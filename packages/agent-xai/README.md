@@ -8,9 +8,13 @@ xAI-specific transport package for the agent harness.
   the terminal `Response`.
 - Implements xAI device authorization, token refresh, and account-id derivation.
 
-The package contains no agent loop, transcript store, context trimming, retry
-policy, or credential failover. Those concerns belong to the harness around the
-provider client.
+`Agent.XAI.LoopBackend` implements the provider-neutral `Backend` used by
+`Agent.Loop`. The proxy does not store transcripts, so the adapter keeps a
+local item list and resends it on each turn.
+
+The package contains no agent loop, context trimming, retry policy, or
+credential failover. Those concerns belong to the harness around the provider
+client.
 
 OAuth login options require the application's public client id at runtime;
 `agent-xai` does not embed one in its source.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `Agent.OpenAI.LoopBackend`: map `TurnInput` / `TurnOutput` onto the
+  Responses WebSocket transport, including `function_call` and
+  `custom_tool_call` (Codex `apply_patch`).
 - Remove embedded OAuth client identifiers. Login and token refresh now receive
   the public client id from application runtime configuration.
 - Replace the streaming event discriminator/property bag with typed lifecycle,

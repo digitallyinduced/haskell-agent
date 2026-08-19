@@ -16,27 +16,66 @@ common common-options
     default-language: GHC2021
     default-extensions: BlockArguments
                       , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
     ghc-options:      -Wall
                       -Wcompat
                       -Widentities
                       -Wincomplete-record-updates
                       -Wincomplete-uni-patterns
                       -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.CLI
+                    , Agent.CLI.Auth
+                    , Agent.CLI.Options
+                    , Agent.CLI.Prompt
+                    , Agent.CLI.Render
+                    , Agent.CLI.Tools
+    build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , text >= 2.0 && < 2.2
+                    , time
 
 executable agent-cli
     import:           common-options
     hs-source-dirs:   app
     main-is:          Main.hs
     ghc-options:      -threaded -rtsopts -with-rtsopts=-N
-    build-depends:    agent-openai >= 0.1 && < 0.2
+    build-depends:    agent-cli
                     , base >= 4.17 && < 5
-                    , text >= 2.0 && < 2.2
 
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    build-depends:    agent-openai >= 0.1 && < 0.2
+    other-modules:    Agent.CLI.AuthSpec
+                    , Agent.CLI.OptionsSpec
+                    , Agent.CLI.PromptSpec
+                    , Agent.CLI.RenderSpec
+                    , Agent.CLI.ToolsSpec
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-openai
+                    , aeson
                     , base >= 4.17 && < 5
+                    , bytestring
                     , hspec >= 2.11 && < 2.12
+                    , text
+                    , time

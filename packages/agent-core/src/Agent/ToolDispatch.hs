@@ -9,6 +9,7 @@ module Agent.ToolDispatch
     , typedTool
     , noArgsTool
     , functionToolCall
+    , customToolCall
     , dispatchToolCall
     , toolArgumentsValue
     , decodeToolArguments
@@ -53,6 +54,14 @@ functionToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = FunctionCallKind
+    }
+
+customToolCall :: Text -> Text -> Text -> ToolCall
+customToolCall callId name arguments = ToolCall
+    { callId
+    , name
+    , arguments
+    , callKind = CustomCallKind
     }
 
 data ToolDispatchConfig = ToolDispatchConfig

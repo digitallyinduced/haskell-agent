@@ -38,6 +38,12 @@ library
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
+                    , Agent.Tools
+                    , Agent.Tools.ApplyPatch
+                    , Agent.Tools.Codex
+                    , Agent.Tools.Grok
+                    , Agent.Tools.IO
+                    , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
@@ -45,11 +51,15 @@ library
                     , async
                     , bytestring
                     , containers
+                    , directory
+                    , filepath
                     , http-conduit
+                    , process
                     , safe-exceptions
                     , stm
                     , text
                     , time
+                    , unix
                     , vector
                     , websockets
 
@@ -62,11 +72,16 @@ test-suite agent-core-test
                     , Agent.LoopSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
+                    , Agent.Tools.CodexSpec
+                    , Agent.Tools.GrokSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , aeson
+                    , directory
+                    , filepath
                     , hspec
                     , text
                     , bytestring
+                    , unix
                     , websockets

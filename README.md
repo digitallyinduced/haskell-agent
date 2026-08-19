@@ -4,7 +4,7 @@ A universal coding-agent harness written in Haskell.
 
 ## Packages
 
-- `agent-cli` is the command-line entry point.
+- `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
 - `agent-core` provides provider-neutral credentials, broker failover, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
 - `agent-openai` provides the OpenAI/ChatGPT Responses transports, authentication,
@@ -21,6 +21,16 @@ nix develop
 cabal build all
 cabal test all
 ```
+
+```console
+nix develop
+cabal run agent-cli -- --help
+cabal run agent-cli -- -p "list the files here"
+```
+
+Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
+`~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI) or `~/.codex/auth.json` /
+`CODEX_ACCESS_TOKEN` (OpenAI). `--provider` overrides auto-detection.
 
 Build and run the CLI directly with Nix:
 

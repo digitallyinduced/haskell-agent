@@ -1,10 +1,17 @@
 module Main (main) where
 
-import Agent.OpenAI.Client (defaultCodexBaseUrl)
-import Test.Hspec
+import Test.Hspec (hspec)
+
+import qualified Agent.CLI.AuthSpec as AuthSpec
+import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PromptSpec as PromptSpec
+import qualified Agent.CLI.RenderSpec as RenderSpec
+import qualified Agent.CLI.ToolsSpec as ToolsSpec
 
 main :: IO ()
 main = hspec do
-    describe "agent-openai integration" do
-        it "exposes the default OpenAI Responses endpoint" do
-            defaultCodexBaseUrl `shouldBe` "https://chatgpt.com/backend-api/codex"
+    AuthSpec.spec
+    OptionsSpec.spec
+    PromptSpec.spec
+    RenderSpec.spec
+    ToolsSpec.spec

@@ -8,6 +8,7 @@ import qualified Agent.OpenAI.CredentialSpec as CredentialSpec
 import qualified Agent.OpenAI.ErrorSpec as ErrorSpec
 import qualified Agent.OpenAI.FunctionalSpec as FunctionalSpec
 import qualified Agent.OpenAI.LoginSpec as LoginSpec
+import qualified Agent.OpenAI.LoopBackendSpec as LoopBackendSpec
 import qualified Agent.OpenAI.ResponsesSpec as ResponsesSpec
 import qualified Agent.OpenAI.ResponseMergeSpec as ResponseMergeSpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
@@ -22,6 +23,7 @@ main = hspec do
     ErrorSpec.spec
     FunctionalSpec.spec
     LoginSpec.spec
+    LoopBackendSpec.spec
     ResponsesSpec.spec
     ResponseMergeSpec.spec
     ToolDSLSpec.spec

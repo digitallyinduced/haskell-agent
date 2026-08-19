@@ -49,6 +49,7 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "src"
                         "test"
                         "agent-cli.cabal"
                         "LICENSE"

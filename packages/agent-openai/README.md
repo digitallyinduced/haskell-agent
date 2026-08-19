@@ -128,6 +128,7 @@ Pass `myRefresh` to `newPool` instead of the configured
 | `Agent.OpenAI.Login` | Headless OAuth device-code login compatible with the Codex CLI |
 | `Agent.OpenAI.Client` | REST client (SSE or JSON) + optional base URL + rate-limit failover |
 | `Agent.OpenAI.WebSocketClient` | OpenAI WebSocket endpoint, authentication, request encoding, and event decoding |
+| `Agent.OpenAI.LoopBackend` | Provider-neutral `Backend` over `sendWsRequestWithEvents`, including function and custom tool-call mapping |
 | `Agent.OpenAI.ToolDSL` | Minimal `PropertySchema` + `buildTool` for function tools |
 
 ## Production login
