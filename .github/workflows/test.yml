@@ -1,0 +1,45 @@
+name: Tests
+
+# Test every PR revision, including drafts. Runs are keyed by commit so a newer
+# push does not cancel the evidence for an earlier revision.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: haskell-agent-tests-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Nix flake check
+    runs-on: [self-hosted, haskell-agent, office-builder, x86_64-linux]
+    timeout-minutes: 90
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Nix flake checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
+            nix_bin=/run/current-system/sw/bin/nix
+          fi
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to run the haskell-agent checks"
+            exit 1
+          fi
+
+          "$nix_bin" flake check --no-write-lock-file --print-build-logs

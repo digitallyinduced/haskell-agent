@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - haskell-agent
+    - office-builder
+    - x86_64-linux
+
+config-variables: null
