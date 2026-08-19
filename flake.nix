@@ -108,11 +108,15 @@
                         packages.agent-xai
                     ];
                     withHoogle = false;
-                    nativeBuildInputs = with haskellPackages; [
-                        cabal-install
-                        ghcid
-                        haskell-language-server
-                    ];
+                    nativeBuildInputs =
+                        (with haskellPackages; [
+                            cabal-install
+                            ghcid
+                            haskell-language-server
+                        ])
+                        ++ (with pkgs; [
+                            ripgrep
+                        ]);
                 };
 
                 checks = {
