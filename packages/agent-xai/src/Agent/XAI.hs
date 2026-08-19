@@ -2,11 +2,13 @@
 module Agent.XAI
     ( module Agent.XAI.Auth
     , module Agent.XAI.Client
+    , module Agent.XAI.LoopBackend
     , module Agent.XAI.Options
     , module Agent.XAI.Request
     ) where
 
 import Agent.XAI.Auth
 import Agent.XAI.Client
+import Agent.XAI.LoopBackend
 import Agent.XAI.Options
 import Agent.XAI.Request

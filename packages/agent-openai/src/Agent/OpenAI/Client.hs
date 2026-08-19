@@ -95,6 +95,9 @@ createCodexMessageWithProviderAt baseUrl provider request =
             XAIProvider -> pure $ Left $ ProviderError ApiErrorType
                 "XAI credentials must be used through agent-xai"
                 Nothing
+            OpenRouterProvider -> pure $ Left $ ProviderError ApiErrorType
+                "OpenRouter credentials must be used through agent-openrouter"
+                Nothing
             OpenAIProvider ->
                 retryTransientCodexResultWithPolicy transientResultPolicy $
                     recovering exceptionPolicy handlers $ \_status ->

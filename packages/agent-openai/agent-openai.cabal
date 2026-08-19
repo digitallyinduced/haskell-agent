@@ -51,6 +51,7 @@ library
                     , Agent.OpenAI.Client
                     , Agent.OpenAI.ResponseMerge
                     , Agent.OpenAI.WebSocketClient
+                    , Agent.OpenAI.LoopBackend
                     , Agent.OpenAI.ToolDSL
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
@@ -102,6 +103,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ErrorSpec
                     , Agent.OpenAI.FunctionalSpec
                     , Agent.OpenAI.LoginSpec
+                    , Agent.OpenAI.LoopBackendSpec
                     , Agent.OpenAI.ResponsesSpec
                     , Agent.OpenAI.ResponseMergeSpec
                     , Agent.OpenAI.ToolDSLSpec

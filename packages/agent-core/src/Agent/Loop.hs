@@ -53,6 +53,8 @@ data LoopEvent
     | ReasoningDelta Text
     | TurnStarted
     | TurnFinished TurnOutput
+    | ToolStarted ToolCall
+    | ToolFinished ToolCallResult
     deriving (Eq, Show)
 
 data LoopConfig = LoopConfig
@@ -129,11 +131,14 @@ runLoop config previousResponseId prompt =
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do
+    config.loopOnEvent (ToolStarted call)
     approved <- config.loopApprove call
-    if approved
+    result <- if approved
         then dispatchToolCall config.loopDispatch config.loopHandlers call
         else pure ToolCallResult
             { callId = call.callId
             , output = "Tool call rejected by user."
             , callKind = call.callKind
             }
+    config.loopOnEvent (ToolFinished result)
+    pure result

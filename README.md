@@ -11,6 +11,9 @@ A universal coding-agent harness written in Haskell.
   streaming, and tool-call types under the `Agent.OpenAI.*` module namespace.
 - `agent-xai` provides Grok request mapping, OAuth login, HTTP SSE transport,
   and stateful sessions under the `Agent.XAI.*` module namespace.
+- `agent-openrouter` provides OpenRouter static API-key auth, HTTP SSE
+  transport, and a local-transcript loop backend under the
+  `Agent.OpenRouter.*` module namespace.
 
 ## Development
 

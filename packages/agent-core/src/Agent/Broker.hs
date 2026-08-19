@@ -156,7 +156,9 @@ fetchBrokerCredentialExcluding
     -> IO (Either ApiError (Maybe Credential))
 fetchBrokerCredentialExcluding options failed excludedAccountIds =
     fmap (fmap brokerCredential)
-        <$> fetchBrokerTokenExcluding options [OpenAIProvider, XAIProvider] failed excludedAccountIds
+        <$> fetchBrokerTokenExcluding options
+            [OpenAIProvider, XAIProvider, OpenRouterProvider]
+            failed excludedAccountIds
   where
     brokerCredential BrokerToken { accessToken, accountId, brokerLeaseId, brokerProvider } =
         Credential

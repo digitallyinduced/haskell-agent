@@ -1,0 +1,158 @@
+module Agent.Tools.CodexSpec (spec) where
+
+import Agent.Loop (defaultLoopDispatch)
+import Agent.Provider (Provider(..))
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , customToolCall
+    , dispatchToolCall
+    , functionToolCall
+    )
+import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.ApplyPatch (parsePatch)
+import Agent.Tools.Codex (codexTools)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Control.Exception (bracket)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import System.Directory
+    ( doesFileExist
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
+import System.FilePath (takeFileName, (</>))
+import System.Posix.Temp (mkdtemp)
+import Test.Hspec
+
+spec :: Spec
+spec = describe "Agent.Tools.Codex" do
+    it "advertises Codex wire names and not Grok names" do
+        withTempEnv \env -> do
+            tools <- codexTools env
+            let names = map (.appToolName) tools
+            names `shouldBe` ["shell_command", "apply_patch", "update_plan"]
+            names `shouldNotContain` ["read_file"]
+            names `shouldNotContain` ["run_terminal_cmd"]
+            names `shouldNotContain` ["search_replace"]
+            openai <- codingToolsFor OpenAIProvider env
+            map (.appToolName) openai `shouldBe` names
+
+    it "adds, updates, and deletes files via apply_patch" do
+        withTempEnv \env -> do
+            added <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: hello.txt"
+                , "+hello"
+                , "+world"
+                , "*** End Patch"
+                ]
+            added `shouldSatisfy` Text.isInfixOf "Success."
+            added `shouldSatisfy` Text.isInfixOf "A hello.txt"
+            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nworld\n"
+
+            updated <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: hello.txt"
+                , "@@"
+                , " hello"
+                , "-world"
+                , "+there"
+                , "*** End Patch"
+                ]
+            updated `shouldSatisfy` Text.isInfixOf "M hello.txt"
+            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nthere\n"
+
+            deleted <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Delete File: hello.txt"
+                , "*** End Patch"
+                ]
+            deleted `shouldSatisfy` Text.isInfixOf "D hello.txt"
+            doesFileExist (env.toolCwd </> "hello.txt") `shouldReturn` False
+
+    it "rejects apply_patch paths that escape cwd" do
+        withTempEnv \env -> do
+            let name = takeFileName env.toolCwd <> "-outside.txt"
+            output <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: ../" <> Text.pack name
+                , "+secret"
+                , "*** End Patch"
+                ]
+            output `shouldSatisfy` Text.isInfixOf "escapes"
+
+    it "rejects a patch whose context does not match the file" do
+        withTempEnv \env -> do
+            Text.writeFile (env.toolCwd </> "a.txt") "foo\n"
+            output <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: a.txt"
+                , "@@"
+                , "-missing"
+                , "+present"
+                , "*** End Patch"
+                ]
+            output `shouldSatisfy` Text.isInfixOf "Failed to find expected lines"
+
+    it "parses add/update/delete hunks" do
+        let parsed = parsePatch $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: path/add.py"
+                , "+abc"
+                , "+def"
+                , "*** Delete File: path/delete.py"
+                , "*** Update File: path/update.py"
+                , "*** Move to: path/update2.py"
+                , "@@ def f():"
+                , "-    pass"
+                , "+    return 123"
+                , "*** End Patch"
+                ]
+        parsed `shouldSatisfy` either (const False) ((== 3) . length)
+
+    it "runs shell_command and times out" do
+        withTempEnv \env -> do
+            output <- runFn env "shell_command"
+                "{\"command\":\"echo hi\",\"workdir\":\".\"}"
+            output `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+            output `shouldSatisfy` Text.isInfixOf "hi"
+            timed <- runFn env "shell_command"
+                "{\"command\":\"sleep 5\",\"timeout_ms\":200}"
+            timed `shouldSatisfy` Text.isInfixOf "timed out"
+
+    it "stores an update_plan and rejects two in_progress steps" do
+        withTempEnv \env -> do
+            ok <- runFn env "update_plan"
+                "{\"plan\":[{\"step\":\"one\",\"status\":\"in_progress\"},{\"step\":\"two\",\"status\":\"pending\"}]}"
+            ok `shouldSatisfy` Text.isInfixOf "[in_progress] one"
+            ok `shouldSatisfy` Text.isInfixOf "[pending] two"
+            bad <- runFn env "update_plan"
+                "{\"plan\":[{\"step\":\"a\",\"status\":\"in_progress\"},{\"step\":\"b\",\"status\":\"in_progress\"}]}"
+            bad `shouldSatisfy` Text.isInfixOf "At most one step"
+
+--------------------------------------------------------------------------------
+-- Helpers
+--------------------------------------------------------------------------------
+
+runPatch :: ToolEnv -> Text -> IO Text
+runPatch env patch = do
+    tools <- codexTools env
+    result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+        (customToolCall "call-1" "apply_patch" patch)
+    pure result.output
+
+runFn :: ToolEnv -> Text -> Text -> IO Text
+runFn env name arguments = do
+    tools <- codexTools env
+    result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+        (functionToolCall "call-1" name arguments)
+    pure result.output
+
+withTempEnv :: (ToolEnv -> IO a) -> IO a
+withTempEnv action = do
+    tmp <- getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp </> "agent-codex-XXXXXX"))
+        removeDirectoryRecursive
+        (\dir -> action (defaultToolEnv dir))

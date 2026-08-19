@@ -171,6 +171,43 @@ spec = describe "runLoop" do
                 }
             ]
 
+    it "emits ToolStarted and ToolFinished around each dispatched call" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-1"
+                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                , assistantText = Nothing
+                }
+            , Right TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "done"
+                }
+            ]
+        let config = (testConfig backend)
+                { loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        _ <- runLoop config Nothing "hello"
+        seen <- reverse <$> readIORef events
+        seen `shouldBe`
+            [ TurnStarted
+            , TurnFinished TurnOutput
+                { responseId = "resp-1"
+                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                , assistantText = Nothing
+                }
+            , ToolStarted (functionToolCall "c1" "echo" "{\"message\":\"hi\"}")
+            , ToolFinished (functionResult "c1" "echo:hi")
+            , TurnStarted
+            , TurnFinished TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "done"
+                }
+            ]
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------

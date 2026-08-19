@@ -1,9 +1,10 @@
 cabal-version:      2.2
-name:               agent-xai
+name:               agent-openrouter
 version:            0.1.0.0
-synopsis:           Haskell client for the xAI Grok subscription transport
-description:        xAI OAuth, typed Responses request projection, HTTP
-                    transport, SSE decoding, and provider-specific errors.
+synopsis:           Haskell client for the OpenRouter Responses transport
+description:        Static API-key auth, typed Responses request projection,
+                    HTTP SSE transport, and provider-specific errors for
+                    OpenRouter's OpenAI-compatible Responses API.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -31,14 +32,14 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.XAI
-                    , Agent.XAI.Auth
-                    , Agent.XAI.Client
-                    , Agent.XAI.Error
-                    , Agent.XAI.LoopBackend
-                    , Agent.XAI.Options
-                    , Agent.XAI.Request
-                    , Agent.XAI.Stream
+    exposed-modules:  Agent.OpenRouter
+                    , Agent.OpenRouter.Client
+                    , Agent.OpenRouter.Credential
+                    , Agent.OpenRouter.Error
+                    , Agent.OpenRouter.LoopBackend
+                    , Agent.OpenRouter.Options
+                    , Agent.OpenRouter.Request
+                    , Agent.OpenRouter.Stream
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
@@ -48,29 +49,31 @@ library
                     , aeson                 >= 2.0
                     , http-client
                     , http-conduit
-                    , base64-bytestring
+                    , http-types
                     , safe-exceptions
+                    , time
 
-test-suite agent-xai-test
+test-suite agent-openrouter-test
     import:           common-opts
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.XAI.AuthSpec
-                    , Agent.XAI.ClientSpec
-                    , Agent.XAI.FunctionalSpec
-                    , Agent.XAI.LoopBackendSpec
-                    , Agent.XAI.ResponsesSpec
+    other-modules:    Agent.OpenRouter.ClientSpec
+                    , Agent.OpenRouter.CredentialSpec
+                    , Agent.OpenRouter.ErrorSpec
+                    , Agent.OpenRouter.FunctionalSpec
+                    , Agent.OpenRouter.LoopBackendSpec
+                    , Agent.OpenRouter.RequestSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-openai
-                    , agent-xai
+                    , agent-openrouter
                     , hspec
                     , aeson
                     , text
                     , bytestring
-                    , base64-bytestring
+                    , time
                     , case-insensitive
                     , http-types
                     , wai

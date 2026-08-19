@@ -4,6 +4,8 @@ import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
+import qualified Agent.Tools.CodexSpec as CodexToolsSpec
+import qualified Agent.Tools.GrokSpec as GrokToolsSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
 
@@ -13,4 +15,6 @@ main = hspec do
     LoopSpec.spec
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
+    GrokToolsSpec.spec
+    CodexToolsSpec.spec
     WebSocketSpec.spec

@@ -21,18 +21,20 @@ import Agent.Error
 import Data.IORef
 import Data.Text (Text)
 
-data Provider = OpenAIProvider | XAIProvider
+data Provider = OpenAIProvider | XAIProvider | OpenRouterProvider
     deriving (Eq, Show)
 
 providerSlug :: Provider -> Text
 providerSlug = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
+    OpenRouterProvider -> "openrouter"
 
 parseProvider :: Text -> Maybe Provider
 parseProvider = \case
     "openai" -> Just OpenAIProvider
     "xai" -> Just XAIProvider
+    "openrouter" -> Just OpenRouterProvider
     _ -> Nothing
 
 data Credential = Credential
