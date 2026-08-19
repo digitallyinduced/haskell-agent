@@ -96,10 +96,10 @@ spec = do
             parseApprovalAnswer "maybe" `shouldBe` Deny
 
     describe "defaultEffortFor" do
-        it "defaults grok/xai to high and other providers to low" do
+        it "defaults grok/xai to high and other providers to medium" do
             defaultEffortFor XAIProvider `shouldBe` "high"
-            defaultEffortFor OpenAIProvider `shouldBe` "low"
-            defaultEffortFor OpenRouterProvider `shouldBe` "low"
+            defaultEffortFor OpenAIProvider `shouldBe` "medium"
+            defaultEffortFor OpenRouterProvider `shouldBe` "medium"
 
     describe "isOneShot" do
         it "is true for -p and --prompt-file" do

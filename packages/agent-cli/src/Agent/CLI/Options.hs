@@ -80,8 +80,8 @@ defaultCliOptions = CliOptions
 defaultEffortFor :: Provider -> Text
 defaultEffortFor = \case
     XAIProvider -> "high"
-    OpenAIProvider -> "low"
-    OpenRouterProvider -> "low"
+    OpenAIProvider -> "medium"
+    OpenRouterProvider -> "medium"
 
 isOneShot :: CliOptions -> Bool
 isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
@@ -184,7 +184,7 @@ usage = unlines
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
     , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh"
-    , "                          (default: high for xai/grok, low otherwise)"
+    , "                          (default: high for xai/grok, medium otherwise)"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""
