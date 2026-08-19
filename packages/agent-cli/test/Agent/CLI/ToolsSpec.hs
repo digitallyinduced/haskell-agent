@@ -2,24 +2,37 @@ module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
 import Agent.OpenAI.Responses.Types
+import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (noArgsTool)
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.Types (AppTool(..), AppToolKind(..))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
-    it "builds a strict function tool for JSON tools" do
-        case schemasFromAppTools [jsonTool] of
+    it "builds a strict function tool for OpenAI JSON tools" do
+        case schemasFromAppTools OpenAIProvider [jsonTool] of
             [FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "builds a loose grok-build function tool for xAI" do
+        case schemasFromAppTools XAIProvider [jsonTool] of
+            [FunctionToolValue tool] -> do
+                tool.name `shouldBe` "read_file"
+                tool.strict `shouldBe` Nothing
+                required_ tool `shouldBe` Just (Aeson.toJSON (["target_file"] :: [Text]))
+                offsetType tool `shouldBe` Just (Aeson.String "integer")
+            other -> expectationFailure ("expected function tool, got " <> show other)
+
     it "registers apply_patch as a custom Lark tool" do
-        case schemasFromAppTools [patchTool] of
+        case schemasFromAppTools OpenAIProvider [patchTool] of
             [KnownResponseTool ToolCustom tagged] -> do
                 tagged.tag `shouldBe` "custom"
                 KeyMap.lookup "name" tagged.fields
@@ -36,7 +49,10 @@ jsonTool :: AppTool
 jsonTool = AppTool
     { appToolName = "read_file"
     , appToolDescription = "Read a file."
-    , appToolParameters = []
+    , appToolParameters =
+        [ PropertySchema "target_file" PropertyString True Nothing
+        , PropertySchema "offset" PropertyInteger False Nothing
+        ]
     , appToolHandler = noArgsTool "read_file" (pure (Right "ok"))
     , appToolKind = JsonFunction
     , appToolReadOnly = True
@@ -51,3 +67,15 @@ patchTool = AppTool
     , appToolKind = FreeformApplyPatch
     , appToolReadOnly = False
     }
+
+required_ :: FunctionTool -> Maybe Aeson.Value
+required_ tool = do
+    Aeson.Object parameters <- tool.parameters
+    KeyMap.lookup "required" parameters
+
+offsetType :: FunctionTool -> Maybe Aeson.Value
+offsetType tool = do
+    Aeson.Object parameters <- tool.parameters
+    Aeson.Object properties <- KeyMap.lookup "properties" parameters
+    Aeson.Object offset <- KeyMap.lookup (Key.fromText "offset") properties
+    KeyMap.lookup "type" offset

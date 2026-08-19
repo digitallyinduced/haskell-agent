@@ -5,7 +5,8 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.OpenAI.Responses.Types
-import Agent.OpenAI.ToolDSL (buildTool)
+import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
+import Agent.Provider (Provider(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.Types (AppTool(..), AppToolKind(..))
 import qualified Data.Aeson as Aeson
@@ -18,13 +19,17 @@ import Data.Text (Text)
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name = find (\tool -> tool.appToolName == name)
 
-schemasFromAppTools :: [AppTool] -> [ResponseTool]
-schemasFromAppTools = map schemaFromAppTool
+schemasFromAppTools :: Provider -> [AppTool] -> [ResponseTool]
+schemasFromAppTools provider = map (schemaFromAppTool provider)
 
-schemaFromAppTool :: AppTool -> ResponseTool
-schemaFromAppTool tool = case tool.appToolKind of
+schemaFromAppTool :: Provider -> AppTool -> ResponseTool
+schemaFromAppTool provider tool = case tool.appToolKind of
     JsonFunction ->
-        buildTool tool.appToolName tool.appToolDescription tool.appToolParameters
+        let build = case provider of
+                OpenAIProvider -> buildTool
+                XAIProvider -> buildGrokTool
+                OpenRouterProvider -> buildGrokTool
+        in build tool.appToolName tool.appToolDescription tool.appToolParameters
     FreeformApplyPatch ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
 

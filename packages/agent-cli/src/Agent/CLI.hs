@@ -66,8 +66,9 @@ runAgent options = do
     today <- utctDay <$> getCurrentTime
     let provider = loaded.loadedProvider
         model = fromMaybe (defaultModelFor provider) options.optModel
-        instructions = systemPrompt provider cwd today
-        params = requestParams model instructions (schemasFromAppTools tools) options.optEffort
+        instructions = systemPrompt provider cwd today (isOneShot options)
+        params = requestParams model instructions
+            (schemasFromAppTools provider tools) options.optEffort
         policy = resolveApprovalPolicy options isTty
     paramsRef <- newIORef params
     prompt <- loadPrompt options

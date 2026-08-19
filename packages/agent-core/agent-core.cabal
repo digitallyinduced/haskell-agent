@@ -42,6 +42,7 @@ library
                     , Agent.Tools.ApplyPatch
                     , Agent.Tools.Codex
                     , Agent.Tools.Grok
+                    , Agent.Tools.Grok.Prompt
                     , Agent.Tools.IO
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
@@ -74,6 +75,7 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
                     , Agent.Tools.GrokSpec
+                    , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
@@ -82,6 +84,7 @@ test-suite agent-core-test
                     , filepath
                     , hspec
                     , text
+                    , time
                     , bytestring
                     , unix
                     , websockets
