@@ -35,6 +35,16 @@ spec = do
                     , optShowReasoning = True
                     })
 
+        it "parses --worktree" do
+            parseArgs ["--worktree"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optWorktree = True })
+            parseArgs ["--cwd", "/tmp/work", "--worktree", "-p", "hello"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCwd = Just "/tmp/work"
+                    , optWorktree = True
+                    , optPrompt = Just "hello"
+                    })
+
         it "rejects the removed openai-base-url command" do
             parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
 

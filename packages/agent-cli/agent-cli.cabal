@@ -41,6 +41,7 @@ library
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
                     , Agent.CLI.Tools
+                    , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
@@ -49,6 +50,7 @@ library
                     , bytestring
                     , directory
                     , filepath
+                    , process
                     , text >= 2.0 && < 2.2
                     , time
 
@@ -70,12 +72,17 @@ test-suite agent-cli-test
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
                     , agent-openai
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring
+                    , directory
+                    , filepath
                     , hspec >= 2.11 && < 2.12
+                    , process
                     , text
                     , time
+                    , unix

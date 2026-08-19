@@ -7,6 +7,7 @@ import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
+import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
 main :: IO ()
 main = hspec do
@@ -15,3 +16,4 @@ main = hspec do
     PromptSpec.spec
     RenderSpec.spec
     ToolsSpec.spec
+    WorktreeSpec.spec

@@ -8,6 +8,7 @@ import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
+import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
 import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
@@ -31,7 +32,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
 import qualified Data.Aeson.KeyMap as KeyMap
-import System.Directory (getCurrentDirectory, makeAbsolute, setCurrentDirectory)
+import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs)
 import System.Exit (die, exitFailure)
 import System.IO (hFlush, hIsTerminalDevice, hPutStrLn, isEOF, stderr, stdin, stdout)
@@ -47,7 +48,14 @@ run = do
 
 runAgent :: CliOptions -> IO ()
 runAgent options = do
-    cwd <- maybe getCurrentDirectory makeAbsolute options.optCwd
+    source <- maybe getCurrentDirectory makeAbsolute options.optCwd
+    cwd <- if options.optWorktree
+        then do
+            home <- getHomeDirectory
+            createWorktree source (worktreeRoot home) >>= either die \path -> do
+                hPutStrLn stderr ("worktree: " <> path)
+                pure path
+        else pure source
     setCurrentDirectory cwd
     isTty <- hIsTerminalDevice stdin
     loaded <- loadAuth options.optProvider >>= either die pure

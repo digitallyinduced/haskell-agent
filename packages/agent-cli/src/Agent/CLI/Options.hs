@@ -31,6 +31,7 @@ data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
     , optCwd :: !(Maybe FilePath)
+    , optWorktree :: !Bool
     , optYolo :: !Bool
     , optNoYolo :: !Bool
     , optMaxTurns :: !Int
@@ -45,6 +46,7 @@ defaultCliOptions = CliOptions
     { optProvider = Nothing
     , optModel = Nothing
     , optCwd = Nothing
+    , optWorktree = False
     , optYolo = False
     , optNoYolo = False
     , optMaxTurns = 50
@@ -88,6 +90,8 @@ parseOptions options = \case
         parseOptions options { optModel = Just (Text.pack value) } rest
     "--cwd" : value : rest ->
         parseOptions options { optCwd = Just value } rest
+    "--worktree" : rest ->
+        parseOptions options { optWorktree = True } rest
     "--yolo" : rest ->
         parseOptions options { optYolo = True, optNoYolo = False } rest
     "--no-yolo" : rest ->
@@ -148,6 +152,7 @@ usage = unlines
     , "      --provider NAME     openai or xai (default: detect from auth)"
     , "      --model NAME        Override the provider default model"
     , "      --cwd DIR           Working directory for tools (default: current)"
+    , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
