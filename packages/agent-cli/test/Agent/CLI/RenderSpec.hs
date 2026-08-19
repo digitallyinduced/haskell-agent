@@ -6,7 +6,7 @@ import Agent.ToolDispatch (customToolCall, functionToolCall)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
-import Data.IORef (newIORef)
+import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory (getTemporaryDirectory, removeFile)
@@ -51,9 +51,12 @@ spec = do
             (path, handle) <- openTempFile tmp "agent-render-spec"
             flip finally (removeFile path) do
                 hSetBuffering handle NoBuffering
+                textBuffer <- newIORef ""
                 let config = RenderConfig
                         { renderShowReasoning = False
+                        , renderColor = False
                         , renderPrintedText = printed
+                        , renderTextBuffer = textBuffer
                         , renderLock = lock
                         , renderStdout = handle
                         , renderStderr = handle
@@ -77,3 +80,64 @@ spec = do
                     [ "→ list_dir packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
+
+        it "buffers colored TextDelta until TurnFinished" do
+            printed <- newIORef False
+            textBuffer <- newIORef ""
+            lock <- newMVar ()
+            tmp <- getTemporaryDirectory
+            (path, handle) <- openTempFile tmp "agent-render-md"
+            flip finally (removeFile path) do
+                hSetBuffering handle NoBuffering
+                let config = RenderConfig
+                        { renderShowReasoning = False
+                        , renderColor = True
+                        , renderPrintedText = printed
+                        , renderTextBuffer = textBuffer
+                        , renderLock = lock
+                        , renderStdout = handle
+                        , renderStderr = handle
+                        }
+                renderEvent config (TextDelta "see `file.txt`")
+                buffered <- readIORef textBuffer
+                buffered `shouldBe` "see `file.txt`"
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "file.txt"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+
+        it "flushes pre-tool assistant prose before tool lines" do
+            printed <- newIORef False
+            textBuffer <- newIORef ""
+            lock <- newMVar ()
+            tmp <- getTemporaryDirectory
+            (path, handle) <- openTempFile tmp "agent-render-pretool"
+            flip finally (removeFile path) do
+                hSetBuffering handle NoBuffering
+                let config = RenderConfig
+                        { renderShowReasoning = False
+                        , renderColor = True
+                        , renderPrintedText = printed
+                        , renderTextBuffer = textBuffer
+                        , renderLock = lock
+                        , renderStdout = handle
+                        , renderStderr = handle
+                        }
+                    call = functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"
+                renderEvent config (TextDelta "checking `src`")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = [call]
+                    , assistantText = Nothing
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "src"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                readIORef textBuffer `shouldReturn` ""

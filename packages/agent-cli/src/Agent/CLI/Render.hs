@@ -3,14 +3,17 @@ module Agent.CLI.Render
     ( RenderConfig(..)
     , formatLoopError
     , putTextLn
+    , renderAssistantText
     , renderEvent
     , summarizeToolCall
     , truncateToolOutput
     ) where
 
+import Agent.CLI.Markdown (renderMarkdown)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent.MVar (MVar, withMVar)
+import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -24,7 +27,9 @@ import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowReasoning :: !Bool
+    , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
+    , renderTextBuffer :: !(IORef Text)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
@@ -36,21 +41,53 @@ renderEvent config event =
 
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
-    TextDelta delta -> do
-        writeIORef config.renderPrintedText True
-        Text.hPutStr config.renderStdout delta
-        hFlush config.renderStdout
+    TextDelta delta ->
+        if config.renderColor
+            then modifyIORef' config.renderTextBuffer (<> delta)
+            else do
+                writeIORef config.renderPrintedText True
+                Text.hPutStr config.renderStdout delta
+                hFlush config.renderStdout
     ReasoningDelta delta
         | config.renderShowReasoning -> do
             Text.hPutStr config.renderStderr (dimText delta)
             hFlush config.renderStderr
         | otherwise -> pure ()
-    TurnStarted -> pure ()
-    TurnFinished _ -> pure ()
+    TurnStarted -> writeIORef config.renderTextBuffer ""
+    -- Flush styled text on every completed turn. Pre-tool prose ("I'll check…")
+    -- is shown before tool lines; the final tool-free turn is the main answer.
+    TurnFinished turn
+        | config.renderColor -> do
+            didPrint <- flushAssistantBuffer config turn.assistantText
+            when (didPrint && not (null turn.toolCalls)) do
+                putTextLn config.renderStdout ""
+        | otherwise -> pure ()
     ToolStarted call ->
         putTextLn config.renderStderr ("→ " <> summarizeToolCall call)
     ToolFinished result ->
         putTextLn config.renderStderr (truncateToolOutput result.output)
+
+-- | Style assistant markdown when color is enabled; otherwise return plain text.
+renderAssistantText :: Bool -> Text -> Text
+renderAssistantText = renderMarkdown
+
+-- | End-of-turn flush for color mode: prefer streamed deltas, else the
+-- completed 'assistantText' from non-streaming backends.
+-- Returns whether anything was written.
+flushAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
+flushAssistantBuffer config assistantText = do
+    buffered <- readIORef config.renderTextBuffer
+    writeIORef config.renderTextBuffer ""
+    let raw
+            | not (Text.null buffered) = buffered
+            | otherwise = fromMaybe "" assistantText
+    if Text.null raw
+        then pure False
+        else do
+            writeIORef config.renderPrintedText True
+            Text.hPutStr config.renderStdout (renderMarkdown True raw)
+            hFlush config.renderStdout
+            pure True
 
 -- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
 -- 'String' is @hPutStr@ then @hPutChar '\\n'@ over a @[Char]@ spine, so

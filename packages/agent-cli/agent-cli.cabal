@@ -38,6 +38,7 @@ library
     exposed-modules:  Agent.CLI
                     , Agent.CLI.Auth
                     , Agent.CLI.Command
+                    , Agent.CLI.Markdown
                     , Agent.CLI.Options
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
@@ -48,6 +49,7 @@ library
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
+                    , ansi-terminal >= 1.0
                     , base >= 4.17 && < 5
                     , bytestring
                     , directory
@@ -71,6 +73,7 @@ test-suite agent-cli-test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AuthSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.MarkdownSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
@@ -80,6 +83,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-openai
                     , aeson
+                    , ansi-terminal
                     , base >= 4.17 && < 5
                     , bytestring
                     , directory
