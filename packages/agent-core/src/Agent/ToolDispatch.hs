@@ -2,11 +2,13 @@
 
 module Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
     , noArgsTool
+    , functionToolCall
     , dispatchToolCall
     , toolArgumentsValue
     , decodeToolArguments
@@ -23,18 +25,35 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 
--- | Provider-neutral function call emitted by a model transport.
+-- | How the originating model turn encoded this call. Adapters need this to
+-- emit @function_call_output@ versus @custom_tool_call_output@.
+data ToolCallKind
+    = FunctionCallKind
+    | CustomCallKind
+    deriving (Eq, Show)
+
+-- | Provider-neutral function or custom tool call emitted by a model transport.
 data ToolCall = ToolCall
     { callId :: !Text
     , name :: !Text
     , arguments :: !Text
+    , callKind :: !ToolCallKind
     } deriving (Eq, Show)
 
 -- | Provider-neutral result ready for a transport adapter to encode.
 data ToolCallResult = ToolCallResult
     { callId :: !Text
     , output :: !Text
+    , callKind :: !ToolCallKind
     } deriving (Eq, Show)
+
+functionToolCall :: Text -> Text -> Text -> ToolCall
+functionToolCall callId name arguments = ToolCall
+    { callId
+    , name
+    , arguments
+    , callKind = FunctionCallKind
+    }
 
 data ToolDispatchConfig = ToolDispatchConfig
     { toolDispatchUnknownTool :: Text -> Text
@@ -70,6 +89,7 @@ dispatchToolCall config handlers call = do
     pure ToolCallResult
         { callId = call.callId
         , output = resultOutput
+        , callKind = call.callKind
         }
 
 toolArgumentsValue :: Text -> Value

@@ -3,7 +3,8 @@ name:               agent-core
 version:            0.1.0.0
 synopsis:           Provider-neutral infrastructure for the agent harness
 description:        Shared provider credentials, broker failover, errors,
-                    transport utilities, and JSON tool-argument helpers.
+                    transport utilities, the agent loop, and JSON
+                    tool-argument helpers.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -33,7 +34,9 @@ library
     exposed-modules:  Agent.Error
                     , Agent.Provider
                     , Agent.Broker
+                    , Agent.Loop
                     , Agent.ToolArgs
+                    , Agent.ToolDSL
                     , Agent.ToolDispatch
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
@@ -56,6 +59,7 @@ test-suite agent-core-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.ErrorSpec
+                    , Agent.LoopSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Transport.WebSocketSpec
