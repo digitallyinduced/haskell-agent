@@ -10,10 +10,11 @@
 -- @{"access_token": "..."}@ object. Alternatively set @GROK_ACCESS_TOKEN@.
 -- @GROK_TEST_MODEL@ overrides the request model (default @gpt-5.6-terra@ —
 -- deliberately an OpenAI name, proving the mapping).
-module Agent.XAI.GrokFunctionalSpec (spec) where
+module Agent.XAI.FunctionalSpec (spec) where
 
-import Agent.XAI.Grok
-import Agent.XAI.GrokLogin (deriveGrokAccountId)
+import Agent.XAI.Auth (accountIdFromAccessToken)
+import Agent.XAI.Client
+import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenAI.Responses.Types
 import qualified Data.Aeson as Aeson
@@ -28,31 +29,22 @@ import System.Environment (lookupEnv)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Grok functional (live)" do
-    it "answers, keeps session state across turns, and drives a function tool" do
+spec = describe "xAI functional (live)" do
+    it "answers and drives a function tool using explicit Responses input" do
         loaded <- loadGrokCredential
         case loaded of
             Nothing -> pendingWith
                 "set GROK_AUTH_JSON (contents of ~/.grok/auth.json) or GROK_ACCESS_TOKEN to run the live Grok functional test"
             Just credential -> do
                 model <- fmap (Text.pack . fromMaybe "gpt-5.6-terra") (lookupEnv "GROK_TEST_MODEL")
-                options <- grokOptionsFromEnv
-                session <- newGrokSessionWith options credential
+                options <- clientOptionsFromEnv
                 events <- newIORef (0 :: Int)
 
-                -- Turn 1: plain answer, streamed events observed.
-                first <- runTurn session (helloRequest model "Reply with exactly: hello world") Nothing events
+                first <- runTurn options credential
+                    (helloRequest model "Reply with exactly: hello world") events
                 assistantTextOf first `shouldSatisfy` Text.isInfixOf "hello world"
 
-                -- Turn 2: previous_response_id emulation replays the transcript.
-                second <- runTurn session
-                    (helloRequest model "Repeat the exact phrase you were asked to reply with in my previous message, nothing else.")
-                    (Just first.responseId)
-                    events
-                assistantTextOf second `shouldSatisfy` Text.isInfixOf "hello world"
-
-                -- Turn 3: function tool round trip.
-                toolCall <- runTurn session (toolRequest model) Nothing events
+                toolCall <- runTurn options credential (toolRequest model) events
                 call <- case [functionCall | FunctionCallItem functionCall <- toolCall.output
                                            , functionCall.name == "echo_text"] of
                     (functionCall : _) -> pure functionCall
@@ -62,18 +54,19 @@ spec = describe "Grok functional (live)" do
                 functionCallArgumentText "text" call.arguments
                     `shouldBe` "grok functional tool ok"
 
-                final <- runTurn session
-                    (toolOutputRequest model call)
-                    (Just toolCall.responseId)
-                    events
+                let toolHistory =
+                        [userMessage "Call the echo_text tool with the text 'grok functional tool ok'."]
+                            <> toolCall.output
+                final <- runTurn options credential
+                    (toolOutputRequest model toolHistory call) events
                 assistantTextOf final `shouldSatisfy` Text.isInfixOf "done"
 
                 streamed <- readIORef events
                 streamed `shouldSatisfy` (> 0)
   where
-    runTurn session request previousResponseId events = do
-        result <- runGrokSessionTurn session request previousResponseId
-            (\_ _ -> modifyIORef' events (+ 1))
+    runTurn options credential request events = do
+        result <- createResponseWithEvents options credential request
+            (const (modifyIORef' events (+ 1)))
         case result of
             Left err -> expectationFailure ("grok turn failed: " <> show err) >> fail "unreachable"
             Right response -> pure response
@@ -105,11 +98,12 @@ toolRequest model = defaultResponseCreateParams
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     }
 
-toolOutputRequest :: Text -> FunctionCall -> ResponseCreateParams
-toolOutputRequest model call = defaultResponseCreateParams
+toolOutputRequest :: Text -> [ResponseItem] -> FunctionCall -> ResponseCreateParams
+toolOutputRequest model history call = defaultResponseCreateParams
     { model = Just model
     , instructions = Just "You are a test assistant."
     , input = Just (ResponseInputItems
+        (history <>
         [ FunctionCallOutputItem FunctionCallOutput
             { itemId = Nothing
             , callId = call.callId
@@ -118,7 +112,7 @@ toolOutputRequest model call = defaultResponseCreateParams
             , extraFields = mempty
             }
         , userMessage "The tool ran. Reply with exactly: done"
-        ])
+        ]))
     , tools = Just [echoTool]
     , reasoning = Just lowReasoning
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
@@ -190,7 +184,7 @@ loadGrokCredential = do
 
     credentialFromToken token = Credential
         { accessToken = token
-        , accountId = fromMaybe "grok-functional" (deriveGrokAccountId token)
+        , accountId = fromMaybe "grok-functional" (accountIdFromAccessToken token)
         , leaseId = Nothing
         , provider = XAIProvider
         }

@@ -2,16 +2,14 @@ module Main (main) where
 
 import Test.Hspec (hspec)
 
-import qualified Agent.XAI.ContextTrimSpec as ContextTrimSpec
-import qualified Agent.XAI.GrokFunctionalSpec as GrokFunctionalSpec
-import qualified Agent.XAI.GrokLoginSpec as GrokLoginSpec
-import qualified Agent.XAI.GrokSpec as GrokSpec
-import qualified Agent.XAI.GrokTransportSpec as GrokTransportSpec
+import qualified Agent.XAI.AuthSpec as AuthSpec
+import qualified Agent.XAI.ClientSpec as ClientSpec
+import qualified Agent.XAI.FunctionalSpec as FunctionalSpec
+import qualified Agent.XAI.ResponsesSpec as ResponsesSpec
 
 main :: IO ()
 main = hspec do
-    ContextTrimSpec.spec
-    GrokFunctionalSpec.spec
-    GrokLoginSpec.spec
-    GrokSpec.spec
-    GrokTransportSpec.spec
+    AuthSpec.spec
+    ClientSpec.spec
+    FunctionalSpec.spec
+    ResponsesSpec.spec

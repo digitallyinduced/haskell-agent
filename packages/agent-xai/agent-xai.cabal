@@ -1,10 +1,9 @@
 cabal-version:      2.2
 name:               agent-xai
 version:            0.1.0.0
-synopsis:           Haskell client for XAI Grok subscription transports
-description:        Grok request mapping, HTTP SSE transport, stateful session
-                    replay, and XAI OAuth login built on canonical Responses
-                    API types from agent-openai.
+synopsis:           Haskell client for the xAI Grok subscription transport
+description:        xAI OAuth, typed Responses request projection, HTTP
+                    transport, SSE decoding, and provider-specific errors.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -32,9 +31,13 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.XAI.Grok
-                    , Agent.XAI.GrokLogin
-                    , Agent.XAI.ContextTrim
+    exposed-modules:  Agent.XAI
+                    , Agent.XAI.Auth
+                    , Agent.XAI.Client
+                    , Agent.XAI.Error
+                    , Agent.XAI.Options
+                    , Agent.XAI.Request
+                    , Agent.XAI.Stream
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
@@ -45,21 +48,17 @@ library
                     , http-client
                     , http-conduit
                     , base64-bytestring
-                    , containers
                     , safe-exceptions
-                    , scientific
-                    , time
 
 test-suite agent-xai-test
     import:           common-opts
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.XAI.ContextTrimSpec
-                    , Agent.XAI.GrokFunctionalSpec
-                    , Agent.XAI.GrokLoginSpec
-                    , Agent.XAI.GrokSpec
-                    , Agent.XAI.GrokTransportSpec
+    other-modules:    Agent.XAI.AuthSpec
+                    , Agent.XAI.ClientSpec
+                    , Agent.XAI.FunctionalSpec
+                    , Agent.XAI.ResponsesSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
@@ -74,5 +73,3 @@ test-suite agent-xai-test
                     , http-types
                     , wai
                     , warp
-                    , time
-                    , vector

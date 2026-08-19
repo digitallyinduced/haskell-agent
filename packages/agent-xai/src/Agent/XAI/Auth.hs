@@ -16,24 +16,22 @@
 --
 -- The OAuth public client id is supplied by the application at runtime and is
 -- never embedded in this package.
-module Agent.XAI.GrokLogin
-    ( GrokLoginOptions(..)
-    , defaultGrokLoginOptions
-    , GrokDeviceCode(..)
-    , GrokTokens(..)
-    , requestGrokDeviceCode
-    , pollGrokDeviceCode
-    , completeGrokDeviceCodeLogin
-    , refreshGrokAccessToken
-    , deriveGrokAccountId
+module Agent.XAI.Auth
+    ( OAuthOptions(..)
+    , defaultOAuthOptions
+    , DeviceAuthorization(..)
+    , OAuthTokens(..)
+    , requestDeviceAuthorization
+    , pollDeviceAuthorization
+    , completeDeviceAuthorization
+    , refreshAccessToken
+    , accountIdFromAccessToken
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
@@ -43,7 +41,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple
 
-data GrokLoginOptions = GrokLoginOptions
+data OAuthOptions = OAuthOptions
     { issuer :: !String
     , clientId :: !Text
     , scopes :: ![Text]
@@ -56,8 +54,8 @@ data GrokLoginOptions = GrokLoginOptions
 -- | The grok CLI's OAuth issuer and scope contract. The caller supplies its
 -- OAuth public client id at runtime. @grok-cli:access@ authorizes the token for
 -- subscription-proxy requests; @offline_access@ yields a refresh token.
-defaultGrokLoginOptions :: Text -> GrokLoginOptions
-defaultGrokLoginOptions oauthClientId = GrokLoginOptions
+defaultOAuthOptions :: Text -> OAuthOptions
+defaultOAuthOptions oauthClientId = OAuthOptions
     { issuer = "https://auth.x.ai"
     , clientId = oauthClientId
     , scopes =
@@ -76,7 +74,7 @@ defaultGrokLoginOptions oauthClientId = GrokLoginOptions
     , principalId = Nothing
     }
 
-data GrokDeviceCode = GrokDeviceCode
+data DeviceAuthorization = DeviceAuthorization
     { deviceCode :: !Text
     , userCode :: !Text
     , verificationUrl :: !Text
@@ -84,16 +82,40 @@ data GrokDeviceCode = GrokDeviceCode
     , expiresInSeconds :: !(Maybe Int)
     } deriving (Eq, Show)
 
-data GrokTokens = GrokTokens
+instance Aeson.FromJSON DeviceAuthorization where
+    parseJSON = Aeson.withObject "DeviceAuthorization" \object -> do
+        deviceCode <- object Aeson..: "device_code"
+        userCode <- object Aeson..: "user_code"
+        verificationUri <- object Aeson..: "verification_uri"
+        verificationUriComplete <- object Aeson..:? "verification_uri_complete"
+        pollIntervalSeconds <- max 1 . Maybe.fromMaybe 5
+            <$> object Aeson..:? "interval"
+        expiresInSeconds <- object Aeson..:? "expires_in"
+        pure DeviceAuthorization
+            { deviceCode
+            , userCode
+            , verificationUrl = Maybe.fromMaybe verificationUri verificationUriComplete
+            , pollIntervalSeconds
+            , expiresInSeconds
+            }
+
+data OAuthTokens = OAuthTokens
     { accessToken :: !Text
     , refreshToken :: !(Maybe Text)
     , idToken :: !(Maybe Text)
     , expiresInSeconds :: !(Maybe Int)
     } deriving (Eq)
 
+instance Aeson.FromJSON OAuthTokens where
+    parseJSON = Aeson.withObject "OAuthTokens" \object -> OAuthTokens
+        <$> object Aeson..: "access_token"
+        <*> object Aeson..:? "refresh_token"
+        <*> object Aeson..:? "id_token"
+        <*> object Aeson..:? "expires_in"
+
 -- Keep bearer/refresh tokens out of logs.
-instance Show GrokTokens where
-    show tokens = "GrokTokens { accessToken = <redacted>, refreshToken = "
+instance Show OAuthTokens where
+    show tokens = "OAuthTokens { accessToken = <redacted>, refreshToken = "
         <> (case tokens.refreshToken of
                 Nothing -> "Nothing"
                 Just _ -> "Just <redacted>")
@@ -102,8 +124,8 @@ instance Show GrokTokens where
 -- | Start a device authorization. A 404 means the device grant is disabled
 -- server-side for this client — surfaced as a distinguishable error text so
 -- callers can fall back to credential import.
-requestGrokDeviceCode :: GrokLoginOptions -> IO (Either Text GrokDeviceCode)
-requestGrokDeviceCode options = safely do
+requestDeviceAuthorization :: OAuthOptions -> IO (Either Text DeviceAuthorization)
+requestDeviceAuthorization options = safely do
     request <- parseRequest ("POST " <> trimIssuer options.issuer <> "/oauth2/device/code")
     response <- httpLBS
         $ setRequestHeader "Content-Type" ["application/x-www-form-urlencoded"]
@@ -118,19 +140,7 @@ requestGrokDeviceCode options = safely do
             fail ("device code request failed with HTTP " <> show status
                 <> ": " <> lbsPreview (getResponseBody response))
         _ -> pure ()
-    object <- decodeObject "device code response" response
-    deviceCode <- field "device_code" object
-    userCode <- field "user_code" object
-    verificationUri <- field "verification_uri" object
-    let verificationUrl = Maybe.fromMaybe verificationUri
-            (textFieldMaybe "verification_uri_complete" object)
-    pure GrokDeviceCode
-        { deviceCode
-        , userCode
-        , verificationUrl
-        , pollIntervalSeconds = max 1 (Maybe.fromMaybe 5 (intFieldMaybe "interval" object))
-        , expiresInSeconds = intFieldMaybe "expires_in" object
-        }
+    decodeResponse "device code response" response
 
 deviceFlowDisabledMessage :: String
 deviceFlowDisabledMessage =
@@ -138,8 +148,8 @@ deviceFlowDisabledMessage =
 
 -- | Poll once without blocking; 'Nothing' means the user has not approved
 -- the device yet ('authorization_pending' / 'slow_down').
-pollGrokDeviceCode :: GrokLoginOptions -> GrokDeviceCode -> IO (Either Text (Maybe GrokTokens))
-pollGrokDeviceCode options deviceCode = safely do
+pollDeviceAuthorization :: OAuthOptions -> DeviceAuthorization -> IO (Either Text (Maybe OAuthTokens))
+pollDeviceAuthorization options deviceCode = safely do
     -- The principal has to be declared when the token is minted, not only
     -- when it is later refreshed: a team login that omits it here gets a
     -- personally scoped token that the refresh then contradicts.
@@ -160,16 +170,16 @@ pollGrokDeviceCode options deviceCode = safely do
             Nothing -> fail ("device token request failed with HTTP " <> show status
                 <> ": " <> lbsPreview (getResponseBody response))
 
--- | Blocking convenience wrapper around 'pollGrokDeviceCode' for CLI use.
-completeGrokDeviceCodeLogin :: GrokLoginOptions -> GrokDeviceCode -> IO (Either Text GrokTokens)
-completeGrokDeviceCodeLogin options deviceCode = go 0
+-- | Blocking convenience wrapper around 'pollDeviceAuthorization' for CLI use.
+completeDeviceAuthorization :: OAuthOptions -> DeviceAuthorization -> IO (Either Text OAuthTokens)
+completeDeviceAuthorization options deviceCode = go 0
   where
     timeoutSeconds = Maybe.fromMaybe (15 * 60) deviceCode.expiresInSeconds
 
     go elapsed
         | elapsed >= timeoutSeconds =
             pure (Left "device authorization timed out")
-        | otherwise = pollGrokDeviceCode options deviceCode >>= \case
+        | otherwise = pollDeviceAuthorization options deviceCode >>= \case
             Left err -> pure (Left err)
             Right (Just tokens) -> pure (Right tokens)
             Right Nothing -> do
@@ -180,8 +190,8 @@ completeGrokDeviceCodeLogin options deviceCode = go 0
 -- | Rotate an access token. Terminal rejections ('invalid_grant',
 -- 'invalid_client') come back as 'AuthenticationError' so brokers mark the
 -- account as needing reconnection; transport and 5xx failures stay retryable.
-refreshGrokAccessToken :: GrokLoginOptions -> Text -> IO (Either ApiError GrokTokens)
-refreshGrokAccessToken options refreshToken = do
+refreshAccessToken :: OAuthOptions -> Text -> IO (Either ApiError OAuthTokens)
+refreshAccessToken options refreshToken = do
     result <- tryAny $ postTokenForm options $
         [ ("grant_type", "refresh_token")
         , ("refresh_token", Text.encodeUtf8 refreshToken)
@@ -206,58 +216,57 @@ refreshGrokAccessToken options refreshToken = do
                     _ -> HttpError status
                         (Text.take 500 (Text.pack (lbsPreview (getResponseBody response))))
 
-principalFields :: GrokLoginOptions -> [(BS.ByteString, BS.ByteString)]
+principalFields :: OAuthOptions -> [(BS.ByteString, BS.ByteString)]
 principalFields options = Maybe.catMaybes
     [ (\value -> ("principal_type", Text.encodeUtf8 value)) <$> options.principalType
     , (\value -> ("principal_id", Text.encodeUtf8 value)) <$> options.principalId
     ]
 
-postTokenForm :: GrokLoginOptions -> [(BS.ByteString, BS.ByteString)] -> IO (Response LBS.ByteString)
+postTokenForm :: OAuthOptions -> [(BS.ByteString, BS.ByteString)] -> IO (Response LBS.ByteString)
 postTokenForm options formFields = do
     request <- parseRequest ("POST " <> trimIssuer options.issuer <> "/oauth2/token")
     httpLBS
         $ setRequestHeader "Content-Type" ["application/x-www-form-urlencoded"]
         $ setRequestBodyURLEncoded formFields request
 
-parseTokens :: Response LBS.ByteString -> IO GrokTokens
-parseTokens response = do
-    object <- decodeObject "token response" response
-    accessToken <- field "access_token" object
-    pure GrokTokens
-        { accessToken
-        , refreshToken = textFieldMaybe "refresh_token" object
-        , idToken = textFieldMaybe "id_token" object
-        , expiresInSeconds = intFieldMaybe "expires_in" object
-        }
+parseTokens :: Response LBS.ByteString -> IO OAuthTokens
+parseTokens = decodeResponse "token response"
 
 -- | Stable per-account identity for pooling, from the access-token JWT
 -- claims. Personal tokens carry the xAI user id in @sub@; team tokens
 -- additionally carry the principal. No signature verification — the id only
 -- namespaces accounts, it grants nothing.
-deriveGrokAccountId :: Text -> Maybe Text
-deriveGrokAccountId accessToken = do
+accountIdFromAccessToken :: Text -> Maybe Text
+accountIdFromAccessToken accessToken = do
     payload <- decodeJwtPayload accessToken
-    textClaim "sub" payload
-        `orElse` textClaim "principal_id" payload
-        `orElse` textClaim "principalId" payload
+    payload.subject
+        `orElse` payload.principalIdSnake
+        `orElse` payload.principalIdCamel
   where
-    textClaim name object = case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) | not (Text.null value) -> Just value
-        _ -> Nothing
-
-    orElse (Just a) _ = Just a
+    orElse (Just value) _ | not (Text.null value) = Just value
     orElse Nothing b = b
+    orElse _ b = b
 
-decodeJwtPayload :: Text -> Maybe Aeson.Object
+data JwtClaims = JwtClaims
+    { subject :: !(Maybe Text)
+    , principalIdSnake :: !(Maybe Text)
+    , principalIdCamel :: !(Maybe Text)
+    }
+
+instance Aeson.FromJSON JwtClaims where
+    parseJSON = Aeson.withObject "JwtClaims" \object -> JwtClaims
+        <$> object Aeson..:? "sub"
+        <*> object Aeson..:? "principal_id"
+        <*> object Aeson..:? "principalId"
+
+decodeJwtPayload :: Text -> Maybe JwtClaims
 decodeJwtPayload token = do
     payloadB64 <- case Text.splitOn "." token of
         (_ : payload : _) -> Just payload
         _ -> Nothing
     let padded = base64UrlToBase64 payloadB64
     payloadBytes <- either (const Nothing) Just (Base64.decode (Text.encodeUtf8 padded))
-    case Aeson.decode (LBS.fromStrict payloadBytes) of
-        Just (Aeson.Object object) -> Just object
-        _ -> Nothing
+    Aeson.decode (LBS.fromStrict payloadBytes)
 
 base64UrlToBase64 :: Text -> Text
 base64UrlToBase64 input = padded
@@ -278,37 +287,21 @@ safely action = tryAny action >>= \case
     Left exception -> pure (Left (Text.pack (show exception)))
     Right result -> pure (Right result)
 
+newtype OAuthError = OAuthError { errorCode :: Text }
+
+instance Aeson.FromJSON OAuthError where
+    parseJSON = Aeson.withObject "OAuthError" \object ->
+        OAuthError <$> object Aeson..: "error"
+
 oauthErrorCode :: Response LBS.ByteString -> Maybe Text
-oauthErrorCode response = case Aeson.eitherDecode (getResponseBody response) of
-    Right (Aeson.Object object) -> case KeyMap.lookup "error" object of
-        Just (Aeson.String code) -> Just code
-        _ -> Nothing
-    _ -> Nothing
+oauthErrorCode response = case Aeson.decode (getResponseBody response) of
+    Just OAuthError { errorCode } -> Just errorCode
+    Nothing -> Nothing
 
-decodeObject :: String -> Response LBS.ByteString -> IO Aeson.Object
-decodeObject label response = case Aeson.eitherDecode (getResponseBody response) of
+decodeResponse :: Aeson.FromJSON value => String -> Response LBS.ByteString -> IO value
+decodeResponse label response = case Aeson.eitherDecode (getResponseBody response) of
     Left err -> fail (label <> " is invalid JSON: " <> err)
-    Right (Aeson.Object object) -> pure object
-    Right _ -> fail (label <> " is not a JSON object")
-
-field :: Text -> Aeson.Object -> IO Text
-field name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.String value) -> pure value
-    Just _ -> fail (Text.unpack name <> " is not a string")
-    Nothing -> fail (Text.unpack name <> " is missing")
-
-textFieldMaybe :: Text -> Aeson.Object -> Maybe Text
-textFieldMaybe name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.String value) -> Just value
-    _ -> Nothing
-
-intFieldMaybe :: Text -> Aeson.Object -> Maybe Int
-intFieldMaybe name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.Number value) -> Just (round value)
-    Just (Aeson.String value) -> case reads (Text.unpack value) of
-        [(number, "")] -> Just number
-        _ -> Nothing
-    _ -> Nothing
+    Right value -> pure value
 
 lbsPreview :: LBS.ByteString -> String
 lbsPreview = Text.unpack . Text.take 300 . Text.decodeUtf8With (\_ _ -> Just '?') . LBS.toStrict

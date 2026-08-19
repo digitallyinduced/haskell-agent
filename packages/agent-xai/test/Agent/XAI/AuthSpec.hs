@@ -1,8 +1,8 @@
 -- | Tests for the xAI OAuth flows against an in-process mock of auth.x.ai.
-module Agent.XAI.GrokLoginSpec (spec) where
+module Agent.XAI.AuthSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.XAI.GrokLogin
+import Agent.XAI.Auth
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64.URL as Base64Url
@@ -18,11 +18,11 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-    describe "requestGrokDeviceCode" do
+    describe "requestDeviceAuthorization" do
         it "posts the configured client id and scopes, and prefers the complete verification URL" do
             recorded <- newIORef []
             deviceCode <- withMockAuth recorded deviceCodeApp \options ->
-                requestGrokDeviceCode options >>= expectRight
+                requestDeviceAuthorization options >>= expectRight
             deviceCode.deviceCode `shouldBe` "device-1"
             deviceCode.userCode `shouldBe` "ABCD-1234"
             deviceCode.verificationUrl `shouldBe` "https://accounts.example/activate?code=ABCD-1234"
@@ -46,7 +46,7 @@ spec = do
                     , principalId = Just "team-abc"
                     }
             _ <- withMockAuth recorded deviceCodeApp \options ->
-                requestGrokDeviceCode (teamOptions options) >>= expectRight
+                requestDeviceAuthorization (teamOptions options) >>= expectRight
             [(_, form)] <- readIORef recorded
             lookup "principal_type" form `shouldBe` Just "Team"
             lookup "principal_id" form `shouldBe` Just "team-abc"
@@ -54,7 +54,7 @@ spec = do
             -- and again on the token exchange, not only on a later refresh
             tokenRecorded <- newIORef []
             _ <- withMockAuth tokenRecorded refreshApp \options ->
-                pollGrokDeviceCode (teamOptions options) sampleDeviceCode >>= expectRight
+                pollDeviceAuthorization (teamOptions options) sampleDeviceCode >>= expectRight
             [(path, tokenForm)] <- readIORef tokenRecorded
             path `shouldBe` "/oauth2/token"
             lookup "principal_type" tokenForm `shouldBe` Just "Team"
@@ -63,12 +63,12 @@ spec = do
         it "reports a disabled device flow distinctly" do
             recorded <- newIORef []
             result <- withMockAuth recorded (respondStatus HTTP.status404 "{}") \options ->
-                requestGrokDeviceCode options
+                requestDeviceAuthorization options
             case result of
                 Left message -> Text.unpack message `shouldContain` "disabled"
                 Right _ -> expectationFailure "expected the 404 to surface as an error"
 
-    describe "pollGrokDeviceCode" do
+    describe "pollDeviceAuthorization" do
         it "treats authorization_pending as not-yet and then returns tokens" do
             recorded <- newIORef []
             calls <- newIORef (0 :: Int)
@@ -88,9 +88,9 @@ spec = do
                                 ]))
                     | otherwise = pure (respondStatusValue HTTP.status404 "not found")
             withMockAuth recorded app \options -> do
-                pending1 <- pollGrokDeviceCode options sampleDeviceCode >>= expectRight
+                pending1 <- pollDeviceAuthorization options sampleDeviceCode >>= expectRight
                 pending1 `shouldBe` Nothing
-                completed <- pollGrokDeviceCode options sampleDeviceCode >>= expectRight
+                completed <- pollDeviceAuthorization options sampleDeviceCode >>= expectRight
                 case completed of
                     Nothing -> expectationFailure "expected tokens on the second poll"
                     Just tokens -> do
@@ -102,16 +102,16 @@ spec = do
             recorded <- newIORef []
             result <- withMockAuth recorded
                 (respondStatus HTTP.status400 "{\"error\":\"access_denied\"}")
-                \options -> pollGrokDeviceCode options sampleDeviceCode
+                \options -> pollDeviceAuthorization options sampleDeviceCode
             case result of
                 Left message -> Text.unpack message `shouldContain` "denied"
                 Right _ -> expectationFailure "expected access_denied to fail"
 
-    describe "refreshGrokAccessToken" do
+    describe "refreshAccessToken" do
         it "rotates tokens and tolerates a non-rotating refresh token" do
             recorded <- newIORef []
             tokens <- withMockAuth recorded refreshApp \options ->
-                refreshGrokAccessToken options "refresh-old" >>= expectRight
+                refreshAccessToken options "refresh-old" >>= expectRight
             tokens.accessToken `shouldBe` "access-new"
             tokens.refreshToken `shouldBe` Nothing
 
@@ -125,7 +125,7 @@ spec = do
             recorded <- newIORef []
             result <- withMockAuth recorded
                 (respondStatus HTTP.status400 "{\"error\":\"invalid_grant\"}")
-                \options -> refreshGrokAccessToken options "refresh-old"
+                \options -> refreshAccessToken options "refresh-old"
             case result of
                 Left (ProviderError AuthenticationError message _) ->
                     Text.unpack message `shouldContain` "invalid_grant"
@@ -135,21 +135,21 @@ spec = do
             recorded <- newIORef []
             result <- withMockAuth recorded
                 (respondStatus HTTP.status503 "unavailable")
-                \options -> refreshGrokAccessToken options "refresh-old"
+                \options -> refreshAccessToken options "refresh-old"
             case result of
                 Left (HttpError 503 _) -> pure ()
                 other -> expectationFailure ("expected HttpError 503, got " <> show other)
 
-    describe "deriveGrokAccountId" do
+    describe "accountIdFromAccessToken" do
         it "prefers sub and falls back to the principal claim" do
-            deriveGrokAccountId (unsignedJwt (Aeson.object
+            accountIdFromAccessToken (unsignedJwt (Aeson.object
                 [ "sub" Aeson..= ("user-123" :: Text)
                 , "principal_id" Aeson..= ("principal-9" :: Text)
                 ])) `shouldBe` Just "user-123"
-            deriveGrokAccountId (unsignedJwt (Aeson.object
+            accountIdFromAccessToken (unsignedJwt (Aeson.object
                 [ "principal_id" Aeson..= ("principal-9" :: Text) ]))
                 `shouldBe` Just "principal-9"
-            deriveGrokAccountId "not-a-jwt" `shouldBe` Nothing
+            accountIdFromAccessToken "not-a-jwt" `shouldBe` Nothing
 
 --------------------------------------------------------------------------------
 -- Mock auth server
@@ -160,11 +160,11 @@ type FormFields = [(Text, Text)]
 withMockAuth
     :: IORef [(Text, FormFields)]
     -> (Text -> FormFields -> IO Wai.Response)
-    -> (GrokLoginOptions -> IO a)
+    -> (OAuthOptions -> IO a)
     -> IO a
 withMockAuth recorded handler action =
     Warp.testWithApplication (pure app) \port ->
-        action (defaultGrokLoginOptions testClientId)
+        action (defaultOAuthOptions testClientId)
             { issuer = "http://127.0.0.1:" <> show port }
   where
     app waiRequest respond = do
@@ -207,8 +207,8 @@ jsonResponse :: HTTP.Status -> Aeson.Value -> Wai.Response
 jsonResponse status value =
     Wai.responseLBS status [("Content-Type", "application/json")] (Aeson.encode value)
 
-sampleDeviceCode :: GrokDeviceCode
-sampleDeviceCode = GrokDeviceCode
+sampleDeviceCode :: DeviceAuthorization
+sampleDeviceCode = DeviceAuthorization
     { deviceCode = "device-1"
     , userCode = "ABCD-1234"
     , verificationUrl = "https://accounts.example/activate"
