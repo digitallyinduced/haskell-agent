@@ -25,6 +25,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     )
 import Control.Concurrent.Async (mapConcurrently)
+import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -99,35 +100,41 @@ runLoop
     -> Maybe Text
     -> Text
     -> IO (Either LoopError LoopResult)
-runLoop config previousResponseId prompt =
+runLoop config0 previousResponseId prompt = do
+    -- Tools run with mapConcurrently. Serialize onEvent so a printer
+    -- (hPutStrLn on String is not atomic) cannot interleave characters.
+    eventLock <- newMVar ()
+    let config = config0
+            { loopOnEvent = \event ->
+                withMVar eventLock \_ -> config0.loopOnEvent event
+            }
+        go prev turnsUsed inputs lastOutput
+            | turnsUsed >= config.loopMaxTurns =
+                pure $ case lastOutput of
+                    Just turn -> Left (LoopMaxTurns turn)
+                    Nothing -> Left LoopNoResponseId
+            | otherwise = do
+                config.loopOnEvent TurnStarted
+                result <- config.loopBackend.submitTurn prev inputs config.loopOnEvent
+                case result of
+                    Left err -> pure (Left (LoopTransport err))
+                    Right turn
+                        | Text.null turn.responseId ->
+                            pure (Left LoopNoResponseId)
+                        | otherwise -> do
+                            config.loopOnEvent (TurnFinished turn)
+                            let nextTurnsUsed = turnsUsed + 1
+                            if null turn.toolCalls
+                                then pure $ Right LoopResult
+                                    { finalResponseId = turn.responseId
+                                    , finalText = turn.assistantText
+                                    , turnsUsed = nextTurnsUsed
+                                    }
+                                else do
+                                    results <- mapConcurrently (runOne config) turn.toolCalls
+                                    go (Just turn.responseId) nextTurnsUsed
+                                        (map CompletedTool results) (Just turn)
     go previousResponseId 0 [UserMessage prompt] Nothing
-  where
-    go prev turnsUsed inputs lastOutput
-        | turnsUsed >= config.loopMaxTurns =
-            pure $ case lastOutput of
-                Just turn -> Left (LoopMaxTurns turn)
-                Nothing -> Left LoopNoResponseId
-        | otherwise = do
-            config.loopOnEvent TurnStarted
-            result <- config.loopBackend.submitTurn prev inputs config.loopOnEvent
-            case result of
-                Left err -> pure (Left (LoopTransport err))
-                Right turn
-                    | Text.null turn.responseId ->
-                        pure (Left LoopNoResponseId)
-                    | otherwise -> do
-                        config.loopOnEvent (TurnFinished turn)
-                        let nextTurnsUsed = turnsUsed + 1
-                        if null turn.toolCalls
-                            then pure $ Right LoopResult
-                                { finalResponseId = turn.responseId
-                                , finalText = turn.assistantText
-                                , turnsUsed = nextTurnsUsed
-                                }
-                            else do
-                                results <- mapConcurrently (runOne config) turn.toolCalls
-                                go (Just turn.responseId) nextTurnsUsed
-                                    (map CompletedTool results) (Just turn)
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do

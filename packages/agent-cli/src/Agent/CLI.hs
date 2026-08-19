@@ -35,7 +35,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs)
 import System.Exit (die, exitFailure)
-import System.IO (hFlush, hIsTerminalDevice, hPutStrLn, isEOF, stderr, stdin, stdout)
+import System.IO (hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
 
 run :: IO ()
 run = do
@@ -86,11 +86,14 @@ runSession
     -> IO ()
 runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
-    approveLock <- newMVar ()
+    ioLock <- newMVar ()
     previous <- newIORef Nothing
     let render = RenderConfig
             { renderShowReasoning = options.optShowReasoning
             , renderPrintedText = printed
+            , renderLock = ioLock
+            , renderStdout = stdout
+            , renderStderr = stderr
             }
         config = LoopConfig
             { loopBackend = backend
@@ -99,7 +102,7 @@ runSession options policy tools prompt paramsRef backend = do
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
-                withMVar approveLock \_ ->
+                withMVar ioLock \_ ->
                     approveTool policy tools call
             }
     case prompt of
@@ -156,14 +159,14 @@ runOneTurn config previous printed prompt = do
     result <- runLoop config prev prompt
     case result of
         Left err -> do
-            Text.hPutStrLn stderr (formatLoopError err)
+            putTextLn stderr (formatLoopError err)
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
             printedText <- readIORef printed
             case (printedText, loopResult.finalText) of
                 (False, Just text) | not (Text.null (Text.strip text)) ->
-                    Text.putStrLn text
+                    putTextLn stdout text
                 _ -> pure ()
             pure True
 
@@ -193,8 +196,7 @@ approveTool policy tools call =
         PromptMutating
             | readOnly -> pure True
             | otherwise -> do
-                hPutStrLn stderr ("Allow " <> Text.unpack (summarizeToolCall call) <> "? [y/N]")
-                hFlush stderr
+                putTextLn stderr ("Allow " <> summarizeToolCall call <> "? [y/N]")
                 eof <- isEOF
                 if eof
                     then pure False
