@@ -151,6 +151,19 @@ spec = do
                         Just (Aeson.toJSON ([Just "open", Just "closed", Nothing] :: [Maybe Text]))
                 other -> expectationFailure ("expected status property, got " <> show other)
 
+    describe "buildGrokTool" $ do
+        it "omits strict and keeps optional fields optional" $ do
+            let tool = buildGrokTool "read_file" "Read a file."
+                    [ PropertySchema "target_file" PropertyString True Nothing
+                    , PropertySchema "offset" PropertyInteger False Nothing
+                    ]
+            case tool of
+                FunctionToolValue fn -> do
+                    fn.strict `shouldBe` Nothing
+                    required_ tool `shouldBe` Just (Aeson.toJSON (["target_file"] :: [Text]))
+                    propertyType "offset" tool `shouldBe` Just (Aeson.String "integer")
+                other -> expectationFailure ("expected FunctionToolValue, got " <> show other)
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------

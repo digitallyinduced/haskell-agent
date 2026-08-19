@@ -7,6 +7,7 @@ module Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     , parametersObject
+    , parametersObjectLoose
     , propertyToValue
     ) where
 
@@ -41,15 +42,28 @@ data PropertySchema = PropertySchema
     , description  :: !(Maybe Text)
     } deriving (Eq, Show)
 
--- | The JSON Schema object used as a function tool's @parameters@ field.
+-- | Strict Structured Outputs parameters: every property is required;
+-- application-optional fields are nullable.
 parametersObject :: [PropertySchema] -> Value
-parametersObject properties = object
+parametersObject = objectSchema propertyToValue (const True)
+
+-- | grok-build / schemars-style parameters: only @required = True@ fields
+-- appear in @required@, and optional fields keep their real type.
+parametersObjectLoose :: [PropertySchema] -> Value
+parametersObjectLoose = objectSchema loosePropertyToValue (.required)
+
+objectSchema
+    :: (PropertySchema -> Value)
+    -> (PropertySchema -> Bool)
+    -> [PropertySchema]
+    -> Value
+objectSchema toValue isRequired properties = object
     [ "type" .= ("object" :: Text)
     , "properties" .= object
-        [ Key.fromText p.propertyName .= propertyToValue p
+        [ Key.fromText p.propertyName .= toValue p
         | p <- properties
         ]
-    , "required" .= [ p.propertyName | p <- properties ]
+    , "required" .= [ p.propertyName | p <- properties, isRequired p ]
     , "additionalProperties" .= False
     ]
 
@@ -57,35 +71,36 @@ propertyToValue :: PropertySchema -> Value
 propertyToValue property =
     applyOptionality property.required
         (applyDescription property.description
-            (typeSchema property.propertyType))
+            (typeSchema True property.propertyType))
+
+loosePropertyToValue :: PropertySchema -> Value
+loosePropertyToValue property =
+    applyDescription property.description
+        (typeSchema False property.propertyType)
 
 instance ToJSON PropertyType where
-    toJSON = typeSchema
+    toJSON = typeSchema True
 
-typeSchema :: PropertyType -> Value
-typeSchema = \case
+typeSchema :: Bool -> PropertyType -> Value
+typeSchema strict = \case
     PropertyString -> primitiveSchema "string"
     PropertyInteger -> primitiveSchema "integer"
     PropertyNumber -> primitiveSchema "number"
     PropertyBoolean -> primitiveSchema "boolean"
     PropertyArray inner -> object
         [ "type" .= ("array" :: Text)
-        , "items" .= typeSchema inner
+        , "items" .= typeSchema strict inner
         ]
     PropertyEnum values -> object
         [ "type" .= ("string" :: Text)
         , "enum" .= values
         ]
-    PropertyObject fields -> object
-        [ "type" .= ("object" :: Text)
-        , "properties" .= object
-            [ Key.fromText field.propertyName .= propertyToValue field
-            | field <- fields
-            ]
-        , "required" .= [ field.propertyName | field <- fields ]
-        , "additionalProperties" .= False
-        ]
-    PropertyRaw value -> strictifyRawSchema value
+    PropertyObject fields
+        | strict -> objectSchema propertyToValue (const True) fields
+        | otherwise -> objectSchema loosePropertyToValue (.required) fields
+    PropertyRaw value
+        | strict -> strictifyRawSchema value
+        | otherwise -> value
 
 primitiveSchema :: Text -> Value
 primitiveSchema typeName = object ["type" .= typeName]

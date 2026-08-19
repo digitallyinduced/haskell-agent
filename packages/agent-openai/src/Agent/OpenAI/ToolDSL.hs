@@ -2,12 +2,18 @@
 
 module Agent.OpenAI.ToolDSL
     ( buildTool
+    , buildGrokTool
     , PropertySchema(..)
     , PropertyType(..)
     ) where
 
 import Agent.OpenAI.Responses.Types (FunctionTool(..), ResponseTool(..))
-import Agent.ToolDSL (PropertySchema(..), PropertyType(..), parametersObject)
+import Agent.ToolDSL
+    ( PropertySchema(..)
+    , PropertyType(..)
+    , parametersObject
+    , parametersObjectLoose
+    )
 import Data.Text (Text)
 import qualified Data.Aeson.KeyMap as KeyMap
 
@@ -23,5 +29,15 @@ buildTool name description properties = FunctionToolValue FunctionTool
     , description = Just description
     , parameters = Just (parametersObject properties)
     , strict = Just True
+    , extraFields = KeyMap.empty
+    }
+
+-- | grok-build function tool: optional fields stay optional, @strict@ omitted.
+buildGrokTool :: Text -> Text -> [PropertySchema] -> ResponseTool
+buildGrokTool name description properties = FunctionToolValue FunctionTool
+    { name
+    , description = Just description
+    , parameters = Just (parametersObjectLoose properties)
+    , strict = Nothing
     , extraFields = KeyMap.empty
     }

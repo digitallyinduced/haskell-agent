@@ -10,21 +10,27 @@ spec :: Spec
 spec = describe "systemPrompt" do
     it "names grok-build tools for xAI and Codex tools for OpenAI" do
         let day = fromGregorian 2026 8 19
-            grok = systemPrompt XAIProvider "/tmp/repo" day
-            openai = systemPrompt OpenAIProvider "/tmp/repo" day
+            grok = systemPrompt XAIProvider "/tmp/repo" day False
+            openai = systemPrompt OpenAIProvider "/tmp/repo" day False
         grok `shouldSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "search_replace"
         grok `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
+        grok `shouldSatisfy` Text.isInfixOf "<tool_calling>"
         grok `shouldNotSatisfy` Text.isInfixOf "apply_patch"
+        grok `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
         openai `shouldSatisfy` Text.isInfixOf "shell_command"
         openai `shouldSatisfy` Text.isInfixOf "apply_patch"
         openai `shouldSatisfy` Text.isInfixOf "update_plan"
         openai `shouldNotSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "2026-08-19"
         grok `shouldSatisfy` Text.isInfixOf "/tmp/repo"
-        let openrouter = systemPrompt OpenRouterProvider "/tmp/repo" day
+        let openrouter = systemPrompt OpenRouterProvider "/tmp/repo" day False
         openrouter `shouldSatisfy` Text.isInfixOf "read_file"
         openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
+
+    it "uses the autonomous identity for one-shot Grok sessions" do
+        let grok = systemPrompt XAIProvider "/tmp/repo" (fromGregorian 2026 8 19) True
+        grok `shouldSatisfy` Text.isInfixOf "no human operator"
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.5"
