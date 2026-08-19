@@ -74,8 +74,9 @@ runAgent options = do
     let provider = loaded.loadedProvider
         model = fromMaybe (defaultModelFor provider) options.optModel
         instructions = systemPrompt provider cwd today (isOneShot options)
+        effort = fromMaybe (defaultEffortFor provider) options.optEffort
         params = requestParams model instructions
-            (schemasFromAppTools provider tools) options.optEffort
+            (schemasFromAppTools provider tools) effort
         policy = resolveApprovalPolicy options isTty
     paramsRef <- newIORef params
     prompt <- loadPrompt options
