@@ -1,4 +1,4 @@
--- | Load ChatGPT, Grok, or broker credentials for the CLI process.
+-- | Load ChatGPT, Grok, OpenRouter, or broker credentials for the CLI process.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
@@ -18,6 +18,7 @@ import Agent.Provider
     , getNextToken
     , seedTokenProvider
     )
+import Agent.OpenRouter.Credential (credentialFromApiKey)
 import Agent.XAI.Auth (accountIdFromAccessToken)
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -50,17 +51,21 @@ loadAuth requested = do
                 Left err -> pure (Left err)
                 Right XAIProvider -> loadXai
                 Right OpenAIProvider -> loadOpenAi
+                Right OpenRouterProvider -> loadOpenRouter
 
 detectProvider :: Maybe Provider -> IO (Either String Provider)
 detectProvider (Just provider) = pure (Right provider)
 detectProvider Nothing = do
     grok <- hasGrokAuth
     openai <- hasOpenAiAuth
+    openrouter <- hasOpenRouterAuth
     pure $ if grok
         then Right XAIProvider
         else if openai
             then Right OpenAIProvider
-            else Left noAuthHint
+            else if openrouter
+                then Right OpenRouterProvider
+                else Left noAuthHint
 
 loadBroker :: Text -> Maybe Provider -> IO (Either String LoadedAuth)
 loadBroker url requested = do
@@ -96,6 +101,16 @@ loadXai = do
         Just loaded -> pure $ Right LoadedAuth
             { loadedProvider = XAIProvider
             , loadedTokenProvider = staticCredentialProvider loaded
+            }
+
+loadOpenRouter :: IO (Either String LoadedAuth)
+loadOpenRouter = do
+    key <- lookupNonEmpty "OPENROUTER_API_KEY"
+    case key of
+        Nothing -> pure (Left noAuthHint)
+        Just apiKey -> pure $ Right LoadedAuth
+            { loadedProvider = OpenRouterProvider
+            , loadedTokenProvider = staticCredentialProvider (credentialFromApiKey apiKey)
             }
 
 loadOpenAi :: IO (Either String LoadedAuth)
@@ -259,6 +274,9 @@ hasOpenAiAuth = do
     file <- doesFileExist (home </> ".codex" </> "auth.json")
     pure (isJust envJson || isJust envToken || file)
 
+hasOpenRouterAuth :: IO Bool
+hasOpenRouterAuth = isJust <$> lookupNonEmpty "OPENROUTER_API_KEY"
+
 staticCredentialProvider :: Credential -> TokenProvider
 staticCredentialProvider credential = TokenProvider \failed ->
     case failed of
@@ -281,5 +299,5 @@ textField name object = case KeyMap.lookup (Key.fromText name) object of
 
 noAuthHint :: String
 noAuthHint =
-    "no credentials found. Set GROK_ACCESS_TOKEN or CODEX_ACCESS_TOKEN, \
-    \or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+    "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
+    \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."

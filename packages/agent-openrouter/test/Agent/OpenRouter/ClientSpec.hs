@@ -1,0 +1,241 @@
+-- | Functional tests for the OpenRouter client against an in-process HTTP mock.
+module Agent.OpenRouter.ClientSpec (spec) where
+
+import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.OpenRouter.Client
+import Agent.OpenRouter.Options
+import Agent.Provider (Credential(..), Provider(..))
+import Agent.OpenAI.Responses.Types
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.CaseInsensitive as CI
+import Data.IORef
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Network.HTTP.Types as HTTP
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
+import Test.Hspec
+
+spec :: Spec
+spec = do
+    describe "createResponseWith" do
+        it "POSTs the mapped request with OpenRouter headers and parses the SSE response" do
+            recorded <- newIORef []
+            let handler _request = do
+                    pure $ sseResponse
+                        [ outputItemDone (assistantMessage "hello world")
+                        , completedEvent "resp-1" []
+                        ]
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWith options
+                    (openRouterCredential "token-a")
+                    (helloRequest "hi")
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-1"
+                extractAssistantText response `shouldBe` Just "hello world"
+
+            [request] <- readIORef recorded
+            request.path `shouldBe` "/v1/responses"
+            lookup "Authorization" request.headers `shouldBe` Just "Bearer token-a"
+            lookup "HTTP-Referer" request.headers `shouldBe` Just "https://example.com"
+            lookup "X-Title" request.headers `shouldBe` Just "haskell-agent-test"
+            requestModel request `shouldBe` Just "openai/gpt-5.1"
+            (instructionsOf <$> requestBodyObject request)
+                `shouldBe` Just (Just "You are a test agent.")
+
+        it "rejects a non-OpenRouter credential before contacting the host" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse []
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWith options
+                    (Credential
+                        { accessToken = "openai-token"
+                        , accountId = "acc"
+                        , leaseId = Nothing
+                        , provider = OpenAIProvider
+                        })
+                    (helloRequest "hi")
+                case result of
+                    Left (ProviderError ApiErrorType message _) ->
+                        message `shouldSatisfy` Text.isInfixOf "OpenRouter"
+                    other -> expectationFailure
+                        ("expected OpenRouter credential error, got " <> show other)
+            readIORef recorded `shouldReturn` []
+
+    describe "retry boundaries" do
+        it "reports a terminal stream failure after one request" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "partial answer")
+                    , sseEvent "response.failed" $ Aeson.object
+                        [ "type" Aeson..= ("response.failed" :: Text)
+                        , "response" Aeson..= Aeson.object
+                            [ "id" Aeson..= ("resp-failed" :: Text)
+                            , "created_at" Aeson..= (0 :: Int)
+                            , "model" Aeson..= ("openai/gpt-5.1" :: Text)
+                            , "status" Aeson..= ("failed" :: Text)
+                            , "incomplete_details" Aeson..= Aeson.object
+                                ["reason" Aeson..= ("overloaded" :: Text)]
+                            ]
+                        ]
+                    ]
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWith options
+                    (openRouterCredential "token-a")
+                    (helloRequest "hi")
+                case result of
+                    Left ConnectionError{} -> pure ()
+                    other -> expectationFailure ("expected ConnectionError, got " <> show other)
+
+            requests <- readIORef recorded
+            length requests `shouldBe` 1
+
+        it "classifies an OpenRouter 401 envelope as authentication rejected" do
+            recorded <- newIORef []
+            let handler _request = pure $ Wai.responseLBS HTTP.status401
+                    [("Content-Type", "application/json")]
+                    "{\"error\":{\"code\":\"unauthorized\",\"message\":\"bad key\"}}"
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWith options
+                    (openRouterCredential "bad")
+                    (helloRequest "hi")
+                case result of
+                    Left (ProviderError AuthenticationError message _) ->
+                        message `shouldSatisfy` Text.isInfixOf "bad key"
+                    other -> expectationFailure
+                        ("expected AuthenticationError, got " <> show other)
+
+--------------------------------------------------------------------------------
+-- Mock server
+--------------------------------------------------------------------------------
+
+data RecordedRequest = RecordedRequest
+    { path :: !Text
+    , headers :: ![(Text, Text)]
+    , body :: !LBS.ByteString
+    } deriving (Eq, Show)
+
+withMockOpenRouter
+    :: IORef [RecordedRequest]
+    -> (RecordedRequest -> IO Wai.Response)
+    -> (ClientOptions -> IO a)
+    -> IO a
+withMockOpenRouter recorded handler action =
+    Warp.testWithApplication (pure app) \port ->
+        action defaultClientOptions
+            { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
+            , requestTimeoutSeconds = 10
+            , httpReferer = Just "https://example.com"
+            , appTitle = Just "haskell-agent-test"
+            }
+  where
+    app waiRequest respond = do
+        requestBody <- Wai.strictRequestBody waiRequest
+        let request = RecordedRequest
+                { path = "/" <> Text.intercalate "/" (Wai.pathInfo waiRequest)
+                , headers =
+                    [ (Text.decodeUtf8 (CI.original name), Text.decodeUtf8 value)
+                    | (name, value) <- Wai.requestHeaders waiRequest
+                    ]
+                , body = requestBody
+                }
+        atomicModifyIORef' recorded \requests -> (requests <> [request], ())
+        respond =<< handler request
+
+sseResponse :: [Text] -> Wai.Response
+sseResponse events = Wai.responseLBS HTTP.status200
+    [("Content-Type", "text/event-stream")]
+    (LBS.fromStrict (Text.encodeUtf8 (Text.concat events)))
+
+outputItemDone :: Aeson.Value -> Text
+outputItemDone item = sseEvent "response.output_item.done" $ Aeson.object
+    [ "type" Aeson..= ("response.output_item.done" :: Text)
+    , "output_index" Aeson..= (0 :: Int)
+    , "item" Aeson..= item
+    ]
+
+completedEvent :: Text -> [Aeson.Value] -> Text
+completedEvent responseId output = sseEvent "response.completed" $ Aeson.object
+    [ "type" Aeson..= ("response.completed" :: Text)
+    , "response" Aeson..= Aeson.object
+        [ "id" Aeson..= responseId
+        , "created_at" Aeson..= (0 :: Int)
+        , "model" Aeson..= ("openai/gpt-5.1" :: Text)
+        , "status" Aeson..= ("completed" :: Text)
+        , "output" Aeson..= output
+        , "usage" Aeson..= Aeson.object
+            [ "input_tokens" Aeson..= (10 :: Int)
+            , "output_tokens" Aeson..= (5 :: Int)
+            , "total_tokens" Aeson..= (15 :: Int)
+            ]
+        ]
+    ]
+
+sseEvent :: Text -> Aeson.Value -> Text
+sseEvent eventType payload =
+    "event: " <> eventType <> "\ndata: "
+        <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode payload))
+        <> "\n\n"
+
+assistantMessage :: Text -> Aeson.Value
+assistantMessage text = Aeson.object
+    [ "type" Aeson..= ("message" :: Text)
+    , "role" Aeson..= ("assistant" :: Text)
+    , "content" Aeson..= [Aeson.object
+        [ "type" Aeson..= ("output_text" :: Text)
+        , "text" Aeson..= text
+        ]]
+    ]
+
+openRouterCredential :: Text -> Credential
+openRouterCredential token = Credential
+    { accessToken = token
+    , accountId = ""
+    , leaseId = Nothing
+    , provider = OpenRouterProvider
+    }
+
+helloRequest :: Text -> ResponseCreateParams
+helloRequest prompt = defaultResponseCreateParams
+    { model = Just "openai/gpt-5.1"
+    , instructions = Just "You are a test agent."
+    , input = Just (ResponseInputText prompt)
+    , tools = Just []
+    }
+
+extractAssistantText :: Response -> Maybe Text
+extractAssistantText response = case
+    [ value
+    | MessageItem message <- response.output
+    , message.role == RoleAssistant
+    , value <- case message.content of
+        MessageContentText text -> [text]
+        MessageContentParts parts -> [text | OutputTextPart { text } <- parts]
+    ] of
+        [] -> Nothing
+        values -> Just (Text.intercalate "\n" values)
+
+requestBodyObject :: RecordedRequest -> Maybe Aeson.Object
+requestBodyObject request = case Aeson.decode request.body of
+    Just (Aeson.Object object) -> Just object
+    _ -> Nothing
+
+requestModel :: RecordedRequest -> Maybe Text
+requestModel request = do
+    object <- requestBodyObject request
+    case KeyMap.lookup "model" object of
+        Just (Aeson.String model) -> Just model
+        _ -> Nothing
+
+instructionsOf :: Aeson.Object -> Maybe Text
+instructionsOf object = case KeyMap.lookup "instructions" object of
+    Just (Aeson.String text) -> Just text
+    _ -> Nothing
+
+expectRight :: Show e => Either e a -> IO a
+expectRight = \case
+    Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
+    Right value -> pure value

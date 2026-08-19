@@ -1,10 +1,10 @@
-module Agent.XAI.LoopBackendSpec (spec) where
+module Agent.OpenRouter.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.OpenAI.Responses.Types
+import Agent.OpenRouter.LoopBackend
 import Agent.ToolDispatch
-import Agent.XAI.LoopBackend
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -14,7 +14,7 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-    describe "xaiBackendWith" do
+    describe "openRouterBackendWith" do
         it "replays the local transcript on the tool follow-up" do
             seen <- newIORef []
             events <- newIORef []
@@ -23,7 +23,7 @@ spec = do
                     [ functionCallItem "c1" "read_file" "{\"target_file\":\"README.md\"}" ]
                 , testResponse "resp-2" [assistantItem "done"]
                 ]
-            backend <- xaiBackendWith (scriptedSend seen remaining) (pure baseParams)
+            backend <- openRouterBackendWith (scriptedSend seen remaining) (pure baseParams)
 
             first <- backend.submitTurn Nothing [UserMessage "read it"]
                 (modifyIORef' events . (:))
@@ -57,7 +57,7 @@ spec = do
             seen <- newIORef []
             remaining <- newIORef
                 [ testResponse "resp-1" [assistantItem "hi"] ]
-            backend <- xaiBackendWith
+            backend <- openRouterBackendWith
                 (\request onEvent -> do
                     n <- length <$> readIORef seen
                     if n == 0
@@ -88,7 +88,7 @@ spec = do
                 , testResponse "resp-2" [assistantItem "two"]
                 ]
             paramsRef <- newIORef (withEffort "low" baseParams)
-            backend <- xaiBackendWith (scriptedSend seen remaining) (readIORef paramsRef)
+            backend <- openRouterBackendWith (scriptedSend seen remaining) (readIORef paramsRef)
             _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
             writeIORef paramsRef (withEffort "high" baseParams)
             _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
@@ -104,7 +104,7 @@ spec = do
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
-baseParams = defaultResponseCreateParams { model = Just "grok-4.5" }
+baseParams = defaultResponseCreateParams { model = Just "openai/gpt-5.1" }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =
@@ -197,7 +197,7 @@ testResponse :: Text -> [ResponseItem] -> Response
 testResponse responseId output = case Aeson.fromJSON $ Aeson.object
     [ "id" Aeson..= responseId
     , "created_at" Aeson..= (0 :: Int)
-    , "model" Aeson..= ("grok-4.5" :: Text)
+    , "model" Aeson..= ("openai/gpt-5.1" :: Text)
     , "status" Aeson..= ("completed" :: Text)
     , "output" Aeson..= output
     ] of

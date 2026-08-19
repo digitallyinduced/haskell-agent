@@ -1,0 +1,80 @@
+cabal-version:      2.2
+name:               agent-openrouter
+version:            0.1.0.0
+synopsis:           Haskell client for the OpenRouter Responses transport
+description:        Static API-key auth, typed Responses request projection,
+                    HTTP SSE transport, and provider-specific errors for
+                    OpenRouter's OpenAI-compatible Responses API.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , PackageImports
+    ghc-options:      -Wall -Wno-unused-do-bind -Wno-name-shadowing -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.OpenRouter
+                    , Agent.OpenRouter.Client
+                    , Agent.OpenRouter.Credential
+                    , Agent.OpenRouter.Error
+                    , Agent.OpenRouter.LoopBackend
+                    , Agent.OpenRouter.Options
+                    , Agent.OpenRouter.Request
+                    , Agent.OpenRouter.Stream
+    hs-source-dirs:   src
+    build-depends:    base                  >= 4.14 && < 5
+                    , agent-core            >= 0.1 && < 0.2
+                    , agent-openai          >= 0.1 && < 0.2
+                    , text
+                    , bytestring
+                    , aeson                 >= 2.0
+                    , http-client
+                    , http-conduit
+                    , http-types
+                    , safe-exceptions
+                    , time
+
+test-suite agent-openrouter-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.OpenRouter.ClientSpec
+                    , Agent.OpenRouter.CredentialSpec
+                    , Agent.OpenRouter.ErrorSpec
+                    , Agent.OpenRouter.FunctionalSpec
+                    , Agent.OpenRouter.LoopBackendSpec
+                    , Agent.OpenRouter.RequestSpec
+    ghc-options:      -threaded
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core
+                    , agent-openai
+                    , agent-openrouter
+                    , hspec
+                    , aeson
+                    , text
+                    , bytestring
+                    , time
+                    , case-insensitive
+                    , http-types
+                    , wai
+                    , warp

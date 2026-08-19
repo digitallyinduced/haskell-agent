@@ -134,6 +134,9 @@ runConnectionAttempt credential _action
     | credential.provider == XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "XAI credentials must be used through agent-xai"
         Nothing
+    | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
+        "OpenRouter credentials must be used through agent-openrouter"
+        Nothing
 runConnectionAttempt credential action = do
     result <- Exception.try @Exception.SomeException $ do
         let headers =

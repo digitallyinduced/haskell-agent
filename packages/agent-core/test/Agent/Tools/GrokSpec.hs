@@ -36,6 +36,8 @@ spec = describe "Agent.Tools.Grok" do
             names `shouldNotContain` ["shell_command"]
             xai <- codingToolsFor XAIProvider env
             map (.appToolName) xai `shouldBe` names
+            openrouter <- codingToolsFor OpenRouterProvider env
+            map (.appToolName) openrouter `shouldBe` names
 
     it "reads a file with grok line-number anchors" do
         withTempEnv \env -> do

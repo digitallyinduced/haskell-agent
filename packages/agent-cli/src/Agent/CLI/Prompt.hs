@@ -14,6 +14,7 @@ defaultModelFor :: Provider -> Text
 defaultModelFor = \case
     XAIProvider -> "grok-4.5"
     OpenAIProvider -> "gpt-5.1-codex"
+    OpenRouterProvider -> "openai/gpt-5.1"
 
 systemPrompt :: Provider -> FilePath -> Day -> Text
 systemPrompt provider cwd today =
@@ -27,13 +28,17 @@ systemPrompt provider cwd today =
 
 toolRules :: Provider -> Text
 toolRules = \case
-    XAIProvider ->
-        "Use grok-build tools only:\n\
-        \- Prefer read_file, grep, and list_dir before editing.\n\
-        \- Edit with search_replace. An empty old_string creates a new file.\n\
-        \- Run commands with run_terminal_cmd."
+    XAIProvider -> grokToolRules
+    OpenRouterProvider -> grokToolRules
     OpenAIProvider ->
         "Use Codex tools only:\n\
         \- Inspect the repo with shell_command (rg, cat, ls). Always set workdir.\n\
         \- Edit files with apply_patch. Never call applypatch or apply-patch.\n\
         \- Track multi-step work with update_plan."
+
+grokToolRules :: Text
+grokToolRules =
+    "Use grok-build tools only:\n\
+    \- Prefer read_file, grep, and list_dir before editing.\n\
+    \- Edit with search_replace. An empty old_string creates a new file.\n\
+    \- Run commands with run_terminal_cmd."

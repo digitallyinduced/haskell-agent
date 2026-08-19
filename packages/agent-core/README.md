@@ -6,8 +6,9 @@ Provider-neutral infrastructure shared by the harness transports:
 - `Agent.Provider` owns credentials, account-failure feedback, and failover.
 - `Agent.Broker` obtains provider credentials from the central broker.
 - `Agent.Loop` runs the provider-neutral tool-calling agent loop. Transport
-  adapters live in `agent-openai` (`Agent.OpenAI.LoopBackend`) and `agent-xai`
-  (`Agent.XAI.LoopBackend`).
+  adapters live in `agent-openai` (`Agent.OpenAI.LoopBackend`), `agent-xai`
+  (`Agent.XAI.LoopBackend`), and `agent-openrouter`
+  (`Agent.OpenRouter.LoopBackend`).
 - `Agent.ToolArgs` parses model-supplied JSON tool arguments.
 - `Agent.ToolDSL` owns JSON Schema fragments for function-tool parameters.
 - `Agent.ToolDispatch` decodes and runs provider-neutral application tools.
@@ -20,4 +21,4 @@ Provider-neutral infrastructure shared by the harness transports:
   handling, serialized writes, bounded receive buffering, and provider-neutral
   failure classification.
 
-This package does not contain OpenAI, ChatGPT, or xAI transport logic.
+This package does not contain OpenAI, ChatGPT, xAI, or OpenRouter transport logic.

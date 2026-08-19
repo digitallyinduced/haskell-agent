@@ -1,8 +1,8 @@
 -- | Registered application tools: schema fragments plus a dispatch handler.
 --
--- Provider-specific surfaces live in 'Agent.Tools.Grok' and (later)
--- 'Agent.Tools.Codex'. Shared filesystem and process helpers are in
--- 'Agent.Tools.IO'.
+-- Provider-specific surfaces live in 'Agent.Tools.Grok' and
+-- 'Agent.Tools.Codex'. OpenRouter reuses the Grok JSON function tools.
+-- Shared filesystem and process helpers are in 'Agent.Tools.IO'.
 module Agent.Tools
     ( AppTool(..)
     , AppToolKind(..)
@@ -21,4 +21,5 @@ import Agent.Tools.Types
 codingToolsFor :: Provider -> ToolEnv -> IO [AppTool]
 codingToolsFor = \case
     XAIProvider -> pure . grokTools
+    OpenRouterProvider -> pure . grokTools
     OpenAIProvider -> codexTools

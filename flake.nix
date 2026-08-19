@@ -67,11 +67,23 @@
                     ];
                 };
 
+                agentOpenrouterSource = nix-filter.lib {
+                    root = ./packages/agent-openrouter;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-openrouter.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 haskellPackages = pkgs.haskellPackages.extend (
                     final: _previous: {
                         agent-core = final.callCabal2nix "agent-core" agentCoreSource { };
                         agent-openai = final.callCabal2nix "agent-openai" agentOpenaiSource { };
                         agent-xai = final.callCabal2nix "agent-xai" agentXaiSource { };
+                        agent-openrouter = final.callCabal2nix "agent-openrouter" agentOpenrouterSource { };
                         agent-cli = final.callCabal2nix "agent-cli" agentCliSource { };
                     }
                 );
@@ -79,6 +91,7 @@
                 agentCorePackage = haskellPackages.agent-core;
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
+                agentOpenrouterPackage = haskellPackages.agent-openrouter;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
@@ -89,6 +102,7 @@
                 packages.agent-core = agentCorePackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
+                packages.agent-openrouter = agentOpenrouterPackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
 
                 apps.default = flake-utils.lib.mkApp {
@@ -106,6 +120,7 @@
                         packages.agent-core
                         packages.agent-openai
                         packages.agent-xai
+                        packages.agent-openrouter
                     ];
                     withHoogle = false;
                     nativeBuildInputs =
@@ -124,6 +139,7 @@
                     agent-core = agentCorePackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
+                    agent-openrouter = agentOpenrouterPackage;
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

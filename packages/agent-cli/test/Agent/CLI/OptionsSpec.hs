@@ -45,6 +45,22 @@ spec = do
                     , optPrompt = Just "hello"
                     })
 
+        it "accepts xhigh effort" do
+            parseArgs ["--effort", "xhigh"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "xhigh" })
+            parseArgs ["--effort", "HIGH"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "high" })
+
+        it "rejects unknown effort levels" do
+            parseArgs ["--effort", "max"] `shouldSatisfy` isLeft
+
+        it "accepts openrouter as a provider" do
+            parseArgs ["--provider", "openrouter", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optProvider = Just OpenRouterProvider
+                    , optPrompt = Just "hi"
+                    })
+
         it "rejects the removed openai-base-url command" do
             parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
 

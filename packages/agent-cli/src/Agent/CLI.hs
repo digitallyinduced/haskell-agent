@@ -4,6 +4,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
@@ -21,8 +22,10 @@ import Agent.Provider
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools (appToolHandlers, codingToolsFor)
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Agent.OpenRouter.LoopBackend (openRouterBackend)
+import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
-import Agent.XAI.Options (clientOptionsFromEnv)
+import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (try)
 import Data.IORef
@@ -66,36 +69,46 @@ runAgent options = do
         instructions = systemPrompt provider cwd today
         params = requestParams model instructions (schemasFromAppTools tools) options.optEffort
         policy = resolveApprovalPolicy options isTty
+    paramsRef <- newIORef params
     prompt <- loadPrompt options
     case provider of
         OpenAIProvider ->
             try @CodexAuthFailed
                 (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                    runSession options policy tools prompt
-                        (openAiBackend conn params))
+                    runSession options policy tools prompt paramsRef
+                        (openAiBackend conn (readIORef paramsRef)))
                 >>= \case
                     Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                     Right () -> pure ()
         XAIProvider -> do
-            xaiOptions <- clientOptionsFromEnv
+            xaiOptions <- XAI.clientOptionsFromEnv
             credential <- firstCredential loaded
-            backend <- xaiBackend xaiOptions credential params
-            runSession options policy tools prompt backend
+            backend <- xaiBackend xaiOptions credential (readIORef paramsRef)
+            runSession options policy tools prompt paramsRef backend
+        OpenRouterProvider -> do
+            openRouterOptions <- OpenRouter.clientOptionsFromEnv
+            credential <- firstCredential loaded
+            backend <- openRouterBackend openRouterOptions credential (readIORef paramsRef)
+            runSession options policy tools prompt paramsRef backend
 
 runSession
     :: CliOptions
     -> ApprovalPolicy
     -> [AppTool]
     -> Maybe Text
+    -> IORef ResponseCreateParams
     -> Backend
     -> IO ()
-runSession options policy tools prompt backend = do
+runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
-    approveLock <- newMVar ()
+    ioLock <- newMVar ()
     previous <- newIORef Nothing
     let render = RenderConfig
             { renderShowReasoning = options.optShowReasoning
             , renderPrintedText = printed
+            , renderLock = ioLock
+            , renderStdout = stdout
+            , renderStderr = stderr
             }
         config = LoopConfig
             { loopBackend = backend
@@ -104,17 +117,22 @@ runSession options policy tools prompt backend = do
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
-                withMVar approveLock \_ ->
+                withMVar ioLock \_ ->
                     approveTool policy tools call
             }
     case prompt of
         Just text -> do
             ok <- runOneTurn config previous printed text
             if ok then putTrailingNewline printed else exitFailure
-        Nothing -> repl config previous printed
+        Nothing -> repl config previous printed paramsRef
 
-repl :: LoopConfig -> IORef (Maybe Text) -> IORef Bool -> IO ()
-repl config previous printed = do
+repl
+    :: LoopConfig
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef ResponseCreateParams
+    -> IO ()
+repl config previous printed paramsRef = do
     putStr "agent> "
     hFlush stdout
     done <- isEOF
@@ -123,14 +141,27 @@ repl config previous printed = do
         else do
             line <- Text.strip <$> Text.getLine
             if Text.null line
-                then repl config previous printed
-                else if line == ":q" || line == ":quit"
-                    then pure ()
-                    else do
+                then continue
+                else case parseReplLine line of
+                    ReplQuit -> pure ()
+                    ReplPrompt text -> do
                         writeIORef printed False
-                        _ <- runOneTurn config previous printed line
+                        _ <- runOneTurn config previous printed text
                         putTrailingNewline printed
-                        repl config previous printed
+                        continue
+                    ReplShowEffort -> do
+                        params <- readIORef paramsRef
+                        Text.putStrLn ("effort: " <> currentEffort params)
+                        continue
+                    ReplSetEffort level -> do
+                        modifyIORef' paramsRef (setReasoningEffort level)
+                        Text.putStrLn ("effort set to " <> level)
+                        continue
+                    ReplCommandError err -> do
+                        Text.hPutStrLn stderr err
+                        continue
+  where
+    continue = repl config previous printed paramsRef
 
 runOneTurn
     :: LoopConfig
@@ -143,14 +174,14 @@ runOneTurn config previous printed prompt = do
     result <- runLoop config prev prompt
     case result of
         Left err -> do
-            Text.hPutStrLn stderr (formatLoopError err)
+            putTextLn stderr (formatLoopError err)
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
             printedText <- readIORef printed
             case (printedText, loopResult.finalText) of
                 (False, Just text) | not (Text.null (Text.strip text)) ->
-                    Text.putStrLn text
+                    putTextLn stdout text
                 _ -> pure ()
             pure True
 
@@ -180,8 +211,7 @@ approveTool policy tools call =
         PromptMutating
             | readOnly -> pure True
             | otherwise -> do
-                hPutStrLn stderr ("Allow " <> Text.unpack (summarizeToolCall call) <> "? [y/N]")
-                hFlush stderr
+                putTextLn stderr ("Allow " <> summarizeToolCall call <> "? [y/N]")
                 eof <- isEOF
                 if eof
                     then pure False

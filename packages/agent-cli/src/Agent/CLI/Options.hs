@@ -6,6 +6,7 @@ module Agent.CLI.Options
     , defaultCliOptions
     , isOneShot
     , parseArgs
+    , parseEffort
     , resolveApprovalPolicy
     , usage
     ) where
@@ -84,7 +85,7 @@ parseOptions options = \case
     "--provider" : value : rest -> do
         provider <- case parseProvider (Text.pack value) of
             Just parsed -> Right parsed
-            Nothing -> Left ("unknown provider: " <> value <> " (use openai or xai)")
+            Nothing -> Left ("unknown provider: " <> value <> " (use openai, xai, or openrouter)")
         parseOptions options { optProvider = Just provider } rest
     "--model" : value : rest ->
         parseOptions options { optModel = Just (Text.pack value) } rest
@@ -100,7 +101,7 @@ parseOptions options = \case
         turns <- parseInt "--max-turns" value
         parseOptions options { optMaxTurns = turns } rest
     "--effort" : value : rest -> do
-        effort <- parseEffort value
+        effort <- parseEffort (Text.pack value)
         parseOptions options { optEffort = effort } rest
     "--show-reasoning" : rest ->
         parseOptions options { optShowReasoning = True } rest
@@ -131,12 +132,14 @@ parseInt flag value = case reads value of
     [(n, "")] | n >= 1 -> Right n
     _ -> Left (flag <> " expects a positive integer, got " <> value)
 
-parseEffort :: String -> Either String Text
-parseEffort = \case
+parseEffort :: Text -> Either String Text
+parseEffort raw = case Text.toLower (Text.strip raw) of
     "low" -> Right "low"
     "medium" -> Right "medium"
     "high" -> Right "high"
-    other -> Left ("--effort must be low, medium, or high (got " <> other <> ")")
+    "xhigh" -> Right "xhigh"
+    other ->
+        Left ("effort must be low, medium, high, or xhigh (got " <> Text.unpack other <> ")")
 
 loginHint :: String
 loginHint =
@@ -149,17 +152,18 @@ usage = unlines
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
-    , "      --provider NAME     openai or xai (default: detect from auth)"
+    , "      --provider NAME     openai, xai, or openrouter (default: detect from auth)"
     , "      --model NAME        Override the provider default model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
-    , "      --effort LEVEL      Reasoning effort: low, medium, high (default: low)"
+    , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh (default: low)"
     , "      --show-reasoning    Print reasoning deltas on stderr"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""
-    , "Without -p/--prompt-file, start a REPL. Ctrl-D or :q exits."
+    , "Without -p/--prompt-file, start a REPL. /effort [LEVEL] changes"
+    , "reasoning effort. Ctrl-D or :q exits."
     ]

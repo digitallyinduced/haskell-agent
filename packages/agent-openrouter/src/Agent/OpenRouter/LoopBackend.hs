@@ -1,12 +1,12 @@
--- | Map the provider-neutral loop onto the xAI Grok subscription transport.
+-- | Map the provider-neutral loop onto the OpenRouter Responses transport.
 --
--- The proxy does not store transcripts ('store = false', no
+-- OpenRouter does not store transcripts ('store = false', no
 -- @previous_response_id@). This backend keeps a local item list so tool
 -- follow-ups can resend the conversation the loop only supplies as
 -- 'CompletedTool' items.
-module Agent.XAI.LoopBackend
-    ( xaiBackend
-    , xaiBackendWith
+module Agent.OpenRouter.LoopBackend
+    ( openRouterBackend
+    , openRouterBackendWith
     ) where
 
 import Agent.Error (ApiError)
@@ -19,32 +19,36 @@ import Agent.OpenAI.LoopBackend
     )
 import Agent.OpenAI.Responses.Types
 import Agent.Provider (Credential)
-import Agent.XAI.Client (createResponseWithEvents)
-import Agent.XAI.Options (ClientOptions)
+import Agent.OpenRouter.Client (createResponseWithEvents)
+import Agent.OpenRouter.Options (ClientOptions)
 import Data.IORef
 
--- | Close over xAI options, credential, and the request fields the loop does
--- not own (model, instructions, tools, reasoning). The params action is
--- re-run each turn so the REPL can change reasoning effort without dropping
--- the local transcript.
-xaiBackend :: ClientOptions -> Credential -> IO ResponseCreateParams -> IO Backend
-xaiBackend options credential =
-    xaiBackendWith (createResponseWithEvents options credential)
+-- | Close over OpenRouter options, credential, and the request fields the
+-- loop does not own (model, instructions, tools, reasoning). The params
+-- action is re-run each turn so the REPL can change reasoning effort
+-- without dropping the local transcript.
+openRouterBackend
+    :: ClientOptions
+    -> Credential
+    -> IO ResponseCreateParams
+    -> IO Backend
+openRouterBackend options credential =
+    openRouterBackendWith (createResponseWithEvents options credential)
 
--- | Same mapping as 'xaiBackend', with an injectable transport for tests.
-xaiBackendWith
+-- | Same mapping as 'openRouterBackend', with an injectable transport for tests.
+openRouterBackendWith
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> IO Backend
-xaiBackendWith send getParams = do
+openRouterBackendWith send getParams = do
     transcript <- newIORef []
     pure $ Backend \_previousResponseId inputs onEvent -> do
         baseParams <- getParams
-        submitXaiTurn send baseParams transcript inputs onEvent
+        submitOpenRouterTurn send baseParams transcript inputs onEvent
 
-submitXaiTurn
+submitOpenRouterTurn
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
@@ -53,7 +57,7 @@ submitXaiTurn
     -> [TurnInput]
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
-submitXaiTurn send baseParams transcript inputs onEvent = do
+submitOpenRouterTurn send baseParams transcript inputs onEvent = do
     history <- readIORef transcript
     let newItems = turnInputsToItems inputs
         requestItems = history <> newItems

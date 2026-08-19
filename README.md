@@ -11,6 +11,9 @@ A universal coding-agent harness written in Haskell.
   streaming, and tool-call types under the `Agent.OpenAI.*` module namespace.
 - `agent-xai` provides Grok request mapping, OAuth login, HTTP SSE transport,
   and stateful sessions under the `Agent.XAI.*` module namespace.
+- `agent-openrouter` provides OpenRouter static API-key auth, HTTP SSE
+  transport, and a local-transcript loop backend under the
+  `Agent.OpenRouter.*` module namespace.
 
 ## Development
 
@@ -29,8 +32,9 @@ cabal run agent-cli -- -p "list the files here"
 ```
 
 Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
-`~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI) or `~/.codex/auth.json` /
-`CODEX_ACCESS_TOKEN` (OpenAI). `--provider` overrides auto-detection.
+`~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /
+`CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
+`--provider` overrides auto-detection.
 
 Build and run the CLI directly with Nix:
 

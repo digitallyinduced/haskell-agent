@@ -22,7 +22,11 @@ spec = describe "systemPrompt" do
         openai `shouldNotSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "2026-08-19"
         grok `shouldSatisfy` Text.isInfixOf "/tmp/repo"
+        let openrouter = systemPrompt OpenRouterProvider "/tmp/repo" day
+        openrouter `shouldSatisfy` Text.isInfixOf "read_file"
+        openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.5"
         defaultModelFor OpenAIProvider `shouldBe` "gpt-5.1-codex"
+        defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"
