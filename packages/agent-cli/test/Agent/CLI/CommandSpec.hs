@@ -26,6 +26,19 @@ spec = do
             parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
 
+        it "toggles always-approve from slash and colon aliases" do
+            parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
+            parseReplLine "/Always-Approve" `shouldBe` ReplToggleAlwaysApprove
+            parseReplLine "/yolo" `shouldBe` ReplToggleAlwaysApprove
+            parseReplLine ":yolo" `shouldBe` ReplToggleAlwaysApprove
+            parseReplLine ":always-approve" `shouldBe` ReplToggleAlwaysApprove
+
+        it "rejects extra args on /always-approve" do
+            parseReplLine "/always-approve now"
+                `shouldBe` ReplCommandError "usage: /always-approve"
+            parseReplLine "/yolo on"
+                `shouldBe` ReplCommandError "usage: /always-approve"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError

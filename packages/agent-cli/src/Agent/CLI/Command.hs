@@ -18,6 +18,7 @@ data ReplAction
     | ReplPrompt Text
     | ReplShowEffort
     | ReplSetEffort Text
+    | ReplToggleAlwaysApprove
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -28,14 +29,28 @@ parseReplLine raw =
         then ReplQuit
         else case Text.uncons line of
             Just ('/', _) -> parseSlash line
+            Just (':', _) -> parseColon line
             _ -> ReplPrompt line
+
+parseColon :: Text -> ReplAction
+parseColon line
+    | isAlwaysApproveAlias (Text.drop 1 line) = ReplToggleAlwaysApprove
+    | otherwise = ReplPrompt line
 
 parseSlash :: Text -> ReplAction
 parseSlash line = case Text.words line of
     [] -> ReplCommandError "unknown command: /"
     command : args
         | Text.toLower command == "/effort" -> parseEffortCommand args
+        | isAlwaysApproveAlias (Text.drop 1 command) ->
+            if null args
+                then ReplToggleAlwaysApprove
+                else ReplCommandError "usage: /always-approve"
         | otherwise -> ReplCommandError ("unknown command: " <> command)
+
+isAlwaysApproveAlias :: Text -> Bool
+isAlwaysApproveAlias name =
+    Text.toLower name `elem` ["always-approve", "yolo"]
 
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case

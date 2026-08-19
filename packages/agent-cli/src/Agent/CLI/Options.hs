@@ -1,10 +1,12 @@
 -- | Command-line flags for @agent-cli@.
 module Agent.CLI.Options
-    ( ApprovalPolicy(..)
+    ( ApprovalAnswer(..)
+    , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
     , defaultCliOptions
     , isOneShot
+    , parseApprovalAnswer
     , parseArgs
     , parseEffort
     , resolveApprovalPolicy
@@ -27,6 +29,23 @@ data ApprovalPolicy
     | DenyMutating
     | PromptMutating
     deriving (Eq, Show)
+
+data ApprovalAnswer
+    = AllowOnce
+    | AllowAlways
+    | Deny
+    deriving (Eq, Show)
+
+-- | Parse a mutating-tool approval reply. Matching is case-insensitive
+-- and ignores surrounding whitespace.
+parseApprovalAnswer :: Text -> ApprovalAnswer
+parseApprovalAnswer raw = case Text.toLower (Text.strip raw) of
+    "y" -> AllowOnce
+    "yes" -> AllowOnce
+    "a" -> AllowAlways
+    "always" -> AllowAlways
+    "yolo" -> AllowAlways
+    _ -> Deny
 
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
@@ -165,5 +184,6 @@ usage = unlines
     , "      --help              Show this help"
     , ""
     , "Without -p/--prompt-file, start a REPL. /effort [LEVEL] changes"
-    , "reasoning effort. Ctrl-D or :q exits."
+    , "reasoning effort. /always-approve (or :yolo) toggles auto-approve."
+    , "Ctrl-D or :q exits."
     ]

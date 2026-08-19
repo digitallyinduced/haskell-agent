@@ -84,6 +84,19 @@ spec = do
             resolveApprovalPolicy defaultCliOptions { optYolo = True } True
                 `shouldBe` ApproveAll
 
+    describe "parseApprovalAnswer" do
+        it "allows once, always, or denies" do
+            parseApprovalAnswer "y" `shouldBe` AllowOnce
+            parseApprovalAnswer "Yes" `shouldBe` AllowOnce
+            parseApprovalAnswer "  Y  " `shouldBe` AllowOnce
+            parseApprovalAnswer "a" `shouldBe` AllowAlways
+            parseApprovalAnswer "ALWAYS" `shouldBe` AllowAlways
+            parseApprovalAnswer "yolo" `shouldBe` AllowAlways
+            parseApprovalAnswer "" `shouldBe` Deny
+            parseApprovalAnswer "n" `shouldBe` Deny
+            parseApprovalAnswer "no" `shouldBe` Deny
+            parseApprovalAnswer "maybe" `shouldBe` Deny
+
     describe "isOneShot" do
         it "is true for -p and --prompt-file" do
             isOneShot defaultCliOptions `shouldBe` False

@@ -104,6 +104,7 @@ runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
     ioLock <- newMVar ()
     previous <- newIORef Nothing
+    policyRef <- newIORef policy
     let render = RenderConfig
             { renderShowReasoning = options.optShowReasoning
             , renderPrintedText = printed
@@ -119,21 +120,22 @@ runSession options policy tools prompt paramsRef backend = do
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    approveTool policy tools call
+                    approveTool policyRef tools call
             }
     case prompt of
         Just text -> do
             ok <- runOneTurn config previous printed text
             if ok then putTrailingNewline printed else exitFailure
-        Nothing -> repl config previous printed paramsRef
+        Nothing -> repl config previous printed paramsRef policyRef
 
 repl
     :: LoopConfig
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef ResponseCreateParams
+    -> IORef ApprovalPolicy
     -> IO ()
-repl config previous printed paramsRef = do
+repl config previous printed paramsRef policyRef = do
     putStr "agent> "
     hFlush stdout
     done <- isEOF
@@ -158,11 +160,14 @@ repl config previous printed paramsRef = do
                         modifyIORef' paramsRef (setReasoningEffort level)
                         Text.putStrLn ("effort set to " <> level)
                         continue
+                    ReplToggleAlwaysApprove -> do
+                        toggleAlwaysApprove policyRef
+                        continue
                     ReplCommandError err -> do
                         Text.hPutStrLn stderr err
                         continue
   where
-    continue = repl config previous printed paramsRef
+    continue = repl config previous printed paramsRef policyRef
 
 runOneTurn
     :: LoopConfig
@@ -203,22 +208,39 @@ firstCredential loaded =
         Left err -> die ("credential: " <> show err)
         Right credential -> pure credential
 
-approveTool :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
-approveTool policy tools call =
+approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
+approveTool policyRef tools call = do
+    policy <- readIORef policyRef
     let readOnly = maybe False (.appToolReadOnly) (lookupAppTool call.name tools)
-    in case policy of
+    case policy of
         ApproveAll -> pure True
         DenyMutating -> pure readOnly
         PromptMutating
             | readOnly -> pure True
             | otherwise -> do
-                putTextLn stderr ("Allow " <> summarizeToolCall call <> "? [y/N]")
+                putTextLn stderr ("Allow " <> summarizeToolCall call <> "? [y/N/a]")
                 eof <- isEOF
                 if eof
                     then pure False
                     else do
-                        answer <- Text.toLower . Text.strip <$> Text.getLine
-                        pure (answer == "y" || answer == "yes")
+                        answer <- parseApprovalAnswer <$> Text.getLine
+                        case answer of
+                            AllowOnce -> pure True
+                            AllowAlways -> do
+                                writeIORef policyRef ApproveAll
+                                putTextLn stderr "auto-approve on"
+                                pure True
+                            Deny -> pure False
+
+toggleAlwaysApprove :: IORef ApprovalPolicy -> IO ()
+toggleAlwaysApprove policyRef = do
+    next <- atomicModifyIORef' policyRef \policy ->
+        if policy == ApproveAll
+            then (PromptMutating, PromptMutating)
+            else (ApproveAll, ApproveAll)
+    putTextLn stderr (case next of
+        ApproveAll -> "auto-approve on"
+        _ -> "auto-approve off")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 requestParams
