@@ -1,10 +1,12 @@
 -- | Command-line flags for @agent-cli@.
 module Agent.CLI.Options
-    ( ApprovalPolicy(..)
+    ( ApprovalAnswer(..)
+    , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
     , defaultCliOptions
     , isOneShot
+    , parseApprovalAnswer
     , parseArgs
     , parseEffort
     , resolveApprovalPolicy
@@ -28,6 +30,23 @@ data ApprovalPolicy
     | PromptMutating
     deriving (Eq, Show)
 
+data ApprovalAnswer
+    = AllowOnce
+    | AllowAlways
+    | Deny
+    deriving (Eq, Show)
+
+-- | Parse a mutating-tool approval reply. Matching is case-insensitive
+-- and ignores surrounding whitespace.
+parseApprovalAnswer :: Text -> ApprovalAnswer
+parseApprovalAnswer raw = case Text.toLower (Text.strip raw) of
+    "y" -> AllowOnce
+    "yes" -> AllowOnce
+    "a" -> AllowAlways
+    "always" -> AllowAlways
+    "yolo" -> AllowAlways
+    _ -> Deny
+
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
@@ -39,7 +58,6 @@ data CliOptions = CliOptions
     , optEffort :: !Text
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe FilePath)
-    , optShowReasoning :: !Bool
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -54,7 +72,6 @@ defaultCliOptions = CliOptions
     , optEffort = "low"
     , optPrompt = Nothing
     , optPromptFile = Nothing
-    , optShowReasoning = False
     }
 
 isOneShot :: CliOptions -> Bool
@@ -103,8 +120,6 @@ parseOptions options = \case
     "--effort" : value : rest -> do
         effort <- parseEffort (Text.pack value)
         parseOptions options { optEffort = effort } rest
-    "--show-reasoning" : rest ->
-        parseOptions options { optShowReasoning = True } rest
     "-p" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt" : value : rest ->
@@ -160,10 +175,10 @@ usage = unlines
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
     , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh (default: low)"
-    , "      --show-reasoning    Print reasoning deltas on stderr"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""
     , "Without -p/--prompt-file, start a REPL. /effort [LEVEL] changes"
-    , "reasoning effort. Ctrl-D or :q exits."
+    , "reasoning effort. /always-approve (or :yolo) toggles auto-approve."
+    , "Ctrl-D or :q exits."
     ]

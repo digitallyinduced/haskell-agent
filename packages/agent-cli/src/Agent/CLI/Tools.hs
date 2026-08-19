@@ -26,9 +26,9 @@ schemaFromAppTool :: Provider -> AppTool -> ResponseTool
 schemaFromAppTool provider tool = case tool.appToolKind of
     JsonFunction ->
         let build = case provider of
-                OpenAIProvider -> buildTool
                 XAIProvider -> buildGrokTool
                 OpenRouterProvider -> buildGrokTool
+                OpenAIProvider -> buildTool
         in build tool.appToolName tool.appToolDescription tool.appToolParameters
     FreeformApplyPatch ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription

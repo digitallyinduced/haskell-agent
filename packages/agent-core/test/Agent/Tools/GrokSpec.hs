@@ -95,14 +95,45 @@ spec = describe "Agent.Tools.Grok" do
         withTempEnv \env -> do
             output <- runTool env "run_terminal_cmd"
                 "{\"command\":\"echo hi\",\"description\":\"print hi\"}"
-            output `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+            output `shouldSatisfy` Text.isPrefixOf "exit: 0"
             output `shouldSatisfy` Text.isInfixOf "hi"
 
     it "times out a long-running shell command" do
         withTempEnv \env -> do
             output <- runTool env "run_terminal_cmd"
                 "{\"command\":\"sleep 5\",\"timeout\":200,\"description\":\"timeout test\"}"
-            output `shouldSatisfy` Text.isInfixOf "timed out"
+            output `shouldSatisfy` Text.isPrefixOf "exit: killed (timeout)"
+
+    it "starts read_file from a negative offset" do
+        withTempEnv \env -> do
+            Text.writeFile (env.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
+            output <- runTool env "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
+            output `shouldNotSatisfy` Text.isInfixOf "beyond the end"
+            output `shouldSatisfy` Text.isInfixOf "d"
+
+    it "wraps grep output in a workspace_result card" do
+        withTempEnv \env -> do
+            Text.writeFile (env.toolCwd </> "hit.txt") "needle in haystack\n"
+            output <- runTool env "grep" "{\"pattern\":\"needle\"}"
+            output `shouldSatisfy` Text.isInfixOf "<workspace_result"
+            output `shouldSatisfy` Text.isInfixOf "needle"
+
+    it "hints the nearest line when search_replace misses" do
+        withTempEnv \env -> do
+            Text.writeFile (env.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
+            output <- runTool env "search_replace"
+                "{\"file_path\":\"near.txt\",\"old_string\":\"xyz unique\",\"new_string\":\"x\"}"
+            output `shouldSatisfy` Text.isInfixOf "Nearest match: line 2"
+
+    it "refuses to edit a gitignored file" do
+        withTempEnv \env -> do
+            Text.writeFile (env.toolCwd </> ".gitignore") "secret.txt\n"
+            Text.writeFile (env.toolCwd </> "secret.txt") "hidden\n"
+            _ <- runTool env "run_terminal_cmd"
+                "{\"command\":\"git init\",\"description\":\"init git\"}"
+            output <- runTool env "search_replace"
+                "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
+            output `shouldSatisfy` Text.isInfixOf "gitignore"
 
     it "rejects background run_terminal_cmd in v1" do
         withTempEnv \env -> do

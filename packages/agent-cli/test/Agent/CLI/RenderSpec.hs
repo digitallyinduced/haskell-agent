@@ -6,11 +6,11 @@ import Agent.ToolDispatch (customToolCall, functionToolCall)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
-import Data.IORef (newIORef)
+import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory (getTemporaryDirectory, removeFile)
-import System.IO (BufferMode(..), hClose, hSetBuffering, openTempFile)
+import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
 import Test.Hspec
 
 spec :: Spec
@@ -45,20 +45,8 @@ spec = do
 
     describe "renderEvent" do
         it "keeps concurrent tool lines intact" do
-            printed <- newIORef False
-            lock <- newMVar ()
-            tmp <- getTemporaryDirectory
-            (path, handle) <- openTempFile tmp "agent-render-spec"
-            flip finally (removeFile path) do
-                hSetBuffering handle NoBuffering
-                let config = RenderConfig
-                        { renderShowReasoning = False
-                        , renderPrintedText = printed
-                        , renderLock = lock
-                        , renderStdout = handle
-                        , renderStderr = handle
-                        }
-                    events =
+            withRenderConfig False \config handle path -> do
+                let events =
                         [ ToolStarted (functionToolCall cid "list_dir" args)
                         | i <- [1 :: Int .. 80]
                         , let cid = Text.pack (show i)
@@ -77,3 +65,48 @@ spec = do
                     [ "→ list_dir packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
+
+        it "shows a static thinking status until the first tool or text" do
+            withRenderConfig True \config handle path -> do
+                renderEvent config TurnStarted
+                visible <- readIORef config.renderThinkingVisible
+                visible `shouldBe` True
+                renderEvent config (ToolStarted (functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"))
+                visibleAfter <- readIORef config.renderThinkingVisible
+                visibleAfter `shouldBe` False
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` ("thinking…" `Text.isPrefixOf`)
+                -- Clear uses CR + erase, so the tool summary shares the buffer
+                -- line with the status text rather than starting a new line.
+                body `shouldSatisfy` ("→ list_dir ." `Text.isInfixOf`)
+
+        it "ignores reasoning deltas" do
+            withRenderConfig True \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "secret plan")
+                hClose handle
+                body <- Text.readFile path
+                body `shouldBe` "thinking…"
+
+withRenderConfig
+    :: Bool
+    -> (RenderConfig -> Handle -> FilePath -> IO ())
+    -> IO ()
+withRenderConfig showThinking action = do
+    printed <- newIORef False
+    thinking <- newIORef False
+    lock <- newMVar ()
+    tmp <- getTemporaryDirectory
+    (path, handle) <- openTempFile tmp "agent-render-spec"
+    flip finally (removeFile path) do
+        hSetBuffering handle NoBuffering
+        let config = RenderConfig
+                { renderShowThinking = showThinking
+                , renderThinkingVisible = thinking
+                , renderPrintedText = printed
+                , renderLock = lock
+                , renderStdout = handle
+                , renderStderr = handle
+                }
+        action config handle path

@@ -21,7 +21,6 @@ spec = do
                 , "--yolo"
                 , "--max-turns", "3"
                 , "--effort", "high"
-                , "--show-reasoning"
                 , "-p", "hello"
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
@@ -32,7 +31,6 @@ spec = do
                     , optMaxTurns = 3
                     , optEffort = "high"
                     , optPrompt = Just "hello"
-                    , optShowReasoning = True
                     })
 
         it "parses --worktree" do
@@ -83,6 +81,19 @@ spec = do
             resolveApprovalPolicy defaultCliOptions True `shouldBe` PromptMutating
             resolveApprovalPolicy defaultCliOptions { optYolo = True } True
                 `shouldBe` ApproveAll
+
+    describe "parseApprovalAnswer" do
+        it "allows once, always, or denies" do
+            parseApprovalAnswer "y" `shouldBe` AllowOnce
+            parseApprovalAnswer "Yes" `shouldBe` AllowOnce
+            parseApprovalAnswer "  Y  " `shouldBe` AllowOnce
+            parseApprovalAnswer "a" `shouldBe` AllowAlways
+            parseApprovalAnswer "ALWAYS" `shouldBe` AllowAlways
+            parseApprovalAnswer "yolo" `shouldBe` AllowAlways
+            parseApprovalAnswer "" `shouldBe` Deny
+            parseApprovalAnswer "n" `shouldBe` Deny
+            parseApprovalAnswer "no" `shouldBe` Deny
+            parseApprovalAnswer "maybe" `shouldBe` Deny
 
     describe "isOneShot" do
         it "is true for -p and --prompt-file" do
