@@ -8,6 +8,13 @@ import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
+    ( RenderConfig(..)
+    , clearThinking
+    , formatLoopError
+    , putTextLn
+    , renderEvent
+    , summarizeToolCall
+    )
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
@@ -102,11 +109,14 @@ runSession
     -> IO ()
 runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
+    thinkingVisible <- newIORef False
     ioLock <- newMVar ()
     previous <- newIORef Nothing
     policyRef <- newIORef policy
+    stderrTty <- hIsTerminalDevice stderr
     let render = RenderConfig
-            { renderShowReasoning = options.optShowReasoning
+            { renderShowThinking = stderrTty
+            , renderThinkingVisible = thinkingVisible
             , renderPrintedText = printed
             , renderLock = ioLock
             , renderStdout = stdout
@@ -124,18 +134,19 @@ runSession options policy tools prompt paramsRef backend = do
             }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config previous printed text
+            ok <- runOneTurn config render previous printed text
             if ok then putTrailingNewline printed else exitFailure
-        Nothing -> repl config previous printed paramsRef policyRef
+        Nothing -> repl config render previous printed paramsRef policyRef
 
 repl
     :: LoopConfig
+    -> RenderConfig
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef ResponseCreateParams
     -> IORef ApprovalPolicy
     -> IO ()
-repl config previous printed paramsRef policyRef = do
+repl config render previous printed paramsRef policyRef = do
     putStr "agent> "
     hFlush stdout
     done <- isEOF
@@ -149,7 +160,7 @@ repl config previous printed paramsRef policyRef = do
                     ReplQuit -> pure ()
                     ReplPrompt text -> do
                         writeIORef printed False
-                        _ <- runOneTurn config previous printed text
+                        _ <- runOneTurn config render previous printed text
                         putTrailingNewline printed
                         continue
                     ReplShowEffort -> do
@@ -167,17 +178,19 @@ repl config previous printed paramsRef policyRef = do
                         Text.hPutStrLn stderr err
                         continue
   where
-    continue = repl config previous printed paramsRef policyRef
+    continue = repl config render previous printed paramsRef policyRef
 
 runOneTurn
     :: LoopConfig
+    -> RenderConfig
     -> IORef (Maybe Text)
     -> IORef Bool
     -> Text
     -> IO Bool
-runOneTurn config previous printed prompt = do
+runOneTurn config render previous printed prompt = do
     prev <- readIORef previous
     result <- runLoop config prev prompt
+    clearThinking render
     case result of
         Left err -> do
             putTextLn stderr (formatLoopError err)

@@ -1,6 +1,7 @@
 -- | Stream renderer and mutating-tool approval prompts.
 module Agent.CLI.Render
     ( RenderConfig(..)
+    , clearThinking
     , formatLoopError
     , putTextLn
     , renderEvent
@@ -23,7 +24,9 @@ import qualified Data.Text.IO as Text
 import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
-    { renderShowReasoning :: !Bool
+    { renderShowThinking :: !Bool
+    -- | True while the static "thinking…" status line is on stderr.
+    , renderThinkingVisible :: !(IORef Bool)
     , renderPrintedText :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
@@ -37,20 +40,45 @@ renderEvent config event =
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
     TextDelta delta -> do
+        clearThinkingUnlocked config
         writeIORef config.renderPrintedText True
         Text.hPutStr config.renderStdout delta
         hFlush config.renderStdout
-    ReasoningDelta delta
-        | config.renderShowReasoning -> do
-            Text.hPutStr config.renderStderr (dimText delta)
-            hFlush config.renderStderr
-        | otherwise -> pure ()
-    TurnStarted -> pure ()
-    TurnFinished _ -> pure ()
-    ToolStarted call ->
+    ReasoningDelta _ -> pure ()
+    TurnStarted -> showThinkingUnlocked config
+    TurnFinished _ -> clearThinkingUnlocked config
+    ToolStarted call -> do
+        clearThinkingUnlocked config
         putTextLn config.renderStderr ("→ " <> summarizeToolCall call)
     ToolFinished result ->
         putTextLn config.renderStderr (truncateToolOutput result.output)
+
+-- | Clear a leftover thinking status line. Safe to call when none is visible.
+clearThinking :: RenderConfig -> IO ()
+clearThinking config =
+    withMVar config.renderLock \_ -> clearThinkingUnlocked config
+
+showThinkingUnlocked :: RenderConfig -> IO ()
+showThinkingUnlocked config
+    | not config.renderShowThinking = pure ()
+    | otherwise = do
+        visible <- readIORef config.renderThinkingVisible
+        if visible
+            then pure ()
+            else do
+                Text.hPutStr config.renderStderr "thinking…"
+                hFlush config.renderStderr
+                writeIORef config.renderThinkingVisible True
+
+clearThinkingUnlocked :: RenderConfig -> IO ()
+clearThinkingUnlocked config = do
+    visible <- readIORef config.renderThinkingVisible
+    if not visible
+        then pure ()
+        else do
+            Text.hPutStr config.renderStderr "\r\ESC[K"
+            hFlush config.renderStderr
+            writeIORef config.renderThinkingVisible False
 
 -- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
 -- 'String' is @hPutStr@ then @hPutChar '\\n'@ over a @[Char]@ spine, so
@@ -109,9 +137,6 @@ truncateToolOutput output =
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')
-
-dimText :: Text -> Text
-dimText text = "\ESC[2m" <> text <> "\ESC[0m"
 
 formatLoopError :: LoopError -> Text
 formatLoopError = \case

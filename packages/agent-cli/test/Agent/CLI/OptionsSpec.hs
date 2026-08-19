@@ -21,7 +21,6 @@ spec = do
                 , "--yolo"
                 , "--max-turns", "3"
                 , "--effort", "high"
-                , "--show-reasoning"
                 , "-p", "hello"
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
@@ -32,7 +31,6 @@ spec = do
                     , optMaxTurns = 3
                     , optEffort = "high"
                     , optPrompt = Just "hello"
-                    , optShowReasoning = True
                     })
 
         it "parses --worktree" do

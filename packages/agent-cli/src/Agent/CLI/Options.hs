@@ -58,7 +58,6 @@ data CliOptions = CliOptions
     , optEffort :: !Text
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe FilePath)
-    , optShowReasoning :: !Bool
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -73,7 +72,6 @@ defaultCliOptions = CliOptions
     , optEffort = "low"
     , optPrompt = Nothing
     , optPromptFile = Nothing
-    , optShowReasoning = False
     }
 
 isOneShot :: CliOptions -> Bool
@@ -122,8 +120,6 @@ parseOptions options = \case
     "--effort" : value : rest -> do
         effort <- parseEffort (Text.pack value)
         parseOptions options { optEffort = effort } rest
-    "--show-reasoning" : rest ->
-        parseOptions options { optShowReasoning = True } rest
     "-p" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt" : value : rest ->
@@ -179,7 +175,6 @@ usage = unlines
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
     , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh (default: low)"
-    , "      --show-reasoning    Print reasoning deltas on stderr"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""
