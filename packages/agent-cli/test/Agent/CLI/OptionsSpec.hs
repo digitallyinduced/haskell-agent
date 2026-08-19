@@ -35,6 +35,15 @@ spec = do
                     , optShowReasoning = True
                     })
 
+        it "accepts xhigh effort" do
+            parseArgs ["--effort", "xhigh"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "xhigh" })
+            parseArgs ["--effort", "HIGH"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "high" })
+
+        it "rejects unknown effort levels" do
+            parseArgs ["--effort", "max"] `shouldSatisfy` isLeft
+
         it "rejects the removed openai-base-url command" do
             parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
 

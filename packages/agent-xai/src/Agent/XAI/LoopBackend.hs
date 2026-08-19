@@ -24,8 +24,10 @@ import Agent.XAI.Options (ClientOptions)
 import Data.IORef
 
 -- | Close over xAI options, credential, and the request fields the loop does
--- not own (model, instructions, tools, reasoning).
-xaiBackend :: ClientOptions -> Credential -> ResponseCreateParams -> IO Backend
+-- not own (model, instructions, tools, reasoning). The params action is
+-- re-run each turn so the REPL can change reasoning effort without dropping
+-- the local transcript.
+xaiBackend :: ClientOptions -> Credential -> IO ResponseCreateParams -> IO Backend
 xaiBackend options credential =
     xaiBackendWith (createResponseWithEvents options credential)
 
@@ -34,11 +36,12 @@ xaiBackendWith
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
-    -> ResponseCreateParams
+    -> IO ResponseCreateParams
     -> IO Backend
-xaiBackendWith send baseParams = do
+xaiBackendWith send getParams = do
     transcript <- newIORef []
-    pure $ Backend \_previousResponseId inputs onEvent ->
+    pure $ Backend \_previousResponseId inputs onEvent -> do
+        baseParams <- getParams
         submitXaiTurn send baseParams transcript inputs onEvent
 
 submitXaiTurn

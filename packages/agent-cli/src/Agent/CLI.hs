@@ -4,6 +4,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
@@ -58,30 +59,32 @@ runAgent options = do
         instructions = systemPrompt provider cwd today
         params = requestParams model instructions (schemasFromAppTools tools) options.optEffort
         policy = resolveApprovalPolicy options isTty
+    paramsRef <- newIORef params
     prompt <- loadPrompt options
     case provider of
         OpenAIProvider ->
             try @CodexAuthFailed
                 (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                    runSession options policy tools prompt
-                        (openAiBackend conn params))
+                    runSession options policy tools prompt paramsRef
+                        (openAiBackend conn (readIORef paramsRef)))
                 >>= \case
                     Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                     Right () -> pure ()
         XAIProvider -> do
             xaiOptions <- clientOptionsFromEnv
             credential <- firstCredential loaded
-            backend <- xaiBackend xaiOptions credential params
-            runSession options policy tools prompt backend
+            backend <- xaiBackend xaiOptions credential (readIORef paramsRef)
+            runSession options policy tools prompt paramsRef backend
 
 runSession
     :: CliOptions
     -> ApprovalPolicy
     -> [AppTool]
     -> Maybe Text
+    -> IORef ResponseCreateParams
     -> Backend
     -> IO ()
-runSession options policy tools prompt backend = do
+runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
     approveLock <- newMVar ()
     previous <- newIORef Nothing
@@ -103,10 +106,15 @@ runSession options policy tools prompt backend = do
         Just text -> do
             ok <- runOneTurn config previous printed text
             if ok then putTrailingNewline printed else exitFailure
-        Nothing -> repl config previous printed
+        Nothing -> repl config previous printed paramsRef
 
-repl :: LoopConfig -> IORef (Maybe Text) -> IORef Bool -> IO ()
-repl config previous printed = do
+repl
+    :: LoopConfig
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef ResponseCreateParams
+    -> IO ()
+repl config previous printed paramsRef = do
     putStr "agent> "
     hFlush stdout
     done <- isEOF
@@ -115,14 +123,27 @@ repl config previous printed = do
         else do
             line <- Text.strip <$> Text.getLine
             if Text.null line
-                then repl config previous printed
-                else if line == ":q" || line == ":quit"
-                    then pure ()
-                    else do
+                then continue
+                else case parseReplLine line of
+                    ReplQuit -> pure ()
+                    ReplPrompt text -> do
                         writeIORef printed False
-                        _ <- runOneTurn config previous printed line
+                        _ <- runOneTurn config previous printed text
                         putTrailingNewline printed
-                        repl config previous printed
+                        continue
+                    ReplShowEffort -> do
+                        params <- readIORef paramsRef
+                        Text.putStrLn ("effort: " <> currentEffort params)
+                        continue
+                    ReplSetEffort level -> do
+                        modifyIORef' paramsRef (setReasoningEffort level)
+                        Text.putStrLn ("effort set to " <> level)
+                        continue
+                    ReplCommandError err -> do
+                        Text.hPutStrLn stderr err
+                        continue
+  where
+    continue = repl config previous printed paramsRef
 
 runOneTurn
     :: LoopConfig

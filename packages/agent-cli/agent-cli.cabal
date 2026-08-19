@@ -37,6 +37,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
                     , Agent.CLI.Auth
+                    , Agent.CLI.Command
                     , Agent.CLI.Options
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
@@ -66,6 +67,7 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AuthSpec
+                    , Agent.CLI.CommandSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec

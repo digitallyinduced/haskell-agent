@@ -38,8 +38,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Close over a live Codex WebSocket and the request fields the loop does
--- not own (model, instructions, tools, reasoning).
-openAiBackend :: CodexConn -> ResponseCreateParams -> Backend
+-- not own (model, instructions, tools, reasoning). The params action is
+-- re-run each turn so the REPL can change reasoning effort in place.
+openAiBackend :: CodexConn -> IO ResponseCreateParams -> Backend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
@@ -50,9 +51,10 @@ openAiBackendWith
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
-    -> ResponseCreateParams
+    -> IO ResponseCreateParams
     -> Backend
-openAiBackendWith send baseParams = Backend \previousResponseId inputs onEvent -> do
+openAiBackendWith send getParams = Backend \previousResponseId inputs onEvent -> do
+    baseParams <- getParams
     let request = withRequestInput baseParams (turnInputsToItems inputs)
     result <- send request previousResponseId \event ->
         mapM_ onEvent (streamEventToLoopEvent event)

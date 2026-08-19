@@ -23,7 +23,7 @@ spec = do
                     [ functionCallItem "c1" "read_file" "{\"target_file\":\"README.md\"}" ]
                 , testResponse "resp-2" [assistantItem "done"]
                 ]
-            backend <- xaiBackendWith (scriptedSend seen remaining) baseParams
+            backend <- xaiBackendWith (scriptedSend seen remaining) (pure baseParams)
 
             first <- backend.submitTurn Nothing [UserMessage "read it"]
                 (modifyIORef' events . (:))
@@ -65,7 +65,7 @@ spec = do
                             modifyIORef' seen (++ [request])
                             pure (Left (ConnectionError "boom"))
                         else scriptedSend seen remaining request onEvent)
-                baseParams
+                (pure baseParams)
 
             failed <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
             failed `shouldBe` Left (ConnectionError "boom")
@@ -81,12 +81,47 @@ spec = do
                 , [userItem "hi"]
                 ]
 
+        it "re-reads request params on each turn without dropping the transcript" do
+            seen <- newIORef []
+            remaining <- newIORef
+                [ testResponse "resp-1" [assistantItem "one"]
+                , testResponse "resp-2" [assistantItem "two"]
+                ]
+            paramsRef <- newIORef (withEffort "low" baseParams)
+            backend <- xaiBackendWith (scriptedSend seen remaining) (readIORef paramsRef)
+            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            writeIORef paramsRef (withEffort "high" baseParams)
+            _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
+            requests <- readIORef seen
+            map reasoningEffort requests `shouldBe` [Just "low", Just "high"]
+            map inputItems requests `shouldBe`
+                [ [userItem "one"]
+                , [userItem "one", assistantItem "one", userItem "two"]
+                ]
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
 baseParams = defaultResponseCreateParams { model = Just "grok-4.5" }
+
+withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
+withEffort effort ResponseCreateParams { reasoning = _, .. } =
+    ResponseCreateParams
+        { reasoning = Just ReasoningConfig
+            { context = Nothing
+            , effort = Just effort
+            , generateSummary = Nothing
+            , reasoningMode = Nothing
+            , summary = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , ..
+        }
+
+reasoningEffort :: ResponseCreateParams -> Maybe Text
+reasoningEffort request = request.reasoning >>= (.effort)
 
 scriptedSend
     :: IORef [ResponseCreateParams]
