@@ -14,4 +14,9 @@ while we are starting out as a coding harness, we plan to expand the harness to 
 we are using haskell and ghc as the primary runtime system for the agent.
 type safety and the approach of functional program maps well to the problem space. monads and haskels concurrency system seem well suited for agent harnesses that need to deal with many concurrent agents.
 
+we follow the tool defintions that are used by the first party lab harnesses. e.g. for oai we use the tool defintions that codex provides out of the box, for grok we use the tool definitions that grok build provides out of the box. This way
 
+
+# ghci
+
+use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
