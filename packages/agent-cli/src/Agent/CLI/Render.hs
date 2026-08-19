@@ -2,6 +2,7 @@
 module Agent.CLI.Render
     ( RenderConfig(..)
     , formatLoopError
+    , putTextLn
     , renderEvent
     , summarizeToolCall
     , truncateToolOutput
@@ -9,6 +10,7 @@ module Agent.CLI.Render
 
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import Control.Concurrent.MVar (MVar, withMVar)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -18,29 +20,49 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
-import System.IO (hFlush, hPutStrLn, stderr, stdout)
+import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowReasoning :: !Bool
     , renderPrintedText :: !(IORef Bool)
+    , renderLock :: !(MVar ())
+    , renderStdout :: !Handle
+    , renderStderr :: !Handle
     }
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
-renderEvent config = \case
+renderEvent config event =
+    withMVar config.renderLock \_ -> renderEventUnlocked config event
+
+renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
+renderEventUnlocked config = \case
     TextDelta delta -> do
         writeIORef config.renderPrintedText True
-        Text.putStr delta
-        hFlush stdout
+        Text.hPutStr config.renderStdout delta
+        hFlush config.renderStdout
     ReasoningDelta delta
-        | config.renderShowReasoning ->
-            Text.hPutStr stderr (dimText delta)
+        | config.renderShowReasoning -> do
+            Text.hPutStr config.renderStderr (dimText delta)
+            hFlush config.renderStderr
         | otherwise -> pure ()
     TurnStarted -> pure ()
     TurnFinished _ -> pure ()
     ToolStarted call ->
-        hPutStrLn stderr ("→ " <> Text.unpack (summarizeToolCall call))
+        putTextLn config.renderStderr ("→ " <> summarizeToolCall call)
     ToolFinished result ->
-        hPutStrLn stderr (Text.unpack (truncateToolOutput result.output))
+        putTextLn config.renderStderr (truncateToolOutput result.output)
+
+-- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
+-- 'String' is @hPutStr@ then @hPutChar '\\n'@ over a @[Char]@ spine, so
+-- concurrent tool threads can interleave characters on the TTY.
+--
+-- Does not take 'renderLock': callers that also read stdin (approval)
+-- must hold that lock themselves. Nested 'withMVar' on the same 'MVar'
+-- deadlocks.
+putTextLn :: Handle -> Text -> IO ()
+putTextLn handle text = do
+    Text.hPutStr handle (text <> "\n")
+    hFlush handle
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =

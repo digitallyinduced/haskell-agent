@@ -39,6 +39,46 @@ spec = describe "runLoop" do
             , (Just "resp-1", [CompletedTool (functionResult "c1" "echo:hi")])
             ]
 
+    it "serializes loopOnEvent across parallel tool calls" do
+        inFlight <- newIORef (0 :: Int)
+        maxInFlight <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-1"
+                , toolCalls =
+                    [ functionToolCall "c1" "a" "{}"
+                    , functionToolCall "c2" "b" "{}"
+                    ]
+                , assistantText = Nothing
+                }
+            , Right TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "ok"
+                }
+            ]
+        let onEvent _ = do
+                now <- atomicModifyIORef' inFlight \n -> (n + 1, n + 1)
+                atomicModifyIORef' maxInFlight \seen -> (max seen now, ())
+                threadDelay 30000
+                atomicModifyIORef' inFlight \n -> (n - 1, ())
+            handlers =
+                [ noArgsTool "a" (pure (Right "ok"))
+                , noArgsTool "b" (pure (Right "ok"))
+                ]
+            config = (testConfig backend)
+                { loopHandlers = handlers
+                , loopOnEvent = onEvent
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "ok"
+            , turnsUsed = 2
+            }
+        readIORef maxInFlight `shouldReturn` 1
+
     it "dispatches parallel tool calls" do
         inFlight <- newIORef (0 :: Int)
         maxInFlight <- newIORef (0 :: Int)

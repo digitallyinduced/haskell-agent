@@ -79,6 +79,7 @@ test-suite agent-cli-test
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring
+                    , directory
                     , hspec >= 2.11 && < 2.12
                     , text
                     , time
