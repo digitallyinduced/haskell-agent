@@ -72,11 +72,15 @@ buildRequest options request = defaultResponseCreateParams
 
 xaiReasoningEffort :: Maybe Text -> Text
 xaiReasoningEffort = \case
+    Nothing -> "high"
+    Just "low" -> "low"
+    Just "none" -> "low"
+    Just "minimal" -> "low"
     Just "medium" -> "medium"
     Just "high" -> "high"
     Just "xhigh" -> "high"
     Just "max" -> "high"
-    _ -> "low"
+    _ -> "high"
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of
