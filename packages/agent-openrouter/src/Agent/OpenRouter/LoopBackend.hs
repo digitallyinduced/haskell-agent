@@ -24,8 +24,14 @@ import Agent.OpenRouter.Options (ClientOptions)
 import Data.IORef
 
 -- | Close over OpenRouter options, credential, and the request fields the
--- loop does not own (model, instructions, tools, reasoning).
-openRouterBackend :: ClientOptions -> Credential -> ResponseCreateParams -> IO Backend
+-- loop does not own (model, instructions, tools, reasoning). The params
+-- action is re-run each turn so the REPL can change reasoning effort
+-- without dropping the local transcript.
+openRouterBackend
+    :: ClientOptions
+    -> Credential
+    -> IO ResponseCreateParams
+    -> IO Backend
 openRouterBackend options credential =
     openRouterBackendWith (createResponseWithEvents options credential)
 
@@ -34,11 +40,12 @@ openRouterBackendWith
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
-    -> ResponseCreateParams
+    -> IO ResponseCreateParams
     -> IO Backend
-openRouterBackendWith send baseParams = do
+openRouterBackendWith send getParams = do
     transcript <- newIORef []
-    pure $ Backend \_previousResponseId inputs onEvent ->
+    pure $ Backend \_previousResponseId inputs onEvent -> do
+        baseParams <- getParams
         submitOpenRouterTurn send baseParams transcript inputs onEvent
 
 submitOpenRouterTurn

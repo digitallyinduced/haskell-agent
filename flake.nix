@@ -49,6 +49,7 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "src"
                         "test"
                         "agent-cli.cabal"
                         "LICENSE"
@@ -122,11 +123,15 @@
                         packages.agent-openrouter
                     ];
                     withHoogle = false;
-                    nativeBuildInputs = with haskellPackages; [
-                        cabal-install
-                        ghcid
-                        haskell-language-server
-                    ];
+                    nativeBuildInputs =
+                        (with haskellPackages; [
+                            cabal-install
+                            ghcid
+                            haskell-language-server
+                        ])
+                        ++ (with pkgs; [
+                            ripgrep
+                        ]);
                 };
 
                 checks = {

@@ -92,7 +92,7 @@ spec = do
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
             events <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) baseParams
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
             result <- backend.submitTurn (Just "resp-prev")
                 [UserMessage "hello"]
                 (modifyIORef' events . (:))
@@ -109,7 +109,7 @@ spec = do
 
         it "does not accumulate prior turns on the OpenAI transport" do
             seen <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) baseParams
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
             _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
             _ <- backend.submitTurn (Just "resp-1")
                 [CompletedTool (functionResult "c1" "out")]
@@ -120,12 +120,39 @@ spec = do
                 , turnInputsToItems [CompletedTool (functionResult "c1" "out")]
                 ]
 
+        it "re-reads request params on each turn so effort can change" do
+            seen <- newIORef []
+            paramsRef <- newIORef (withEffort "low" baseParams)
+            let backend = openAiBackendWith (recordingSend seen) (readIORef paramsRef)
+            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            writeIORef paramsRef (withEffort "high" baseParams)
+            _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
+            map (reasoningEffort . fst) <$> readIORef seen
+                `shouldReturn` [Just "low", Just "high"]
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
 baseParams = defaultResponseCreateParams { model = Just "gpt-5.1-codex" }
+
+withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
+withEffort effort ResponseCreateParams { reasoning = _, .. } =
+    ResponseCreateParams
+        { reasoning = Just ReasoningConfig
+            { context = Nothing
+            , effort = Just effort
+            , generateSummary = Nothing
+            , reasoningMode = Nothing
+            , summary = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , ..
+        }
+
+reasoningEffort :: ResponseCreateParams -> Maybe Text
+reasoningEffort request = request.reasoning >>= (.effort)
 
 recordingSend
     :: IORef [(ResponseCreateParams, Maybe Text)]
