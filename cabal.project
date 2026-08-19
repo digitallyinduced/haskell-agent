@@ -1,0 +1,7 @@
+packages:
+    packages/agent-cli
+    packages/agent-core
+    packages/agent-openai
+    packages/agent-xai
+
+tests: True

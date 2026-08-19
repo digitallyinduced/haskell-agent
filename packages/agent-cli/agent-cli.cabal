@@ -1,0 +1,42 @@
+cabal-version:      3.0
+name:               agent-cli
+version:            0.1.0.0
+synopsis:           Command-line interface for the universal agent harness
+description:        Command-line interface for a model-independent coding and
+                    digital-work agent harness.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Wincomplete-record-updates
+                      -Wincomplete-uni-patterns
+                      -Wpartial-fields
+
+executable agent-cli
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+    build-depends:    agent-openai >= 0.1 && < 0.2
+                    , base >= 4.17 && < 5
+                    , text >= 2.0 && < 2.2
+
+test-suite agent-cli-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    agent-openai >= 0.1 && < 0.2
+                    , base >= 4.17 && < 5
+                    , hspec >= 2.11 && < 2.12

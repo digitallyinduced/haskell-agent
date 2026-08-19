@@ -1,0 +1,68 @@
+cabal-version:      2.2
+name:               agent-core
+version:            0.1.0.0
+synopsis:           Provider-neutral infrastructure for the agent harness
+description:        Shared provider credentials, broker failover, errors,
+                    transport utilities, and JSON tool-argument helpers.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , PackageImports
+    ghc-options:      -Wall -Wno-unused-do-bind -Wno-name-shadowing -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.Error
+                    , Agent.Provider
+                    , Agent.Broker
+                    , Agent.ToolArgs
+                    , Agent.ToolDispatch
+                    , Agent.Transport.WebSocket
+    hs-source-dirs:   src
+    build-depends:    base >= 4.14 && < 5
+                    , aeson >= 2.0
+                    , async
+                    , bytestring
+                    , containers
+                    , http-conduit
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+                    , vector
+                    , websockets
+
+test-suite agent-core-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.ErrorSpec
+                    , Agent.ToolArgsSpec
+                    , Agent.ToolDispatchSpec
+                    , Agent.Transport.WebSocketSpec
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core
+                    , aeson
+                    , hspec
+                    , text
+                    , bytestring
+                    , websockets

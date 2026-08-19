@@ -1,0 +1,130 @@
+cabal-version:      2.2
+name:               agent-openai
+version:            0.1.0.0
+synopsis:           Haskell client for the OpenAI Responses API
+description:        REST + WebSocket clients, OAuth pool with round-robin and
+                    cooldown tracking, JWT-aware token refresh, and a tool DSL
+                    for the OpenAI Responses API and ChatGPT Codex transport.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+                  , CHANGELOG.md
+                  , UPSTREAM.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , DeriveGeneric
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , DerivingStrategies
+                      , GeneralizedNewtypeDeriving
+                      , DataKinds
+                      , FlexibleContexts
+                      , TupleSections
+                      , PackageImports
+    ghc-options:      -Wall -Wno-unused-do-bind -Wno-name-shadowing -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.OpenAI.Responses.Types
+                    , Agent.OpenAI.Responses.Codec
+                    , Agent.OpenAI.Error
+                    , Agent.OpenAI.Http
+                    , Agent.OpenAI.Auth
+                    , Agent.OpenAI.Credential
+                    , Agent.OpenAI.Login
+                    , Agent.OpenAI.Usage
+                    , Agent.OpenAI.Client
+                    , Agent.OpenAI.ResponseMerge
+                    , Agent.OpenAI.WebSocketClient
+                    , Agent.OpenAI.ToolDSL
+    hs-source-dirs:   src
+    build-depends:    base                  >= 4.14 && < 5
+                    , agent-core            >= 0.1 && < 0.2
+                    , text
+                    , bytestring
+                    , aeson                 >= 2.0
+                    , http-client
+                    , http-client-tls
+                    , http-conduit
+                    , http-streams
+                    , http-types
+                    , HsOpenSSL
+                    , io-streams
+                    , network-uri
+                    , websockets
+                    , wuss
+                    , base64-bytestring
+                    , retry
+                    , exceptions
+                    , safe-exceptions
+                    , containers
+                    , hashable
+                    , vector
+                    , scientific
+                    , time
+                    , directory
+                    , filepath
+                    , unix
+
+executable agent-openai-login
+    import:           common-opts
+    hs-source-dirs:   app
+    main-is:          Login.hs
+    build-depends:    base >= 4.14 && < 5
+                    , agent-openai
+                    , directory
+                    , filepath
+                    , text
+
+test-suite agent-openai-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.OpenAI.AuthSpec
+                    , Agent.OpenAI.ClientSpec
+                    , Agent.OpenAI.CredentialSpec
+                    , Agent.OpenAI.ErrorSpec
+                    , Agent.OpenAI.FunctionalSpec
+                    , Agent.OpenAI.LoginSpec
+                    , Agent.OpenAI.ResponsesSpec
+                    , Agent.OpenAI.ResponseMergeSpec
+                    , Agent.OpenAI.ToolDSLSpec
+                    , Agent.OpenAI.UsageSpec
+                    , Agent.OpenAI.WebSocketClientSpec
+    ghc-options:      -threaded
+    build-depends:    base >= 4.14 && < 5
+                    , agent-core
+                    , agent-openai
+                    , hspec
+                    , aeson
+                    , retry
+                    , text
+                    , bytestring
+                    , base64-bytestring
+                    , time
+                    , vector
+                    , websockets
+                    , directory
+                    , filepath
+                    , temporary
+                    , unix
+                    , case-insensitive
+                    , http-types
+                    , wai
+                    , warp
