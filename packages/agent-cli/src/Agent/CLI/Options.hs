@@ -10,6 +10,7 @@ module Agent.CLI.Options
     , parseApprovalAnswer
     , parseArgs
     , parseEffort
+    , reasoningEfforts
     , resolveApprovalPolicy
     , usage
     ) where
@@ -189,14 +190,19 @@ parseInt flag value = case reads value of
     [(n, "")] | n >= 1 -> Right n
     _ -> Left (flag <> " expects a positive integer, got " <> value)
 
+reasoningEfforts :: [Text]
+reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+
 parseEffort :: Text -> Either String Text
-parseEffort raw = case Text.toLower (Text.strip raw) of
-    "low" -> Right "low"
-    "medium" -> Right "medium"
-    "high" -> Right "high"
-    "xhigh" -> Right "xhigh"
-    other ->
-        Left ("effort must be low, medium, high, or xhigh (got " <> Text.unpack other <> ")")
+parseEffort raw =
+    let effort = Text.toLower (Text.strip raw)
+    in if effort `elem` reasoningEfforts
+        then Right effort
+        else Left
+            ( "effort must be none, low, medium, high, xhigh, or max (got "
+                <> Text.unpack effort
+                <> ")"
+            )
 
 loginHint :: String
 loginHint =
@@ -222,7 +228,7 @@ usage = unlines
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
-    , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh"
+    , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: high for xai/grok, medium otherwise)"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"

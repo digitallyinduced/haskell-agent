@@ -43,14 +43,18 @@ spec = do
                     , optPrompt = Just "hello"
                     })
 
-        it "accepts xhigh effort" do
+        it "accepts none, xhigh, and max effort" do
+            parseArgs ["--effort", "none"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "none" })
             parseArgs ["--effort", "xhigh"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "xhigh" })
+            parseArgs ["--effort", "max"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "max" })
             parseArgs ["--effort", "HIGH"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
 
         it "rejects unknown effort levels" do
-            parseArgs ["--effort", "max"] `shouldSatisfy` isLeft
+            parseArgs ["--effort", "extreme"] `shouldSatisfy` isLeft
 
         it "accepts openrouter as a provider" do
             parseArgs ["--provider", "openrouter", "-p", "hi"]
