@@ -21,6 +21,7 @@ import Agent.ToolDSL
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
+import Agent.Tools.Dangerous (forbiddenRmRfReason, commandLooksLikeRmRf)
 import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
 import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
@@ -118,29 +119,33 @@ shellDescription =
     \- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."
 
 runShell :: ToolEnv -> ShellCommandArgs -> IO (Either Text Text)
-runShell env args = do
-    let timeoutMs = min 300000 (max 1 (fromMaybe 10000 args.timeoutMs))
-    workdir <- case args.workdir of
-        Nothing -> pure (Right env.toolCwd)
-        Just dir -> resolveUnderCwd env (Text.unpack dir)
-    case workdir of
-        Left err -> pure (Left err)
-        Right dir -> do
-            result <- runShellCommand env dir (Text.unpack args.command) timeoutMs
-            if result.commandCancelled
-                then pure $ Left "Error: Command cancelled"
-                else if result.commandTimedOut
-                then pure $ Left $
-                    "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
-                else
-                    let code = fromMaybe 1 result.commandExitCode
-                        body
-                            | Text.null result.commandStderr = result.commandStdout
-                            | Text.null result.commandStdout = result.commandStderr
-                            | otherwise =
-                                result.commandStdout <> "\nstderr:\n" <> result.commandStderr
-                    in pure $ Right $
-                        "Exit code: " <> Text.pack (show code) <> "\n" <> body
+runShell env args
+    | commandLooksLikeRmRf args.command =
+        pure (Left (forbiddenRmRfReason args.command))
+    | otherwise = do
+        let timeoutMs = min 300000 (max 1 (fromMaybe 10000 args.timeoutMs))
+        workdir <- case args.workdir of
+            Nothing -> pure (Right env.toolCwd)
+            Just dir -> resolveUnderCwd env (Text.unpack dir)
+        case workdir of
+            Left err -> pure (Left err)
+            Right dir -> do
+                result <- runShellCommand env dir (Text.unpack args.command) timeoutMs
+                if result.commandCancelled
+                    then pure $ Left "Error: Command cancelled"
+                    else if result.commandTimedOut
+                    then pure $ Left $
+                        "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
+                    else
+                        let code = fromMaybe 1 result.commandExitCode
+                            body
+                                | Text.null result.commandStderr = result.commandStdout
+                                | Text.null result.commandStdout = result.commandStderr
+                                | otherwise =
+                                    result.commandStdout <> "\nstderr:\n" <> result.commandStderr
+                        in pure $ Right $
+                            "Exit code: " <> Text.pack (show code) <> "\n" <> body
+
 
 --------------------------------------------------------------------------------
 -- apply_patch

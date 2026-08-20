@@ -8,9 +8,21 @@ module Agent.CLI
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
-import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
+import Agent.CLI.Clipboard
+    ( ClipboardContent(..)
+    , formatImageSize
+    , readClipboard
+    , readClipboardImages
+    )
 import Agent.CLI.Command
-import Agent.CLI.Input (readApprovalLine, readReplLine)
+import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
+import Agent.CLI.Interrupt
+    ( InterruptState
+    , newInterruptState
+    , withCtrlCHandler
+    , withTurnCancel
+    )
+import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Options
 import Agent.CLI.Plan
     ( cliPlanHooks
@@ -105,6 +117,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
@@ -277,7 +290,15 @@ runAgent options = do
         Nothing -> pure ()
 
     toolEnv <- defaultToolEnv cwd
-    let planHooks = cliPlanHooks (resolveColor stderr)
+    interrupt <- newInterruptState \msg -> do
+        -- Drop an in-place "thinking…" status so the hint is its own line.
+        Text.hPutStr stderr "\r\ESC[K"
+        hFlush stderr
+        color <- resolveColor stderr
+        putTextLn stderr (roleMuted color msg)
+    -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
+    escPaused <- newIORef False
+    let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
         provider = loaded.loadedProvider
     multiCtx <- case provider of
         OpenAIProvider -> do
@@ -332,48 +353,49 @@ runAgent options = do
                     Left _ -> pure ()
             Nothing -> pure ()
         progName <- getProgName
-        withInterruptResume progName persist do
-            case provider of
-                OpenAIProvider ->
-                    try @_ @CodexAuthFailed
-                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
-                            wsLock <- newMVar ()
-                            case multiCtx of
-                                Just ctx ->
-                                    setSubagentRunner ctx.multiRegistry $
-                                        runCodexSubagent
-                                            options
-                                            policy
-                                            planHooks
-                                            paramsRef
-                                            wsLock
-                                            conn
-                                            ctx.multiRegistry
-                                Nothing -> pure ()
-                            let lockedBackend =
-                                    lockedOpenAiBackend wsLock conn
-                                        (readIORef paramsRef)
-                                        transcriptRef
-                            runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                initialPrevious persist projectRoot Nothing agentsContext
-                                lockedBackend)
-                        >>= \case
-                            Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                            Right result -> pure result
-                XAIProvider -> do
-                    xaiOptions <- XAI.clientOptionsFromEnv
-                    let backend =
-                            xaiBackend xaiOptions loaded.loadedTokenProvider
-                                (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
-                OpenRouterProvider -> do
-                    openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                    let backend =
-                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
-                                (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
+        withCtrlCHandler interrupt $
+            withInterruptResume progName persist do
+                case provider of
+                    OpenAIProvider ->
+                        try @_ @CodexAuthFailed
+                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
+                                wsLock <- newMVar ()
+                                case multiCtx of
+                                    Just ctx ->
+                                        setSubagentRunner ctx.multiRegistry $
+                                            runCodexSubagent
+                                                options
+                                                policy
+                                                planHooks
+                                                paramsRef
+                                                wsLock
+                                                conn
+                                                ctx.multiRegistry
+                                    Nothing -> pure ()
+                                let lockedBackend =
+                                        lockedOpenAiBackend wsLock conn
+                                            (readIORef paramsRef)
+                                            transcriptRef
+                                runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                                    initialPrevious persist projectRoot Nothing agentsContext escPaused interrupt
+                                    lockedBackend)
+                            >>= \case
+                                Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                                Right result -> pure result
+                    XAIProvider -> do
+                        xaiOptions <- XAI.clientOptionsFromEnv
+                        let backend =
+                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                    (readIORef paramsRef) transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
+                    OpenRouterProvider -> do
+                        openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                        let backend =
+                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                    (readIORef paramsRef) transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
 
 preparePersistence
     :: CliOptions
@@ -475,12 +497,16 @@ runSession
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
+    -> IORef Bool
+    -> InterruptState
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext escPaused interrupt backend = do
     printed <- newIORef False
-    escPaused <- newIORef False
+    attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
+    liveRows <- newIORef (0 :: Int)
+    liveEndsNL <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
@@ -496,6 +522,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
+            , renderLiveRows = liveRows
+            , renderLiveEndsWithNewline = liveEndsNL
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
@@ -516,13 +544,14 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused text [UserMessage text]
+                planMode agentsContext escPaused interrupt text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+                transcriptRef persist planMode projectRoot tokenProvider agentsContext
+                escPaused attachmentsRef interrupt
 
 repl
     :: LoopConfig
@@ -539,8 +568,10 @@ repl
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> IORef [ImageAttachment]
+    -> InterruptState
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -557,14 +588,18 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    mline <- readReplLine chromePrompt
+    mline <- readReplLine interrupt chromePrompt
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
-        Nothing -> do
+        ReplEof -> do
             putStrLn ""
             pure DevQuit
-        Just line ->
+        ReplQuitInterrupt ->
+            -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
+            -- the --resume hint and the process exits.
+            throwIO UserInterrupt
+        ReplText line ->
             let stripped = Text.strip line
             in if Text.null stripped
                 then continue
@@ -572,39 +607,102 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
+                        pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
                         writeIORef printed False
+                        let turnInputs =
+                                if null pendingImages
+                                    then [UserMessage text]
+                                    else
+                                        [ UserMultimodal
+                                            { userText = text
+                                            , userImages = pendingImages
+                                            }
+                                        ]
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist planMode agentsContext escPaused text
-                            [UserMessage text]
+                            transcriptRef persist planMode agentsContext escPaused interrupt text
+                            turnInputs
                         putTrailingNewline printed
                         continue
-                    ReplPaste caption -> do
-                        clipboard <- readClipboardImage
-                        case clipboard of
+                    ReplPaste{pasteImmediate, pasteCaption} -> do
+                        color <- resolveColor stdout
+                        errColor <- resolveColor stderr
+                        imagesResult <- readClipboardImages
+                        case imagesResult of
                             Left err -> do
-                                color <- resolveColor stderr
-                                Text.hPutStrLn stderr (roleError color err)
+                                -- Fall back to a richer clipboard sniff for better errors.
+                                content <- readClipboard
+                                case content of
+                                    ClipboardText _ ->
+                                        Text.hPutStrLn stderr (roleError errColor
+                                            "clipboard has text, not an image (paste text normally into the prompt)")
+                                    ClipboardPaths paths ->
+                                        Text.hPutStrLn stderr (roleError errColor
+                                            ("clipboard has file path(s), but no loadable image: "
+                                                <> Text.intercalate ", " (map Text.pack paths)))
+                                    ClipboardEmpty ->
+                                        Text.hPutStrLn stderr (roleError errColor err)
+                                    ClipboardImage image ->
+                                        -- Shouldn't happen if readClipboardImages failed, but be safe.
+                                        modifyIORef' attachmentsRef (<> [image])
                                 continue
-                            Right image -> do
-                                let promptText =
-                                        if Text.null caption
-                                            then "See attached image."
-                                            else caption
-                                    size = formatImageSize (BS.length image.imageBytes)
-                                color <- resolveColor stdout
-                                Text.putStrLn
-                                    (roleMuted color
-                                        (glyphOk <> "pasted " <> image.imageMime <> " (" <> size <> ")"))
-                                writeIORef printed False
-                                _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext escPaused promptText
-                                    [ UserMultimodal
-                                        { userText = promptText
-                                        , userImages = [image]
-                                        }
-                                    ]
-                                putTrailingNewline printed
+                            Right [] -> do
+                                Text.hPutStrLn stderr (roleError errColor "no image found on the clipboard")
                                 continue
+                            Right images -> do
+                                let sizes =
+                                        Text.intercalate ", "
+                                            [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
+                                            | img <- images
+                                            ]
+                                if pasteImmediate
+                                    then do
+                                        let promptText =
+                                                if Text.null pasteCaption
+                                                    then "See attached image."
+                                                    else pasteCaption
+                                        Text.putStrLn
+                                            (roleMuted color (glyphOk <> "pasted " <> sizes))
+                                        writeIORef printed False
+                                        _ <- runOneTurn config render previous printed
+                                            transcriptRef persist planMode agentsContext escPaused interrupt promptText
+                                            [ UserMultimodal
+                                                { userText = promptText
+                                                , userImages = images
+                                                }
+                                            ]
+                                        putTrailingNewline printed
+                                        continue
+                                    else do
+                                        modifyIORef' attachmentsRef (<> images)
+                                        pending <- readIORef attachmentsRef
+                                        Text.putStrLn
+                                            (roleMuted color
+                                                (glyphOk
+                                                    <> "attached "
+                                                    <> sizes
+                                                    <> " — send with next message ("
+                                                    <> Text.pack (show (length pending))
+                                                    <> " queued)"))
+                                        continue
+                    ReplShowAttachments -> do
+                        pending <- readIORef attachmentsRef
+                        color <- resolveColor stdout
+                        if null pending
+                            then Text.putStrLn (roleMuted color (glyphSession <> "attachments: (none)"))
+                            else Text.putStrLn $ roleMuted color $
+                                glyphSession
+                                    <> "attachments: "
+                                    <> Text.intercalate ", "
+                                        [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
+                                        | img <- pending
+                                        ]
+                        continue
+                    ReplClearAttachments -> do
+                        writeIORef attachmentsRef []
+                        color <- resolveColor stdout
+                        Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
+                        continue
+
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -629,42 +727,31 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (Right handle { sessionMeta = meta })
                         continue
                     ReplShowModel -> do
+                        color <- resolveColor stderr
                         params <- readIORef paramsRef
-                        Text.putStrLn (glyphSession <> "model: " <> currentModel params)
-                        continue
+                        let current = currentModel params
+                        pickModel color provider current >>= \case
+                            Nothing -> continue
+                            Just name
+                                | name == current -> do
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            (glyphSession <> "model: " <> name))
+                                    continue
+                                | otherwise -> do
+                                    applyModelChange
+                                        provider name paramsRef render previous persist
+                                    continue
                     ReplSetModel name -> do
-                        modifyIORef' paramsRef (setModel name)
-                        writeIORef render.renderModelRef name
-                        clearedChain <- case provider of
-                            OpenAIProvider ->
-                                atomicModifyIORef' previous \prev ->
-                                    (Nothing, isJust prev)
-                            _ -> pure False
-                        if clearedChain
-                            then Text.putStrLn
-                                ("model set to " <> name
-                                    <> " (conversation continued locally)")
-                            else Text.putStrLn ("model set to " <> name)
-                        case persist of
-                            Nothing -> pure ()
-                            Just slotRef -> do
-                                slot <- readIORef slotRef
-                                case slot of
-                                    Left pending ->
-                                        writeIORef slotRef
-                                            (Left pending { createModel = name })
-                                    Right handle -> do
-                                        let meta = handle.sessionMeta { metaModel = name }
-                                        writeSessionMeta handle.sessionMetaPath meta
-                                        writeIORef slotRef
-                                            (Right handle { sessionMeta = meta })
+                        applyModelChange
+                            provider name paramsRef render previous persist
                         continue
                     ReplToggleAlwaysApprove -> do
                         toggleAlwaysApprove policyRef projectRoot
                         continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash planMode persist maybeDescription
-                            config render previous printed transcriptRef agentsContext escPaused
+                            config render previous printed transcriptRef agentsContext escPaused interrupt
                         continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -693,7 +780,46 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+            transcriptRef persist planMode projectRoot tokenProvider agentsContext
+            escPaused attachmentsRef interrupt
+
+applyModelChange
+    :: Provider
+    -> Text
+    -> IORef ResponseCreateParams
+    -> RenderConfig
+    -> IORef (Maybe Text)
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+applyModelChange provider name paramsRef render previous persist = do
+    color <- resolveColor stdout
+    modifyIORef' paramsRef (setModel name)
+    writeIORef render.renderModelRef name
+    clearedChain <- case provider of
+        OpenAIProvider ->
+            atomicModifyIORef' previous \prev ->
+                (Nothing, isJust prev)
+        _ -> pure False
+    if clearedChain
+        then Text.putStrLn
+            (roleMuted color
+                (glyphOk <> "model set to " <> name
+                    <> " (conversation continued locally)"))
+        else Text.putStrLn
+            (roleMuted color (glyphOk <> "model set to " <> name))
+    case persist of
+        Nothing -> pure ()
+        Just slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                Left pending ->
+                    writeIORef slotRef
+                        (Left pending { createModel = name })
+                Right handle -> do
+                    let meta = handle.sessionMeta { metaModel = name }
+                    writeSessionMeta handle.sessionMetaPath meta
+                    writeIORef slotRef
+                        (Right handle { sessionMeta = meta })
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -759,9 +885,10 @@ enterPlanFromSlash
     -> IORef [ResponseItem]
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> InterruptState
     -> IO ()
 enterPlanFromSlash planMode persist maybeDescription config render previous printed
-    transcriptRef agentsContext escPaused = do
+    transcriptRef agentsContext escPaused interrupt = do
     color <- resolveColor stderr
     case persist of
         Just slotRef -> do
@@ -785,7 +912,7 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused description [UserMessage description]
+                planMode agentsContext escPaused interrupt description [UserMessage description]
             putTrailingNewline printed
 
 runOneTurn
@@ -798,10 +925,12 @@ runOneTurn
     -> PlanModeEnv
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> InterruptState
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused promptText inputs =
+runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt promptText inputs =
+  withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
@@ -901,7 +1030,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Just notes -> do
                     writeIORef printed False
                     _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext escPaused notes [UserMessage notes]
+                        planMode agentsContext escPaused interrupt notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
@@ -990,46 +1119,53 @@ approveToolDecision policyRef tools planMode call projectRoot = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
-    -- Plan mode: reject mutating file edits except plan.md (even under yolo).
-    -- Grok search_replace also enforces this in-tool; this covers apply_patch
-    -- and any other write tool before dispatch.
-    blocked <- planModeBlocksCall planMode planActive planPath call
-    if blocked
-        then do
-            let msg = planModeBlockedEditMessage planPath
+    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
+    case shellCommandBlocked call.name call.arguments of
+        Just msg -> do
             color <- resolveColor stderr
-            putTextLn stderr (roleWarn color msg)
+            putTextLn stderr (roleWarn color (glyphWarn <> msg))
             pure (Left msg)
-        else do
-            readOnly <- case lookupAppTool call.name tools of
-                Nothing -> pure False
-                Just tool -> toolAllowsWithoutPrompt tool call
-            -- plan.md edits are auto-approved while plan mode is active.
-            planFileOk <- isPlanFileWrite planMode planActive planPath call
-            if planFileOk
-                then pure (Right True)
-                else case policy of
-                    ApproveAll -> pure (Right True)
-                    DenyMutating -> pure (Right readOnly)
-                    PromptMutating
-                        | readOnly -> pure (Right True)
-                        | otherwise -> do
-                            color <- resolveColor stderr
-                            let question =
-                                    roleWarn color
-                                        (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
-                            readApprovalLine question >>= \case
-                                Nothing -> pure (Right False)
-                                Just raw -> case parseApprovalAnswer raw of
-                                    AllowOnce -> pure (Right True)
-                                    AllowAlways -> do
-                                        writeIORef policyRef ApproveAll
-                                        saveProjectAutoApprove projectRoot True
-                                        putTextLn stderr
-                                            (roleSuccess color
-                                                glyphOk <> "auto-approve on (saved for project)")
-                                        pure (Right True)
-                                    Deny -> pure (Right False)
+        Nothing -> do
+            -- Plan mode: reject mutating file edits except plan.md (even under yolo).
+            -- Grok search_replace also enforces this in-tool; this covers apply_patch
+            -- and any other write tool before dispatch.
+            blocked <- planModeBlocksCall planMode planActive planPath call
+            if blocked
+                then do
+                    let msg = planModeBlockedEditMessage planPath
+                    color <- resolveColor stderr
+                    putTextLn stderr (roleWarn color msg)
+                    pure (Left msg)
+                else do
+                    readOnly <- case lookupAppTool call.name tools of
+                        Nothing -> pure False
+                        Just tool -> toolAllowsWithoutPrompt tool call
+                    -- plan.md edits are auto-approved while plan mode is active.
+                    planFileOk <- isPlanFileWrite planMode planActive planPath call
+                    if planFileOk
+                        then pure (Right True)
+                        else case policy of
+                            ApproveAll -> pure (Right True)
+                            DenyMutating -> pure (Right readOnly)
+                            PromptMutating
+                                | readOnly -> pure (Right True)
+                                | otherwise -> do
+                                    color <- resolveColor stderr
+                                    let question =
+                                            roleWarn color
+                                                (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
+                                    readApprovalLine question >>= \case
+                                        Nothing -> pure (Right False)
+                                        Just raw -> case parseApprovalAnswer raw of
+                                            AllowOnce -> pure (Right True)
+                                            AllowAlways -> do
+                                                writeIORef policyRef ApproveAll
+                                                saveProjectAutoApprove projectRoot True
+                                                putTextLn stderr
+                                                    (roleSuccess color
+                                                        glyphOk <> "auto-approve on (saved for project)")
+                                                pure (Right True)
+                                            Deny -> pure (Right False)
 
 planModeBlocksCall :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
 planModeBlocksCall _planMode active planPath call
@@ -1068,8 +1204,8 @@ toggleAlwaysApprove policyRef projectRoot = do
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color glyphOk <> "auto-approve on (saved for project)"
-        _ -> roleMuted color glyphSession <> "auto-approve off (saved for project)")
+        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
+        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
 -- | Serialize OpenAI WebSocket turns: parent and children share one connection,
 -- and 'receiveWsResponse' is not multiplexed.

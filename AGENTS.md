@@ -73,6 +73,15 @@ cabal repl agent-cli
 
 Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as built libraries here, so changes in `agent-core` / providers need a repl restart or the multi-package command above.
 
+### CLI UI changes
+
+When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval prompts, markdown rendering, status lines, etc.):
+
+- Always exercise the live agent in **tmux** before opening a PR.
+- Prefer `tmux new-session` / `tmux send-keys` / `tmux capture-pane` so the TTY path is real (raw mode, Esc cancel, haskeline, washes).
+- Do not rely only on unit tests for visual/TTY behavior; confirm the prompt and interactions look right in the captured pane.
+- Only open the PR after that tmux smoke check passes.
+
 ### pitfalls
 
 - Exit the agent (`:q` or Ctrl-D) before `:r`; a live stdin/WebSocket session blocks GHCi.
@@ -81,6 +90,16 @@ Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as bu
 - `cabal repl agent-cli:exe:agent-cli` + `:main` looks convenient but only interprets `Main.hs` and does **not** reload library source changes.
 - Use `ghcid` for typecheck-on-save; keep `cabal repl` + `withArgs ... run` for running the live agent.
 - Prefer `repl` when you want automatic `:reload` + session resume instead of the manual `:q` / `:r` / `run` loop.
+
+### memory / RTS heap cap
+
+`nix develop` and the `repl` wrapper default `GHCRTS` to `-M8G -A64m` so the agent/GHCi process dies at an 8 GiB heap instead of OOMing the whole machine. The `agent-cli` executable is built with the same `-M8G -A64m` RTS defaults (overridable via `+RTS` because `-rtsopts` is enabled). Override when needed:
+
+```
+GHCRTS='-M16G -A64m' repl
+GHCRTS='-M4G -A32m' cabal repl agent-cli
+cabal run agent-cli -- +RTS -M16G -RTS
+```
 
 
 # haskell

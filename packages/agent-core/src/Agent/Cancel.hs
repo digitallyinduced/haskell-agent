@@ -1,7 +1,8 @@
 -- | Soft-cancel signal shared by the agent loop and long-running tools.
 --
--- Distinct from Ctrl-C / 'UserInterrupt': a cancel asks the current turn to
--- stop and return to the REPL, without tearing the process down.
+-- Soft-cancel asks the current turn to stop and return to the REPL without
+-- tearing the process down. The CLI maps the first Ctrl-C (and Esc) onto
+-- this flag; a second Ctrl-C still raises 'UserInterrupt' for full exit.
 module Agent.Cancel
     ( CancelFlag
     , newCancelFlag

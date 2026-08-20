@@ -44,6 +44,7 @@ library
                     , Agent.Tools
                     , Agent.Tools.ApplyPatch
                     , Agent.Tools.Codex
+                    , Agent.Tools.Dangerous
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.Shell
@@ -84,6 +85,7 @@ test-suite agent-core-test
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
+                    , Agent.Tools.DangerousSpec
                     , Agent.Tools.GrokSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec

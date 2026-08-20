@@ -14,8 +14,8 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 
 defaultModelFor :: Provider -> Text
 defaultModelFor = \case
-    XAIProvider -> "grok-4.5"
-    OpenAIProvider -> "gpt-5.1-codex"
+    XAIProvider -> "grok-4.6"
+    OpenAIProvider -> "gpt-5.6-luna"
     OpenRouterProvider -> "openai/gpt-5.1"
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).

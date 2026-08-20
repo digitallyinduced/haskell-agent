@@ -25,5 +25,12 @@ spec = do
                     Right ImageAttachment{imageMime, imageBytes} -> do
                         imageMime `shouldSatisfy` (`elem` ["image/png", "image/jpeg"])
                         BS.length imageBytes `shouldSatisfy` (> 0)
-                else result `shouldBe`
-                    Left "clipboard images are only supported on macOS for now"
+                else if os == "linux"
+                    then case result of
+                        Left err ->
+                            err `shouldSatisfy` (not . Text.null)
+                        Right ImageAttachment{imageMime, imageBytes} -> do
+                            imageMime `shouldSatisfy` (`elem` ["image/png", "image/jpeg"])
+                            BS.length imageBytes `shouldSatisfy` (> 0)
+                    else result `shouldBe`
+                        Left "clipboard images are not supported on this platform yet"
