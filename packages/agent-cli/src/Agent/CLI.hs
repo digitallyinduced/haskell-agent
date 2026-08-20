@@ -4,6 +4,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
@@ -45,6 +46,7 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (finally, try)
+import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -292,6 +294,7 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist text
+                [UserMessage text]
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef transcriptRef persist
@@ -323,9 +326,36 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist text
+                            transcriptRef persist text [UserMessage text]
                         putTrailingNewline printed
                         continue
+                    ReplPaste caption -> do
+                        clipboard <- readClipboardImage
+                        case clipboard of
+                            Left err -> do
+                                color <- resolveColor stderr
+                                Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right image -> do
+                                let promptText =
+                                        if Text.null caption
+                                            then "See attached image."
+                                            else caption
+                                    size = formatImageSize (BS.length image.imageBytes)
+                                color <- resolveColor stdout
+                                Text.putStrLn
+                                    (roleMuted color
+                                        ("pasted " <> image.imageMime <> " (" <> size <> ")"))
+                                writeIORef printed False
+                                _ <- runOneTurn config render previous printed
+                                    transcriptRef persist promptText
+                                    [ UserMultimodal
+                                        { userText = promptText
+                                        , userImages = [image]
+                                        }
+                                    ]
+                                putTrailingNewline printed
+                                continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -415,11 +445,12 @@ runOneTurn
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> Text
+    -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist prompt = do
+runOneTurn config render previous printed transcriptRef persist promptText inputs = do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
-    result <- runLoop config prev prompt
+    result <- runLoopInputs config prev inputs
     clearThinking render
     case result of
         Left err -> do
@@ -451,7 +482,7 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
-                            , turnUserText = prompt
+                            , turnUserText = promptText
                             , turnAssistantText = loopResult.finalText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
