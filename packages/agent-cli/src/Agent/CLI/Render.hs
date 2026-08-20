@@ -11,6 +11,7 @@ module Agent.CLI.Render
     , renderEvent
     , summarizeToolCall
     , truncateToolOutput
+    , visibleDisplayRows
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
@@ -48,6 +49,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
+import System.Console.ANSI (getTerminalSize)
+import System.Console.ANSI.Codes
+    ( clearFromCursorToScreenEndCode
+    , cursorUpLineCode
+    , setCursorColumnCode
+    )
 import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
@@ -57,6 +64,12 @@ data RenderConfig = RenderConfig
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
+    -- | Display rows occupied by the last live color-mode redraw of the
+    -- assistant buffer. Used to move the cursor back before restyling.
+    , renderLiveRows :: !(IORef Int)
+    -- | Whether the last live paint ended with a newline (cursor sits on the
+    -- following empty row rather than at the end of the last content row).
+    , renderLiveEndsWithNewline :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
@@ -74,6 +87,8 @@ renderEventUnlocked config = \case
             then do
                 clearThinkingUnlocked config
                 modifyIORef' config.renderTextBuffer (<> delta)
+                buffered <- readIORef config.renderTextBuffer
+                redrawLiveAssistant config buffered
             else do
                 clearThinkingUnlocked config
                 writeIORef config.renderPrintedText True
@@ -82,13 +97,16 @@ renderEventUnlocked config = \case
     ReasoningDelta _ -> pure ()
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
+        writeIORef config.renderLiveRows 0
+        writeIORef config.renderLiveEndsWithNewline False
         startThinkingSpinnerUnlocked config
-    -- Flush styled text on every completed turn. Pre-tool prose ("I'll check…")
-    -- is shown before tool lines; the final tool-free turn is the main answer.
+    -- Finalize live color output (or paint once for non-streaming backends).
+    -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
+    -- tool-free turn is the main answer.
     TurnFinished turn -> do
         clearThinkingUnlocked config
         when config.renderColor do
-            didPrint <- flushAssistantBuffer config turn.assistantText
+            didPrint <- finalizeAssistantBuffer config turn.assistantText
             when (didPrint && not (null turn.toolCalls)) do
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
@@ -104,23 +122,124 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
--- | End-of-turn flush for color mode: prefer streamed deltas, else the
--- completed 'assistantText' from non-streaming backends.
+-- | Live color-mode redraw: restyle the full buffer and replace the previous
+-- painted region in-place so tokens appear as they stream.
+redrawLiveAssistant :: RenderConfig -> Text -> IO ()
+redrawLiveAssistant config raw
+    | Text.null raw = pure ()
+    | otherwise = do
+        width <- terminalWidth
+        let painted = renderAssistantText True raw
+            rows = visibleDisplayRows width painted
+            endsNL = Text.isSuffixOf "\n" painted
+        eraseLiveAssistant config
+        writeIORef config.renderPrintedText True
+        writeIORef config.renderLiveRows rows
+        writeIORef config.renderLiveEndsWithNewline endsNL
+        Text.hPutStr config.renderStdout painted
+        hFlush config.renderStdout
+
+-- | End-of-turn: keep live paint when deltas already drew; otherwise paint
+-- once from the buffer or completed 'assistantText' (non-streaming backends).
 -- Returns whether anything was written.
-flushAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
-flushAssistantBuffer config assistantText = do
+finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
+finalizeAssistantBuffer config assistantText = do
     buffered <- readIORef config.renderTextBuffer
     writeIORef config.renderTextBuffer ""
-    let raw
-            | not (Text.null buffered) = buffered
-            | otherwise = fromMaybe "" assistantText
-    if Text.null raw
-        then pure False
-        else do
+    liveRows <- readIORef config.renderLiveRows
+    writeIORef config.renderLiveRows 0
+    writeIORef config.renderLiveEndsWithNewline False
+    if liveRows > 0
+        then do
             writeIORef config.renderPrintedText True
-            Text.hPutStr config.renderStdout (renderAssistantText True raw)
-            hFlush config.renderStdout
             pure True
+        else do
+            let raw
+                    | not (Text.null buffered) = buffered
+                    | otherwise = fromMaybe "" assistantText
+            if Text.null raw
+                then pure False
+                else do
+                    writeIORef config.renderPrintedText True
+                    Text.hPutStr config.renderStdout (renderAssistantText True raw)
+                    hFlush config.renderStdout
+                    pure True
+
+eraseLiveAssistant :: RenderConfig -> IO ()
+eraseLiveAssistant config = do
+    rows <- readIORef config.renderLiveRows
+    endsNL <- readIORef config.renderLiveEndsWithNewline
+    when (rows > 0) (eraseRows config rows endsNL)
+    writeIORef config.renderLiveRows 0
+    writeIORef config.renderLiveEndsWithNewline False
+
+eraseRows :: RenderConfig -> Int -> Bool -> IO ()
+eraseRows config rows endsWithNewline
+    | rows <= 0 = pure ()
+    | otherwise = do
+        -- After a trailing newline the cursor sits on the empty row below
+        -- the content, so move up @rows@; otherwise @rows - 1@.
+        let upCount
+                | endsWithNewline = rows
+                | rows > 1 = rows - 1
+                | otherwise = 0
+            up = if upCount > 0 then Text.pack (cursorUpLineCode upCount) else ""
+            home = Text.pack (setCursorColumnCode 1)
+            clear = Text.pack clearFromCursorToScreenEndCode
+        Text.hPutStr config.renderStdout (up <> home <> clear)
+        hFlush config.renderStdout
+
+terminalWidth :: IO Int
+terminalWidth = do
+    -- getTerminalSize may probe stdin; non-TTY / EOF (unit tests) → 80.
+    result <- tryIO getTerminalSize
+    pure $ case result of
+        Right (Just (_height, width)) | width > 0 -> width
+        _ -> 80
+
+-- | How many terminal rows a painted assistant block occupies, accounting for
+-- soft wrap at @width@. ANSI/OSC sequences do not consume columns.
+visibleDisplayRows :: Int -> Text -> Int
+visibleDisplayRows width painted
+    | Text.null painted = 0
+    | otherwise =
+        let width' = max 1 width
+            endsWithNewline = Text.isSuffixOf "\n" painted
+            parts = Text.splitOn "\n" painted
+            logical
+                | endsWithNewline && not (null parts) = init parts
+                | otherwise = parts
+            rowCount line =
+                let cols = Text.length (stripAnsiOsc line)
+                in max 1 ((cols + width' - 1) `div` width')
+        in sum (map rowCount logical)
+
+-- | Drop CSI and OSC-8 hyperlink wrappers so length matches visible cells.
+stripAnsiOsc :: Text -> Text
+stripAnsiOsc = go
+  where
+    go t
+        | Text.null t = t
+        | Text.isPrefixOf "\ESC[" t =
+            let rest = Text.drop 2 t
+                (_, after) = Text.break isCsiFinal rest
+            in go (Text.drop 1 after)
+        | Text.isPrefixOf "\ESC]8;" t =
+            case Text.breakOn "\ESC\\" (Text.drop 5 t) of
+                (_params, rest)
+                    | Text.isPrefixOf "\ESC\\" rest -> go (Text.drop 2 rest)
+                    | otherwise ->
+                        case Text.break (== '\a') (Text.drop 5 t) of
+                            (_params, rest2)
+                                | Text.isPrefixOf "\a" rest2 -> go (Text.drop 1 rest2)
+                                | otherwise -> go (Text.drop 1 t)
+        | Text.head t == '\ESC' = go (Text.drop 1 t)
+        | otherwise =
+            let (plain, rest) = Text.break (== '\ESC') t
+            in plain <> go rest
+
+isCsiFinal :: Char -> Bool
+isCsiFinal c = c >= '@' && c <= '~'
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
 clearThinking :: RenderConfig -> IO ()
