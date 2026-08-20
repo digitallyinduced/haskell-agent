@@ -59,21 +59,13 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.Console.ANSI (ConsoleLayer(..), SGR(..))
-import System.Console.ANSI.Codes
-    ( clearFromCursorToScreenEndCode
-    , setCursorColumnCode
-    )
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
@@ -83,13 +75,10 @@ data RenderConfig = RenderConfig
     , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
     -- | Accumulated reasoning-summary text for the current model round.
     , renderReasoningBuffer :: !(IORef Text)
-    -- | True after a live thinking-block paint on stderr.
-    , renderReasoningLive :: !(IORef Bool)
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
-    -- | True after a live color-mode paint; next redraw restores the saved
-    -- cursor and clears from there before restyling the buffer.
+    -- | True after assistant text has been streamed for the current round.
     , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
@@ -115,8 +104,7 @@ renderEventUnlocked config = \case
         if config.renderColor
             then do
                 modifyIORef' config.renderTextBuffer (<> delta)
-                buffered <- readIORef config.renderTextBuffer
-                redrawLiveAssistant config buffered
+                streamAssistantDelta config delta
             else do
                 writeIORef config.renderPrintedText True
                 Text.hPutStr config.renderStdout delta
@@ -127,7 +115,6 @@ renderEventUnlocked config = \case
         writeIORef config.renderTextBuffer ""
         writeIORef config.renderLiveActive False
         writeIORef config.renderReasoningBuffer ""
-        writeIORef config.renderReasoningLive False
         writeIORef config.renderActivityRef "Thinking…"
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
@@ -163,23 +150,22 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
--- | Live color-mode redraw: restyle the full buffer and replace the previous
--- painted region in-place so tokens appear as they stream.
+-- | Stream assistant text append-only.
 --
--- Uses DECSC/DECRC (ESC 7 / ESC 8) instead of counting display rows. Row
--- counting breaks on soft-wrap, wide glyphs, and background erase sequences
--- from 'paintBackgroundLines', which left garbled leftover text on redraw.
-redrawLiveAssistant :: RenderConfig -> Text -> IO ()
-redrawLiveAssistant config raw
-    | Text.null raw = pure ()
+-- Repainting the full accumulated response with DECSC/DECRC looks correct
+-- inside the current viewport, but once a repaint scrolls the terminal the
+-- previous frame has already entered scrollback and cannot be erased. Long
+-- responses therefore appeared there many times. Markdown styling that needs
+-- future context is reserved for non-streaming responses.
+streamAssistantDelta :: RenderConfig -> Text -> IO ()
+streamAssistantDelta config delta
+    | Text.null delta = pure ()
     | otherwise = do
-        let painted = renderAssistantText True raw
-        eraseLiveAssistant config
-        -- Save cursor at the start of this paint so the next delta can return.
-        Text.hPutStr config.renderStdout "\ESC7"
+        let safe = Text.filter (/= '\ESC') delta
         writeIORef config.renderPrintedText True
         writeIORef config.renderLiveActive True
-        Text.hPutStr config.renderStdout painted
+        Text.hPutStr config.renderStdout
+            (paintBackgroundLines True agentBackground safe)
         hFlush config.renderStdout
 
 -- | End-of-turn: keep live paint when deltas already drew; otherwise paint
@@ -206,20 +192,6 @@ finalizeAssistantBuffer config assistantText = do
                     Text.hPutStr config.renderStdout (renderAssistantText True raw)
                     hFlush config.renderStdout
                     pure True
-
-eraseLiveAssistant :: RenderConfig -> IO ()
-eraseLiveAssistant config = do
-    live <- readIORef config.renderLiveActive
-    when live do
-        -- Restore to the saved start of the previous live paint, then clear
-        -- everything below so soft-wrapped leftovers disappear.
-        Text.hPutStr config.renderStdout $
-            "\ESC8"
-                <> Text.pack (setCursorColumnCode 0)
-                <> Text.pack clearFromCursorToScreenEndCode
-        hFlush config.renderStdout
-    writeIORef config.renderLiveActive False
-
 
 -- | How many terminal rows a painted assistant block occupies, accounting for
 -- soft wrap at @width@. ANSI/OSC sequences do not consume columns.
@@ -285,17 +257,14 @@ startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
         emitNativeProgress config True
-        -- A live reasoning block already owns stderr; don't overlay a spinner.
-        live <- readIORef config.renderReasoningLive
-        unless live do
-            visible <- readIORef config.renderThinkingVisible
-            if visible
-                then paintThinkingFrame config 0
-                else do
-                    writeIORef config.renderThinkingVisible True
-                    paintThinkingFrame config 0
-                    tid <- forkIO (spinnerLoop config 0)
-                    writeIORef config.renderThinkingSpinner (Just tid)
+        visible <- readIORef config.renderThinkingVisible
+        if visible
+            then paintThinkingFrame config 0
+            else do
+                writeIORef config.renderThinkingVisible True
+                paintThinkingFrame config 0
+                tid <- forkIO (spinnerLoop config 0)
+                writeIORef config.renderThinkingSpinner (Just tid)
 
 -- | Stop the spinner and erase its in-place status line. Does not commit a
 -- reasoning block; callers that need that use 'commitThinkingUnlocked'.
@@ -343,26 +312,19 @@ spinnerLoop config frame = do
 
 paintThinkingFrame :: RenderConfig -> Int -> IO ()
 paintThinkingFrame config frame = do
-    live <- readIORef config.renderReasoningLive
-    if live
-        then do
-            buffered <- readIORef config.renderReasoningBuffer
-            elapsed <- thinkingElapsed config
-            redrawLiveReasoning config True elapsed buffered
-        else do
-            activity <- readIORef config.renderActivityRef
-            elapsed <- thinkingElapsed config
-            let frames = spinnerFrames
-                glyph = frames !! (frame `mod` length frames)
-                line =
-                    formatActivityLine
-                        config.renderColor
-                        glyph
-                        activity
-                        elapsed
-            void $ tryIO do
-                Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
-                hFlush config.renderStderr
+    activity <- readIORef config.renderActivityRef
+    elapsed <- thinkingElapsed config
+    let frames = spinnerFrames
+        glyph = frames !! (frame `mod` length frames)
+        line =
+            formatActivityLine
+                config.renderColor
+                glyph
+                activity
+                elapsed
+    void $ tryIO do
+        Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
+        hFlush config.renderStderr
 
 thinkingElapsed :: RenderConfig -> IO Double
 thinkingElapsed config = do
@@ -376,17 +338,10 @@ appendReasoningUnlocked :: RenderConfig -> Text -> IO ()
 appendReasoningUnlocked config delta
     | Text.null delta = pure ()
     | not config.renderShowThinking = pure ()
-    | otherwise = do
+    | otherwise =
+        -- Keep the one-line spinner while buffering. Repainting even a bounded
+        -- multi-line preview can scroll old frames into terminal scrollback.
         modifyIORef' config.renderReasoningBuffer (<> delta)
-        buffered <- readIORef config.renderReasoningBuffer
-        elapsed <- thinkingElapsed config
-        -- First summary token replaces the one-line spinner; later tokens
-        -- restyle the live truncated block in place. Elapsed time on the
-        -- header updates with each delta rather than a dedicated spinner.
-        -- Keep Ghostty's native bar up until the round is committed.
-        stopThinkingSpinnerUnlocked config
-        emitNativeProgress config True
-        redrawLiveReasoning config True elapsed buffered
 
 commitThinkingUnlocked :: RenderConfig -> IO ()
 commitThinkingUnlocked config = do
@@ -395,7 +350,7 @@ commitThinkingUnlocked config = do
     buffered <- readIORef config.renderReasoningBuffer
     writeIORef config.renderReasoningBuffer ""
     if Text.null (Text.strip buffered)
-        then eraseLiveReasoning config
+        then pure ()
         else do
             elapsed <- thinkingElapsed config
             let painted =
@@ -404,33 +359,10 @@ commitThinkingUnlocked config = do
                         False
                         elapsed
                         buffered
-            eraseLiveReasoning config
             Text.hPutStr config.renderStderr painted
             unless (Text.isSuffixOf "\n" painted) do
                 Text.hPutStr config.renderStderr "\n"
             hFlush config.renderStderr
-
-redrawLiveReasoning :: RenderConfig -> Bool -> Double -> Text -> IO ()
-redrawLiveReasoning config streaming elapsed raw
-    | Text.null (Text.strip raw) = pure ()
-    | otherwise = do
-        let painted = formatThinkingBlock config.renderColor streaming elapsed raw
-        eraseLiveReasoning config
-        Text.hPutStr config.renderStderr "\ESC7"
-        writeIORef config.renderReasoningLive True
-        Text.hPutStr config.renderStderr painted
-        hFlush config.renderStderr
-
-eraseLiveReasoning :: RenderConfig -> IO ()
-eraseLiveReasoning config = do
-    live <- readIORef config.renderReasoningLive
-    when live do
-        Text.hPutStr config.renderStderr $
-            "\ESC8"
-                <> Text.pack (setCursorColumnCode 0)
-                <> Text.pack clearFromCursorToScreenEndCode
-        hFlush config.renderStderr
-    writeIORef config.renderReasoningLive False
 
 -- | Thinking/reasoning block: accented header plus wrapped summary, matching
 -- grok-build's collapsible thought chrome in a linear CLI.

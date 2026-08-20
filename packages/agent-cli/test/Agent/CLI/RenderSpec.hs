@@ -139,7 +139,7 @@ spec = do
                 body `shouldSatisfy` (Text.isInfixOf "Thinking…")
                 body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
 
-        it "streams reasoning summaries as a thinking block" do
+        it "buffers reasoning summaries and commits one thinking block" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 renderEvent config (ReasoningDelta "secret plan")
@@ -154,8 +154,8 @@ spec = do
                 body `shouldSatisfy` (Text.isInfixOf "Thinking")
                 body `shouldSatisfy` (Text.isInfixOf "secret plan")
                 body `shouldSatisfy` (Text.isInfixOf "Thought for")
-                body `shouldSatisfy` (Text.isInfixOf "\ESC7")
-                body `shouldSatisfy` (Text.isInfixOf "\ESC8")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 
         it "commits the thinking block before the first tool" do
             withRenderConfig True False \config handle path -> do
@@ -185,7 +185,7 @@ spec = do
                 body `shouldSatisfy` (not . Text.isInfixOf "secret plan")
                 body `shouldSatisfy` (not . Text.isInfixOf "Thought for")
 
-        it "streams styled TextDelta live in color mode" do
+        it "streams TextDelta append-only in color mode" do
             withRenderConfig False True \config handle path -> do
                 renderEvent config (TextDelta "see `file.txt`")
                 buffered <- readIORef config.renderTextBuffer
@@ -205,22 +205,21 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "file.txt"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
-                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                body `shouldSatisfy` Text.isInfixOf "`file.txt`"
                 readIORef config.renderLiveActive `shouldReturn` False
 
-        it "restyles growing markdown across deltas" do
+        it "does not repaint earlier content across deltas" do
             withRenderConfig False True \config handle path -> do
                 renderEvent config (TextDelta "see `fi")
                 renderEvent config (TextDelta "le.txt`")
                 hClose handle
                 body <- Text.readFile path
-                -- Second delta should restore saved cursor and redraw; final
-                -- body styles the closed code span (no raw backticks left).
-                body `shouldSatisfy` Text.isInfixOf "file.txt"
-                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                body `shouldSatisfy` Text.isInfixOf "see `fi"
+                body `shouldSatisfy` Text.isInfixOf "le.txt`"
+                Text.count "see " body `shouldBe` 1
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
-                body `shouldSatisfy` Text.isInfixOf "\ESC7"  -- DECSC
-                body `shouldSatisfy` Text.isInfixOf "\ESC8"  -- DECRC
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
@@ -342,7 +341,6 @@ withRenderConfigNative showThinking color native action = do
     thinking <- newIORef False
     spinner <- newIORef Nothing
     reasoningBuffer <- newIORef ""
-    reasoningLive <- newIORef False
     modelRef <- newIORef "test-model"
     activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
@@ -358,7 +356,6 @@ withRenderConfigNative showThinking color native action = do
                 , renderThinkingVisible = thinking
                 , renderThinkingSpinner = spinner
                 , renderReasoningBuffer = reasoningBuffer
-                , renderReasoningLive = reasoningLive
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
