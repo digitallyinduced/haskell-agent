@@ -6,9 +6,10 @@ module Agent.CLI.CancelWatch
     ) where
 
 import Agent.Cancel (CancelFlag, requestCancel)
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (bracket, finally)
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import System.IO
     ( BufferMode(..)
@@ -35,10 +36,15 @@ import System.Posix.Terminal
     )
 
 -- | Run @action@ while Esc on a TTY stdin requests soft cancel.
--- Restores terminal attributes afterward. Non-TTY is a no-op wrapper.
+-- Restores the pre-call terminal attributes afterward. Non-TTY is a no-op.
 --
 -- @paused@ suspends stdin reads (see 'withStdinPaused') so approval prompts
 -- can use cooked 'getLine' without the watcher stealing keystrokes.
+--
+-- The watcher is never 'killThread'ed while blocked on stdin: that can leave
+-- the Handle lock stuck and break the next haskeline prompt (arrow keys print
+-- as raw CSI like @^[OA@). Instead we set a stop flag and wait for the
+-- watcher's short poll timeout to exit.
 withEscCancel :: CancelFlag -> IORef Bool -> IO a -> IO a
 withEscCancel cancel paused action = do
     tty <- hIsTerminalDevice stdin
@@ -48,18 +54,21 @@ withEscCancel cancel paused action = do
             oldTerm <- getTerminalAttributes stdInput
             oldBuf <- hGetBuffering stdin
             stopped <- newIORef False
+            done <- newEmptyMVar
             let enter = do
                     setTerminalAttributes stdInput (rawAttrs oldTerm) Immediately
                     hSetBuffering stdin NoBuffering
                 restore = do
+                    -- Ask the watcher to exit, then wait for its poll loop.
+                    writeIORef stopped True
+                    void (takeMVar done)
                     setTerminalAttributes stdInput oldTerm Immediately
                     hSetBuffering stdin oldBuf
             bracket enter (const restore) \() -> do
-                tid <- forkIO (escLoop cancel paused stopped)
-                action `finally` do
-                    writeIORef stopped True
-                    -- Unblock a stuck hWaitForInput by killing the watcher.
-                    killThread tid
+                _ <- forkIO $
+                    escLoop cancel paused stopped
+                        `finally` putMVar done ()
+                action
 
 -- | Temporarily stop the Esc watcher and restore cooked stdin for approval.
 withStdinPaused :: IORef Bool -> IO a -> IO a
@@ -68,20 +77,20 @@ withStdinPaused paused action = do
     if not tty
         then action
         else do
-            rawTerm <- getTerminalAttributes stdInput
-            rawBuf <- hGetBuffering stdin
-            let cooked =
-                    flip withMode ProcessInput
-                        . flip withMode EnableEcho
-                        . flip withMode EchoLF
-                        $ rawTerm
+            -- Snapshot the active (raw) attrs so we can put them back.
+            activeTerm <- getTerminalAttributes stdInput
+            activeBuf <- hGetBuffering stdin
+            let cooked = cookedAttrs activeTerm
                 enter = do
                     writeIORef paused True
+                    -- Give the watcher one poll interval to observe @paused@
+                    -- before we start reading approval input.
+                    threadDelay 120000
                     setTerminalAttributes stdInput cooked Immediately
                     hSetBuffering stdin LineBuffering
                 restore = do
-                    setTerminalAttributes stdInput (rawAttrs rawTerm) Immediately
-                    hSetBuffering stdin rawBuf
+                    setTerminalAttributes stdInput activeTerm Immediately
+                    hSetBuffering stdin activeBuf
                     writeIORef paused False
             bracket enter (const restore) (\_ -> action)
 
@@ -95,6 +104,13 @@ rawAttrs oldTerm =
         -- Keep Ctrl-C as SIGINT / UserInterrupt.
         . flip withMode KeyboardInterrupts
         $ oldTerm
+
+cookedAttrs :: TerminalAttributes -> TerminalAttributes
+cookedAttrs term =
+    flip withMode ProcessInput
+        . flip withMode EnableEcho
+        . flip withMode EchoLF
+        $ term
 
 -- | True when @bytes@ is a lone ESC, not the start of a CSI/SS3 sequence.
 isBareEscape :: String -> Bool
