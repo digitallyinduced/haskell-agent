@@ -51,6 +51,7 @@ import Agent.Tools.PlanMode
     , planFilePath
     , planModeBlockedEditMessage
     )
+import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
@@ -728,6 +729,8 @@ runTerminal :: GrokSession -> TerminalArgs -> IO (Either Text Text)
 runTerminal session args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
+    | commandLooksLikeRmRf args.command =
+        pure (Left (forbiddenRmRfReason args.command))
     | not args.background && hasUnwaitedBackgroundOp args.command =
         pure $ Left
             "The command contains a background '&'. Set background=true to run it as a background task, or append `wait` if you meant to wait for the children."
