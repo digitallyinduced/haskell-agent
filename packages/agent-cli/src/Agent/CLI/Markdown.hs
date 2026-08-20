@@ -3,7 +3,7 @@ module Agent.CLI.Markdown
     ( renderMarkdown
     ) where
 
-import Agent.CLI.Style (style)
+import Agent.CLI.Style (agentBackground, styleBase)
 import Control.Applicative ((<|>))
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (transpose)
@@ -20,6 +20,7 @@ import System.Console.ANSI
 
 -- | When @color@ is 'True', style a useful subset of GFM for a TTY.
 -- When 'False', return @text@ unchanged (pipes, redirects, tests).
+-- Nested spans restore 'agentBackground' after each 'Reset'.
 renderMarkdown :: Bool -> Text -> Text
 renderMarkdown color text
     | not color = text
@@ -33,6 +34,10 @@ renderMarkdown color text
             rendered = Text.intercalate "\n" (renderBlocks linesForParse)
         in if endsWithNewline then rendered <> "\n" else rendered
 
+-- | Style helper that keeps the agent line wash across nested SGR.
+md :: [SGR] -> Text -> Text
+md = styleBase True agentBackground
+
 renderBlocks :: [Text] -> [Text]
 renderBlocks = go
   where
@@ -44,38 +49,38 @@ renderBlocks = go
                     if Text.null info
                         then []
                         else
-                            [ style True
+                            [ md
                                 [ SetConsoleIntensity FaintIntensity
                                 , SetColor Foreground Dull Cyan
                                 ]
                                 info
                             ]
-                styledBody = map (style True [SetConsoleIntensity FaintIntensity]) body
+                styledBody = map (md [SetConsoleIntensity FaintIntensity]) body
             in header ++ styledBody ++ go after
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
             let marker = Text.replicate level "#"
-                prefix = style True (headingPrefixStyle level) (marker <> " ")
+                prefix = md (headingPrefixStyle level) (marker <> " ")
             in (prefix <> styleInline title) : go rest
         | Just item <- unorderedItem line =
-            ( style True listMarkerStyle "• "
+            ( md listMarkerStyle "• "
                 <> styleInline item
             )
                 : go rest
         | Just (digits, item) <- orderedItemParts line =
-            ( style True listMarkerStyle (digits <> ". ")
+            ( md listMarkerStyle (digits <> ". ")
                 <> styleInline item
             )
                 : go rest
         | Just quote <- blockQuote line =
             let body
                     | Text.any (`elem` ['`', '*', '_', '[']) quote = styleInline quote
-                    | otherwise = style True quoteStyle quote
-            in (style True [SetConsoleIntensity FaintIntensity] "│ " <> body)
+                    | otherwise = md quoteStyle quote
+            in (md [SetConsoleIntensity FaintIntensity] "│ " <> body)
                 : go rest
         | isThematicBreak line =
-            style True [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
+            md [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
@@ -238,7 +243,7 @@ styleTableRow isHeader widths cells =
                 (cells ++ repeat "")
         line = Text.intercalate "  " (take (length widths) padded)
     in if isHeader
-        then style True [SetConsoleIntensity BoldIntensity] line
+        then md [SetConsoleIntensity BoldIntensity] line
         else styleInline line
 
 styleInline :: Text -> Text
@@ -248,22 +253,22 @@ styleInline = Text.concat . go Nothing
     go prev t
         | Text.null t = []
         | Just (code, rest) <- takeInlineCode t =
-            style True codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
+            md codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
         | Just (linkText, url, rest) <- takeLink t =
-            style True linkStyle (styleInline linkText)
-                : style True urlStyle (" (" <> url <> ")")
+            md linkStyle (styleInline linkText)
+                : md urlStyle (" (" <> url <> ")")
                 : go (Just ')') rest
         | Just (inner, rest) <- takeEmphasis prev "**" t =
-            style True [SetConsoleIntensity BoldIntensity] (styleInline inner)
+            md [SetConsoleIntensity BoldIntensity] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "__" t =
-            style True [SetConsoleIntensity BoldIntensity] (styleInline inner)
+            md [SetConsoleIntensity BoldIntensity] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "*" t =
-            style True [SetItalicized True] (styleInline inner)
+            md [SetItalicized True] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "_" t =
-            style True [SetItalicized True] (styleInline inner)
+            md [SetItalicized True] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | otherwise =
             let (plain, rest) = Text.break (`elem` ['`', '[', '*', '_']) t

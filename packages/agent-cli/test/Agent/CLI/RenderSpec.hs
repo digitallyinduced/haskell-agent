@@ -110,6 +110,7 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` Text.isInfixOf "file.txt"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` Text.isInfixOf "\ESC[48;5;236m"
                 body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
 
         it "flushes pre-tool assistant prose before tool lines" do
