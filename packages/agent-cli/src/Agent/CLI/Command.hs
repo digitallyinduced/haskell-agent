@@ -1,16 +1,26 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
     ( ReplAction(..)
+    , SlashCommand(..)
     , currentEffort
     , currentModel
+    , formatSlashHelp
+    , lookupSlashCommand
     , parseReplLine
     , setModel
     , setReasoningEffort
+    , slashCommands
+    , slashCompletionCandidates
     ) where
 
+import Agent.CLI.Models (catalogModelIds)
 import Agent.CLI.Options (parseEffort)
+import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.OpenAI.Responses.Types
+
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Char (isSpace)
+import Data.List (find, isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -34,8 +44,51 @@ data ReplAction
         }
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplHelp (Maybe Text)
+    -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
+    | ReplResume (Maybe Text)
+    -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
     | ReplCommandError Text
     deriving (Eq, Show)
+
+-- | One REPL slash command. @slashName@ is the canonical name without a
+-- leading @/@; aliases are also stored without @/@.
+data SlashCommand = SlashCommand
+    { slashName :: !Text
+    , slashAliases :: ![Text]
+    , slashUsage :: !Text
+    , slashSummary :: !Text
+    }
+    deriving (Eq, Show)
+
+slashCommands :: [SlashCommand]
+slashCommands =
+    [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one"
+    , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
+    , cmd "effort" [] "/effort [low|medium|high|xhigh]" "Show or set reasoning effort"
+    , cmd "plan" [] "/plan [description]" "Enter plan mode"
+    , cmd "session" [] "/session" "Print the current session id"
+    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
+    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
+    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image to the next prompt"
+    , cmd "attachments" [] "/attachments" "List queued clipboard images"
+    , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
+    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve"
+    ]
+  where
+    cmd name aliases usage summary =
+        SlashCommand
+            { slashName = name
+            , slashAliases = aliases
+            , slashUsage = usage
+            , slashSummary = summary
+            }
+
+lookupSlashCommand :: Text -> Maybe SlashCommand
+lookupSlashCommand raw =
+    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
+    in find (\cmd -> cmd.slashName == name || name `elem` cmd.slashAliases)
+        slashCommands
 
 parseReplLine :: Text -> ReplAction
 parseReplLine raw =
@@ -56,38 +109,63 @@ parseColon line
 
 parseSlash :: Text -> ReplAction
 parseSlash line = case Text.words line of
-    [] -> ReplCommandError "unknown command: /"
-    command : args
-        | Text.toLower command == "/effort" -> parseEffortCommand args
-        | Text.toLower command == "/model" -> parseModelCommand args
-        | Text.toLower command == "/plan" ->
-            let description =
-                    Text.strip (Text.drop (Text.length command) line)
-            in ReplPlan
-                (if Text.null description then Nothing else Just description)
-        | Text.toLower command == "/session" ->
-            if null args
-                then ReplShowSession
-                else ReplCommandError "usage: /session"
-        | Text.toLower command == "/reload-auth" ->
-            if null args
-                then ReplReloadAuth
-                else ReplCommandError "usage: /reload-auth"
-        | Text.toLower command == "/paste" ->
-            parsePasteCommand (Text.strip (Text.drop (Text.length command) line))
-        | Text.toLower command == "/attachments" ->
-            if null args
-                then ReplShowAttachments
-                else ReplCommandError "usage: /attachments"
-        | Text.toLower command == "/clear-attachments" ->
-            if null args
-                then ReplClearAttachments
-                else ReplCommandError "usage: /clear-attachments"
-        | isAlwaysApproveAlias (Text.drop 1 command) ->
-            if null args
-                then ReplToggleAlwaysApprove
-                else ReplCommandError "usage: /always-approve"
-        | otherwise -> ReplCommandError ("unknown command: " <> command)
+    [] -> unknownCommand "/"
+    command : args -> case lookupSlashCommand command of
+        Nothing -> unknownCommand command
+        Just spec -> case spec.slashName of
+            "help" -> parseHelpCommand args
+            "effort" -> parseEffortCommand args
+            "model" -> parseModelCommand args
+            "plan" ->
+                let description =
+                        Text.strip (Text.drop (Text.length command) line)
+                in ReplPlan
+                    (if Text.null description then Nothing else Just description)
+            "session" ->
+                if null args
+                    then ReplShowSession
+                    else ReplCommandError "usage: /session"
+            "resume" -> parseResumeCommand args
+            "reload-auth" ->
+                if null args
+                    then ReplReloadAuth
+                    else ReplCommandError "usage: /reload-auth"
+            "paste" ->
+                parsePasteCommand (Text.strip (Text.drop (Text.length command) line))
+            "attachments" ->
+                if null args
+                    then ReplShowAttachments
+                    else ReplCommandError "usage: /attachments"
+            "clear-attachments" ->
+                if null args
+                    then ReplClearAttachments
+                    else ReplCommandError "usage: /clear-attachments"
+            "always-approve" ->
+                if null args
+                    then ReplToggleAlwaysApprove
+                    else ReplCommandError "usage: /always-approve"
+            other -> unknownCommand ("/" <> other)
+
+unknownCommand :: Text -> ReplAction
+unknownCommand command =
+    ReplCommandError ("unknown command: " <> command <> " (try /help)")
+
+parseHelpCommand :: [Text] -> ReplAction
+parseHelpCommand = \case
+    [] -> ReplHelp Nothing
+    [name] -> case lookupSlashCommand name of
+        Just spec -> ReplHelp (Just spec.slashName)
+        Nothing -> unknownCommand name
+    _ -> ReplCommandError "usage: /help [NAME]"
+
+parseResumeCommand :: [Text] -> ReplAction
+parseResumeCommand = \case
+    [] -> ReplResume Nothing
+    [sessionId]
+        | Text.null (Text.strip sessionId) ->
+            ReplCommandError "usage: /resume [ID]"
+        | otherwise -> ReplResume (Just sessionId)
+    _ -> ReplCommandError "usage: /resume [ID]"
 
 isAlwaysApproveAlias :: Text -> Bool
 isAlwaysApproveAlias name =
@@ -157,3 +235,74 @@ setModel name ResponseCreateParams{..} =
 currentModel :: ResponseCreateParams -> Text
 currentModel params =
     fromMaybe "(unset)" params.model
+
+-- | Help text for @/help@ / @/help NAME@.
+formatSlashHelp :: Bool -> Maybe Text -> Text
+formatSlashHelp color = \case
+    Nothing ->
+        Text.intercalate "\n" (map (formatSlashHelpRow color) slashCommands)
+    Just name ->
+        case lookupSlashCommand name of
+            Just spec -> formatSlashHelpRow color spec
+            Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
+
+formatSlashHelpRow :: Bool -> SlashCommand -> Text
+formatSlashHelpRow color spec =
+    let aliases =
+            if null spec.slashAliases
+                then ""
+                else
+                    " ("
+                        <> Text.intercalate ", "
+                            (map ("/" <>) spec.slashAliases)
+                        <> ")"
+    in rolePrompt color spec.slashUsage
+        <> aliases
+        <> "\n  "
+        <> roleMuted color spec.slashSummary
+
+-- | Haskeline replacements for the word being completed.
+-- @reversedPrev@ is the text before that word, reversed (haskeline's
+-- 'completeWordWithPrev' convention). Empty when the buffer is not a slash
+-- line.
+slashCompletionCandidates :: String -> String -> [String]
+slashCompletionCandidates reversedPrev word =
+    let prev = reverse reversedPrev
+    in if not (isSlashLine prev word)
+        then []
+        else case words prev of
+            [] -> completeSlashNames word
+            cmd : _ -> completeSlashArgs cmd word
+
+isSlashLine :: String -> String -> Bool
+isSlashLine prev word = case dropWhile isSpace prev of
+    [] -> "/" `isPrefixOf` word
+    rest -> "/" `isPrefixOf` rest
+
+completeSlashNames :: String -> [String]
+completeSlashNames word =
+    let needle = Text.toLower (Text.dropWhile (== '/') (Text.pack word))
+        names =
+            concatMap
+                (\cmd -> ("/" <> cmd.slashName) : map ("/" <>) cmd.slashAliases)
+                slashCommands
+    in filter (\name -> needle `Text.isPrefixOf` Text.drop 1 (Text.toLower (Text.pack name)))
+        (map Text.unpack names)
+
+completeSlashArgs :: String -> String -> [String]
+completeSlashArgs cmd word =
+    case lookupSlashCommand (Text.pack cmd) of
+        Nothing -> []
+        Just spec ->
+            let needle = Text.toLower (Text.pack word)
+                options = argCompletions spec
+            in map Text.unpack $
+                filter (Text.isPrefixOf needle . Text.toLower) options
+
+argCompletions :: SlashCommand -> [Text]
+argCompletions spec = case spec.slashName of
+    "effort" -> ["low", "medium", "high", "xhigh"]
+    "model" -> catalogModelIds
+    "help" -> map (.slashName) slashCommands
+    "paste" -> ["--send"]
+    _ -> []

@@ -2,8 +2,11 @@
 module Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
+    , formatActivityLine
+    , formatElapsed
     , formatLoopError
     , formatLoopErrorColored
+    , formatSearchReplaceDiff
     , formatToolStarted
     , formatTurnStatus
     , putTextLn
@@ -32,14 +35,17 @@ import Agent.CLI.Style
     , roleToolDetail
     , roleToolName
     , roleToolOutput
+    , solarizedGreen
+    , solarizedRed
     , spinnerFrames
+    , style
     )
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -49,7 +55,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
-import System.Console.ANSI (getTerminalSize)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import System.Console.ANSI (ConsoleLayer(..), SGR(..), getTerminalSize)
 import System.Console.ANSI.Codes
     ( clearFromCursorToScreenEndCode
     , cursorUpLineCode
@@ -74,6 +81,8 @@ data RenderConfig = RenderConfig
     , renderStdout :: !Handle
     , renderStderr :: !Handle
     , renderModelRef :: !(IORef Text)
+    , renderActivityRef :: !(IORef Text)
+    , renderStartedAt :: !(IORef (Maybe UTCTime))
     }
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
@@ -99,6 +108,9 @@ renderEventUnlocked config = \case
         writeIORef config.renderTextBuffer ""
         writeIORef config.renderLiveRows 0
         writeIORef config.renderLiveEndsWithNewline False
+        writeIORef config.renderActivityRef "thinking…"
+        now <- getCurrentTime
+        writeIORef config.renderStartedAt (Just now)
         startThinkingSpinnerUnlocked config
     -- Finalize live color output (or paint once for non-streaming backends).
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
@@ -110,8 +122,16 @@ renderEventUnlocked config = \case
             when (didPrint && not (null turn.toolCalls)) do
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
-        clearThinkingUnlocked config
+        writeIORef config.renderActivityRef (summarizeToolCall call)
         putTextLn config.renderStderr (formatToolStarted config.renderColor call)
+        let extra = formatToolBody config.renderColor call
+        unless (Text.null extra) do
+            putTextLn config.renderStderr extra
+        when config.renderShowThinking do
+            visible <- readIORef config.renderThinkingVisible
+            if visible
+                then paintThinkingFrame config 0
+                else startThinkingSpinnerUnlocked config
     ToolFinished result ->
         putTextLn config.renderStderr
             (roleToolOutput config.renderColor (truncateToolOutput result.output))
@@ -252,7 +272,7 @@ startThinkingSpinnerUnlocked config
     | otherwise = do
         visible <- readIORef config.renderThinkingVisible
         if visible
-            then pure ()
+            then paintThinkingFrame config 0
             else do
                 writeIORef config.renderThinkingVisible True
                 paintThinkingFrame config 0
@@ -286,12 +306,48 @@ spinnerLoop config frame = do
 
 paintThinkingFrame :: RenderConfig -> Int -> IO ()
 paintThinkingFrame config frame = do
-    let frames = spinnerFrames
+    activity <- readIORef config.renderActivityRef
+    started <- readIORef config.renderStartedAt
+    now <- getCurrentTime
+    let seconds = case started of
+            Nothing -> 0
+            Just t0 -> realToFrac (diffUTCTime now t0)
+        frames = spinnerFrames
         glyph = frames !! (frame `mod` length frames)
-        line = roleThinking config.renderColor (glyph <> " thinking…")
+        line =
+            formatActivityLine
+                config.renderColor
+                glyph
+                activity
+                seconds
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
+
+-- | One-line live status: spinner, current activity, elapsed time.
+formatActivityLine :: Bool -> Text -> Text -> Double -> Text
+formatActivityLine color glyph activity seconds =
+    roleThinking color (glyph <> " " <> activity)
+        <> roleMuted color ("  " <> formatElapsed seconds)
+
+-- | Compact elapsed time: @0.4s@, @12.4s@, @1m20s@.
+formatElapsed :: Double -> Text
+formatElapsed seconds
+    | seconds < 0 = "0.0s"
+    | seconds < 60 =
+        let tenths = round (seconds * 10) :: Int
+            whole = tenths `div` 10
+            frac = tenths `mod` 10
+        in Text.pack (show whole <> "." <> show frac <> "s")
+    | otherwise =
+        let total = round seconds :: Int
+            m = total `div` 60
+            s = total `mod` 60
+        in Text.pack (show m <> "m" <> pad2 s <> "s")
+  where
+    pad2 n
+        | n < 10 = "0" <> show n
+        | otherwise = show n
 
 formatTurnStatus :: Bool -> Text -> Text -> Text
 formatTurnStatus color outcome detail =
@@ -331,6 +387,36 @@ formatToolStarted color call =
         then arrow <> name
         else arrow <> name <> " " <> roleToolDetail color detail
 
+formatToolBody :: Bool -> ToolCall -> Text
+formatToolBody color call = case call.name of
+    "search_replace" -> formatSearchReplaceDiff color call.arguments
+    _ -> ""
+
+-- | Compact unified-diff preview for @search_replace@ arguments.
+formatSearchReplaceDiff :: Bool -> Text -> Text
+formatSearchReplaceDiff color arguments =
+    let path = jsonField "file_path" arguments
+        oldText = jsonField "old_string" arguments
+        newText = jsonField "new_string" arguments
+        header = case (Text.null oldText, Text.null newText) of
+            (True, False) -> roleMuted color ("  create " <> path)
+            (False, True) -> roleMuted color ("  delete " <> path)
+            _ -> ""
+        oldLines = Text.lines oldText
+        newLines = Text.lines newText
+        minus = map (\line -> style color [SetRGBColor Foreground solarizedRed] ("  -" <> line)) oldLines
+        plus = map (\line -> style color [SetRGBColor Foreground solarizedGreen] ("  +" <> line)) newLines
+        raw = minus <> plus
+        (shown, hidden)
+            | length raw <= 20 = (raw, 0)
+            | otherwise = (take 20 raw, length raw - 20)
+        more =
+            if hidden == 0
+                then []
+                else [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
+        body = shown <> more
+    in Text.intercalate "\n" (filter (not . Text.null) (header : body))
+
 toolDetail :: ToolCall -> Text
 toolDetail call = case call.name of
     "read_file" -> jsonField "target_file" call.arguments
@@ -367,13 +453,21 @@ firstPatchPath patch =
 
 truncateToolOutput :: Text -> Text
 truncateToolOutput output =
-    let line = firstLine (Text.strip output)
-        shortened
-            | Text.length line <= 160 = line
-            | otherwise = Text.take 157 line <> "..."
-    in if Text.null shortened
+    let stripped = Text.strip output
+        lines_ = take 8 (filter (not . Text.null) (Text.lines stripped))
+        rest = length (filter (not . Text.null) (Text.lines stripped)) - length lines_
+        paint line =
+            let shortened
+                    | Text.length line <= 160 = line
+                    | otherwise = Text.take 157 line <> "..."
+            in glyphToolAccent <> glyphToolOut <> shortened
+    in if Text.null stripped
         then glyphToolAccent <> glyphToolOut <> "(empty)"
-        else glyphToolAccent <> glyphToolOut <> shortened
+        else
+            Text.intercalate "\n" (map paint lines_)
+                <> if rest > 0
+                    then "\n" <> glyphToolAccent <> glyphToolOut <> "… " <> Text.pack (show rest) <> " more"
+                    else ""
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')

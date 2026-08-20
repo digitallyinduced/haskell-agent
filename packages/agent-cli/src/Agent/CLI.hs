@@ -15,7 +15,7 @@ import Agent.CLI.Clipboard
     , readClipboardImages
     )
 import Agent.CLI.Command
-import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
+import Agent.CLI.Input (ReplLine(..), readReplLine)
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
@@ -24,6 +24,11 @@ import Agent.CLI.Interrupt
     )
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Options
+import Agent.CLI.Permission
+    ( PermissionChoice(..)
+    , promptPermission
+    )
+import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan
     ( cliPlanHooks
     , extractProposedPlan
@@ -39,11 +44,11 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
     , formatLoopErrorColored
+    , formatElapsed
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
-    , summarizeToolCall
     )
 import Agent.CLI.Session
 import Agent.CLI.Style
@@ -142,7 +147,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
-import Data.Time.Clock (getCurrentTime, utctDay)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Time.Clock (diffUTCTime, getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs, getProgName, lookupEnv)
@@ -526,6 +533,9 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     liveEndsNL <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
+    activityRef <- newIORef "thinking…"
+    startedAtRef <- newIORef Nothing
+    allowedToolsRef <- newIORef Set.empty
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
@@ -545,6 +555,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , renderStdout = stdout
             , renderStderr = stderr
             , renderModelRef = modelRef
+            , renderActivityRef = activityRef
+            , renderStartedAt = startedAtRef
             }
         config = LoopConfig
             { loopBackend = backend
@@ -555,7 +567,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
                     withStdinPaused escPaused $
-                        approveToolDecision policyRef tools planMode call projectRoot
+                        approveToolDecision
+                            policyRef allowedToolsRef tools planMode call projectRoot
             , loopCancel = toolEnv.toolCancel
             }
     case prompt of
@@ -770,6 +783,9 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         enterPlanFromSlash planMode persist maybeDescription
                             config render previous printed transcriptRef agentsContext escPaused interrupt
                         continue
+                    ReplResume maybeId -> do
+                        handleResume maybeId persist
+                        continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
                         case persist of
@@ -789,6 +805,10 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
+                        continue
+                    ReplHelp maybeName -> do
+                        color <- resolveColor stdout
+                        Text.putStrLn (formatSlashHelp color maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
@@ -976,8 +996,13 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
     turnInputs <- stampTurnInputs turnInputs0
+    startedAt <- readIORef render.renderStartedAt
     result <- runLoopInputs config prev turnInputs
     clearThinking render
+    finishedAt <- getCurrentTime
+    let elapsedDetail extra = case startedAt of
+            Nothing -> extra
+            Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
     case result of
         Left (LoopCancelled toolResults) -> do
             unless (null toolResults) do
@@ -986,13 +1011,13 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
             model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "cancelled" model)
+            putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
             pure True
         Left err -> do
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color err)
             model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "error" model)
+            putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
@@ -1002,7 +1027,8 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 let turns = Text.pack (show loopResult.turnsUsed)
                     unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
                 putTextLn stderr
-                    (formatTurnStatus color "ok" (model <> " · " <> turns <> unit))
+                    (formatTurnStatus color "ok"
+                        (elapsedDetail (model <> " · " <> turns <> unit)))
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
             let assistantText =
@@ -1125,14 +1151,51 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
 
+handleResume
+    :: Maybe Text
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+handleResume maybeId persist = do
+    color <- resolveColor stderr
+    home <- getHomeDirectory
+    prog <- getProgName
+    let printHint sessionId =
+            Text.hPutStrLn stderr
+                (roleMuted color (resumeHint prog sessionId))
+    case maybeId of
+        Just sessionId -> printHint sessionId
+        Nothing -> do
+            sessions <- listSessions (sessionsRoot home)
+            currentId <- currentSessionId persist
+            pickResumeSession color sessions >>= \case
+                Nothing -> pure ()
+                Just sessionId
+                    | Just sessionId == currentId ->
+                        Text.hPutStrLn stderr
+                            (roleMuted color
+                                (glyphSession <> "already on session " <> sessionId))
+                    | otherwise -> printHint sessionId
+
+currentSessionId
+    :: Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO (Maybe Text)
+currentSessionId = \case
+    Nothing -> pure Nothing
+    Just slotRef -> do
+        slot <- readIORef slotRef
+        pure $ case slot of
+            Left _ -> Nothing
+            Right handle -> Just handle.sessionMeta.metaId
+
 approveToolDecision
     :: IORef ApprovalPolicy
+    -> IORef (Set Text)
     -> [AppTool]
     -> PlanModeEnv
     -> ToolCall
     -> FilePath
     -> IO (Either Text Bool)
-approveToolDecision policyRef tools planMode call projectRoot = do
+approveToolDecision policyRef allowedToolsRef tools planMode call _projectRoot = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -1161,28 +1224,33 @@ approveToolDecision policyRef tools planMode call projectRoot = do
                     planFileOk <- isPlanFileWrite planMode planActive planPath call
                     if planFileOk
                         then pure (Right True)
-                        else case policy of
-                            ApproveAll -> pure (Right True)
-                            DenyMutating -> pure (Right readOnly)
-                            PromptMutating
-                                | readOnly -> pure (Right True)
-                                | otherwise -> do
-                                    color <- resolveColor stderr
-                                    let question =
-                                            roleWarn color
-                                                (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
-                                    readApprovalLine question >>= \case
-                                        Nothing -> pure (Right False)
-                                        Just raw -> case parseApprovalAnswer raw of
-                                            AllowOnce -> pure (Right True)
-                                            AllowAlways -> do
-                                                writeIORef policyRef ApproveAll
-                                                saveProjectAutoApprove projectRoot True
-                                                putTextLn stderr
-                                                    (roleSuccess color
-                                                        glyphOk <> "auto-approve on (saved for project)")
-                                                pure (Right True)
-                                            Deny -> pure (Right False)
+                        else do
+                            allowed <- readIORef allowedToolsRef
+                            if Set.member call.name allowed
+                                then pure (Right True)
+                                else case policy of
+                                    ApproveAll -> pure (Right True)
+                                    DenyMutating -> pure (Right readOnly)
+                                    PromptMutating
+                                        | readOnly -> pure (Right True)
+                                        | otherwise -> do
+                                            color <- resolveColor stderr
+                                            promptPermission color call >>= \case
+                                                Nothing -> pure (Right False)
+                                                Just PermissionAllowOnce ->
+                                                    pure (Right True)
+                                                Just PermissionAllowTool -> do
+                                                    modifyIORef' allowedToolsRef
+                                                        (Set.insert call.name)
+                                                    putTextLn stderr
+                                                        (roleSuccess color
+                                                            (glyphOk
+                                                                <> "always allow "
+                                                                <> call.name
+                                                                <> " this session"))
+                                                    pure (Right True)
+                                                Just PermissionDeny ->
+                                                    pure (Right False)
 
 planModeBlocksCall :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
 planModeBlocksCall _planMode active planPath call

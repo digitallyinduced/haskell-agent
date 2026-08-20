@@ -4,6 +4,7 @@ module Agent.CLI.Models
     , PickerState(..)
     , PickerEvent(..)
     , modelsForProvider
+    , catalogModelIds
     , ensureCurrentInList
     , initialPickerState
     , visibleOptions
@@ -13,7 +14,7 @@ module Agent.CLI.Models
 
 import Agent.CLI.Prompt (defaultModelFor)
 import Agent.Provider (Provider(..))
-import Data.List (find)
+import Data.List (find, nub)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -70,6 +71,14 @@ modelsForProvider provider =
     in ensureCurrentInList def opts
   where
     opt mid label = ModelOption { modelId = mid, modelLabel = label }
+
+-- | Every curated catalog id across providers, de-duplicated, for completion.
+catalogModelIds :: [Text]
+catalogModelIds =
+    nub $
+        concatMap
+            (map (\opt -> opt.modelId) . modelsForProvider)
+            [XAIProvider, OpenAIProvider, OpenRouterProvider]
 
 -- | Prepend @current@ when it is missing so the active model stays visible.
 ensureCurrentInList :: Text -> [ModelOption] -> [ModelOption]

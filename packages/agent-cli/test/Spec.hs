@@ -12,10 +12,12 @@ import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
+import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
@@ -34,10 +36,12 @@ main = hspec do
     ModelPickerSpec.spec
     ModelsSpec.spec
     OptionsSpec.spec
+    PermissionSpec.spec
     PlanSpec.spec
     ProjectSpec.spec
     PromptSpec.spec
     RenderSpec.spec
+    ResumeSpec.spec
     StyleSpec.spec
     TimestampSpec.spec
     SessionSpec.spec

@@ -13,6 +13,7 @@ module Agent.CLI.Input
     , replHistoryPath
     ) where
 
+import Agent.CLI.Command (slashCompletionCandidates)
 import Agent.CLI.Interrupt
     ( IdleCtrlCResult(..)
     , InterruptState
@@ -38,7 +39,13 @@ import System.Console.Haskeline
     , getInputLine
     , handleInterrupt
     , runInputT
+    , setComplete
     , withInterrupt
+    )
+import System.Console.Haskeline.Completion
+    ( Completion(..)
+    , CompletionFunc
+    , completeWordWithPrev
     )
 import System.Directory
     ( createDirectoryIfMissing
@@ -138,10 +145,11 @@ readReplLine interrupt prompt = do
             let path = replHistoryPath home
             ensureHistoryParent path
             readEditedLine interrupt
-                defaultSettings
-                    { historyFile = Just path
-                    , autoAddHistory = True
-                    }
+                (setComplete completeSlash
+                    defaultSettings
+                        { historyFile = Just path
+                        , autoAddHistory = True
+                        })
                 prompt
         else do
             Text.hPutStr stdout prompt
@@ -374,6 +382,20 @@ readEditedLine interrupt settings prompt = go
         noteIdleCtrlC interrupt >>= \case
             ContinuePrompt -> go
             QuitProcess -> pure ReplQuitInterrupt
+
+-- | Tab-complete slash command names and a few known argument tokens.
+completeSlash :: CompletionFunc IO
+completeSlash =
+    completeWordWithPrev Nothing " \t" \reversedPrev word ->
+        pure $ map toCompletion (slashCompletionCandidates reversedPrev word)
+  where
+    toCompletion replacement =
+        Completion
+            { replacement
+            , display = replacement
+            , isFinished = True
+            }
+
 readAnswerOnly :: IO (Maybe Text)
 readAnswerOnly = do
     done <- isEOF

@@ -46,10 +46,13 @@ library
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
                     , Agent.CLI.Options
+                    , Agent.CLI.Permission
+                    , Agent.CLI.Picker
                     , Agent.CLI.Plan
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
+                    , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.Style
                     , Agent.CLI.Timestamp
@@ -99,8 +102,10 @@ test-suite agent-cli-test
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
+                    , Agent.CLI.PermissionSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
+                    , Agent.CLI.ResumeSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.SessionSpec
@@ -114,6 +119,7 @@ test-suite agent-cli-test
                     , base >= 4.17 && < 5
                     , bytestring
                     , colour
+                    , containers
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9

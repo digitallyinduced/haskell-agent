@@ -39,9 +39,40 @@ spec = do
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do
             truncateToolOutput "Exit code: 0\nhello"
-                `shouldSatisfy` ("Exit code: 0" `Text.isSuffixOf`)
+                `shouldSatisfy` ("Exit code: 0" `Text.isInfixOf`)
             truncateToolOutput "   "
                 `shouldSatisfy` ("(empty)" `Text.isSuffixOf`)
+
+        it "caps long multi-line output" do
+            let out = Text.unlines (map (Text.pack . show) [1 :: Int .. 12])
+            truncateToolOutput out `shouldSatisfy` Text.isInfixOf "… 4 more"
+
+    describe "formatElapsed" do
+        it "formats seconds and minutes" do
+            formatElapsed 0.4 `shouldBe` "0.4s"
+            formatElapsed 12.4 `shouldBe` "12.4s"
+            formatElapsed 80 `shouldBe` "1m20s"
+
+    describe "formatActivityLine" do
+        it "joins spinner, activity, and elapsed" do
+            formatActivityLine False "⠋" "thinking…" 1.2
+                `shouldBe` "⠋ thinking…  1.2s"
+
+    describe "formatSearchReplaceDiff" do
+        it "renders a compact unified diff" do
+            let args =
+                    "{\"file_path\":\"src/A.hs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}"
+                diff = formatSearchReplaceDiff False args
+            diff `shouldSatisfy` Text.isInfixOf "-foo"
+            diff `shouldSatisfy` Text.isInfixOf "+bar"
+
+        it "labels create and delete" do
+            formatSearchReplaceDiff False
+                "{\"file_path\":\"src/New.hs\",\"old_string\":\"\",\"new_string\":\"hi\"}"
+                `shouldSatisfy` Text.isInfixOf "create src/New.hs"
+            formatSearchReplaceDiff False
+                "{\"file_path\":\"src/Old.hs\",\"old_string\":\"bye\",\"new_string\":\"\"}"
+                `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -75,19 +106,19 @@ spec = do
                     | i <- [1 :: Int .. 80]
                     ]
 
-        it "shows a static thinking status until the first tool or text" do
+        it "keeps a live thinking status after the first tool" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 visible <- readIORef config.renderThinkingVisible
                 visible `shouldBe` True
                 renderEvent config (ToolStarted (functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"))
                 visibleAfter <- readIORef config.renderThinkingVisible
-                visibleAfter `shouldBe` False
+                visibleAfter `shouldBe` True
+                activity <- readIORef config.renderActivityRef
+                activity `shouldBe` "list_dir ."
                 hClose handle
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
-                -- Clear uses CR + erase, so the tool summary shares the buffer
-                -- line with the status text rather than starting a new line.
                 body `shouldSatisfy` ("◆ list_dir ." `Text.isInfixOf`)
 
         it "ignores reasoning deltas" do
@@ -201,6 +232,8 @@ withRenderConfig showThinking color action = do
     thinking <- newIORef False
     spinner <- newIORef Nothing
     modelRef <- newIORef "test-model"
+    activityRef <- newIORef "thinking…"
+    startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
     liveRows <- newIORef (0 :: Int)
     liveEndsNL <- newIORef False
@@ -222,6 +255,8 @@ withRenderConfig showThinking color action = do
                 , renderStdout = handle
                 , renderStderr = handle
                 , renderModelRef = modelRef
+                , renderActivityRef = activityRef
+                , renderStartedAt = startedAt
                 }
         action config handle path
         clearThinking config

@@ -3,6 +3,8 @@ module Agent.CLI.CommandSpec (spec) where
 import Agent.CLI.Command
 import Agent.OpenAI.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.List (isInfixOf)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -76,11 +78,27 @@ spec = do
         it "opens the model picker with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel
             parseReplLine "  /Model  " `shouldBe` ReplShowModel
+            parseReplLine "/m" `shouldBe` ReplShowModel
 
         it "sets a model name" do
             parseReplLine "/model grok-4.6" `shouldBe` ReplSetModel "grok-4.6"
+            parseReplLine "/m openai/gpt-5.1"
+                `shouldBe` ReplSetModel "openai/gpt-5.1"
             parseReplLine "/model openai/gpt-5.1"
                 `shouldBe` ReplSetModel "openai/gpt-5.1"
+
+        it "opens the resume picker" do
+            parseReplLine "/resume" `shouldBe` ReplResume Nothing
+            parseReplLine "/resume abc-123" `shouldBe` ReplResume (Just "abc-123")
+            parseReplLine "/resume a b"
+                `shouldBe` ReplCommandError "usage: /resume [ID]"
+
+        it "lists slash commands with /help" do
+            parseReplLine "/help" `shouldBe` ReplHelp Nothing
+            parseReplLine "/help model" `shouldBe` ReplHelp (Just "model")
+            parseReplLine "/help /m" `shouldBe` ReplHelp (Just "model")
+            parseReplLine "/help bogus"
+                `shouldBe` ReplCommandError "unknown command: bogus (try /help)"
 
         it "rejects extra args on /model" do
             parseReplLine "/model grok-4.6 extra"
@@ -101,9 +119,58 @@ spec = do
             parseReplLine "/effort high extra"
                 `shouldBe` ReplCommandError "usage: /effort [low|medium|high|xhigh]"
             parseReplLine "/bogus"
-                `shouldBe` ReplCommandError "unknown command: /bogus"
+                `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
             parseReplLine "/"
-                `shouldBe` ReplCommandError "unknown command: /"
+                `shouldBe` ReplCommandError "unknown command: / (try /help)"
+
+    describe "slashCommands" do
+        it "covers every slash name the parser accepts" do
+            let names = map (.slashName) slashCommands
+            names
+                `shouldBe`
+                    [ "help"
+                    , "model"
+                    , "effort"
+                    , "plan"
+                    , "session"
+                    , "resume"
+                    , "reload-auth"
+                    , "paste"
+                    , "attachments"
+                    , "clear-attachments"
+                    , "always-approve"
+                    ]
+
+        it "looks up aliases" do
+            fmap (.slashName) (lookupSlashCommand "m") `shouldBe` Just "model"
+            fmap (.slashName) (lookupSlashCommand "/yolo")
+                `shouldBe` Just "always-approve"
+
+        it "completes command names from a leading slash" do
+            slashCompletionCandidates "" "/"
+                `shouldSatisfy` (\xs -> "/help" `elem` xs && "/model" `elem` xs && "/m" `elem` xs)
+            slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
+            slashCompletionCandidates "ledom/" "high" `shouldBe` []
+
+        it "completes effort and model arguments" do
+            slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
+            slashCompletionCandidates "m/" "grok-4"
+                `shouldSatisfy` (\xs ->
+                    "grok-4.6" `elem` xs
+                        && "grok-4.5" `elem` xs
+                        && "grok-4.5-mini" `elem` xs)
+
+        it "does not complete ordinary prompts" do
+            slashCompletionCandidates "" "help" `shouldBe` []
+            slashCompletionCandidates (reverse "list the ") "files" `shouldBe` []
+
+        it "renders /help with usage and summary" do
+            let listing = Text.unpack (formatSlashHelp False Nothing)
+            listing `shouldSatisfy` ("/model [NAME]" `isInfixOf`)
+            listing `shouldSatisfy` ("Open the model picker" `isInfixOf`)
+            listing `shouldSatisfy` ("(/m)" `isInfixOf`)
+            Text.unpack (formatSlashHelp False (Just "effort"))
+                `shouldSatisfy` ("/effort [low|medium|high|xhigh]" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do
