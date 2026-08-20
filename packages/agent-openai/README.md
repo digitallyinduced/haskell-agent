@@ -27,7 +27,7 @@ main = do
     provider <- poolTokenProvider pool
 
     let request = defaultResponseCreateParams
-            { model = Just "gpt-5.1-codex"
+            { model = Just "gpt-5.6-luna"
             , instructions = Just "You are a helpful assistant."
             , input = Just (ResponseInputText "Say hi")
             , reasoning = Just ReasoningConfig
