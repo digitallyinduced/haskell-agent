@@ -73,7 +73,7 @@ spec = do
             parseReplLine "/attachments" `shouldBe` ReplShowAttachments
             parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
 
-        it "shows the current model with a bare /model" do
+        it "opens the model picker with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel
             parseReplLine "  /Model  " `shouldBe` ReplShowModel
 

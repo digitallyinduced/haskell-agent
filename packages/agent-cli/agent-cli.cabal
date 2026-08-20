@@ -42,6 +42,8 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.Input
                     , Agent.CLI.Markdown
+                    , Agent.CLI.ModelPicker
+                    , Agent.CLI.Models
                     , Agent.CLI.Options
                     , Agent.CLI.Plan
                     , Agent.CLI.Project
@@ -89,6 +91,8 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.ModelPickerSpec
+                    , Agent.CLI.ModelsSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
