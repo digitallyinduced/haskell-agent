@@ -2,7 +2,7 @@ module Agent.Tools.IOSpec (spec) where
 
 import Agent.Tools.IO (readTextFile, writeTextFile)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
 import Data.Either (isLeft)
 import qualified Data.Text as Text

@@ -18,7 +18,8 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, concurrently, race, wait)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
-import Control.Exception (SomeException, evaluate, try)
+import Control.Exception (evaluate)
+import Control.Exception.Safe (SomeException, catchIO, throwIO, try)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
@@ -36,7 +37,7 @@ import System.Directory
     , renameFile
     )
 import System.Exit (ExitCode(..))
-import System.IO.Error (catchIOError, ioError, isAlreadyInUseError)
+import System.IO.Error (isAlreadyInUseError)
 import System.FilePath
     ( addTrailingPathSeparator
     , isAbsolute
@@ -111,10 +112,10 @@ retryOnBusy action = go lockRetryDelaysUs
   where
     go [] = action
     go (delayUs : rest) =
-        catchIOError action \err ->
+        catchIO action \err ->
             if isAlreadyInUseError err
                 then threadDelay delayUs >> go rest
-                else ioError err
+                else throwIO err
 
 readTextFile :: FilePath -> IO (Either Text Text)
 readTextFile path = try @SomeException (retryOnBusy (BS.readFile path)) >>= \case
