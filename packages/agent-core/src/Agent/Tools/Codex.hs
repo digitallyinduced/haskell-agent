@@ -1,8 +1,8 @@
 -- | OpenAI Codex coding tools.
 --
 -- Wire names and schemas are copied from openai/codex
--- @ codex-rs/core/src/tools/handlers. Do not advertise Grok names here;
--- Codex models are trained on shell_command + apply_patch + update_plan.
+-- @ codex-rs/core/src/tools/handlers for the Codex-native tools.
+-- run_ghci is a local extension shared with Grok/OpenRouter.
 module Agent.Tools.Codex
     ( codexTools
     ) where
@@ -19,6 +19,7 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
+import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
 import Agent.Tools.Types
     ( AppTool(..)
@@ -34,13 +35,14 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-codexTools :: ToolEnv -> IO [AppTool]
-codexTools env = do
+codexTools :: ToolEnv -> GhciSession -> IO [AppTool]
+codexTools env ghci = do
     planRef <- newIORef []
     pure
         [ shellCommandTool env
         , applyPatchTool env
         , updatePlanTool planRef
+        , runGhciTool ghci
         ]
 
 jsonTool
@@ -57,6 +59,7 @@ jsonTool name description parameters readOnly handler = AppTool
     , appToolHandler = handler
     , appToolKind = JsonFunction
     , appToolReadOnly = readOnly
+    , appToolIsReadOnlyCall = Nothing
     }
 
 --------------------------------------------------------------------------------
@@ -145,6 +148,7 @@ applyPatchTool env = AppTool
     , appToolHandler = typedTool "apply_patch" (runApplyPatch env)
     , appToolKind = FreeformApplyPatch
     , appToolReadOnly = False
+    , appToolIsReadOnlyCall = Nothing
     }
 
 applyPatchDescription :: Text

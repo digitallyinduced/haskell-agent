@@ -49,6 +49,7 @@ library
                     , http-client
                     , http-conduit
                     , base64-bytestring
+                    , retry
                     , safe-exceptions
 
 test-suite agent-xai-test
@@ -73,5 +74,6 @@ test-suite agent-xai-test
                     , base64-bytestring
                     , case-insensitive
                     , http-types
+                    , retry
                     , wai
                     , warp

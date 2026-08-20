@@ -7,8 +7,15 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Options
+import Agent.CLI.Project
+    ( ProjectSettings(..)
+    , loadProjectSettings
+    , resolveProjectRoot
+    , saveProjectAutoApprove
+    )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
     ( RenderConfig(..)
@@ -20,36 +27,52 @@ import Agent.CLI.Render
     , summarizeToolCall
     )
 import Agent.CLI.Style
-    ( roleError
+    ( cliWindowTitle
+    , roleError
     , roleMuted
     , rolePrompt
     , roleSuccess
     , roleWarn
+    , setCliWindowTitle
     )
 import Agent.CLI.Session
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
+import Agent.ProjectInstructions
+    ( DiscoverOptions(..)
+    , defaultDiscoverOptions
+    , discoverProjectInstructions
+    , formatAgentsMdForProvider
+    , globalAgentsHomeDir
+    , loadedInstructionFiles
+    )
 import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
 import Agent.Provider
-    ( Credential(..)
+    ( AccountFailure(..)
+    , Credential(..)
+    , FailedCredential(..)
     , Provider(..)
+    , TokenProvider
     , getNextToken
     , providerSlug
     )
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools (appToolHandlers, codingToolsFor)
-import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Agent.Tools.Types (AppTool(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception (finally, try)
+import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (catchAsync, finally, throwIO, try)
+import Control.Monad (when)
+import qualified Data.ByteString as BS
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -57,7 +80,7 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, getProgName, lookupEnv)
 import System.FilePath ((</>))
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
@@ -180,7 +203,10 @@ runAgent options = do
             | otherwise -> pure source
     setCurrentDirectory cwd
 
+    projectRoot <- resolveProjectRoot cwd
+    projectSettings <- loadProjectSettings projectRoot
     isTty <- hIsTerminalDevice stdin
+    stdoutTty <- hIsTerminalDevice stdout
     let requestedProvider = case resumed of
             Just (meta, _) -> Just meta.metaProvider
             Nothing -> options.optProvider
@@ -209,37 +235,45 @@ runAgent options = do
             params = requestParams provider model instructions
                 (schemasFromAppTools provider tools) effort
             policy = resolveApprovalPolicy options isTty
+                projectSettings.settingsAutoApprove
             initialItems = maybe [] (concatMap (.turnItems) . snd) resumed
             initialPrevious = resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
         prompt <- loadPrompt options
+        let titleHint = case resumed of
+                Just (meta, _) -> Just meta.metaTitle
+                Nothing -> sessionTitleFromPrompt <$> prompt
+        setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
+        agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
-        case provider of
-            OpenAIProvider ->
-                try @CodexAuthFailed
-                    (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                        runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist
-                            (openAiBackend conn (readIORef paramsRef) transcriptRef))
-                    >>= \case
-                        Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                        Right result -> pure result
-            XAIProvider -> do
-                xaiOptions <- XAI.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
-            OpenRouterProvider -> do
-                openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend =
-                        openRouterBackend openRouterOptions credential
-                            (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
+        progName <- getProgName
+        withInterruptResume progName persist do
+            case provider of
+                OpenAIProvider ->
+                    try @_ @CodexAuthFailed
+                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                            runSession options provider policy tools prompt paramsRef transcriptRef
+                                initialPrevious persist projectRoot Nothing agentsContext
+                                (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                        >>= \case
+                            Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                            Right result -> pure result
+                XAIProvider -> do
+                    xaiOptions <- XAI.clientOptionsFromEnv
+                    let backend =
+                            xaiBackend xaiOptions loaded.loadedTokenProvider
+                                (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
+                OpenRouterProvider -> do
+                    openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                    let backend =
+                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
     :: CliOptions
@@ -285,6 +319,38 @@ isLeftSlot = \case
     Left _ -> True
     Right _ -> False
 
+-- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
+withInterruptResume
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO a
+    -> IO a
+withInterruptResume progName persist action =
+    action `catchAsync` \(e :: AsyncException) ->
+        case e of
+            UserInterrupt -> do
+                printResumeHint progName persist
+                throwIO e
+            _ -> throwIO e
+
+printResumeHint
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+printResumeHint progName = \case
+    Nothing -> pure ()
+    Just slotRef -> do
+        slot <- readIORef slotRef
+        case slot of
+            Left _ -> pure ()
+            Right handle -> do
+                -- Drop an in-place "thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                hFlush stderr
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
+
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
@@ -304,9 +370,12 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> FilePath
+    -> Maybe TokenProvider
+    -> IORef (Maybe Text)
     -> Backend
     -> IO DevResult
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -333,16 +402,18 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    approveTool policyRef tools call
+                    approveTool policyRef tools call projectRoot
             }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config render previous printed transcriptRef persist text
+            ok <- runOneTurn config render previous printed transcriptRef persist agentsContext text
+                [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
-            repl config render provider previous printed paramsRef policyRef transcriptRef persist
+            repl config render provider previous printed paramsRef policyRef
+                transcriptRef persist projectRoot tokenProvider agentsContext
 
 repl
     :: LoopConfig
@@ -354,8 +425,11 @@ repl
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> FilePath
+    -> Maybe TokenProvider
+    -> IORef (Maybe Text)
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -372,9 +446,36 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist text
+                            transcriptRef persist agentsContext text [UserMessage text]
                         putTrailingNewline printed
                         continue
+                    ReplPaste caption -> do
+                        clipboard <- readClipboardImage
+                        case clipboard of
+                            Left err -> do
+                                color <- resolveColor stderr
+                                Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right image -> do
+                                let promptText =
+                                        if Text.null caption
+                                            then "See attached image."
+                                            else caption
+                                    size = formatImageSize (BS.length image.imageBytes)
+                                color <- resolveColor stdout
+                                Text.putStrLn
+                                    (roleMuted color
+                                        ("pasted " <> image.imageMime <> " (" <> size <> ")"))
+                                writeIORef printed False
+                                _ <- runOneTurn config render previous printed
+                                    transcriptRef persist agentsContext promptText
+                                    [ UserMultimodal
+                                        { userText = promptText
+                                        , userImages = [image]
+                                        }
+                                    ]
+                                putTrailingNewline printed
+                                continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -429,7 +530,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (Right handle { sessionMeta = meta })
                         continue
                     ReplToggleAlwaysApprove -> do
-                        toggleAlwaysApprove policyRef
+                        toggleAlwaysApprove policyRef projectRoot
                         continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -448,13 +549,51 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color
                                                 ("session: " <> handle.sessionMeta.metaId))
                         continue
+                    ReplReloadAuth -> do
+                        reloadAuth provider tokenProvider
+                        continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
                         continue
   where
     continue =
-        repl config render provider previous printed paramsRef policyRef transcriptRef persist
+        repl config render provider previous printed paramsRef policyRef
+            transcriptRef persist projectRoot tokenProvider agentsContext
+
+reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
+reloadAuth provider = \case
+    Nothing -> do
+        color <- resolveColor stderr
+        putTextLn stderr $ roleMuted color $
+            "reload-auth: OpenAI WebSocket auth is fixed for this process; "
+                <> "restart after refreshing ~/.codex/auth.json "
+                <> "(OAuth pools already rotate on handshake failure)"
+    Just tokenProvider ->
+        -- Force a disk/env re-read by pretending the cached credential was
+        -- rejected for authentication; the reloadable provider clears its cache.
+        getNextToken tokenProvider (Just FailedCredential
+            { credential = Credential
+                { accessToken = ""
+                , accountId = ""
+                , leaseId = Nothing
+                , provider
+                }
+            , failure = AccountAuthenticationRejected
+            }) >>= \case
+            Left err -> do
+                color <- resolveColor stderr
+                putTextLn stderr $ roleError color $
+                    "reload-auth failed: " <> Text.pack (show err)
+            Right credential -> do
+                color <- resolveColor stdout
+                Text.putStrLn $ roleSuccess color $
+                    "auth reloaded ("
+                        <> providerSlug provider
+                        <> " account "
+                        <> credential.accountId
+                        <> ")"
+
 
 requestReload
     :: Maybe (IORef (Either SessionCreate SessionHandle))
@@ -482,12 +621,19 @@ runOneTurn
     -> IORef Bool
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IORef (Maybe Text)
     -> Text
+    -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist prompt = do
+runOneTurn config render previous printed transcriptRef persist agentsContext promptText inputs = do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
-    result <- runLoop config prev prompt
+    pendingAgents <- atomicModifyIORef' agentsContext \pending -> (Nothing, pending)
+    let turnInputs = case pendingAgents of
+            Just agents | null beforeItems && isNothing prev ->
+                UserMessage agents : inputs
+            _ -> inputs
+    result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
         Left err -> do
@@ -519,15 +665,52 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
-                            , turnUserText = prompt
+                            , turnUserText = promptText
                             , turnAssistantText = loopResult.finalText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
                             }
                     handle' <- appendTurn handle turn
                     writeIORef slotRef (Right handle')
+                    when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                        tty <- hIsTerminalDevice stdout
+                        setCliWindowTitle tty stdout
+                            (cliWindowTitle handle'.sessionMeta.metaCwd
+                                (Just handle'.sessionMeta.metaTitle))
             pure True
 
+
+-- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
+-- whatever instructions were already in history.
+loadAgentsContext
+    :: CliOptions
+    -> Provider
+    -> FilePath
+    -> FilePath
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (IORef (Maybe Text))
+loadAgentsContext options provider home cwd initialItems initialPrevious
+    | not options.optAgentsMd = newIORef Nothing
+    | not (null initialItems) || isJust initialPrevious = newIORef Nothing
+    | otherwise = do
+        let discoverOptions = DiscoverOptions
+                { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
+                , discoverGlobalDir = Just (globalAgentsHomeDir provider home)
+                , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
+                }
+        loaded <- discoverProjectInstructions discoverOptions cwd
+        let files = loadedInstructionFiles loaded
+        case formatAgentsMdForProvider provider cwd loaded of
+            Nothing -> newIORef Nothing
+            Just text -> do
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color
+                        ("agents.md: loaded "
+                            <> Text.pack (show (length files))
+                            <> if length files == 1 then " file" else " files"))
+                newIORef (Just text)
 
 -- | Color when the handle is a TTY and NO_COLOR is unset.
 resolveColor :: Handle -> IO Bool
@@ -547,16 +730,12 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
 
-firstCredential :: LoadedAuth -> IO Credential
-firstCredential loaded =
-    getNextToken loaded.loadedTokenProvider Nothing >>= \case
-        Left err -> die ("credential: " <> show err)
-        Right credential -> pure credential
-
-approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
-approveTool policyRef tools call = do
+approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> FilePath -> IO Bool
+approveTool policyRef tools call projectRoot = do
     policy <- readIORef policyRef
-    let readOnly = maybe False (.appToolReadOnly) (lookupAppTool call.name tools)
+    readOnly <- case lookupAppTool call.name tools of
+        Nothing -> pure False
+        Just tool -> toolAllowsWithoutPrompt tool call
     case policy of
         ApproveAll -> pure True
         DenyMutating -> pure readOnly
@@ -575,20 +754,23 @@ approveTool policyRef tools call = do
                             AllowOnce -> pure True
                             AllowAlways -> do
                                 writeIORef policyRef ApproveAll
-                                putTextLn stderr (roleSuccess color "auto-approve on")
+                                saveProjectAutoApprove projectRoot True
+                                putTextLn stderr
+                                    (roleSuccess color "auto-approve on (saved for project)")
                                 pure True
                             Deny -> pure False
 
-toggleAlwaysApprove :: IORef ApprovalPolicy -> IO ()
-toggleAlwaysApprove policyRef = do
+toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
+toggleAlwaysApprove policyRef projectRoot = do
     color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->
         if policy == ApproveAll
             then (PromptMutating, PromptMutating)
             else (ApproveAll, ApproveAll)
+    saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color "auto-approve on"
-        _ -> roleMuted color "auto-approve off")
+        ApproveAll -> roleSuccess color "auto-approve on (saved for project)"
+        _ -> roleMuted color "auto-approve off (saved for project)")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

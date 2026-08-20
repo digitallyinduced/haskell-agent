@@ -37,9 +37,11 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
                     , Agent.CLI.Auth
+                    , Agent.CLI.Clipboard
                     , Agent.CLI.Command
                     , Agent.CLI.Markdown
                     , Agent.CLI.Options
+                    , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
                     , Agent.CLI.Session
@@ -57,6 +59,7 @@ library
                     , directory
                     , filepath
                     , process
+                    , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
                     , unix
@@ -75,9 +78,11 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AuthSpec
+                    , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.OptionsSpec
+                    , Agent.CLI.ProjectSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.StyleSpec

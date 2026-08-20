@@ -11,8 +11,9 @@ import Agent.ToolDispatch
 import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.ApplyPatch (parsePatch)
 import Agent.Tools.Codex (codexTools)
+import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -29,14 +30,13 @@ spec :: Spec
 spec = describe "Agent.Tools.Codex" do
     it "advertises Codex wire names and not Grok names" do
         withTempEnv \env -> do
-            tools <- codexTools env
-            let names = map (.appToolName) tools
-            names `shouldBe` ["shell_command", "apply_patch", "update_plan"]
+            -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
+            (openai, closeOpenai) <- codingToolsFor OpenAIProvider env
+            let names = map (.appToolName) openai
+            names `shouldBe` ["shell_command", "apply_patch", "update_plan", "run_ghci"]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
-            (openai, closeOpenai) <- codingToolsFor OpenAIProvider env
-            map (.appToolName) openai `shouldBe` names
             closeOpenai
 
     it "adds, updates, and deletes files via apply_patch" do
@@ -137,18 +137,22 @@ spec = describe "Agent.Tools.Codex" do
 --------------------------------------------------------------------------------
 
 runPatch :: ToolEnv -> Text -> IO Text
-runPatch env patch = do
-    tools <- codexTools env
+runPatch env patch = withCodexTools env \tools -> do
     result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
         (customToolCall "call-1" "apply_patch" patch)
     pure result.output
 
 runFn :: ToolEnv -> Text -> Text -> IO Text
-runFn env name arguments = do
-    tools <- codexTools env
+runFn env name arguments = withCodexTools env \tools -> do
     result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
         (functionToolCall "call-1" name arguments)
     pure result.output
+
+withCodexTools :: ToolEnv -> ([AppTool] -> IO a) -> IO a
+withCodexTools env action = do
+    ghci <- newGhciSession env
+    tools <- codexTools env ghci
+    action tools `finally` closeGhciSession ghci
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action = do

@@ -16,6 +16,7 @@ import Agent.Error (ApiError)
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
+    , ImageAttachment(..)
     , LoopEvent(..)
     , TurnInput(..)
     , TurnOutput(..)
@@ -34,10 +35,13 @@ import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.ByteString (ByteString)
+import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 
 -- | Close over a live Codex WebSocket and the request fields the loop does
 -- not own (model, instructions, tools, reasoning). The params action is
@@ -98,6 +102,7 @@ turnInputsToItems = map turnInputToItem
 turnInputToItem :: TurnInput -> ResponseItem
 turnInputToItem = \case
     UserMessage text -> userMessageItem text
+    UserMultimodal{userText, userImages} -> multimodalUserItem userText userImages
     CompletedTool result -> toolResultToItem result
 
 userMessageItem :: Text -> ResponseItem
@@ -109,6 +114,33 @@ userMessageItem text = MessageItem ResponseMessage
     , phase = Nothing
     , extraFields = KeyMap.empty
     }
+
+multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem
+multimodalUserItem text images = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentParts
+        ( InputTextPart text Nothing KeyMap.empty
+        : map imageAttachmentPart images
+        )
+    , role = RoleUser
+    , status = Nothing
+    , phase = Nothing
+    , extraFields = KeyMap.empty
+    }
+
+imageAttachmentPart :: ImageAttachment -> ResponseContentPart
+imageAttachmentPart ImageAttachment{imageMime, imageBytes} =
+    InputImagePart
+        { detail = Just "auto"
+        , fileId = Nothing
+        , imageUrl = Just (imageDataUrl imageMime imageBytes)
+        , promptCacheBreakpoint = Nothing
+        , extraFields = KeyMap.empty
+        }
+
+imageDataUrl :: Text -> ByteString -> Text
+imageDataUrl mime bytes =
+    "data:" <> mime <> ";base64," <> Text.decodeUtf8 (Base64.encode bytes)
 
 toolResultToItem :: ToolCallResult -> ResponseItem
 toolResultToItem result = case result.callKind of

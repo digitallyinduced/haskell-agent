@@ -5,6 +5,7 @@ import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
@@ -26,14 +27,15 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
-        withTempSession \session -> do
-            let names = map (.appToolName) (grokTools session)
+        withTempSession \(session, ghci) -> do
+            let names = map (.appToolName) (grokTools session ghci)
             names `shouldBe`
                 [ "read_file"
                 , "grep"
                 , "list_dir"
                 , "search_replace"
                 , "run_terminal_cmd"
+                , "run_ghci"
                 , "get_task_output"
                 , "kill_task"
                 ]
@@ -47,190 +49,190 @@ spec = describe "Agent.Tools.Grok" do
                 `finally` (closeXai >> closeOr)
 
     it "reads a file with grok line-number anchors" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             let path = session.grokEnv.toolCwd </> "sample.txt"
             Text.writeFile path (Text.unlines ["alpha", "bravo", "charlie"])
-            output <- runTool session "read_file" "{\"target_file\":\"sample.txt\"}"
+            output <- runTool session ghci "read_file" "{\"target_file\":\"sample.txt\"}"
             output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
             output `shouldSatisfy` Text.isInfixOf "bravo"
 
     it "rejects a path that escapes cwd" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             let cwd = session.grokEnv.toolCwd
                 name = takeFileName cwd <> "-outside.txt"
                 outsider = takeDirectory cwd </> name
             Text.writeFile outsider "secret"
-            relative <- runTool session "read_file"
+            relative <- runTool session ghci "read_file"
                 ("{\"target_file\":\"../" <> Text.pack name <> "\"}")
             relative `shouldSatisfy` Text.isInfixOf "escapes"
-            absolute <- runTool session "read_file" "{\"target_file\":\"/etc/passwd\"}"
+            absolute <- runTool session ghci "read_file" "{\"target_file\":\"/etc/passwd\"}"
             absolute `shouldSatisfy` Text.isInfixOf "escapes"
 
     it "lists directory entries with a trailing slash for folders" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             createDirectoryIfMissing True (session.grokEnv.toolCwd </> "sub")
             Text.writeFile (session.grokEnv.toolCwd </> "a.txt") "x"
-            output <- runTool session "list_dir" "{\"target_directory\":\".\"}"
+            output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
 
     it "creates a file with empty old_string and replaces a unique match" do
-        withTempSession \session -> do
-            created <- runTool session "search_replace"
+        withTempSession \(session, ghci) -> do
+            created <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"\",\"new_string\":\"hello world\\n\"}"
             created `shouldSatisfy` Text.isInfixOf "created successfully"
             doesFileExist (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` True
 
-            updated <- runTool session "search_replace"
+            updated <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"hello\",\"new_string\":\"goodbye\"}"
             updated `shouldSatisfy` Text.isInfixOf "updated successfully"
             Text.readFile (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
 
     it "refuses a non-unique search_replace without replace_all" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
-            output <- runTool session "search_replace"
+            output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
             output `shouldSatisfy` Text.isInfixOf "multiple times"
 
     it "grep finds a literal match" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
-            output <- runTool session "grep" "{\"pattern\":\"needle\"}"
+            output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "grep accepts glob before the path terminator" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
             Text.writeFile (session.grokEnv.toolCwd </> "hit.md") "needle in markdown\n"
-            output <- runTool session "grep"
+            output <- runTool session ghci "grep"
                 "{\"pattern\":\"needle\",\"glob\":\"*.txt\"}"
             output `shouldSatisfy` Text.isInfixOf "hit.txt"
             output `shouldNotSatisfy` Text.isInfixOf "hit.md"
             output `shouldNotSatisfy` Text.isInfixOf "No such file or directory"
 
     it "runs a foreground shell command" do
-        withTempSession \session -> do
-            output <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            output <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo hi\",\"description\":\"print hi\"}"
             output `shouldSatisfy` Text.isPrefixOf "exit: 0"
             output `shouldSatisfy` Text.isInfixOf "hi"
 
     it "times out a long-running shell command" do
-        withTempSession \session -> do
-            output <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            output <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 5\",\"timeout\":200,\"description\":\"timeout test\"}"
             output `shouldSatisfy` Text.isPrefixOf "exit: killed (timeout)"
 
     it "starts read_file from a negative offset" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
-            output <- runTool session "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
+            output <- runTool session ghci "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
             output `shouldNotSatisfy` Text.isInfixOf "beyond the end"
             output `shouldSatisfy` Text.isInfixOf "d"
 
     it "wraps grep output in a workspace_result card" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
-            output <- runTool session "grep" "{\"pattern\":\"needle\"}"
+            output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "<workspace_result"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "hints the nearest line when search_replace misses" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
-            output <- runTool session "search_replace"
+            output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"near.txt\",\"old_string\":\"xyz unique\",\"new_string\":\"x\"}"
             output `shouldSatisfy` Text.isInfixOf "Nearest match: line 2"
 
     it "refuses to edit a gitignored file" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             Text.writeFile (session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
             Text.writeFile (session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
-            initOut <- runTool session "run_terminal_cmd"
+            initOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
             initOut `shouldSatisfy` Text.isPrefixOf "exit: 0"
-            output <- runTool session "search_replace"
+            output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"
 
     it "persists cwd and exported env across run_terminal_cmd calls" do
-        withTempSession \session -> do
-            _ <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            _ <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"mkdir nest && cd nest && export GROK_SESSION_VAR=persisted\",\"description\":\"cd and export\"}"
-            pwdOut <- runTool session "run_terminal_cmd"
+            pwdOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"pwd\",\"description\":\"show cwd\"}"
             pwdOut `shouldSatisfy` Text.isInfixOf "nest"
-            envOut <- runTool session "run_terminal_cmd"
+            envOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo $GROK_SESSION_VAR\",\"description\":\"show env\"}"
             envOut `shouldSatisfy` Text.isInfixOf "persisted"
 
     it "rejects an un-waited & in a foreground command" do
-        withTempSession \session -> do
-            output <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            output <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 1 &\",\"description\":\"ampersand\"}"
             output `shouldSatisfy` Text.isInfixOf "background '&'"
-            waited <- runTool session "run_terminal_cmd"
+            waited <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 0.1 & wait\",\"description\":\"wait for child\"}"
             waited `shouldSatisfy` Text.isPrefixOf "exit: 0"
 
     it "runs a background command, waits for output, and kills a task" do
-        withTempSession \session -> do
-            started <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 0.3 && echo bgdone\",\"description\":\"bg echo\",\"background\":true}"
             started `shouldSatisfy` Text.isInfixOf "task_id:"
             let taskId = taskIdFrom started
-            snapshot <- runTool session "get_task_output"
+            snapshot <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\"}")
             snapshot `shouldSatisfy` \text ->
                 Text.isInfixOf "still running" text || Text.isInfixOf "bgdone" text
-            finished <- runTool session "get_task_output"
+            finished <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\",\"timeout\":5000}")
             finished `shouldSatisfy` Text.isInfixOf "exit: 0"
             finished `shouldSatisfy` Text.isInfixOf "bgdone"
 
-            longRunning <- runTool session "run_terminal_cmd"
+            longRunning <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 30\",\"description\":\"bg sleep\",\"background\":true}"
             let killId = taskIdFrom longRunning
-            killed <- runTool session "kill_task"
+            killed <- runTool session ghci "kill_task"
                 ("{\"task_id\":\"" <> killId <> "\"}")
             killed `shouldSatisfy` Text.isInfixOf killId
 
     it "does not let a background command overwrite later foreground env" do
-        withTempSession \session -> do
-            started <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 0.4\",\"description\":\"bg sleeper\",\"background\":true}"
             let taskId = taskIdFrom started
-            _ <- runTool session "run_terminal_cmd"
+            _ <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"export GROK_SESSION_VAR=fromfg\",\"description\":\"fg export\"}"
-            _ <- runTool session "get_task_output"
+            _ <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\",\"timeout\":2000}")
-            envOut <- runTool session "run_terminal_cmd"
+            envOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo $GROK_SESSION_VAR\",\"description\":\"show env\"}"
             envOut `shouldSatisfy` Text.isInfixOf "fromfg"
 
     it "returns output already emitted by a still-running background task" do
-        withTempSession \session -> do
-            started <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo liveout; touch flag; sleep 30\",\"description\":\"live snapshot\",\"background\":true}"
             let taskId = taskIdFrom started
             waitForFile (session.grokEnv.toolCwd </> "flag")
-            snap <- runTool session "get_task_output"
+            snap <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\"}")
             snap `shouldSatisfy` Text.isInfixOf "liveout"
-            _ <- runTool session "kill_task"
+            _ <- runTool session ghci "kill_task"
                 ("{\"task_id\":\"" <> taskId <> "\"}")
             pure ()
 
     it "drains a large stderr pipe without hanging the foreground command" do
-        withTempSession \session -> do
-            output <- runTool session "run_terminal_cmd"
+        withTempSession \(session, ghci) -> do
+            output <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"yes x | head -c 262144 >&2; echo drained\",\"timeout\":10000,\"description\":\"fill stderr\"}"
             output `shouldSatisfy` Text.isInfixOf "drained"
             output `shouldSatisfy` Text.isPrefixOf "exit: 0"
 
     it "deletes the env dump when the session closes" do
-        withTempSession \session -> do
+        withTempSession \(session, ghci) -> do
             shell <- readMVar session.grokShell
             doesFileExist shell.shellEnvFile `shouldReturn` True
             closeGrokSession session
@@ -251,10 +253,10 @@ spec = describe "Agent.Tools.Grok" do
 -- Helpers
 --------------------------------------------------------------------------------
 
-runTool :: GrokSession -> Text -> Text -> IO Text
-runTool session name arguments = do
+runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
+runTool session ghci name arguments = do
     result <- dispatchToolCall defaultLoopDispatch
-        (appToolHandlers (grokTools session))
+        (appToolHandlers (grokTools session ghci))
         (functionToolCall "call-1" name arguments)
     pure result.output
 
@@ -273,12 +275,14 @@ taskIdFrom output =
         (tid : _) -> tid
         [] -> error ("missing task_id in:\n" <> Text.unpack output)
 
-withTempSession :: (GrokSession -> IO a) -> IO a
+withTempSession :: ((GrokSession, GhciSession) -> IO a) -> IO a
 withTempSession action = do
     tmp <- getTemporaryDirectory
     bracket
         (mkdtemp (tmp </> "agent-grok-XXXXXX"))
         (\dir -> removeDirectoryRecursive dir)
         \dir -> do
-            session <- newGrokSession (defaultToolEnv dir)
-            action session `finally` closeGrokSession session
+            let env = defaultToolEnv dir
+            session <- newGrokSession env
+            ghci <- newGhciSession env
+            action (session, ghci) `finally` (closeGrokSession session >> closeGhciSession ghci)
