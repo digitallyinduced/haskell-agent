@@ -574,6 +574,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
+    reasoningBuffer <- newIORef ""
+    reasoningLive <- newIORef False
     activityRef <- newIORef "thinking…"
     startedAtRef <- newIORef Nothing
     allowedToolsRef <- newIORef Set.empty
@@ -587,6 +589,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
             , renderThinkingSpinner = spinnerRef
+            , renderReasoningBuffer = reasoningBuffer
+            , renderReasoningLive = reasoningLive
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer

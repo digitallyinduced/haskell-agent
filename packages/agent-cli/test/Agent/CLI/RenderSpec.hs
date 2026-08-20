@@ -121,13 +121,49 @@ spec = do
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
                 body `shouldSatisfy` ("◆ list_dir ." `Text.isInfixOf`)
 
-        it "ignores reasoning deltas" do
+        it "streams reasoning summaries as a thinking block" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 renderEvent config (ReasoningDelta "secret plan")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
+                body `shouldSatisfy` (Text.isInfixOf "Thinking")
+                body `shouldSatisfy` (Text.isInfixOf "secret plan")
+                body `shouldSatisfy` (Text.isInfixOf "Thought for")
+                body `shouldSatisfy` (Text.isInfixOf "\ESC7")
+                body `shouldSatisfy` (Text.isInfixOf "\ESC8")
+
+        it "commits the thinking block before the first tool" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "look at src")
+                renderEvent config
+                    (ToolStarted (functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"))
+                hClose handle
+                body <- Text.readFile path
+                let thoughtIdx = Text.length (fst (Text.breakOn "Thought for" body))
+                    toolIdx = Text.length (fst (Text.breakOn "list_dir" body))
+                thoughtIdx `shouldSatisfy` (< toolIdx)
+                body `shouldSatisfy` (Text.isInfixOf "look at src")
+
+        it "hides reasoning when thinking chrome is off" do
+            withRenderConfig False False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "secret plan")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` (not . Text.isInfixOf "secret plan")
+                body `shouldSatisfy` (not . Text.isInfixOf "Thought for")
 
         it "streams styled TextDelta live in color mode" do
             withRenderConfig False True \config handle path -> do
@@ -215,6 +251,29 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
 
+    describe "formatThinkingBlock" do
+        it "headers a live preview and a finished duration" do
+            formatThinkingBlock False True 1.2 "secret plan"
+                `shouldSatisfy` Text.isInfixOf "Thinking"
+            let finished = formatThinkingBlock False False 1.2 "secret plan"
+            finished `shouldSatisfy` Text.isInfixOf "Thought for 1.2s"
+            finished `shouldSatisfy` Text.isInfixOf "secret plan"
+
+        it "truncates live preview to three wrapped lines" do
+            let raw = Text.unlines (replicate 8 "word")
+                live = formatThinkingBlock False True 0.4 raw
+            Text.count "word" live `shouldBe` 3
+            live `shouldSatisfy` Text.isInfixOf "more"
+
+    describe "wrapThinkingLines" do
+        it "wraps at the thoughts width" do
+            wrapThinkingLines 8 "hello world friends"
+                `shouldBe` ["hello", "world", "friends"]
+
+        it "splits an overlong token" do
+            wrapThinkingLines 4 "abcdefgh"
+                `shouldBe` ["abcd", "efgh"]
+
     describe "visibleDisplayRows" do
         it "counts soft-wrapped rows without ANSI" do
             visibleDisplayRows 5 "abcdefghij" `shouldBe` 2
@@ -233,6 +292,8 @@ withRenderConfig showThinking color action = do
     printed <- newIORef False
     thinking <- newIORef False
     spinner <- newIORef Nothing
+    reasoningBuffer <- newIORef ""
+    reasoningLive <- newIORef False
     modelRef <- newIORef "test-model"
     activityRef <- newIORef "thinking…"
     startedAt <- newIORef Nothing
@@ -247,6 +308,8 @@ withRenderConfig showThinking color action = do
                 { renderShowThinking = showThinking
                 , renderThinkingVisible = thinking
                 , renderThinkingSpinner = spinner
+                , renderReasoningBuffer = reasoningBuffer
+                , renderReasoningLive = reasoningLive
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer

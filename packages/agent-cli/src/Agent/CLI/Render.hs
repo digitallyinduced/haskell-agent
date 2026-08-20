@@ -2,19 +2,23 @@
 module Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
+    , commitThinking
     , formatActivityLine
     , formatElapsed
     , formatLoopError
     , formatLoopErrorColored
     , formatSearchReplaceDiff
+    , formatThinkingBlock
     , formatToolStarted
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
     , summarizeToolCall
+    , thinkingMaxWidth
     , truncateToolOutput
     , visibleDisplayRows
+    , wrapThinkingLines
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
@@ -23,6 +27,7 @@ import Agent.CLI.Style
     , glyphCancel
     , glyphErr
     , glyphOk
+    , glyphThink
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
@@ -67,6 +72,10 @@ data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
     , renderThinkingVisible :: !(IORef Bool)
     , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
+    -- | Accumulated reasoning-summary text for the current model round.
+    , renderReasoningBuffer :: !(IORef Text)
+    -- | True after a live thinking-block paint on stderr.
+    , renderReasoningLive :: !(IORef Bool)
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
@@ -81,28 +90,34 @@ data RenderConfig = RenderConfig
     , renderStartedAt :: !(IORef (Maybe UTCTime))
     }
 
+-- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
+thinkingMaxWidth :: Int
+thinkingMaxWidth = 120
+
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
 renderEvent config event =
     withMVar config.renderLock \_ -> renderEventUnlocked config event
 
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
-    TextDelta delta ->
+    TextDelta delta -> do
+        commitThinkingUnlocked config
         if config.renderColor
             then do
-                clearThinkingUnlocked config
                 modifyIORef' config.renderTextBuffer (<> delta)
                 buffered <- readIORef config.renderTextBuffer
                 redrawLiveAssistant config buffered
             else do
-                clearThinkingUnlocked config
                 writeIORef config.renderPrintedText True
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
-    ReasoningDelta _ -> pure ()
+    ReasoningDelta delta ->
+        appendReasoningUnlocked config delta
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
         writeIORef config.renderLiveActive False
+        writeIORef config.renderReasoningBuffer ""
+        writeIORef config.renderReasoningLive False
         writeIORef config.renderActivityRef "thinking…"
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
@@ -111,12 +126,13 @@ renderEventUnlocked config = \case
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
     -- tool-free turn is the main answer.
     TurnFinished turn -> do
-        clearThinkingUnlocked config
+        commitThinkingUnlocked config
         when config.renderColor do
             didPrint <- finalizeAssistantBuffer config turn.assistantText
             when (didPrint && not (null turn.toolCalls)) do
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
+        commitThinkingUnlocked config
         writeIORef config.renderActivityRef (summarizeToolCall call)
         putTextLn config.renderStderr (formatToolStarted config.renderColor call)
         let extra = formatToolBody config.renderColor call
@@ -243,25 +259,37 @@ isCsiFinal :: Char -> Bool
 isCsiFinal c = c >= '@' && c <= '~'
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
+-- Commits a streamed reasoning block first so cancel/error still leave the
+-- summary in the transcript.
 clearThinking :: RenderConfig -> IO ()
 clearThinking config =
-    withMVar config.renderLock \_ -> clearThinkingUnlocked config
+    withMVar config.renderLock \_ -> commitThinkingUnlocked config
+
+-- | Flush a completed reasoning block to stderr. Safe when none is pending.
+commitThinking :: RenderConfig -> IO ()
+commitThinking config =
+    withMVar config.renderLock \_ -> commitThinkingUnlocked config
 
 startThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
-        visible <- readIORef config.renderThinkingVisible
-        if visible
-            then paintThinkingFrame config 0
-            else do
-                writeIORef config.renderThinkingVisible True
-                paintThinkingFrame config 0
-                tid <- forkIO (spinnerLoop config 0)
-                writeIORef config.renderThinkingSpinner (Just tid)
+        -- A live reasoning block already owns stderr; don't overlay a spinner.
+        live <- readIORef config.renderReasoningLive
+        unless live do
+            visible <- readIORef config.renderThinkingVisible
+            if visible
+                then paintThinkingFrame config 0
+                else do
+                    writeIORef config.renderThinkingVisible True
+                    paintThinkingFrame config 0
+                    tid <- forkIO (spinnerLoop config 0)
+                    writeIORef config.renderThinkingSpinner (Just tid)
 
-clearThinkingUnlocked :: RenderConfig -> IO ()
-clearThinkingUnlocked config = do
+-- | Stop the spinner and erase its in-place status line. Does not commit a
+-- reasoning block; callers that need that use 'commitThinkingUnlocked'.
+stopThinkingSpinnerUnlocked :: RenderConfig -> IO ()
+stopThinkingSpinnerUnlocked config = do
     mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
     case mtid of
         Just tid -> killThread tid
@@ -287,23 +315,146 @@ spinnerLoop config frame = do
 
 paintThinkingFrame :: RenderConfig -> Int -> IO ()
 paintThinkingFrame config frame = do
-    activity <- readIORef config.renderActivityRef
+    live <- readIORef config.renderReasoningLive
+    if live
+        then do
+            buffered <- readIORef config.renderReasoningBuffer
+            elapsed <- thinkingElapsed config
+            redrawLiveReasoning config True elapsed buffered
+        else do
+            activity <- readIORef config.renderActivityRef
+            elapsed <- thinkingElapsed config
+            let frames = spinnerFrames
+                glyph = frames !! (frame `mod` length frames)
+                line =
+                    formatActivityLine
+                        config.renderColor
+                        glyph
+                        activity
+                        elapsed
+            void $ tryIO do
+                Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
+                hFlush config.renderStderr
+
+thinkingElapsed :: RenderConfig -> IO Double
+thinkingElapsed config = do
     started <- readIORef config.renderStartedAt
     now <- getCurrentTime
-    let seconds = case started of
-            Nothing -> 0
-            Just t0 -> realToFrac (diffUTCTime now t0)
-        frames = spinnerFrames
-        glyph = frames !! (frame `mod` length frames)
-        line =
-            formatActivityLine
-                config.renderColor
-                glyph
-                activity
-                seconds
-    void $ tryIO do
-        Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
+    pure $ case started of
+        Nothing -> 0
+        Just t0 -> realToFrac (diffUTCTime now t0)
+
+appendReasoningUnlocked :: RenderConfig -> Text -> IO ()
+appendReasoningUnlocked config delta
+    | Text.null delta = pure ()
+    | not config.renderShowThinking = pure ()
+    | otherwise = do
+        modifyIORef' config.renderReasoningBuffer (<> delta)
+        buffered <- readIORef config.renderReasoningBuffer
+        elapsed <- thinkingElapsed config
+        -- First summary token replaces the one-line spinner; later tokens
+        -- restyle the live truncated block in place. Elapsed time on the
+        -- header updates with each delta rather than a dedicated spinner.
+        stopThinkingSpinnerUnlocked config
+        redrawLiveReasoning config True elapsed buffered
+
+commitThinkingUnlocked :: RenderConfig -> IO ()
+commitThinkingUnlocked config = do
+    stopThinkingSpinnerUnlocked config
+    buffered <- readIORef config.renderReasoningBuffer
+    writeIORef config.renderReasoningBuffer ""
+    if Text.null (Text.strip buffered)
+        then eraseLiveReasoning config
+        else do
+            elapsed <- thinkingElapsed config
+            let painted =
+                    formatThinkingBlock
+                        config.renderColor
+                        False
+                        elapsed
+                        buffered
+            eraseLiveReasoning config
+            Text.hPutStr config.renderStderr painted
+            unless (Text.isSuffixOf "\n" painted) do
+                Text.hPutStr config.renderStderr "\n"
+            hFlush config.renderStderr
+
+redrawLiveReasoning :: RenderConfig -> Bool -> Double -> Text -> IO ()
+redrawLiveReasoning config streaming elapsed raw
+    | Text.null (Text.strip raw) = pure ()
+    | otherwise = do
+        let painted = formatThinkingBlock config.renderColor streaming elapsed raw
+        eraseLiveReasoning config
+        Text.hPutStr config.renderStderr "\ESC7"
+        writeIORef config.renderReasoningLive True
+        Text.hPutStr config.renderStderr painted
         hFlush config.renderStderr
+
+eraseLiveReasoning :: RenderConfig -> IO ()
+eraseLiveReasoning config = do
+    live <- readIORef config.renderReasoningLive
+    when live do
+        Text.hPutStr config.renderStderr $
+            "\ESC8"
+                <> Text.pack (setCursorColumnCode 0)
+                <> Text.pack clearFromCursorToScreenEndCode
+        hFlush config.renderStderr
+    writeIORef config.renderReasoningLive False
+
+-- | Thinking/reasoning block: accented header plus wrapped summary, matching
+-- grok-build's collapsible thought chrome in a linear CLI.
+--
+-- Live (@streaming@) shows a truncated preview so the block cannot grow
+-- without bound while tokens arrive; the committed form keeps the full text
+-- wrapped at 'thinkingMaxWidth'.
+formatThinkingBlock :: Bool -> Bool -> Double -> Text -> Text
+formatThinkingBlock color streaming elapsed raw =
+    let header =
+            if streaming
+                then roleThinking color (glyphThink <> "Thinking…")
+                    <> roleMuted color ("  " <> formatElapsed elapsed)
+                else roleThinking color (glyphThink <> "Thought for " <> formatElapsed elapsed)
+        wrapped = wrapThinkingLines thinkingMaxWidth (Text.strip raw)
+        preview
+            | streaming = take thinkingPreviewLines wrapped
+            | otherwise = wrapped
+        hidden = length wrapped - length preview
+        more
+            | streaming && hidden > 0 =
+                [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
+            | otherwise = []
+        body =
+            map (\line -> roleMuted color (glyphToolAccent <> line)) preview
+                <> more
+    in Text.intercalate "\n" (header : body)
+
+thinkingPreviewLines :: Int
+thinkingPreviewLines = 3
+
+-- | Wrap reasoning text at @width@, splitting on spaces when possible.
+wrapThinkingLines :: Int -> Text -> [Text]
+wrapThinkingLines width text
+    | Text.null text = []
+    | otherwise =
+        concatMap (wrapOne (max 1 width)) (Text.splitOn "\n" text)
+
+wrapOne :: Int -> Text -> [Text]
+wrapOne width line
+    | Text.null line = [""]
+    | Text.length line <= width = [line]
+    | otherwise = go (Text.words line) ""
+  where
+    go [] acc
+        | Text.null acc = []
+        | otherwise = [acc]
+    go (word : rest) acc
+        | Text.null acc && Text.length word > width =
+            let (chunk, leftover) = Text.splitAt width word
+            in chunk : go (leftover : rest) ""
+        | Text.null acc = go rest word
+        | Text.length acc + 1 + Text.length word <= width =
+            go rest (acc <> " " <> word)
+        | otherwise = acc : go (word : rest) ""
 
 -- | One-line live status: spinner, current activity, elapsed time.
 formatActivityLine :: Bool -> Text -> Text -> Double -> Text
