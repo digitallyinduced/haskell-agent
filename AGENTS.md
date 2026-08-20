@@ -20,3 +20,6 @@ we follow the tool defintions that are used by the first party lab harnesses. e.
 # ghci
 
 use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
+
+# haskell
+- Prefer Control.Exception.Safe over Control.Exception
