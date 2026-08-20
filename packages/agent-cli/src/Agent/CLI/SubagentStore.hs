@@ -8,6 +8,7 @@
 -- @
 module Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
+    , isValidSubagentStoreId
     , subagentStoreDir
     , saveSubagentState
     , loadSubagentState
@@ -15,16 +16,17 @@ module Agent.CLI.SubagentStore
 
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Subagents (SubagentId(..))
-import Control.Exception (try)
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.=))
+import Control.Exception.Safe (tryAny)
+import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
+import Data.Char (isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectoryIfMissing
     , doesFileExist
+    , renameFile
     )
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
@@ -46,9 +48,25 @@ instance FromJSON SubagentDiskMeta where
             <$> o .:? "previousResponseId"
             <*> o .:? "agentType"
 
-subagentStoreDir :: FilePath -> SubagentId -> FilePath
-subagentStoreDir sessionDir agentId =
-    sessionDir </> "agents" </> Text.unpack agentId.unSubagentId
+-- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
+-- traversal so resume paths cannot escape @agents/@.
+isValidSubagentStoreId :: SubagentId -> Bool
+isValidSubagentStoreId (SubagentId text) =
+    let name = Text.unpack text
+    in not (null name)
+        && all isSafeNameChar name
+        && name /= "."
+        && name /= ".."
+        && "agent-" `Text.isPrefixOf` text
+  where
+    isSafeNameChar c = isAlphaNum c || c == '-' || c == '_'
+
+subagentStoreDir :: FilePath -> SubagentId -> Either Text FilePath
+subagentStoreDir sessionDir agentId
+    | not (isValidSubagentStoreId agentId) =
+        Left ("invalid subagent id for store path: " <> agentId.unSubagentId)
+    | otherwise =
+        Right (sessionDir </> "agents" </> Text.unpack agentId.unSubagentId)
 
 saveSubagentState
     :: FilePath
@@ -56,45 +74,62 @@ saveSubagentState
     -> [ResponseItem]
     -> Maybe Text
     -> Maybe Text
-    -> IO ()
-saveSubagentState sessionDir agentId items previous agentType = do
-    let dir = subagentStoreDir sessionDir agentId
-        metaPath = dir </> "meta.json"
-        transcriptPath = dir </> "transcript.json"
-    createDirectoryIfMissing True dir
-    _ <- try @IOError (setFileMode dir 0o700)
-    LBS.writeFile metaPath $ Aeson.encode SubagentDiskMeta
-        { diskPreviousResponseId = previous
-        , diskAgentType = agentType
-        }
-    _ <- try @IOError (setFileMode metaPath 0o600)
-    LBS.writeFile transcriptPath (Aeson.encode items)
-    _ <- try @IOError (setFileMode transcriptPath 0o600)
-    pure ()
+    -> IO (Either Text ())
+saveSubagentState sessionDir agentId items previous agentType =
+    case subagentStoreDir sessionDir agentId of
+        Left err -> pure (Left err)
+        Right dir -> do
+            let metaPath = dir </> "meta.json"
+                transcriptPath = dir </> "transcript.json"
+                metaTmp = metaPath <> ".tmp"
+                transcriptTmp = transcriptPath <> ".tmp"
+            createDirectoryIfMissing True dir
+            _ <- tryAny (setFileMode dir 0o700)
+            LBS.writeFile metaTmp $ Aeson.encode SubagentDiskMeta
+                { diskPreviousResponseId = previous
+                , diskAgentType = agentType
+                }
+            _ <- tryAny (setFileMode metaTmp 0o600)
+            LBS.writeFile transcriptTmp (Aeson.encode items)
+            _ <- tryAny (setFileMode transcriptTmp 0o600)
+            renameFile metaTmp metaPath
+            renameFile transcriptTmp transcriptPath
+            pure (Right ())
 
 loadSubagentState
     :: FilePath
     -> SubagentId
-    -> IO (Maybe ([ResponseItem], SubagentDiskMeta))
-loadSubagentState sessionDir agentId = do
-    let dir = subagentStoreDir sessionDir agentId
-        metaPath = dir </> "meta.json"
-        transcriptPath = dir </> "transcript.json"
-    hasMeta <- doesFileExist metaPath
-    hasTranscript <- doesFileExist transcriptPath
-    if not (hasMeta || hasTranscript)
-        then pure Nothing
-        else do
-            meta <- if hasMeta
-                then do
-                    raw <- LBS.readFile metaPath
-                    pure $ fromMaybe emptyMeta (Aeson.decode raw)
-                else pure emptyMeta
-            items <- if hasTranscript
-                then do
-                    raw <- LBS.readFile transcriptPath
-                    pure $ fromMaybe [] (Aeson.decode raw)
-                else pure []
-            pure $ Just (items, meta)
+    -> IO (Either Text (Maybe ([ResponseItem], SubagentDiskMeta)))
+loadSubagentState sessionDir agentId =
+    case subagentStoreDir sessionDir agentId of
+        Left err -> pure (Left err)
+        Right dir -> do
+            let metaPath = dir </> "meta.json"
+                transcriptPath = dir </> "transcript.json"
+            hasMeta <- doesFileExist metaPath
+            hasTranscript <- doesFileExist transcriptPath
+            if not (hasMeta || hasTranscript)
+                then pure (Right Nothing)
+                else do
+                    metaResult <- if hasMeta
+                        then decodeFile metaPath
+                        else pure (Right (SubagentDiskMeta Nothing Nothing))
+                    itemsResult <- if hasTranscript
+                        then decodeFile transcriptPath
+                        else pure (Right [])
+                    pure $ case (metaResult, itemsResult) of
+                        (Left err, _) -> Left err
+                        (_, Left err) -> Left err
+                        (Right meta, Right items) ->
+                            Right (Just (items, meta))
   where
-    emptyMeta = SubagentDiskMeta Nothing Nothing
+    decodeFile path = do
+        raw <- LBS.readFile path
+        case Aeson.eitherDecode raw of
+            Left err ->
+                pure $ Left $
+                    "failed to decode "
+                        <> Text.pack path
+                        <> ": "
+                        <> Text.pack err
+            Right value -> pure (Right value)

@@ -1093,14 +1093,19 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
+    -- Create the session directory before tools run so first-turn subagents
+    -- can persist under agents/<id>/ as they complete.
     case persist of
         Just slotRef -> do
-            slot <- readIORef slotRef
-            case slot of
-                Right handle -> do
-                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                    writeIORef storeRoot (Just handle.sessionDir)
-                Left _ -> pure ()
+            created <- isLeftSlot <$> readIORef slotRef
+            handle <- ensureSession slotRef
+            writeIORef planMode.planSessionDir (Just handle.sessionDir)
+            writeIORef storeRoot (Just handle.sessionDir)
+            when created do
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color
+                        (glyphSession <> "session: " <> handle.sessionMeta.metaId))
         Nothing -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
@@ -1167,17 +1172,9 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Nothing -> pure ()
                 Just slotRef -> do
                     now <- getCurrentTime
-                    created <- isLeftSlot <$> readIORef slotRef
                     handle <- ensureSession slotRef
                     writeIORef planMode.planSessionDir (Just handle.sessionDir)
                     writeIORef storeRoot (Just handle.sessionDir)
-                    if created
-                        then do
-                            color <- resolveColor stderr
-                            putTextLn stderr
-                                (roleMuted color
-                                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
-                        else pure ()
                     let turn = SessionTurn
                             { turnAt = now
                             , turnUserText = promptText
@@ -1450,7 +1447,22 @@ persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = d
             items <- readIORef transcriptRef
             previous <- getPreviousResponseId registry agentId
             agentType <- lookupAgentType typesRef agentId
-            saveSubagentState sessionDir agentId items previous agentType
+            _ <- saveSubagentState sessionDir agentId items previous agentType
+            pure ()
+
+flushAllSubagentSnapshots
+    :: SubagentStoreRoot
+    -> SubagentRegistry
+    -> IORef (Map SubagentId SubagentSession)
+    -> IORef (Map SubagentId Text)
+    -> IO ()
+flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
+    sessions <- readIORef sessionsRef
+    mapM_
+        (\(agentId, session) ->
+            persistSubagentSnapshot storeRootRef registry typesRef agentId
+                session.subSessionTranscript)
+        (Map.toList sessions)
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
 -- 'resume_agent' / 'resume_from' can continue the prior transcript.
@@ -1475,19 +1487,32 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                 pure (Left "no session directory; cannot restore subagent from disk")
             Just sessionDir ->
                 loadSubagentState sessionDir agentId >>= \case
-                    Nothing ->
-                        pure (Left ("no persisted transcript for " <> agentId.unSubagentId))
-                    Just (items, meta) -> do
-                        _ <- restoreSubagent registry agentId Nothing 1 Nothing
-                            meta.diskPreviousResponseId
-                        case meta.diskAgentType of
-                            Just agentType -> recordAgentType typesRef agentId agentType
-                            Nothing -> pure ()
-                        transcript <- newIORef items
-                        let session = SubagentSession { subSessionTranscript = transcript }
-                        atomicModifyIORef' sessionsRef \m ->
-                            (Map.insert agentId session m, ())
-                        pure (Right ())
+                    Left err -> pure (Left err)
+                    Right Nothing ->
+                        -- Same-process close with no disk yet: still reopen.
+                        reopenInMemory Nothing
+                    Right (Just (items, meta)) -> do
+                        result <- reopenInMemory meta.diskPreviousResponseId
+                        case result of
+                            Left err -> pure (Left err)
+                            Right () -> do
+                                case meta.diskAgentType of
+                                    Just agentType ->
+                                        recordAgentType typesRef agentId agentType
+                                    Nothing -> pure ()
+                                transcript <- newIORef items
+                                let session =
+                                        SubagentSession
+                                            { subSessionTranscript = transcript
+                                            }
+                                atomicModifyIORef' sessionsRef \m ->
+                                    (Map.insert agentId session m, ())
+                                pure (Right ())
+    reopenInMemory previous = do
+        restored <- restoreSubagent registry agentId Nothing 1 Nothing previous
+        pure $ case restored of
+            Left err -> Left err
+            Right _ -> Right ()
 
 -- | Serialize OpenAI WebSocket turns: parent and children share one connection,
 -- and 'receiveWsResponse' is not multiplexed.
@@ -1675,17 +1700,15 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
             mroot <- readIORef storeRootRef
             loaded <- case mroot of
                 Just sessionDir -> loadSubagentState sessionDir agentId
-                Nothing -> pure Nothing
-            transcript <- newIORef $ case loaded of
-                Just (items, _) -> items
-                Nothing -> []
-            case loaded of
-                Just (_, meta) ->
-                    case meta.diskAgentType of
-                        Just agentType ->
-                            atomicModifyIORef' typesRef \m ->
-                                (Map.insertWith (\_ new -> new) agentId agentType m, ())
-                        Nothing -> pure ()
+                Nothing -> pure (Right Nothing)
+            let (items, meta) = case loaded of
+                    Right (Just (xs, m)) -> (xs, Just m)
+                    _ -> ([], Nothing)
+            transcript <- newIORef items
+            case meta >>= (.diskAgentType) of
+                Just agentType ->
+                    atomicModifyIORef' typesRef \m ->
+                        (Map.insertWith (\_ new -> new) agentId agentType m, ())
                 Nothing -> pure ()
             let session = SubagentSession { subSessionTranscript = transcript }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())

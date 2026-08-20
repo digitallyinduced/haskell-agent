@@ -219,3 +219,22 @@ spec = describe "Agent.Subagents" do
         (statuses, timedOut) <- waitSubagents registry [agentId] 15000
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "follow"))
+
+    it "reopens a closed agent via restoreSubagent" do
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "r"
+                , finalText = Just prompt
+                , turnsUsed = 1
+                })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        _ <- closeSubagent registry agentId
+        status0 <- getStatus registry agentId
+        status0 `shouldBe` Closed
+        Right _ <- restoreSubagent registry agentId Nothing 1 Nothing (Just "prev")
+        status1 <- getStatus registry agentId
+        status1 `shouldBe` Completed Nothing
+        previous <- getPreviousResponseId registry agentId
+        previous `shouldBe` Just "prev"
