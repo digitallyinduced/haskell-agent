@@ -64,6 +64,8 @@ data CliOptions = CliOptions
     , optPromptFile :: !(Maybe FilePath)
     , optResume :: !(Maybe Text)
     , optSaveSession :: !Bool
+    , optAgentsMd :: !Bool
+      -- ^ Discover and inject AGENTS.md at session start (default: True).
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -80,6 +82,7 @@ defaultCliOptions = CliOptions
     , optPromptFile = Nothing
     , optResume = Nothing
     , optSaveSession = False
+    , optAgentsMd = True
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -156,6 +159,10 @@ parseOptions options = \case
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->
         parseOptions options { optSaveSession = True } rest
+    "--agents-md" : rest ->
+        parseOptions options { optAgentsMd = True } rest
+    "--no-agents-md" : rest ->
+        parseOptions options { optAgentsMd = False } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -207,6 +214,8 @@ usage = unlines
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
     , "      --save-session      Persist a one-shot (-p) run as a session"
+    , "      --agents-md         Discover and inject AGENTS.md (default)"
+    , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"

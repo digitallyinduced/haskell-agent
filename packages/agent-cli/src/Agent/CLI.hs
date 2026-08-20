@@ -27,6 +27,14 @@ import Agent.CLI.Session
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
+import Agent.ProjectInstructions
+    ( DiscoverOptions(..)
+    , defaultDiscoverOptions
+    , discoverProjectInstructions
+    , formatAgentsMdForProvider
+    , globalAgentsHomeDir
+    , loadedInstructionFiles
+    )
 import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
@@ -46,7 +54,7 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (finally, try)
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -168,6 +176,7 @@ runAgent options = do
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
         prompt <- loadPrompt options
+        agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
         case provider of
@@ -175,7 +184,7 @@ runAgent options = do
                 try @CodexAuthFailed
                     (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                         runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist
+                            initialPrevious persist agentsContext
                             (openAiBackend conn (readIORef paramsRef) transcriptRef))
                     >>= \case
                         Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
@@ -185,7 +194,7 @@ runAgent options = do
                 credential <- firstCredential loaded
                 let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
                 runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
+                    initialPrevious persist agentsContext backend
             OpenRouterProvider -> do
                 openRouterOptions <- OpenRouter.clientOptionsFromEnv
                 credential <- firstCredential loaded
@@ -193,7 +202,7 @@ runAgent options = do
                         openRouterBackend openRouterOptions credential
                             (readIORef paramsRef) transcriptRef
                 runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
+                    initialPrevious persist agentsContext backend
 
 preparePersistence
     :: CliOptions
@@ -258,9 +267,10 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IORef (Maybe Text)
     -> Backend
     -> IO ()
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -291,10 +301,11 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
             }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config render previous printed transcriptRef persist text
+            ok <- runOneTurn config render previous printed transcriptRef persist agentsContext text
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
-            repl config render provider previous printed paramsRef policyRef transcriptRef persist
+            repl config render provider previous printed paramsRef policyRef
+                transcriptRef persist agentsContext
 
 repl
     :: LoopConfig
@@ -306,8 +317,9 @@ repl
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IORef (Maybe Text)
     -> IO ()
-repl config render provider previous printed paramsRef policyRef transcriptRef persist = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist agentsContext = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -323,7 +335,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist text
+                            transcriptRef persist agentsContext text
                         putTrailingNewline printed
                         continue
                     ReplShowEffort -> do
@@ -405,7 +417,8 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
   where
     continue =
-        repl config render provider previous printed paramsRef policyRef transcriptRef persist
+        repl config render provider previous printed paramsRef policyRef
+            transcriptRef persist agentsContext
 
 runOneTurn
     :: LoopConfig
@@ -414,12 +427,18 @@ runOneTurn
     -> IORef Bool
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IORef (Maybe Text)
     -> Text
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist prompt = do
+runOneTurn config render previous printed transcriptRef persist agentsContext prompt = do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
-    result <- runLoop config prev prompt
+    pendingAgents <- atomicModifyIORef' agentsContext \pending -> (Nothing, pending)
+    let inputs = case pendingAgents of
+            Just agents | null beforeItems && isNothing prev ->
+                [UserMessage agents, UserMessage prompt]
+            _ -> [UserMessage prompt]
+    result <- runLoopWith config prev inputs
     clearThinking render
     case result of
         Left err -> do
@@ -460,6 +479,37 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                     writeIORef slotRef (Right handle')
             pure True
 
+-- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
+-- whatever instructions were already in history.
+loadAgentsContext
+    :: CliOptions
+    -> Provider
+    -> FilePath
+    -> FilePath
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (IORef (Maybe Text))
+loadAgentsContext options provider home cwd initialItems initialPrevious
+    | not options.optAgentsMd = newIORef Nothing
+    | not (null initialItems) || isJust initialPrevious = newIORef Nothing
+    | otherwise = do
+        let discoverOptions = DiscoverOptions
+                { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
+                , discoverGlobalDir = Just (globalAgentsHomeDir provider home)
+                , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
+                }
+        loaded <- discoverProjectInstructions discoverOptions cwd
+        let files = loadedInstructionFiles loaded
+        case formatAgentsMdForProvider provider cwd loaded of
+            Nothing -> newIORef Nothing
+            Just text -> do
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color
+                        ("agents.md: loaded "
+                            <> Text.pack (show (length files))
+                            <> if length files == 1 then " file" else " files"))
+                newIORef (Just text)
 
 -- | Color when the handle is a TTY and NO_COLOR is unset.
 resolveColor :: Handle -> IO Bool

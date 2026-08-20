@@ -88,6 +88,18 @@ spec = do
         it "rejects --resume with --worktree" do
             parseArgs ["--resume", "abc", "--worktree"] `shouldSatisfy` isLeft
 
+        it "parses --agents-md and --no-agents-md" do
+            parseArgs ["--no-agents-md", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optAgentsMd = False
+                    })
+            parseArgs ["--no-agents-md", "--agents-md", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optAgentsMd = True
+                    })
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False

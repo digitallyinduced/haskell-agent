@@ -14,6 +14,7 @@ module Agent.Loop
     , defaultLoopMaxTurns
     , defaultLoopDispatch
     , runLoop
+    , runLoopWith
     ) where
 
 import Agent.Error (ApiError)
@@ -100,7 +101,17 @@ runLoop
     -> Maybe Text
     -> Text
     -> IO (Either LoopError LoopResult)
-runLoop config0 previousResponseId prompt = do
+runLoop config previousResponseId prompt =
+    runLoopWith config previousResponseId [UserMessage prompt]
+
+-- | Like 'runLoop', but the first turn may include leading context items
+-- (for example AGENTS.md) before the user message.
+runLoopWith
+    :: LoopConfig
+    -> Maybe Text
+    -> [TurnInput]
+    -> IO (Either LoopError LoopResult)
+runLoopWith config0 previousResponseId initialInputs = do
     -- Tools run with mapConcurrently. Serialize onEvent so a printer
     -- (hPutStrLn on String is not atomic) cannot interleave characters.
     eventLock <- newMVar ()
@@ -134,7 +145,7 @@ runLoop config0 previousResponseId prompt = do
                                     results <- mapConcurrently (runOne config) turn.toolCalls
                                     go (Just turn.responseId) nextTurnsUsed
                                         (map CompletedTool results) (Just turn)
-    go previousResponseId 0 [UserMessage prompt] Nothing
+    go previousResponseId 0 initialInputs Nothing
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do
