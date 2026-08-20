@@ -65,6 +65,23 @@ spec = describe "Agent.CLI.Project" do
                 createDirectoryIfMissing True nested
                 resolveProjectRoot nested `shouldReturn` expected
 
+        it "uses the primary worktree for linked worktrees" $
+            withTempDir "agent-wt-" \root -> do
+                let mainRepo = root </> "main"
+                    linked = root </> "linked"
+                createDirectoryIfMissing True mainRepo
+                git_ mainRepo ["init"]
+                git_ mainRepo ["config", "user.email", "test@example.com"]
+                git_ mainRepo ["config", "user.name", "Test"]
+                git_ mainRepo ["config", "commit.gpgsign", "false"]
+                git_ mainRepo ["commit", "--allow-empty", "-m", "init"]
+                git_ mainRepo ["worktree", "add", "--detach", linked]
+                expected <- canonicalizePath mainRepo
+                resolveProjectRoot linked `shouldReturn` expected
+                saveProjectAutoApprove expected True
+                settings <- loadProjectSettings =<< resolveProjectRoot linked
+                settings.settingsAutoApprove `shouldBe` True
+
         it "falls back to cwd outside a git repo" $
             withTempDir "agent-nogit-" \root -> do
                 expected <- canonicalizePath root
