@@ -18,14 +18,14 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, concurrently, race, wait)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
-import Control.Exception (SomeException, evaluate, try)
+import Control.Exception (evaluate)
+import Control.Exception.Safe (SomeException, catchIO, throwIO, try)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
 import qualified Data.ByteString as BS
-import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory
     ( canonicalizePath
@@ -37,6 +37,7 @@ import System.Directory
     , renameFile
     )
 import System.Exit (ExitCode(..))
+import System.IO.Error (isAlreadyInUseError)
 import System.FilePath
     ( addTrailingPathSeparator
     , isAbsolute
@@ -100,8 +101,24 @@ isInside root path =
     let root' = addTrailingPathSeparator root
     in path == root || root' `isPrefixOf` path
 
+-- | GHC Handle locks throw @isAlreadyInUseError@ when another Handle
+-- still has the path open. Retry briefly so overlapping tool calls
+-- (e.g. parallel @search_replace@) can wait the lock out.
+lockRetryDelaysUs :: [Int]
+lockRetryDelaysUs = [1000, 2000, 4000, 8000, 16000]
+
+retryOnBusy :: IO a -> IO a
+retryOnBusy action = go lockRetryDelaysUs
+  where
+    go [] = action
+    go (delayUs : rest) =
+        catchIO action \err ->
+            if isAlreadyInUseError err
+                then threadDelay delayUs >> go rest
+                else throwIO err
+
 readTextFile :: FilePath -> IO (Either Text Text)
-readTextFile path = try @SomeException (BS.readFile path) >>= \case
+readTextFile path = try @_ @SomeException (retryOnBusy (BS.readFile path)) >>= \case
     Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
     Right bytes
         | BS.elem 0 (BS.take 8192 bytes) ->
@@ -112,25 +129,25 @@ readTextFile path = try @SomeException (BS.readFile path) >>= \case
 writeTextFile :: FilePath -> Text -> IO (Either Text ())
 writeTextFile path content = do
     createDirectoryIfMissing True (takeDirectory path)
-    try @SomeException (Text.writeFile path content) >>= \case
+    try @_ @SomeException (retryOnBusy (BS.writeFile path (encodeUtf8 content))) >>= \case
         Left err -> pure $ Left $ "Failed to write file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
 deleteTextFile :: FilePath -> IO (Either Text ())
 deleteTextFile path =
-    try @SomeException (removeFile path) >>= \case
+    try @_ @SomeException (removeFile path) >>= \case
         Left err -> pure $ Left $ "Failed to delete file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
 renameTextFile :: FilePath -> FilePath -> IO (Either Text ())
 renameTextFile from to = do
     createDirectoryIfMissing True (takeDirectory to)
-    try @SomeException (renameFile from to) >>= \case
+    try @_ @SomeException (renameFile from to) >>= \case
         Left err -> pure $ Left $ "Failed to move file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
 listDirectoryEntries :: FilePath -> IO (Either Text [(FilePath, Bool)])
-listDirectoryEntries path = try @SomeException (listDirectory path) >>= \case
+listDirectoryEntries path = try @_ @SomeException (listDirectory path) >>= \case
     Left err -> pure $ Left $ "Failed to list directory: " <> Text.pack (show err)
     Right names -> Right <$> mapM (classify path) names
   where
@@ -178,7 +195,7 @@ runShellCommand env workdir command timeoutMs = do
             , std_err = CreatePipe
             , create_group = True
             }
-    try @SomeException (createProcess spec) >>= \case
+    try @_ @SomeException (createProcess spec) >>= \case
         Left err -> pure CommandResult
             { commandExitCode = Just 127
             , commandStdout = ""
@@ -198,7 +215,7 @@ runShellCommand env workdir command timeoutMs = do
             raced <- race (threadDelay (max 1 timeoutMs * 1000)) collect
             case raced of
                 Left () -> do
-                    _ <- try @SomeException (interruptProcessGroupOf processHandle)
+                    _ <- try @_ @SomeException (interruptProcessGroupOf processHandle)
                     pure CommandResult
                         { commandExitCode = Nothing
                         , commandStdout = ""
@@ -237,7 +254,7 @@ startShellCommand env workdir command = do
             , std_err = CreatePipe
             , create_group = True
             }
-    try @SomeException (createProcess spec) >>= \case
+    try @_ @SomeException (createProcess spec) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right (Just hin, Just hout, Just herr, processHandle) -> do
             hClose hin
@@ -247,7 +264,7 @@ startShellCommand env workdir command = do
             outA <- async (drainHandle hout stdoutRef)
             errA <- async (drainHandle herr stderrRef)
             _ <- forkIO do
-                result <- try @SomeException do
+                result <- try @_ @SomeException do
                     code <- waitForProcess processHandle
                     outBytes <- wait outA
                     errBytes <- wait errA

@@ -76,6 +76,7 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
                     , Agent.Tools.GrokSpec
+                    , Agent.Tools.IOSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
@@ -84,6 +85,7 @@ test-suite agent-core-test
                     , directory
                     , filepath
                     , hspec
+                    , safe-exceptions
                     , text
                     , time
                     , bytestring
