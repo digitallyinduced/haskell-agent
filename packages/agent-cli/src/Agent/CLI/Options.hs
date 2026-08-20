@@ -243,6 +243,7 @@ usage = unlines
     , "message; /paste --send [TEXT] sends immediately. /attachments lists queued"
     , "images; /clear-attachments drops them. Linux uses wl-paste/xclip."
     , "with an optional caption. /session prints the current session id."
+    , "/clear resets the live conversation; /new starts a fresh session id."
     , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits."

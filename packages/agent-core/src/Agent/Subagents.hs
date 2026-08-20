@@ -19,6 +19,7 @@ module Agent.Subagents
     , setSubagentRunner
     , setSubagentOnComplete
     , closeSubagentRegistry
+    , resetSubagentRegistry
     , spawnSubagent
     , restoreSubagent
     , waitSubagents
@@ -180,6 +181,15 @@ closeSubagentRegistry registry = do
         writeTVar registry.registryClosed True
         Map.elems <$> readTVar registry.registryAgents
     mapM_ (shutdownRecord registry) records
+
+-- | Shut down live children and reopen the registry for a fresh session.
+resetSubagentRegistry :: SubagentRegistry -> IO ()
+resetSubagentRegistry registry = do
+    closeSubagentRegistry registry
+    atomically do
+        writeTVar registry.registryAgents Map.empty
+        writeTVar registry.registryLiveCount 0
+        writeTVar registry.registryClosed False
 
 spawnSubagent
     :: SubagentRegistry

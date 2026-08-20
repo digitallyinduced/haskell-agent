@@ -6,6 +6,7 @@ module Agent.CLI.Session
     , SessionCreate(..)
     , createSession
     , appendTurn
+    , appendTurnKeepTitle
     , loadSession
     , listSessions
     , sessionsRoot
@@ -232,6 +233,24 @@ appendTurn handle turn = do
             }
     writeSessionMeta handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
+
+-- | Like 'appendTurn', but never derives the session title from this turn.
+-- Used for synthetic markers such as @/new@ and @/clear@.
+appendTurnKeepTitle :: SessionHandle -> SessionTurn -> IO SessionHandle
+appendTurnKeepTitle handle turn = do
+    let path = handle.sessionTranscriptPath
+    existed <- doesFileExist path
+    LBS.appendFile path (Aeson.encode turn <> "\n")
+    if existed then pure () else setFileMode path 0o600
+    now <- getCurrentTime
+    let meta0 = handle.sessionMeta
+        meta = meta0
+            { metaUpdatedAt = now
+            , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
+            }
+    writeSessionMeta handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
 
 loadSession :: FilePath -> Text -> IO (Either String (SessionMeta, [SessionTurn]))
 loadSession root sessionId = do
