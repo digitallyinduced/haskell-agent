@@ -220,4 +220,6 @@ usage = unlines
     , "reasoning effort. /model [NAME] shows or changes the model."
     , "/always-approve (or :yolo) toggles auto-approve."
     , "/session prints the current session id. Ctrl-D or :q exits."
+    , "Under `repl` (nix develop), :reload returns to GHCi, reloads modules,"
+    , "and resumes the same session."
     ]

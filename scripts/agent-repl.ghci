@@ -1,0 +1,6 @@
+-- Driven by the `repl` shortcut from nix develop.
+-- The wrapper waits for "Ok, N modules loaded." then runs:
+--   :module +Agent.CLI
+--   :cmd afterDev =<< devMain
+-- Agent :reload returns DevReload; afterDev asks GHCi to :reload and re-enter.
+:set prompt "ghci> "

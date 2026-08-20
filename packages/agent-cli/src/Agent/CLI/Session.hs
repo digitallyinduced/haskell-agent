@@ -12,6 +12,10 @@ module Agent.CLI.Session
     , sessionTitleFromPrompt
     , writeSessionMeta
     , ensureSession
+    , devResumePointerPath
+    , writeDevResumePointer
+    , readDevResumePointer
+    , clearDevResumePointer
     ) where
 
 import Agent.OpenAI.Responses.Types (ResponseItem)
@@ -23,7 +27,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.List (sortOn)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -51,6 +55,34 @@ sessionSchemaVersion = 1
 -- | @~/.haskell-agent/sessions@ given the user's home directory.
 sessionsRoot :: FilePath -> FilePath
 sessionsRoot home = home </> ".haskell-agent" </> "sessions"
+
+-- | Pointer written before a GHCi @:reload@ so @devMain@ can resume.
+devResumePointerPath :: FilePath -> FilePath
+devResumePointerPath home = home </> ".haskell-agent" </> "dev-resume"
+
+writeDevResumePointer :: FilePath -> Text -> IO ()
+writeDevResumePointer home sessionId = do
+    let root = home </> ".haskell-agent"
+        path = devResumePointerPath home
+    ensurePrivateDir root
+    Text.writeFile path (sessionId <> "\n")
+    setFileMode path 0o600
+
+readDevResumePointer :: FilePath -> IO (Maybe Text)
+readDevResumePointer home = do
+    let path = devResumePointerPath home
+    exists <- doesFileExist path
+    if not exists
+        then pure Nothing
+        else do
+            raw <- Text.strip <$> Text.readFile path
+            pure (if Text.null raw then Nothing else Just raw)
+
+clearDevResumePointer :: FilePath -> IO ()
+clearDevResumePointer home = do
+    let path = devResumePointerPath home
+    _ <- try @IOError (removeFile path)
+    pure ()
 
 data SessionMeta = SessionMeta
     { metaVersion :: !Int

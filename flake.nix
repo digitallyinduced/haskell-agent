@@ -112,6 +112,41 @@
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
+
+                # Opens cabal repl on the agent-cli library and enters the
+                # GHCi :cmd loop that reloads + resumes after agent :reload.
+                # expect waits for modules to load, then starts the agent
+                # (ghci scripts run before cabal loads the package).
+                agentRepl = pkgs.writeShellScriptBin "repl" ''
+                    set -euo pipefail
+                    root="$(${pkgs.git}/bin/git rev-parse --show-toplevel 2>/dev/null || pwd)"
+                    script="$root/scripts/agent-repl.ghci"
+                    if [ ! -f "$script" ]; then
+                      echo "repl: missing $script" >&2
+                      exit 1
+                    fi
+                    cabal="${haskellPackages.cabal-install}/bin/cabal"
+                    expect_bin="${pkgs.expect}/bin/expect"
+                    export AGENT_REPL_SCRIPT="$script"
+                    export AGENT_REPL_CABAL="$cabal"
+                    exec "$expect_bin" -c '
+                      set timeout -1
+                      set cabal $env(AGENT_REPL_CABAL)
+                      set script $env(AGENT_REPL_SCRIPT)
+                      spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script
+                      expect {
+                        -re {Ok, [0-9]+ modules? loaded\.} {}
+                        eof {
+                          puts stderr "repl: cabal repl exited before modules loaded"
+                          exit 1
+                        }
+                      }
+                      send -- ":module +Agent.CLI\r"
+                      expect -re {ghci>}
+                      send -- ":cmd afterDev =<< devMain\r"
+                      interact
+                    '
+                '';
             in
             {
                 packages.default = agentCliExecutable;
@@ -148,7 +183,8 @@
                         ++ (with pkgs; [
                             cabal2nix
                             ripgrep
-                        ]);
+                        ])
+                        ++ [ agentRepl ];
                 };
 
                 checks = {
