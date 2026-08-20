@@ -15,6 +15,10 @@ import Agent.CLI.Clipboard
     , readClipboardImages
     )
 import Agent.CLI.Command
+import Agent.CLI.Compaction
+    ( CompactOutcome(..)
+    , runProviderCompact
+    )
 import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
 import Agent.CLI.Interrupt
     ( InterruptState
@@ -72,6 +76,10 @@ import Agent.ProjectInstructions
     , formatAgentsMdForProvider
     , globalAgentsHomeDir
     , loadedInstructionFiles
+    )
+import Agent.OpenAI.Compaction
+    ( compactSessionUserText
+    , isCompactSessionTurn
     )
 import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
@@ -346,7 +354,7 @@ runAgent options = do
                 (schemasFromAppTools provider tools) effort
             policy = resolveApprovalPolicy options isTty
                 projectSettings.settingsAutoApprove
-            initialItems = maybe [] (concatMap (.turnItems) . snd) resumed
+            initialItems = maybe [] (foldSessionItems . snd) resumed
             initialPrevious = resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
@@ -394,7 +402,7 @@ runAgent options = do
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                    initialPrevious persist projectRoot Nothing agentsContext escPaused interrupt
+                                    initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
                                     noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
@@ -766,6 +774,45 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplToggleAlwaysApprove -> do
                         toggleAlwaysApprove policyRef projectRoot
                         continue
+                    ReplCompact focus -> do
+                        color <- resolveColor stderr
+                        result <- runProviderCompact provider tokenProvider paramsRef transcriptRef focus
+                        case result of
+                            Left err -> do
+                                Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right outcome -> do
+                                writeIORef transcriptRef outcome.compactHistory
+                                writeIORef previous Nothing
+                                Text.hPutStrLn stderr $ roleMuted color $
+                                    glyphSession
+                                        <> "compacted "
+                                        <> Text.pack (show outcome.compactBeforeTokens)
+                                        <> " → "
+                                        <> Text.pack (show outcome.compactAfterTokens)
+                                        <> " tokens ("
+                                        <> Text.pack (show (length outcome.compactHistory))
+                                        <> " items)"
+                                case persist of
+                                    Nothing -> pure ()
+                                    Just slotRef -> do
+                                        now <- getCurrentTime
+                                        handle <- ensureSession slotRef
+                                        let turn = SessionTurn
+                                                { turnAt = now
+                                                , turnUserText = compactSessionUserText focus
+                                                , turnAssistantText = Just outcome.compactSummary
+                                                , turnResponseId = Nothing
+                                                , turnItems = outcome.compactHistory
+                                                }
+                                        handle' <- appendTurn handle turn
+                                        writeIORef slotRef (Right handle')
+                                        writeSessionMeta handle'.sessionMetaPath $
+                                            handle'.sessionMeta
+                                                { metaLastResponseId = Nothing
+                                                , metaUpdatedAt = now
+                                                }
+                                continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash planMode persist maybeDescription
                             config render previous printed transcriptRef agentsContext escPaused interrupt
@@ -1346,6 +1393,18 @@ childApprove policy tools call = case policy of
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
 -- xAI/OpenRouter force @store = false@ and replay local transcripts instead.
+
+-- | Apply compact turns as full transcript replacements when resuming.
+foldSessionItems :: [SessionTurn] -> [ResponseItem]
+foldSessionItems = go []
+  where
+    go acc [] = acc
+    go acc (turn:rest)
+        | isCompactSessionTurn turn.turnUserText
+            && not (null turn.turnItems) =
+            go turn.turnItems rest
+        | otherwise = go (acc <> turn.turnItems) rest
+
 requestParams
     :: Provider
     -> Text

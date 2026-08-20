@@ -230,6 +230,8 @@ usage = unlines
     , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model opens the model picker; /model NAME sets it."
+    , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
+    , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"

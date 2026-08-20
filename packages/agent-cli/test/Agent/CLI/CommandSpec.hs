@@ -54,6 +54,11 @@ spec = do
             parseReplLine "/reload-auth now"
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
+        it "compacts with optional focus text" do
+            parseReplLine "/compact" `shouldBe` ReplCompact Nothing
+            parseReplLine "/compact focus auth"
+                `shouldBe` ReplCompact (Just "focus auth")
+
         it "pastes clipboard images with an optional caption" do
             parseReplLine "/paste"
                 `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }

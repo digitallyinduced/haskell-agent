@@ -34,6 +34,7 @@ data ReplAction
         }
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplCompact (Maybe Text)
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -73,6 +74,9 @@ parseSlash line = case Text.words line of
             if null args
                 then ReplReloadAuth
                 else ReplCommandError "usage: /reload-auth"
+        | Text.toLower command == "/compact" ->
+            let focus = Text.strip (Text.drop (Text.length command) line)
+            in ReplCompact (if Text.null focus then Nothing else Just focus)
         | Text.toLower command == "/paste" ->
             parsePasteCommand (Text.strip (Text.drop (Text.length command) line))
         | Text.toLower command == "/attachments" ->

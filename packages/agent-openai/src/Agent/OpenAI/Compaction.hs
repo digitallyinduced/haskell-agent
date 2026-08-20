@@ -1,0 +1,129 @@
+-- | Conversation compaction helpers shared by OpenAI remote compact and
+-- xAI/OpenRouter local summarization.
+module Agent.OpenAI.Compaction
+    ( summaryPrefix
+    , summarizationPrompt
+    , estimateTokens
+    , estimateItemsTokens
+    , collectRecentUserTexts
+    , buildLocalCompactedHistory
+    , assistantSummaryItem
+    , userTextItem
+    , isCompactSessionTurn
+    , compactSessionUserText
+    ) where
+
+import Agent.OpenAI.Responses.Types
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Maybe (mapMaybe)
+import qualified Data.ByteString.Lazy as LBS
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+
+-- | Marker prefix for compacted summary messages.
+summaryPrefix :: Text
+summaryPrefix = "Compacted conversation summary:"
+
+-- | User-visible / persisted marker for a compact turn.
+compactSessionUserText :: Maybe Text -> Text
+compactSessionUserText focus = case focus of
+    Just text | not (Text.null (Text.strip text)) ->
+        "/compact " <> Text.strip text
+    _ -> "/compact"
+
+-- | Prompt used for local (Grok-style) summarization turns.
+summarizationPrompt :: Maybe Text -> Text
+summarizationPrompt focus =
+    Text.unlines $
+        [ "Summarize the conversation so far for a successor coding agent."
+        , "The successor will only see this summary plus a few recent user messages;"
+        , "it will not see prior tool calls or tool outputs."
+        , "Preserve: the user's goals, important file paths, decisions made,"
+        , "errors encountered and how they were fixed, and remaining work."
+        , "Be concrete and concise. Do not call tools."
+        ]
+            <> case focus of
+                Just text | not (Text.null (Text.strip text)) ->
+                    [ ""
+                    , "Additional focus from the user:"
+                    , Text.strip text
+                    ]
+                _ -> []
+
+estimateTokens :: Text -> Int
+estimateTokens text = max 1 (Text.length text `div` 4)
+
+estimateItemsTokens :: [ResponseItem] -> Int
+estimateItemsTokens items =
+    sum
+        [ estimateTokens (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode item)))
+        | item <- items
+        ]
+
+-- | Collect recent real user message texts (newest last), skipping /compact markers.
+collectRecentUserTexts :: Int -> [ResponseItem] -> [Text]
+collectRecentUserTexts keep items =
+    reverse (take keep (reverse (mapMaybe userTextOf items)))
+  where
+    userTextOf = \case
+        MessageItem message
+            | message.role == RoleUser ->
+                case messageText message of
+                    Just text
+                        | Text.isPrefixOf "/compact" (Text.strip text) -> Nothing
+                        | otherwise -> Just text
+                    Nothing -> Nothing
+        _ -> Nothing
+
+messageText :: ResponseMessage -> Maybe Text
+messageText message = case message.content of
+    MessageContentText text -> Just text
+    MessageContentParts parts ->
+        let texts =
+                [ text
+                | InputTextPart { text } <- parts
+                ]
+        in case texts of
+            [] -> Nothing
+            xs -> Just (Text.intercalate "\n" xs)
+
+userTextItem :: Text -> ResponseItem
+userTextItem text = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , role = RoleUser
+    , status = Nothing
+    , phase = Nothing
+    , extraFields = KeyMap.empty
+    }
+
+assistantSummaryItem :: Text -> ResponseItem
+assistantSummaryItem summary =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content =
+            MessageContentParts
+                [ InputTextPart
+                    (summaryPrefix <> "\n" <> Text.strip summary)
+                    Nothing
+                    KeyMap.empty
+                ]
+        , role = RoleAssistant
+        , status = Nothing
+        , phase = Nothing
+        , extraFields = KeyMap.empty
+        }
+
+-- | Grok-style local rebuild: recent user texts + assistant summary.
+buildLocalCompactedHistory :: Int -> [ResponseItem] -> Text -> [ResponseItem]
+buildLocalCompactedHistory keepRecent history summary =
+    map userTextItem (collectRecentUserTexts keepRecent history)
+        <> [assistantSummaryItem summary]
+
+-- | Session turns that represent a compaction checkpoint.
+isCompactSessionTurn :: Text -> Bool
+isCompactSessionTurn text =
+    let stripped = Text.strip text
+    in stripped == "/compact" || Text.isPrefixOf "/compact " stripped
