@@ -3,6 +3,8 @@ module Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
     , formatLoopError
+    , formatLoopErrorColored
+    , formatToolStarted
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -11,6 +13,14 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Style
+    ( roleError
+    , roleThinking
+    , roleToolArrow
+    , roleToolDetail
+    , roleToolName
+    , roleToolOutput
+    )
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent.MVar (MVar, withMVar)
@@ -68,9 +78,10 @@ renderEventUnlocked config = \case
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
         clearThinkingUnlocked config
-        putTextLn config.renderStderr ("→ " <> summarizeToolCall call)
+        putTextLn config.renderStderr (formatToolStarted config.renderColor call)
     ToolFinished result ->
-        putTextLn config.renderStderr (truncateToolOutput result.output)
+        putTextLn config.renderStderr
+            (roleToolOutput config.renderColor (truncateToolOutput result.output))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 renderAssistantText :: Bool -> Text -> Text
@@ -107,7 +118,8 @@ showThinkingUnlocked config
         if visible
             then pure ()
             else do
-                Text.hPutStr config.renderStderr "thinking…"
+                Text.hPutStr config.renderStderr
+                    (roleThinking config.renderColor "thinking…")
                 hFlush config.renderStderr
                 writeIORef config.renderThinkingVisible True
 
@@ -122,7 +134,7 @@ clearThinkingUnlocked config = do
             writeIORef config.renderThinkingVisible False
 
 -- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
--- 'String' is @hPutStr@ then @hPutChar '\\n'@ over a @[Char]@ spine, so
+-- 'String' is @hPutStr@ then @hPutChar '\n'@ over a @[Char]@ spine, so
 -- concurrent tool threads can interleave characters on the TTY.
 --
 -- Does not take 'renderLock': callers that also read stdin (approval)
@@ -137,6 +149,16 @@ summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =
     let detail = toolDetail call
     in if Text.null detail then call.name else call.name <> " " <> detail
+
+-- | Colored tool-start line for stderr chrome.
+formatToolStarted :: Bool -> ToolCall -> Text
+formatToolStarted color call =
+    let detail = toolDetail call
+        arrow = roleToolArrow color "→ "
+        name = roleToolName color call.name
+    in if Text.null detail
+        then arrow <> name
+        else arrow <> name <> " " <> roleToolDetail color detail
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case call.name of
@@ -180,9 +202,15 @@ firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')
 
 formatLoopError :: LoopError -> Text
-formatLoopError = \case
-    LoopTransport err -> "transport error: " <> Text.pack (show err)
+formatLoopError = formatLoopErrorColored False
+
+-- | Like 'formatLoopError', with optional ANSI styling for TTY stderr.
+formatLoopErrorColored :: Bool -> LoopError -> Text
+formatLoopErrorColored color = \case
+    LoopTransport err ->
+        roleError color ("transport error: " <> Text.pack (show err))
     LoopMaxTurns turn ->
-        "stopped: max turns reached"
+        roleError color "stopped: max turns reached"
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
-    LoopNoResponseId -> "transport error: response had no id"
+    LoopNoResponseId ->
+        roleError color "transport error: response had no id"

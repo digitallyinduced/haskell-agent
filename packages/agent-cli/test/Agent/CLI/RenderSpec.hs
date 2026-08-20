@@ -2,7 +2,12 @@ module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
-import Agent.ToolDispatch (customToolCall, functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , customToolCall
+    , functionToolCall
+    )
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
@@ -119,6 +124,28 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "src"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 readIORef config.renderTextBuffer `shouldReturn` ""
+
+        it "styles tool chrome when color is on" do
+            withRenderConfig False True \config handle path -> do
+                let call = functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"
+                renderEvent config (ToolStarted call)
+                renderEvent config (ToolFinished ToolCallResult
+                    { callId = "c1"
+                    , output = "ok\nmore"
+                    , callKind = FunctionCallKind
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "list_dir"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` Text.isInfixOf "ok"
+
+        it "keeps thinking plain when color is off" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                hClose handle
+                body <- Text.readFile path
+                body `shouldBe` "thinking…"
 
 withRenderConfig
     :: Bool

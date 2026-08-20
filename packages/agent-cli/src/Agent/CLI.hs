@@ -10,11 +10,18 @@ import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
-    , formatLoopError
+    , formatLoopErrorColored
     , putTextLn
     , renderAssistantText
     , renderEvent
     , summarizeToolCall
+    )
+import Agent.CLI.Style
+    ( roleError
+    , roleMuted
+    , rolePrompt
+    , roleSuccess
+    , roleWarn
     )
 import Agent.CLI.Session
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
@@ -50,7 +57,7 @@ import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, se
 import System.Environment (getArgs, lookupEnv)
 import System.FilePath ((</>))
 import System.Exit (die, exitFailure)
-import System.IO (hFlush, hIsTerminalDevice, hPutStrLn, isEOF, stderr, stdin, stdout)
+import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
 
 run :: IO ()
 run = do
@@ -121,7 +128,8 @@ runAgent options = do
         Nothing
             | options.optWorktree -> do
                 createWorktree source (worktreeRoot home) >>= either die \path -> do
-                    hPutStrLn stderr ("worktree: " <> path)
+                    color <- resolveColor stderr
+                    putTextLn stderr (roleMuted color ("worktree: " <> Text.pack path))
                     pure path
             | otherwise -> pure source
     setCurrentDirectory cwd
@@ -207,7 +215,10 @@ preparePersistence options root provider model cwd effort prompt resumed =
                         root </> Text.unpack meta.metaId </> "transcript.jsonl"
                     , sessionMeta = meta
                     }
-            hPutStrLn stderr ("session: " <> Text.unpack meta.metaId <> " (resumed)")
+            color <- resolveColor stderr
+            putTextLn stderr
+                (roleMuted color
+                    ("session: " <> meta.metaId <> " (resumed)"))
             Just <$> newIORef (Right handle)
         Nothing
             | shouldPersist options ->
@@ -255,11 +266,9 @@ runSession options policy tools prompt paramsRef transcriptRef initialPrevious p
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
     policyRef <- newIORef policy
-    stdoutTty <- hIsTerminalDevice stdout
     stderrTty <- hIsTerminalDevice stderr
-    noColor <- lookupEnv "NO_COLOR"
-    let useColor = stdoutTty && maybe True (\_ -> False) noColor
-        render = RenderConfig
+    useColor <- resolveColor stdout
+    let render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
             , renderColor = useColor
@@ -297,7 +306,8 @@ repl
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> IO ()
 repl config render previous printed paramsRef policyRef transcriptRef persist = do
-    putStr "agent> "
+    stdoutColor <- resolveColor stdout
+    Text.putStr (rolePrompt stdoutColor "agent> ")
     hFlush stdout
     done <- isEOF
     if done
@@ -315,12 +325,14 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                         putTrailingNewline printed
                         continue
                     ReplShowEffort -> do
+                        color <- resolveColor stdout
                         params <- readIORef paramsRef
-                        Text.putStrLn ("effort: " <> currentEffort params)
+                        Text.putStrLn (roleMuted color ("effort: " <> currentEffort params))
                         continue
                     ReplSetEffort level -> do
+                        color <- resolveColor stdout
                         modifyIORef' paramsRef (setReasoningEffort level)
-                        Text.putStrLn ("effort set to " <> level)
+                        Text.putStrLn (roleMuted color ("effort set to " <> level))
                         case persist of
                             Nothing -> pure ()
                             Just slotRef -> do
@@ -339,20 +351,25 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                         toggleAlwaysApprove policyRef
                         continue
                     ReplShowSession -> do
+                        color <- resolveColor stdout
                         case persist of
-                            Nothing -> Text.putStrLn "session: (not persisted)"
+                            Nothing ->
+                                Text.putStrLn (roleMuted color "session: (not persisted)")
                             Just slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
                                     Left _ ->
                                         Text.putStrLn
-                                            "session: (pending until first turn)"
+                                            (roleMuted color
+                                                "session: (pending until first turn)")
                                     Right handle ->
                                         Text.putStrLn
-                                            ("session: " <> handle.sessionMeta.metaId)
+                                            (roleMuted color
+                                                ("session: " <> handle.sessionMeta.metaId))
                         continue
                     ReplCommandError err -> do
-                        Text.hPutStrLn stderr err
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr (roleError color err)
                         continue
   where
     continue = repl config render previous printed paramsRef policyRef transcriptRef persist
@@ -373,16 +390,15 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
     clearThinking render
     case result of
         Left err -> do
-            putTextLn stderr (formatLoopError err)
+            color <- resolveColor stderr
+            putTextLn stderr (formatLoopErrorColored color err)
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
             printedText <- readIORef printed
             case (printedText, loopResult.finalText) of
                 (False, Just text) | not (Text.null (Text.strip text)) -> do
-                    color <- hIsTerminalDevice stdout
-                    noColor <- lookupEnv "NO_COLOR"
-                    let useColor = color && maybe True (\_ -> False) noColor
+                    useColor <- resolveColor stdout
                     putTextLn stdout (renderAssistantText useColor text)
                 _ -> pure ()
             afterItems <- readIORef transcriptRef
@@ -394,8 +410,11 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                     created <- isLeftSlot <$> readIORef slotRef
                     handle <- ensureSession slotRef
                     if created
-                        then hPutStrLn stderr
-                            ("session: " <> Text.unpack handle.sessionMeta.metaId)
+                        then do
+                            color <- resolveColor stderr
+                            putTextLn stderr
+                                (roleMuted color
+                                    ("session: " <> handle.sessionMeta.metaId))
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
@@ -407,6 +426,14 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                     handle' <- appendTurn handle turn
                     writeIORef slotRef (Right handle')
             pure True
+
+
+-- | Color when the handle is a TTY and NO_COLOR is unset.
+resolveColor :: Handle -> IO Bool
+resolveColor handle = do
+    isTty <- hIsTerminalDevice handle
+    noColor <- lookupEnv "NO_COLOR"
+    pure (isTty && maybe True (\_ -> False) noColor)
 
 putTrailingNewline :: IORef Bool -> IO ()
 putTrailingNewline printed = do
@@ -435,7 +462,9 @@ approveTool policyRef tools call = do
         PromptMutating
             | readOnly -> pure True
             | otherwise -> do
-                putTextLn stderr ("Allow " <> summarizeToolCall call <> "? [y/N/a]")
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleWarn color ("Allow " <> summarizeToolCall call <> "? [y/N/a]"))
                 eof <- isEOF
                 if eof
                     then pure False
@@ -445,19 +474,20 @@ approveTool policyRef tools call = do
                             AllowOnce -> pure True
                             AllowAlways -> do
                                 writeIORef policyRef ApproveAll
-                                putTextLn stderr "auto-approve on"
+                                putTextLn stderr (roleSuccess color "auto-approve on")
                                 pure True
                             Deny -> pure False
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> IO ()
 toggleAlwaysApprove policyRef = do
+    color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->
         if policy == ApproveAll
             then (PromptMutating, PromptMutating)
             else (ApproveAll, ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> "auto-approve on"
-        _ -> "auto-approve off")
+        ApproveAll -> roleSuccess color "auto-approve on"
+        _ -> roleMuted color "auto-approve off")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

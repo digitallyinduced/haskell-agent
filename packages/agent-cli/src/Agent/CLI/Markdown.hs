@@ -3,6 +3,7 @@ module Agent.CLI.Markdown
     ( renderMarkdown
     ) where
 
+import Agent.CLI.Style (style)
 import Control.Applicative ((<|>))
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (transpose)
@@ -16,7 +17,6 @@ import System.Console.ANSI
     , SGR(..)
     , Underlining(..)
     )
-import System.Console.ANSI.Codes (setSGRCode)
 
 -- | When @color@ is 'True', style a useful subset of GFM for a TTY.
 -- When 'False', return @text@ unchanged (pipes, redirects, tests).
@@ -43,14 +43,14 @@ renderBlocks = go
                 header =
                     if Text.null info
                         then []
-                        else [style [SetConsoleIntensity FaintIntensity] info]
+                        else [style True [SetConsoleIntensity FaintIntensity] info]
             in header ++ body ++ go after
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
             let marker = Text.replicate level "#"
                 prefix =
-                    style
+                    style True
                         [ SetConsoleIntensity BoldIntensity
                         , SetUnderlining SingleUnderline
                         ]
@@ -61,12 +61,12 @@ renderBlocks = go
         | Just item <- orderedItem line =
             styleInline item : go rest
         | Just quote <- blockQuote line =
-            ( style [SetConsoleIntensity FaintIntensity] "│ "
+            ( style True [SetConsoleIntensity FaintIntensity] "│ "
                 <> styleInline quote
             )
                 : go rest
         | isThematicBreak line =
-            style [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
+            style True [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
@@ -201,7 +201,7 @@ styleTableRow isHeader widths cells =
                 (cells ++ repeat "")
         line = Text.intercalate "  " (take (length widths) padded)
     in if isHeader
-        then style [SetConsoleIntensity BoldIntensity] line
+        then style True [SetConsoleIntensity BoldIntensity] line
         else styleInline line
 
 styleInline :: Text -> Text
@@ -211,22 +211,22 @@ styleInline = Text.concat . go Nothing
     go prev t
         | Text.null t = []
         | Just (code, rest) <- takeInlineCode t =
-            style codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
+            style True codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
         | Just (linkText, url, rest) <- takeLink t =
-            style linkStyle (styleInline linkText)
-                : style urlStyle (" (" <> url <> ")")
+            style True linkStyle (styleInline linkText)
+                : style True urlStyle (" (" <> url <> ")")
                 : go (Just ')') rest
         | Just (inner, rest) <- takeEmphasis prev "**" t =
-            style [SetConsoleIntensity BoldIntensity] (styleInline inner)
+            style True [SetConsoleIntensity BoldIntensity] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "__" t =
-            style [SetConsoleIntensity BoldIntensity] (styleInline inner)
+            style True [SetConsoleIntensity BoldIntensity] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "*" t =
-            style [SetItalicized True] (styleInline inner)
+            style True [SetItalicized True] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | Just (inner, rest) <- takeEmphasis prev "_" t =
-            style [SetItalicized True] (styleInline inner)
+            style True [SetItalicized True] (styleInline inner)
                 : go (Text.unsnoc inner >>= Just . snd) rest
         | otherwise =
             let (plain, rest) = Text.break (`elem` ['`', '[', '*', '_']) t
@@ -322,7 +322,3 @@ canClose delim inner after =
 
 isWordChar :: Char -> Bool
 isWordChar c = isAlphaNum c || c == '_'
-
-style :: [SGR] -> Text -> Text
-style attrs text =
-    Text.pack (setSGRCode attrs) <> text <> Text.pack (setSGRCode [Reset])
