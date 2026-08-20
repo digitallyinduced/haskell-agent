@@ -11,10 +11,10 @@ spec = do
             style False [] "plain" `shouldBe` "plain"
 
         it "wraps text in SGR codes when color is on" do
-            let out = rolePrompt True "agent>"
-            out `shouldSatisfy` Text.isInfixOf "agent>"
+            let out = rolePrompt True "λ>"
+            out `shouldSatisfy` Text.isInfixOf "λ>"
             out `shouldSatisfy` Text.isInfixOf "\ESC["
-            out `shouldSatisfy` (not . Text.isPrefixOf "agent>")
+            out `shouldSatisfy` (not . Text.isPrefixOf "λ>")
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
