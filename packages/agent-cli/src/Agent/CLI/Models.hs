@@ -54,11 +54,9 @@ modelsForProvider provider =
                 , opt "grok-3" Nothing
                 ]
             OpenAIProvider ->
-                [ opt "gpt-5.6-luna" (Just "default")
-                , opt "gpt-5.1-codex" Nothing
-                , opt "gpt-5.1-codex-mini" (Just "faster")
-                , opt "gpt-5.1" Nothing
-                , opt "o3" Nothing
+                [ opt "gpt-5.6-luna" (Just "default · fast")
+                , opt "gpt-5.6-terra" (Just "balanced")
+                , opt "gpt-5.6-sol" (Just "frontier")
                 ]
             OpenRouterProvider ->
                 [ opt "openai/gpt-5.1" (Just "default")
