@@ -220,6 +220,9 @@ usage = unlines
     , "reasoning effort. /model [NAME] shows or changes the model."
     , "/always-approve (or :yolo) toggles auto-approve."
     , "/paste [TEXT] sends the clipboard image (macOS) with an optional caption."
-    , "/session prints the current session id. Ctrl-D or :q exits."
+    , "/session prints the current session id."
+    , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
+    , "auth failures also reload once and retry automatically."
+    , "Ctrl-D or :q exits."
     , "Ctrl-C prints a --resume command when a session has been persisted."
     ]

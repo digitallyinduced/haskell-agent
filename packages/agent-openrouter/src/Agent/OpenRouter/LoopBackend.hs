@@ -19,23 +19,29 @@ import Agent.OpenAI.LoopBackend
     , withRequestInput
     )
 import Agent.OpenAI.Responses.Types
-import Agent.Provider (Credential)
+import Agent.Provider
+    ( TokenProvider
+    , runWithTokenProvider
+    )
 import Agent.OpenRouter.Client (createResponseWithEvents)
 import Agent.OpenRouter.Options (ClientOptions)
 import Data.IORef
 
--- | Close over OpenRouter options, credential, and the request fields the
--- loop does not own (model, instructions, tools, reasoning). The params
--- action is re-run each turn so the REPL can change reasoning effort
+-- | Close over OpenRouter options, a token provider, and the request fields
+-- the loop does not own (model, instructions, tools, reasoning). Credentials
+-- stay cached; an auth rejection triggers one provider reload and retry.
+-- Params are re-read each turn so the REPL can change reasoning effort
 -- without dropping the local transcript.
 openRouterBackend
     :: ClientOptions
-    -> Credential
+    -> TokenProvider
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-openRouterBackend options credential =
-    openRouterBackendWith (createResponseWithEvents options credential)
+openRouterBackend options provider =
+    openRouterBackendWith \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            createResponseWithEvents options credential params onEvent
 
 -- | Same mapping as 'openRouterBackend', with an injectable transport for tests.
 openRouterBackendWith
