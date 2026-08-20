@@ -71,4 +71,7 @@ sampleMeta sid title =
         , metaEffort = "high"
         , metaTitle = title
         , metaLastResponseId = Nothing
+        , metaInputTokens = 0
+        , metaOutputTokens = 0
+        , metaCachedTokens = 0
         }

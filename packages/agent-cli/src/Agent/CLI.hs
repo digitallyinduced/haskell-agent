@@ -4,6 +4,7 @@ module Agent.CLI
     , afterDev
     , devMain
     , formatReplStatusLine
+    , formatTokenUsage
     , run
     ) where
 
@@ -419,6 +420,9 @@ runAgent options = do
         agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
+        usageRef <- newIORef $ case resumed of
+            Just (meta, turns) -> sessionUsageFromTurns meta turns
+            Nothing -> emptyTokenUsage
         case persist of
             Just slotRef -> do
                 slot <- readIORef slotRef
@@ -458,7 +462,7 @@ runAgent options = do
                                         withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    multiCtx subagentSessions pendingNotices subagentStoreRoot noticingBackend)
+                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -487,7 +491,7 @@ runAgent options = do
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot backend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -513,7 +517,7 @@ runAgent options = do
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot backend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
 
 preparePersistence
     :: CliOptions
@@ -591,21 +595,69 @@ printResumeHint progName = \case
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
--- | Idle prompt chrome: model, reasoning effort, approval mode.
-formatReplStatusLine :: Bool -> Text -> Text -> ApprovalPolicy -> Text
-formatReplStatusLine color model effort policy =
-    roleMuted color $
-        "  "
-            <> model
-            <> " · "
-            <> effort
-            <> " · "
-            <> approvalLabel policy
+-- | Idle prompt chrome: model, reasoning effort, approval mode on the left;
+-- session token totals right-aligned when the TTY width is known.
+formatReplStatusLine
+    :: Bool
+    -> Maybe Int
+    -> Text
+    -> Text
+    -> ApprovalPolicy
+    -> TokenUsage
+    -> Text
+formatReplStatusLine color width model effort policy usage =
+    let left = "  " <> model <> " · " <> effort <> " · " <> approvalLabel policy
+        right = formatTokenUsage usage
+        padded = case width of
+            Just cols | cols > 0, not (Text.null right) ->
+                let gap = cols - Text.length left - Text.length right
+                in if gap > 0
+                    then left <> Text.replicate gap " " <> right
+                    else left <> "  " <> right
+            _ | Text.null right -> left
+            _ -> left <> "  " <> right
+    in roleMuted color padded
   where
     approvalLabel = \case
         ApproveAll -> "yolo"
         PromptMutating -> "ask"
         DenyMutating -> "deny"
+
+-- | Compact session totals: @1.2k in · 340 out@. Cached tokens are shown
+-- only when the provider reported a non-zero cache hit.
+formatTokenUsage :: TokenUsage -> Text
+formatTokenUsage usage
+    | usage == emptyTokenUsage = ""
+    | otherwise =
+        formatTokenCount usage.inputTokens
+            <> " in · "
+            <> formatTokenCount usage.outputTokens
+            <> " out"
+            <> cachedSuffix
+  where
+    cachedSuffix
+        | usage.cachedTokens > 0 =
+            " · " <> formatTokenCount usage.cachedTokens <> " cached"
+        | otherwise = ""
+
+formatTokenCount :: Int -> Text
+formatTokenCount n
+    | n < 0 = "0"
+    | n < 1000 = Text.pack (show n)
+    | n < 10000 =
+        let tenths = (n + 50) `div` 100
+            whole = tenths `div` 10
+            frac = tenths `mod` 10
+        in Text.pack (show whole <> "." <> show frac <> "k")
+    | n < 1000000 =
+        Text.pack (show ((n + 500) `div` 1000) <> "k")
+    | n < 10000000 =
+        let tenths = (n + 50000) `div` 100000
+            whole = tenths `div` 10
+            frac = tenths `mod` 10
+        in Text.pack (show whole <> "." <> show frac <> "M")
+    | otherwise =
+        Text.pack (show ((n + 500000) `div` 1000000) <> "M")
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
@@ -639,9 +691,10 @@ runSession
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [Text]
     -> SubagentStoreRoot
+    -> IORef TokenUsage
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -659,6 +712,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     previous <- newIORef initialPrevious
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
+            writeIORef usageRef emptyTokenUsage
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             case multiCtx of
@@ -715,14 +769,14 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt storeRoot text [UserMessage text]
+                planMode agentsContext escPaused interrupt storeRoot usageRef text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
                 transcriptRef persist planMode projectRoot tokenProvider agentsContext
-                escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
+                escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset
 
 repl
     :: LoopConfig
@@ -743,9 +797,10 @@ repl
     -> IORef Int
     -> InterruptState
     -> SubagentStoreRoot
+    -> IORef TokenUsage
     -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -753,10 +808,14 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     policy <- readIORef policyRef
     -- Status sits on the line above λ so haskeline can keep the cursor on
     -- the input. Haskeline cannot park a persistent footer under the draft.
-    Text.putStrLn $ formatReplStatusLine stdoutColor
+    -- Token totals sit on the right of that line when the TTY width is known.
+    termCols <- fmap snd <$> getTerminalSize
+    usage <- readIORef usageRef
+    Text.putStrLn $ formatReplStatusLine stdoutColor termCols
         (currentModel params)
         (currentEffort params)
         policy
+        usage
     hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
@@ -823,7 +882,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                                     }
                                                 ]
                                 _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext escPaused interrupt storeRoot text
+                                    transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef text
                                     turnInputs
                                 putTrailingNewline printed
                                 continue
@@ -869,7 +928,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
                                         _ <- runOneTurn config render previous printed
-                                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot promptText
+                                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef promptText
                                             [ UserMultimodal
                                                 { userText = promptText
                                                 , userImages = images
@@ -976,6 +1035,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                                 , turnAssistantText = Just outcome.compactSummary
                                                 , turnResponseId = Nothing
                                                 , turnItems = outcome.compactHistory
+                                                , turnUsage = Nothing
                                                 }
                                         handle' <- appendTurn handle turn
                                         writeIORef slotRef (Right handle')
@@ -987,7 +1047,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                 continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash planMode persist maybeDescription
-                            config render previous printed transcriptRef agentsContext escPaused interrupt
+                            config render previous printed transcriptRef agentsContext escPaused interrupt usageRef
                         continue
                     ReplResume maybeId -> do
                         handleResume maybeId persist
@@ -1014,11 +1074,15 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                                     Just "Conversation cleared."
                                                 , turnResponseId = Nothing
                                                 , turnItems = []
+                                                , turnUsage = Nothing
                                                 }
                                         handle' <- appendTurnKeepTitle handle turn
                                         let meta = handle'.sessionMeta
                                                 { metaLastResponseId = Nothing
                                                 , metaUpdatedAt = now
+                                                , metaInputTokens = 0
+                                                , metaOutputTokens = 0
+                                                , metaCachedTokens = 0
                                                 }
                                         writeSessionMeta handle'.sessionMetaPath meta
                                         writeIORef slotRef
@@ -1072,6 +1136,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             Just "Started a new session."
                                         , turnResponseId = Nothing
                                         , turnItems = []
+                                        , turnUsage = Nothing
                                         }
                                 handle' <- appendTurnKeepTitle handle turn
                                 let meta = handle'.sessionMeta
@@ -1123,7 +1188,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
-            escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
+            escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset
 
 applyModelChange
     :: Provider
@@ -1228,9 +1293,10 @@ enterPlanFromSlash
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
+    -> IORef TokenUsage
     -> IO ()
 enterPlanFromSlash planMode persist maybeDescription config render previous printed
-    transcriptRef agentsContext escPaused interrupt = do
+    transcriptRef agentsContext escPaused interrupt usageRef = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     case persist of
@@ -1255,7 +1321,7 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt discardStore description [UserMessage description]
+                planMode agentsContext escPaused interrupt discardStore usageRef description [UserMessage description]
             putTrailingNewline printed
 
 runOneTurn
@@ -1270,10 +1336,11 @@ runOneTurn
     -> IORef Bool
     -> InterruptState
     -> SubagentStoreRoot
+    -> IORef TokenUsage
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt storeRoot promptText inputs =
+runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
@@ -1334,14 +1401,19 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
+            modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
             do
                 color <- resolveColor stderr
                 model <- readIORef render.renderModelRef
                 let turns = Text.pack (show loopResult.turnsUsed)
                     unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
+                    usageDetail = formatTokenUsage loopResult.tokenUsage
+                    extra =
+                        if Text.null usageDetail
+                            then model <> " · " <> turns <> unit
+                            else model <> " · " <> turns <> unit <> " · " <> usageDetail
                 putTextLn stderr
-                    (formatTurnStatus color "ok"
-                        (elapsedDetail (model <> " · " <> turns <> unit)))
+                    (formatTurnStatus color "ok" (elapsedDetail extra))
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
             let assistantText =
@@ -1366,6 +1438,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                             , turnAssistantText = assistantText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
+                            , turnUsage = Just loopResult.tokenUsage
                             }
                     handle' <- appendTurn handle turn
                     writeIORef slotRef (Right handle')
@@ -1379,7 +1452,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Just notes -> do
                     writeIORef printed False
                     _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext escPaused interrupt storeRoot notes [UserMessage notes]
+                        planMode agentsContext escPaused interrupt storeRoot usageRef notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)

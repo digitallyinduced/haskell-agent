@@ -1,6 +1,7 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Responses.Types
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
@@ -83,10 +84,18 @@ spec = describe "Agent.CLI.Session" do
                         , turnAssistantText = Just "hello"
                         , turnResponseId = Just "resp-1"
                         , turnItems = [item]
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 10
+                            , outputTokens = 4
+                            , cachedTokens = 2
+                            }
                         }
                 handle' <- appendTurn handle turn
                 handle'.sessionMeta.metaTitle `shouldBe` "hi there"
                 handle'.sessionMeta.metaLastResponseId `shouldBe` Just "resp-1"
+                handle'.sessionMeta.metaInputTokens `shouldBe` 10
+                handle'.sessionMeta.metaOutputTokens `shouldBe` 4
+                handle'.sessionMeta.metaCachedTokens `shouldBe` 2
                 modeOf handle.sessionTranscriptPath `shouldReturn` 0o600
 
                 loaded <- loadSession root handle.sessionMeta.metaId
@@ -101,6 +110,16 @@ spec = describe "Agent.CLI.Session" do
                             [loadedTurn] -> do
                                 loadedTurn.turnUserText `shouldBe` "hi there"
                                 loadedTurn.turnItems `shouldBe` [item]
+                                loadedTurn.turnUsage `shouldBe` Just TokenUsage
+                                    { inputTokens = 10
+                                    , outputTokens = 4
+                                    , cachedTokens = 2
+                                    }
+                                sessionUsageFromTurns meta turns `shouldBe` TokenUsage
+                                    { inputTokens = 10
+                                    , outputTokens = 4
+                                    , cachedTokens = 2
+                                    }
                             other ->
                                 expectationFailure
                                     ("expected one turn, got " <> show (length other))
@@ -135,6 +154,7 @@ spec = describe "Agent.CLI.Session" do
                     , turnAssistantText = Nothing
                     , turnResponseId = Nothing
                     , turnItems = []
+                    , turnUsage = Nothing
                     }
             Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
 

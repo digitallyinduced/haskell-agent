@@ -1,6 +1,6 @@
 module Agent.SubagentsSpec (spec) where
 
-import Agent.Loop (LoopError(..), LoopResult(..))
+import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Control.Concurrent (threadDelay)
@@ -21,6 +21,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "child"
                 , finalText = Just ("done:" <> prompt)
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "hello" Nothing
@@ -35,6 +36,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "x"
                 , finalText = Just "ok"
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right child <- spawnSubagent registry Nothing 0 "one" Nothing
@@ -52,6 +54,7 @@ spec = describe "Agent.Subagents" do
                     { finalResponseId = "x"
                     , finalText = Just "ok"
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right first <- spawnSubagent registry Nothing 0 "a" Nothing
@@ -82,12 +85,14 @@ spec = describe "Agent.Subagents" do
                         { finalResponseId = "child"
                         , finalText = Just ("parent-of-" <> gid.unSubagentId)
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
                 else
                     pure $ Right LoopResult
                         { finalResponseId = "grand"
                         , finalText = Just ("leaf:" <> prompt)
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
         Right child <- spawnSubagent registry Nothing 0 "root-task" Nothing
         (statuses, timedOut) <- waitSubagents registry [child] 20000
@@ -105,6 +110,7 @@ spec = describe "Agent.Subagents" do
                     { finalResponseId = "fast"
                     , finalText = Just "done-fast"
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     }
                 _ -> do
                     atomically $ readTVar gate >>= \ready -> unless ready retry
@@ -112,6 +118,7 @@ spec = describe "Agent.Subagents" do
                         { finalResponseId = "slow"
                         , finalText = Just "done-slow"
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         })
             (\_ _ -> pure ())
         Right fast <- spawnSubagent registry Nothing 0 "fast" Nothing
@@ -138,6 +145,7 @@ spec = describe "Agent.Subagents" do
                     { finalResponseId = "resp-" <> prompt
                     , finalText = Just prompt
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
@@ -158,11 +166,13 @@ spec = describe "Agent.Subagents" do
                         { finalResponseId = "hold"
                         , finalText = Just "holding"
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
                 other -> pure $ Right LoopResult
                     { finalResponseId = "done"
                     , finalText = Just other
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right idle <- spawnSubagent registry Nothing 0 "idle" Nothing
@@ -191,6 +201,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "c"
                 , finalText = Just prompt
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         setSubagentOnComplete registry \agentId status ->
@@ -208,6 +219,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = fromMaybe "resp" previous
                 , finalText = Just prompt
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         let agentId = SubagentId "agent-restored-1"
@@ -227,6 +239,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "r"
                 , finalText = Just prompt
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
@@ -246,6 +259,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "c"
                 , finalText = Just prompt
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right (agentId, path) <-
@@ -266,6 +280,7 @@ spec = describe "Agent.Subagents" do
                     { finalResponseId = "c"
                     , finalText = Just prompt
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing

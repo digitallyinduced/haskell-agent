@@ -76,14 +76,11 @@ spec = do
                     , assistantItem "working"
                     , customCallItem "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
                     ]
-            turn `shouldBe` TurnOutput
-                { responseId = "resp-9"
-                , toolCalls =
-                    [ functionToolCall "fc1" "shell_command" "{\"command\":\"ls\"}"
-                    , customToolCall "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
-                    ]
-                , assistantText = Just "working"
-                }
+            turn `shouldBe` emptyTurnOutput "resp-9"
+                [ functionToolCall "fc1" "shell_command" "{\"command\":\"ls\"}"
+                , customToolCall "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
+                ]
+                (Just "working")
 
         it "joins multiple assistant messages" do
             let turn = responseToTurnOutput $ testResponse "resp-text"
@@ -92,6 +89,23 @@ spec = do
                     , assistantItem "second"
                     ]
             turn.assistantText `shouldBe` Just "first\nsecond"
+
+        it "copies provider usage including cached input tokens" do
+            let turn = responseToTurnOutput $ testResponseWithUsage "resp-u"
+                    [assistantItem "ok"]
+                    (Aeson.object
+                        [ "input_tokens" Aeson..= (120 :: Int)
+                        , "output_tokens" Aeson..= (30 :: Int)
+                        , "total_tokens" Aeson..= (150 :: Int)
+                        , "input_tokens_details" Aeson..= Aeson.object
+                            [ "cached_tokens" Aeson..= (80 :: Int)
+                            ]
+                        ])
+            turn.tokenUsage `shouldBe` TokenUsage
+                { inputTokens = 120
+                , outputTokens = 30
+                , cachedTokens = 80
+                }
 
     describe "streamEventToLoopEvent" do
         it "maps output_text.delta and reasoning deltas" do
@@ -123,11 +137,7 @@ spec = do
             result <- backend.submitTurn (Just "resp-prev")
                 [UserMessage "hello"]
                 (modifyIORef' events . (:))
-            result `shouldBe` Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            result `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "ok"))
             [(request, previous)] <- readIORef seen
             previous `shouldBe` Just "resp-prev"
             request.model `shouldBe` Just "gpt-5.6-luna"
@@ -177,11 +187,7 @@ spec = do
             result <- backend.submitTurn (Just "resp-missing")
                 [UserMessage "new"]
                 (const (pure ()))
-            result `shouldBe` Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            result `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "ok"))
             requests <- readIORef seen
             map snd requests `shouldBe` [Just "resp-missing", Nothing]
             map (inputItems . fst) requests `shouldBe`
@@ -276,15 +282,23 @@ deltaEvent otherEventType delta = OtherResponseStreamEvent
     }
 
 testResponse :: Text -> [ResponseItem] -> Response
-testResponse responseId output = case Aeson.fromJSON $ Aeson.object
+testResponse responseId output = testResponseWithUsage responseId output Aeson.Null
+
+testResponseWithUsage :: Text -> [ResponseItem] -> Aeson.Value -> Response
+testResponseWithUsage responseId output usage = case Aeson.fromJSON $ Aeson.object $
     [ "id" Aeson..= responseId
     , "created_at" Aeson..= (0 :: Int)
     , "model" Aeson..= ("test-model" :: Text)
     , "status" Aeson..= ("completed" :: Text)
     , "output" Aeson..= output
-    ] of
+    ] <> usageField
+  of
     Aeson.Success response -> response
     Aeson.Error err -> error err
+  where
+    usageField = case usage of
+        Aeson.Null -> []
+        value -> ["usage" Aeson..= value]
 
 itemType :: Aeson.ToJSON a => a -> Text
 itemType value = case Aeson.toJSON value of

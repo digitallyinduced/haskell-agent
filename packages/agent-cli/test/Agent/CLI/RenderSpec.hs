@@ -1,7 +1,7 @@
 module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
@@ -80,6 +80,7 @@ spec = do
                 { responseId = "r"
                 , toolCalls = []
                 , assistantText = Just "almost"
+                , tokenUsage = emptyTokenUsage
                 })
                 `shouldSatisfy` (/= "")
 
@@ -129,6 +130,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -159,6 +161,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -178,6 +181,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -209,6 +213,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = [call]
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -222,6 +227,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
