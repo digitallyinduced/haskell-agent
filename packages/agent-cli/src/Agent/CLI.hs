@@ -55,6 +55,11 @@ import Agent.CLI.Render
     , renderEvent
     )
 import Agent.CLI.Session
+import Agent.CLI.SubagentStore
+    ( SubagentDiskMeta(..)
+    , loadSubagentState
+    , saveSubagentState
+    )
 import Agent.CLI.Style
     ( beginBackground
     , cliWindowTitle
@@ -113,12 +118,21 @@ import Agent.Subagents
     , closeSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
+    , getPreviousResponseId
+    , getStatus
     , newSubagentRegistry
+    , restoreSubagent
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, filterChildGrokTools)
-import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType)
+import Agent.Tools
+    ( CodingTools(..)
+    , appToolHandlers
+    , codingToolsFor
+    , codingToolsForWithTypes
+    , filterChildGrokTools
+    )
+import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType, recordAgentType)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -321,28 +335,40 @@ runAgent options = do
     escPaused <- newIORef False
     let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
         provider = loaded.loadedProvider
-    multiCtx <- do
-        registry <- newSubagentRegistry defaultSubagentConfig cwd
-            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
-            (\_ _ -> pure ())
-        pure $ Just MultiAgentContext
+    -- Per-subagent transcripts / previous ids, shared across send_input / task.
+    subagentSessions <- newIORef Map.empty
+    subagentStoreRoot <- newIORef Nothing
+    pendingNotices <- newIORef ([] :: [Text])
+    registry <- newSubagentRegistry defaultSubagentConfig cwd
+        (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+        (\_ _ -> pure ())
+    agentTypesRef <- newIORef Map.empty
+    let multiCtx = Just MultiAgentContext
             { multiRegistry = registry
             , multiSelfId = Nothing
             , multiDepth = 0
+            , multiResumeFromDisk = Just
+                (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             }
-    -- Per-subagent transcripts / previous ids, shared across send_input / task.
-    subagentSessions <- newIORef Map.empty
-    pendingNotices <- newIORef ([] :: [Text])
+    coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
         Just ctx ->
-            setSubagentOnComplete ctx.multiRegistry \agentId status ->
+            setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [formatCompletionNotice agentId status], ())
+                sessions <- readIORef subagentSessions
+                case Map.lookup agentId sessions of
+                    Just session ->
+                        persistSubagentSnapshot subagentStoreRoot ctx.multiRegistry
+                            agentTypesRef agentId session.subSessionTranscript
+                    Nothing -> pure ()
         Nothing -> pure ()
-    coding <- codingToolsFor provider toolEnv (Just planHooks) multiCtx
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
-        agentTypesRef = coding.codingAgentTypes
+        -- Keep planSessionDir and subagent store root in sync.
+        noteSessionDir dir = do
+            writeIORef planMode.planSessionDir (Just dir)
+            writeIORef subagentStoreRoot (Just dir)
         closeAll = do
             case multiCtx of
                 Just ctx -> closeSubagentRegistry ctx.multiRegistry
@@ -378,7 +404,7 @@ runAgent options = do
                 slot <- readIORef slotRef
                 case slot of
                     Right handle ->
-                        writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                        noteSessionDir handle.sessionDir
                     Left _ -> pure ()
             Nothing -> pure ()
         progName <- getProgName
@@ -401,6 +427,8 @@ runAgent options = do
                                                 conn
                                                 ctx.multiRegistry
                                                 subagentSessions
+                                                subagentStoreRoot
+                                                agentTypesRef
                                     Nothing -> pure ()
                                 let lockedBackend =
                                         lockedOpenAiBackend wsLock conn
@@ -410,7 +438,7 @@ runAgent options = do
                                         withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                     initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    noticingBackend)
+                                    subagentStoreRoot noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -431,13 +459,15 @@ runAgent options = do
                                         ctx.multiRegistry
                                         subagentSessions
                                         agentTypesRef
+                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingNotices pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            subagentStoreRoot backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -455,13 +485,15 @@ runAgent options = do
                                         ctx.multiRegistry
                                         subagentSessions
                                         agentTypesRef
+                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingNotices pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            subagentStoreRoot backend
 
 preparePersistence
     :: CliOptions
@@ -565,9 +597,10 @@ runSession
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
+    -> SubagentStoreRoot
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext escPaused interrupt backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext escPaused interrupt storeRoot backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
@@ -583,6 +616,13 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
     useColor <- resolveColor stdout
+    -- Mirror plan session dir into the subagent store root for this session.
+    let syncStore = do
+            sessionDir <- readIORef planMode.planSessionDir
+            case sessionDir of
+                Just dir -> writeIORef storeRoot (Just dir)
+                Nothing -> pure ()
+    syncStore
     let render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
@@ -614,14 +654,14 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt text [UserMessage text]
+                planMode agentsContext escPaused interrupt storeRoot text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
                 transcriptRef persist planMode projectRoot tokenProvider agentsContext
-                escPaused attachmentsRef interrupt
+                escPaused attachmentsRef interrupt storeRoot
 
 repl
     :: LoopConfig
@@ -640,8 +680,9 @@ repl
     -> IORef Bool
     -> IORef [ImageAttachment]
     -> InterruptState
+    -> SubagentStoreRoot
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt storeRoot = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -689,7 +730,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             }
                                         ]
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist planMode agentsContext escPaused interrupt text
+                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot text
                             turnInputs
                         putTrailingNewline printed
                         continue
@@ -734,7 +775,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
                                         _ <- runOneTurn config render previous printed
-                                            transcriptRef persist planMode agentsContext escPaused interrupt promptText
+                                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot promptText
                                             [ UserMultimodal
                                                 { userText = promptText
                                                 , userImages = images
@@ -897,7 +938,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
-            escPaused attachmentsRef interrupt
+            escPaused attachmentsRef interrupt storeRoot
 
 applyModelChange
     :: Provider
@@ -1005,6 +1046,7 @@ enterPlanFromSlash
     -> IO ()
 enterPlanFromSlash planMode persist maybeDescription config render previous printed
     transcriptRef agentsContext escPaused interrupt = do
+    discardStore <- newIORef Nothing
     color <- resolveColor stderr
     case persist of
         Just slotRef -> do
@@ -1028,7 +1070,7 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt description [UserMessage description]
+                planMode agentsContext escPaused interrupt discardStore description [UserMessage description]
             putTrailingNewline printed
 
 runOneTurn
@@ -1042,10 +1084,11 @@ runOneTurn
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
+    -> SubagentStoreRoot
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt promptText inputs =
+runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt storeRoot promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
@@ -1054,8 +1097,9 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
         Just slotRef -> do
             slot <- readIORef slotRef
             case slot of
-                Right handle ->
+                Right handle -> do
                     writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                    writeIORef storeRoot (Just handle.sessionDir)
                 Left _ -> pure ()
         Nothing -> pure ()
     prev <- readIORef previous
@@ -1126,6 +1170,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     created <- isLeftSlot <$> readIORef slotRef
                     handle <- ensureSession slotRef
                     writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                    writeIORef storeRoot (Just handle.sessionDir)
                     if created
                         then do
                             color <- resolveColor stderr
@@ -1152,7 +1197,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Just notes -> do
                     writeIORef printed False
                     _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext escPaused interrupt notes [UserMessage notes]
+                        planMode agentsContext escPaused interrupt storeRoot notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
@@ -1375,6 +1420,75 @@ data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
     }
 
+-- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
+type SubagentStoreRoot = IORef (Maybe FilePath)
+
+-- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
+syncStoreRootFromPlan :: SubagentStoreRoot -> PlanModeEnv -> IO ()
+syncStoreRootFromPlan storeRootRef planMode = do
+    mroot <- readIORef storeRootRef
+    case mroot of
+        Just _ -> pure ()
+        Nothing -> do
+            sessionDir <- readIORef planMode.planSessionDir
+            case sessionDir of
+                Just dir -> writeIORef storeRootRef (Just dir)
+                Nothing -> pure ()
+
+persistSubagentSnapshot
+    :: SubagentStoreRoot
+    -> SubagentRegistry
+    -> IORef (Map SubagentId Text)
+    -> SubagentId
+    -> IORef [ResponseItem]
+    -> IO ()
+persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = do
+    mroot <- readIORef storeRootRef
+    case mroot of
+        Nothing -> pure ()
+        Just sessionDir -> do
+            items <- readIORef transcriptRef
+            previous <- getPreviousResponseId registry agentId
+            agentType <- lookupAgentType typesRef agentId
+            saveSubagentState sessionDir agentId items previous agentType
+
+-- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
+-- 'resume_agent' / 'resume_from' can continue the prior transcript.
+restoreAgentFromDisk
+    :: SubagentStoreRoot
+    -> SubagentRegistry
+    -> IORef (Map SubagentId SubagentSession)
+    -> IORef (Map SubagentId Text)
+    -> SubagentId
+    -> IO (Either Text ())
+restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
+    status <- getStatus registry agentId
+    case status of
+        NotFound -> restore
+        Closed -> restore
+        _ -> pure (Right ())
+  where
+    restore = do
+        mroot <- readIORef storeRootRef
+        case mroot of
+            Nothing ->
+                pure (Left "no session directory; cannot restore subagent from disk")
+            Just sessionDir ->
+                loadSubagentState sessionDir agentId >>= \case
+                    Nothing ->
+                        pure (Left ("no persisted transcript for " <> agentId.unSubagentId))
+                    Just (items, meta) -> do
+                        _ <- restoreSubagent registry agentId Nothing 1 Nothing
+                            meta.diskPreviousResponseId
+                        case meta.diskAgentType of
+                            Just agentType -> recordAgentType typesRef agentId agentType
+                            Nothing -> pure ()
+                        transcript <- newIORef items
+                        let session = SubagentSession { subSessionTranscript = transcript }
+                        atomicModifyIORef' sessionsRef \m ->
+                            (Map.insert agentId session m, ())
+                        pure (Right ())
+
 -- | Serialize OpenAI WebSocket turns: parent and children share one connection,
 -- and 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
@@ -1408,8 +1522,10 @@ runCodexSubagent
     -> CodexConn
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
+    -> SubagentStoreRoot
+    -> IORef (Map SubagentId Text)
     -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock conn registry sessionsRef =
+runCodexSubagent options policy planHooks paramsRef wsLock conn registry sessionsRef storeRootRef typesRef =
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
@@ -1419,9 +1535,14 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiResumeFromDisk = Nothing
                 }
-        session <- lookupOrCreateSubagentSession sessionsRef env.subId
+        -- Child tools create their own PlanModeEnv; sync store root from parent
+        -- params is handled by noteSessionDir on the parent path. If the parent
+        -- already has a session dir in storeRootRef, we persist; otherwise skip.
+        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
+        syncStoreRootFromPlan storeRootRef coding.codingPlanMode
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
             let model = fromMaybe (defaultModelFor OpenAIProvider) parentParams.model
@@ -1455,7 +1576,10 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
                     , loopApprove = \call -> childApprove policy tools call
                     , loopCancel = env.subCancel
                     }
-            runLoop config previous prompt
+            result <- runLoop config previous prompt
+            persistSubagentSnapshot storeRootRef registry typesRef env.subId
+                session.subSessionTranscript
+            pure result
 
 -- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
 runHttpSubagent
@@ -1468,8 +1592,9 @@ runHttpSubagent
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
     -> IORef (Map SubagentId Text)
+    -> SubagentStoreRoot
     -> RunSubagent
-runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef =
+runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef storeRootRef =
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
@@ -1478,8 +1603,9 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiResumeFromDisk = Nothing
                 }
-        session <- lookupOrCreateSubagentSession sessionsRef env.subId
+        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
         coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
         flip finally coding.codingClose do
@@ -1512,7 +1638,10 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                     }
             -- XAI/OpenRouter ignore previous_response_id and replay local
             -- transcripts; still pass previous for API symmetry.
-            runLoop config previous prompt
+            result <- runLoop config previous prompt
+            persistSubagentSnapshot storeRootRef registry typesRef env.subId
+                session.subSessionTranscript
+            pure result
 
 grokSubagentSuffix :: Text -> SubagentId -> Text
 grokSubagentSuffix agentType agentId =
@@ -1534,14 +1663,30 @@ grokSubagentSuffix agentType agentId =
 
 lookupOrCreateSubagentSession
     :: IORef (Map SubagentId SubagentSession)
+    -> SubagentStoreRoot
+    -> IORef (Map SubagentId Text)
     -> SubagentId
     -> IO SubagentSession
-lookupOrCreateSubagentSession sessionsRef agentId = do
+lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
     sessions <- readIORef sessionsRef
     case Map.lookup agentId sessions of
         Just session -> pure session
         Nothing -> do
-            transcript <- newIORef ([] :: [ResponseItem])
+            mroot <- readIORef storeRootRef
+            loaded <- case mroot of
+                Just sessionDir -> loadSubagentState sessionDir agentId
+                Nothing -> pure Nothing
+            transcript <- newIORef $ case loaded of
+                Just (items, _) -> items
+                Nothing -> []
+            case loaded of
+                Just (_, meta) ->
+                    case meta.diskAgentType of
+                        Just agentType ->
+                            atomicModifyIORef' typesRef \m ->
+                                (Map.insertWith (\_ new -> new) agentId agentType m, ())
+                        Nothing -> pure ()
+                Nothing -> pure ()
             let session = SubagentSession { subSessionTranscript = transcript }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
             pure session

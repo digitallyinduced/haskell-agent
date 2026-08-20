@@ -28,7 +28,7 @@ spec = describe "Agent.Tools.Grok.Task" do
                 })
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0
+        let ctx = MultiAgentContext registry Nothing 0 Nothing
             tool = taskTool ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -55,7 +55,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0
+        let ctx = MultiAgentContext registry Nothing 0 Nothing
             tool = taskTool ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"

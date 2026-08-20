@@ -57,6 +57,9 @@ data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
     , multiSelfId :: !(Maybe SubagentId)
     , multiDepth :: !Int
+      -- | Optional host hook to rehydrate a closed/missing agent from disk
+      -- before 'resume_agent' / follow-ups. 'Nothing' means in-memory only.
+    , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
     }
 
 multiAgentNamespace :: Text
@@ -335,7 +338,11 @@ resumeAgentDescription =
 
 runResume :: MultiAgentContext -> ResumeAgentArgs -> IO (Either Text Text)
 runResume ctx args = do
-    result <- resumeSubagent ctx.multiRegistry (SubagentId args.resumeId)
+    let agentId = SubagentId args.resumeId
+    _ <- case ctx.multiResumeFromDisk of
+        Just restore -> restore agentId
+        Nothing -> pure (Right ())
+    result <- resumeSubagent ctx.multiRegistry agentId
     pure $ case result of
         Left err -> Left err
         Right status ->
