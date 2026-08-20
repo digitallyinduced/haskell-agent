@@ -1,6 +1,5 @@
 /dist-newstyle/
 /.direnv/
-/.envrc
 /result
 /result-*
 /.ghc.environment.*
