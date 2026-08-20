@@ -76,7 +76,13 @@ openAiBackendWith send getParams transcript = Backend \previousResponseId inputs
         deltaRequest = withRequestInput baseParams newItems
         fullRequest = withRequestInput baseParams (history <> newItems)
         emit event = mapM_ onEvent (streamEventToLoopEvent event)
-    result <- send deltaRequest previousResponseId emit
+        -- After compaction (or any cleared chain), previousResponseId is Nothing
+        -- but local history is the compacted transcript — send it as a fresh chain.
+        (initialRequest, initialPrevious) =
+            case previousResponseId of
+                Nothing | not (null history) -> (fullRequest, Nothing)
+                _ -> (deltaRequest, previousResponseId)
+    result <- send initialRequest initialPrevious emit
     recovered <- case result of
         Left err
             | isPreviousResponseIdError err && not (null history) ->

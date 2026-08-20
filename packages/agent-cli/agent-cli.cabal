@@ -39,6 +39,7 @@ library
                     , Agent.CLI.Auth
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
+                    , Agent.CLI.Compaction
                     , Agent.CLI.Command
                     , Agent.CLI.Input
                     , Agent.CLI.Interrupt

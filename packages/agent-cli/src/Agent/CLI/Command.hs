@@ -48,6 +48,8 @@ data ReplAction
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
+    | ReplCompact (Maybe Text)
+    -- ^ Optional focus note for what to keep while compacting history.
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -69,6 +71,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
+    , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image to the next prompt"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
@@ -126,6 +129,11 @@ parseSlash line = case Text.words line of
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
             "resume" -> parseResumeCommand args
+            "compact" ->
+                let focus =
+                        Text.strip (Text.drop (Text.length command) line)
+                in ReplCompact
+                    (if Text.null focus then Nothing else Just focus)
             "reload-auth" ->
                 if null args
                     then ReplReloadAuth
