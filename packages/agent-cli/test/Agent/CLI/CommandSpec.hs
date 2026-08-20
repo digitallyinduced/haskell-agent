@@ -78,12 +78,12 @@ spec = do
             parseReplLine "  /Model  " `shouldBe` ReplShowModel
 
         it "sets a model name" do
-            parseReplLine "/model grok-4.5" `shouldBe` ReplSetModel "grok-4.5"
+            parseReplLine "/model grok-4.6" `shouldBe` ReplSetModel "grok-4.6"
             parseReplLine "/model openai/gpt-5.1"
                 `shouldBe` ReplSetModel "openai/gpt-5.1"
 
         it "rejects extra args on /model" do
-            parseReplLine "/model grok-4.5 extra"
+            parseReplLine "/model grok-4.6 extra"
                 `shouldBe` ReplCommandError "usage: /model [NAME]"
 
         it "enters plan mode with optional description" do
@@ -139,9 +139,9 @@ spec = do
 
     describe "setModel" do
         it "writes the model onto request params" do
-            let updated = setModel "grok-4.5" defaultResponseCreateParams
-            currentModel updated `shouldBe` "grok-4.5"
-            updated.model `shouldBe` Just "grok-4.5"
+            let updated = setModel "grok-4.6" defaultResponseCreateParams
+            currentModel updated `shouldBe` "grok-4.6"
+            updated.model `shouldBe` Just "grok-4.6"
 
         it "preserves other request fields" do
             let original = case defaultResponseCreateParams of
