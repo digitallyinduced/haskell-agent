@@ -16,14 +16,17 @@ import Agent.CLI.Render
     , renderEvent
     , summarizeToolCall
     )
+import Agent.CLI.Session
 import Agent.CLI.Style
-    ( roleError
+    ( beginBackground
+    , endBackground
+    , roleError
     , roleMuted
     , rolePrompt
     , roleSuccess
     , roleWarn
+    , userBackground
     )
-import Agent.CLI.Session
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
@@ -56,6 +59,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.FilePath ((</>))
+import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
 
@@ -309,13 +313,25 @@ repl
     -> IO ()
 repl config render provider previous printed paramsRef policyRef transcriptRef persist = do
     stdoutColor <- resolveColor stdout
-    Text.putStr (rolePrompt stdoutColor "λ> ")
+    -- Prompt + typed input share a navy wash; clear-to-EOL paints the rest
+    -- of the line immediately. Reset after the line is read.
+    Text.putStr
+        ( beginBackground stdoutColor userBackground
+            <> rolePrompt stdoutColor "λ> "
+            <> if stdoutColor
+                then Text.pack clearFromCursorToLineEndCode
+                else mempty
+        )
     hFlush stdout
     done <- isEOF
     if done
-        then putStrLn ""
+        then do
+            Text.putStr (endBackground stdoutColor)
+            putStrLn ""
         else do
             line <- Text.strip <$> Text.getLine
+            Text.putStr (endBackground stdoutColor)
+            hFlush stdout
             if Text.null line
                 then continue
                 else case parseReplLine line of

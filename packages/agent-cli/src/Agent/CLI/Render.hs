@@ -14,7 +14,9 @@ module Agent.CLI.Render
 
 import Agent.CLI.Markdown (renderMarkdown)
 import Agent.CLI.Style
-    ( roleError
+    ( agentBackground
+    , paintBackgroundLines
+    , roleError
     , roleThinking
     , roleToolArrow
     , roleToolDetail
@@ -84,8 +86,10 @@ renderEventUnlocked config = \case
             (roleToolOutput config.renderColor (truncateToolOutput result.output))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
+-- Color mode also paints each line with 'agentBackground'.
 renderAssistantText :: Bool -> Text -> Text
-renderAssistantText = renderMarkdown
+renderAssistantText color text =
+    paintBackgroundLines color agentBackground (renderMarkdown color text)
 
 -- | End-of-turn flush for color mode: prefer streamed deltas, else the
 -- completed 'assistantText' from non-streaming backends.
@@ -101,7 +105,7 @@ flushAssistantBuffer config assistantText = do
         then pure False
         else do
             writeIORef config.renderPrintedText True
-            Text.hPutStr config.renderStdout (renderMarkdown True raw)
+            Text.hPutStr config.renderStdout (renderAssistantText True raw)
             hFlush config.renderStdout
             pure True
 

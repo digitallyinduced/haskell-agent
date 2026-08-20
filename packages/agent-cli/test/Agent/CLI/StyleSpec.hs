@@ -16,8 +16,29 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "\ESC["
             out `shouldSatisfy` (not . Text.isPrefixOf "λ>")
 
+        it "restores a base wash after nested styling" do
+            let out = styleBase True agentBackground [] "hi"
+            -- Reset then reopen palette 236 (combined into one SGR sequence).
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;236m"
+
+    describe "paintBackgroundLines" do
+        it "leaves text unchanged when color is off" do
+            paintBackgroundLines False agentBackground "a\nb" `shouldBe` "a\nb"
+
+        it "paints each line and preserves a trailing newline" do
+            let out = paintBackgroundLines True agentBackground "a\nb\n"
+            Text.count "\ESC[48;5;236m" out `shouldBe` 2
+            out `shouldSatisfy` Text.isSuffixOf "\n"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0K"
+
     describe "roles" do
         it "keeps tool labels readable with color off" do
             roleToolName False "read_file" `shouldBe` "read_file"
             roleError False "boom" `shouldBe` "boom"
             roleMuted False "session: 1" `shouldBe` "session: 1"
+
+        it "keeps the user wash under the prompt glyph" do
+            let out = rolePrompt True "λ>"
+            -- Background may share an SGR sequence with bold/cyan attrs.
+            out `shouldSatisfy` Text.isInfixOf "48;5;17"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;17m"
