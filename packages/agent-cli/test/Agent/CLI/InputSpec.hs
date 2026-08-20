@@ -8,6 +8,7 @@ import Agent.CLI.Input
     , dropCycleModeSentinel
     , formatPasteChip
     , isCycleModeSentinel
+    , pastePrefsText
     , parseChoiceKey
     , replHistoryPath
     , shiftTabPrefsText
@@ -68,6 +69,12 @@ spec = do
             classifyPastedText wrapped `shouldBe` (payload, True)
             classifyPastedText payload `shouldBe` (payload, False)
 
+        it "detects the sentinels inserted by haskeline bindings" do
+            let payload = "hello from clipboard"
+                wrapped = Text.pack [toEnum 0x27E6] <> payload
+                    <> Text.pack [toEnum 0x27E7]
+            classifyPastedText wrapped `shouldBe` (payload, True)
+
         it "treats a 4-line burst as a paste" do
             let burst = Text.unlines ["one", "two", "three", "four"]
             classifyPastedText burst `shouldBe` (burst, True)
@@ -97,3 +104,16 @@ spec = do
                     prefs <- readPrefs path
                     show prefs `shouldSatisfy` ("f24" `Text.isInfixOf`) . Text.pack
                     show prefs `shouldSatisfy` ("\\ESC[Z" `Text.isInfixOf`) . Text.pack
+
+        it "parses bracketed-paste keyseq and bind lines" $ do
+            tmp <- getTemporaryDirectory
+            bracket
+                (openTempFile tmp "haskeline-bracketed-paste")
+                (\(path, _) -> removeFile path)
+                \(path, handle) -> do
+                    Text.hPutStr handle pastePrefsText
+                    hClose handle
+                    prefs <- readPrefs path
+                    show prefs `shouldSatisfy` ("f23" `Text.isInfixOf`) . Text.pack
+                    show prefs `shouldSatisfy`
+                        ("\\ESC[200~" `Text.isInfixOf`) . Text.pack

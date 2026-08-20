@@ -17,6 +17,7 @@ module Agent.CLI.Input
     , dropCycleModeSentinel
     , replHistoryPath
     , shiftTabPrefsText
+    , pastePrefsText
     ) where
 
 import Agent.CLI.Command (slashCompletionCandidates)
@@ -110,8 +111,9 @@ data ReplLine
     | ReplQuitInterrupt
     deriving (Eq, Show)
 
--- | Strip terminal bracketed-paste wrappers (@CSI 200~@ / @CSI 201~@)
--- and decide whether the buffer looks pasted rather than typed.
+-- | Strip terminal bracketed-paste wrappers (raw @CSI 200~@ / @CSI 201~@,
+-- or the printable sentinels inserted by our haskeline bindings) and decide
+-- whether the buffer looks pasted rather than typed.
 classifyPastedText :: Text -> (Text, Bool)
 classifyPastedText raw =
     let stripped = stripBracketedPaste raw
@@ -130,10 +132,23 @@ formatPasteChip text =
 
 stripBracketedPaste :: Text -> Text
 stripBracketedPaste text =
-    Text.replace pasteEnd "" (Text.replace pasteStart "" text)
+    Text.filter (not . isPasteSentinel)
+        (Text.replace pasteEnd "" (Text.replace pasteStart "" text))
   where
     pasteStart = "\ESC[200~"
     pasteEnd = "\ESC[201~"
+
+pasteStartSentinel, pasteEndSentinel :: Char
+pasteStartSentinel = '\x27E6'
+pasteEndSentinel = '\x27E7'
+
+isPasteSentinel :: Char -> Bool
+isPasteSentinel char =
+    char == pasteStartSentinel || char == pasteEndSentinel
+
+hasPasteStartSentinel, hasPasteEndSentinel :: Text -> Bool
+hasPasteStartSentinel = Text.any (== pasteStartSentinel)
+hasPasteEndSentinel = Text.any (== pasteEndSentinel)
 
 -- | @~/.haskell-agent/history@ given the user's home directory.
 replHistoryPath :: FilePath -> FilePath
@@ -451,6 +466,16 @@ shiftTabPrefsText =
         , "bind: f24 " <> Text.singleton cycleModeSentinel <> " Return"
         ]
 
+-- | Preserve bracketed-paste boundaries through haskeline.
+pastePrefsText :: Text
+pastePrefsText =
+    Text.unlines
+        [ "keyseq: \"\\x1b[200~\" f23"
+        , "keyseq: \"\\x1b[201~\" f22"
+        , "bind: f23 " <> Text.singleton pasteStartSentinel
+        , "bind: f22 " <> Text.singleton pasteEndSentinel
+        ]
+
 loadReplPrefs :: IO Prefs
 loadReplPrefs = do
     home <- getHomeDirectory
@@ -464,6 +489,7 @@ loadReplPrefs = do
     unless (Text.null userText || Text.isSuffixOf "\n" userText) $
         Text.hPutStr handle "\n"
     Text.hPutStr handle shiftTabPrefsText
+    Text.hPutStr handle pastePrefsText
     hClose handle
     readPrefs path `finally` (removeFile path `catchIO` \_ -> pure ())
 
@@ -478,24 +504,41 @@ readEditedLine interrupt settings prompt initial = do
         -- are applied here via 'noteIdleCtrlC'.
         handleInterrupt (onInterrupt prefs) $
             runInputTWithPrefs prefs settings $
-                withInterrupt do
-                    result <- getInputLineWithInitial
-                        (Text.unpack prompt)
-                        (Text.unpack initial, "")
-                    case result of
-                        Nothing -> pure ReplEof
-                        Just raw
-                            | isCycleModeSentinel packed ->
-                                -- Leave history unchanged; the REPL
-                                -- restores @draft@ on the next prompt.
-                                pure (ReplCycleMode (dropCycleModeSentinel packed))
-                            | otherwise -> do
-                                unless (all (== ' ') raw) do
-                                    hist <- getHistory
-                                    putHistory (addHistory raw hist)
-                                pure (ReplText packed)
-                          where
-                            packed = Text.pack raw
+                withInterrupt (readSubmittedLine prompt initial [])
+
+    readSubmittedLine linePrompt lineInitial pasteChunks = do
+        result <- getInputLineWithInitial
+            (Text.unpack linePrompt)
+            (Text.unpack lineInitial, "")
+        case result of
+            Nothing -> pure ReplEof
+            Just raw ->
+                let packed = Text.pack raw
+                    chunks = pasteChunks <> [packed]
+                    combined = Text.intercalate "\n" chunks
+                    pasteStarted =
+                        not (null pasteChunks)
+                            || hasPasteStartSentinel packed
+                in if pasteStarted && not (hasPasteEndSentinel packed)
+                    then
+                        -- Haskeline treats newlines inside bracketed paste as
+                        -- submissions. Keep consuming those fragments inside
+                        -- this one REPL read until the terminal's end marker.
+                        readSubmittedLine "" "" chunks
+                    else finishSubmittedLine combined
+
+    finishSubmittedLine packed
+        | isCycleModeSentinel packed =
+            -- Leave history unchanged; the REPL restores @draft@ on the next
+            -- prompt.
+            pure (ReplCycleMode (dropCycleModeSentinel packed))
+        | otherwise = do
+            let (historyText, _) = classifyPastedText packed
+            unless (Text.all (== ' ') historyText) do
+                hist <- getHistory
+                putHistory (addHistory (Text.unpack historyText) hist)
+            pure (ReplText packed)
+
     onInterrupt prefs = do
         noteIdleCtrlC interrupt >>= \case
             ContinuePrompt -> go prefs
