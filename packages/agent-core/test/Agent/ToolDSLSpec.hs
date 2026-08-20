@@ -34,17 +34,20 @@ spec = do
                 `shouldBe` Just (Aeson.String "integer")
 
     describe "grokSystemPrompt" do
-        it "names grok-build tools and omits Codex names and background_tasks" do
+        it "names grok-build tools including background task helpers" do
             let prompt = grokSystemPrompt codingGrokPromptTools "/tmp/repo"
                     (fromGregorian 2026 8 20) False
             prompt `shouldSatisfy` Text.isInfixOf "read_file"
             prompt `shouldSatisfy` Text.isInfixOf "search_replace"
             prompt `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
+            prompt `shouldSatisfy` Text.isInfixOf "get_task_output"
+            prompt `shouldSatisfy` Text.isInfixOf "kill_task"
             prompt `shouldSatisfy` Text.isInfixOf "<tool_calling>"
             prompt `shouldSatisfy` Text.isInfixOf "<work_policy>"
+            prompt `shouldSatisfy` Text.isInfixOf "<background_tasks>"
             prompt `shouldNotSatisfy` Text.isInfixOf "shell_command"
             prompt `shouldNotSatisfy` Text.isInfixOf "apply_patch"
-            prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
+            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_command"
             prompt `shouldSatisfy` Text.isInfixOf "/tmp/repo"
             prompt `shouldSatisfy` Text.isInfixOf "2026-08-20"
 
