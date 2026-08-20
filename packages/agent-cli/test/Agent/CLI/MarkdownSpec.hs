@@ -100,5 +100,5 @@ spec = do
 
         it "restores the agent wash after inline spans" do
             let out = renderMarkdown True "see `file.txt` now"
-            -- Nested Reset must re-open palette 236 so line painting sticks.
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;236m"
+            -- Nested Reset must re-open Solarized base03 so line painting sticks.
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;0;43;54m"

@@ -436,8 +436,8 @@ repl
     -> IO DevResult
 repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
-    -- Prompt + typed input share a navy wash; clear-to-EOL paints the rest
-    -- of the line immediately. Haskeline redraws this prompt on edit.
+    -- Solarized user wash under the prompt; haskeline redraws it on edit.
+    -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let chromePrompt =
             beginBackground stdoutColor userBackground
                 <> rolePrompt stdoutColor "λ> "

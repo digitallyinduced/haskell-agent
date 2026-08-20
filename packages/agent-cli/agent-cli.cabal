@@ -57,6 +57,7 @@ library
                     , ansi-terminal >= 1.0
                     , base >= 4.17 && < 5
                     , bytestring
+                    , colour >= 2.3
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
@@ -99,6 +100,7 @@ test-suite agent-cli-test
                     , ansi-terminal
                     , base >= 4.17 && < 5
                     , bytestring
+                    , colour
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
