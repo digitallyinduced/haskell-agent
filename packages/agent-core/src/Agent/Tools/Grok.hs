@@ -5,6 +5,7 @@
 -- Do not rename these to match Codex; Grok models are trained on this dialect.
 module Agent.Tools.Grok
     ( grokTools
+    , filterGrokToolsForType
     , newGrokSession
     , closeGrokSession
     , GrokSession
@@ -52,6 +53,19 @@ import Agent.Tools.PlanMode
     , planModeBlockedEditMessage
     )
 import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
+import Agent.Tools.Grok.Task
+    ( filterGrokToolsForType
+    , isSubagentIdText
+    , taskTool
+    )
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents
+    ( SubagentId(..)
+    , SubagentStatus(..)
+    , closeSubagent
+    , getStatus
+    , waitSubagents
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
@@ -59,8 +73,10 @@ import Agent.Tools.Types
     )
 import Data.Aeson (FromJSON(..), Object)
 import Data.Aeson.Types (Parser)
+import Data.IORef
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -70,24 +86,33 @@ import System.FilePath (takeExtension, (</>))
 import System.Process (readProcessWithExitCode)
 
 -- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash,
--- get_task_output, kill_task, enter_plan_mode, exit_plan_mode, ask_user_question}.
+-- get_task_output, kill_task, task, enter_plan_mode, exit_plan_mode, ask_user_question}.
 -- Local extension: run_ghci (persistent GHCi with per-call purity approval).
-grokTools :: GrokSession -> GhciSession -> PlanModeEnv -> [AppTool]
-grokTools session ghci planMode =
+grokTools
+    :: GrokSession
+    -> GhciSession
+    -> PlanModeEnv
+    -> Maybe MultiAgentContext
+    -> IORef (Map SubagentId Text)
+    -> [AppTool]
+grokTools session ghci planMode multi typesRef =
     let env = session.grokEnv
-    in
-        [ readFileTool env
-        , grepTool env
-        , listDirTool env
-        , searchReplaceTool env planMode
-        , runTerminalCmdTool session
-        , runGhciTool ghci
-        , getTaskOutputTool session
-        , killTaskTool session
-        , enterPlanModeTool planMode
-        , exitPlanModeTool planMode
-        , askUserQuestionTool planMode
-        ]
+        base =
+            [ readFileTool env
+            , grepTool env
+            , listDirTool env
+            , searchReplaceTool env planMode
+            , runTerminalCmdTool session
+            , runGhciTool ghci
+            , getTaskOutputTool session multi
+            , killTaskTool session multi
+            , enterPlanModeTool planMode
+            , exitPlanModeTool planMode
+            , askUserQuestionTool planMode
+            ]
+    in case multi of
+        Nothing -> base
+        Just ctx -> base ++ [taskTool ctx typesRef]
 
 jsonTool
     :: Text
@@ -753,49 +778,98 @@ data TaskOutputArgs = TaskOutputArgs
     }
 
 instance FromJSON TaskOutputArgs where
-    parseJSON = objectArgs \object -> TaskOutputArgs
-        <$> reqText object "task_id"
-        <*> optionalTimeout object
+    parseJSON = objectArgs \object ->
+        TaskOutputArgs
+            <$> (reqText object "task_id" <|> reqText object "task_ids")
+            <*> optionalTimeout object
 
-getTaskOutputTool :: GrokSession -> AppTool
-getTaskOutputTool session = jsonTool "get_task_output" getTaskOutputDescription
+getTaskOutputTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
+getTaskOutputTool session multi = jsonTool "get_task_output" getTaskOutputDescription
     [ PropertySchema "task_id" PropertyString True $ Just
-        "The task id returned by a background run_terminal_cmd."
+        "The task id from a background run_terminal_cmd or the subagent_id from task."
     , PropertySchema "timeout" PropertyInteger False $ Just
         "Optional wait in milliseconds. If omitted, return a snapshot immediately."
     ]
     True
-    (typedTool "get_task_output" (runGetTaskOutput session))
+    (typedTool "get_task_output" (runGetTaskOutput session multi))
 
 getTaskOutputDescription :: Text
 getTaskOutputDescription =
-    "Read output from a background task started with run_terminal_cmd.\n\
+    "Read output from a background command or subagent.\n\
     \Use this for a snapshot of current output, or one bounded wait — not a polling loop."
 
-runGetTaskOutput :: GrokSession -> TaskOutputArgs -> IO (Either Text Text)
-runGetTaskOutput session args =
-    Right . stripAnsi <$> readTaskOutput session args.taskId args.timeout
+runGetTaskOutput
+    :: GrokSession
+    -> Maybe MultiAgentContext
+    -> TaskOutputArgs
+    -> IO (Either Text Text)
+runGetTaskOutput session multi args = case multi of
+    Just ctx | isSubagentIdText args.taskId -> do
+        let agentId = SubagentId args.taskId
+            timeoutMs = fromMaybe 0 args.timeout
+        if timeoutMs <= 0
+            then do
+                status <- getStatus ctx.multiRegistry agentId
+                pure $ Right $ formatAgentWait args.taskId False (Just status)
+            else do
+                (statuses, timedOut) <-
+                    waitSubagents ctx.multiRegistry [agentId] timeoutMs
+                pure $ Right $ formatAgentWait args.taskId timedOut (Map.lookup agentId statuses)
+    _ ->
+        Right . stripAnsi <$> readTaskOutput session args.taskId args.timeout
+
+formatAgentWait :: Text -> Bool -> Maybe SubagentStatus -> Text
+formatAgentWait taskId timedOut mstatus = case mstatus of
+    Just (Completed (Just text)) ->
+        "subagent_id: " <> taskId <> "\nstatus: completed\nfinal:\n" <> text
+    Just (Completed Nothing) ->
+        "subagent_id: " <> taskId <> "\nstatus: completed"
+    Just (Errored err) ->
+        "subagent_id: " <> taskId <> "\nstatus: errored\nerror: " <> err
+    Just Interrupted ->
+        "subagent_id: " <> taskId <> "\nstatus: interrupted"
+    Just Closed ->
+        "subagent_id: " <> taskId <> "\nstatus: shutdown"
+    Just Running
+        | timedOut -> "subagent_id: " <> taskId <> "\nstatus: running (wait timed out)"
+        | otherwise -> "subagent_id: " <> taskId <> "\nstatus: running"
+    Just Pending ->
+        "subagent_id: " <> taskId <> "\nstatus: pending"
+    Just NotFound ->
+        "Unknown task_id: " <> taskId
+    Nothing ->
+        "Unknown task_id: " <> taskId
 
 newtype KillTaskArgs = KillTaskArgs { taskId :: Text }
 
 instance FromJSON KillTaskArgs where
     parseJSON = objectArgs \object -> KillTaskArgs <$> reqText object "task_id"
 
-killTaskTool :: GrokSession -> AppTool
-killTaskTool session = jsonTool "kill_task" killTaskDescription
+killTaskTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
+killTaskTool session multi = jsonTool "kill_task" killTaskDescription
     [ PropertySchema "task_id" PropertyString True $ Just
-        "The task id returned by a background run_terminal_cmd."
+        "The task id from a background run_terminal_cmd or the subagent_id from task."
     ]
     False
-    (typedTool "kill_task" (runKillTask session))
+    (typedTool "kill_task" (runKillTask session multi))
 
 killTaskDescription :: Text
 killTaskDescription =
-    "Kill a background task started with run_terminal_cmd."
+    "Kill a background command or close a subagent."
 
-runKillTask :: GrokSession -> KillTaskArgs -> IO (Either Text Text)
-runKillTask session args =
-    Right . stripAnsi <$> killTask session args.taskId
+runKillTask
+    :: GrokSession
+    -> Maybe MultiAgentContext
+    -> KillTaskArgs
+    -> IO (Either Text Text)
+runKillTask session multi args = case multi of
+    Just ctx | isSubagentIdText args.taskId -> do
+        result <- closeSubagent ctx.multiRegistry (SubagentId args.taskId)
+        pure $ case result of
+            Left err -> Left err
+            Right _ -> Right ("closed subagent " <> args.taskId)
+    _ ->
+        Right . stripAnsi <$> killTask session args.taskId
 
 combinedOutput :: CommandResult -> Text
 combinedOutput result

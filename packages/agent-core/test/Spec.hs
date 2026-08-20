@@ -11,6 +11,7 @@ import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.CodexSpec as CodexToolsSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.GrokSpec as GrokToolsSpec
+import qualified Agent.Tools.Grok.TaskSpec as GrokTaskSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
@@ -27,6 +28,7 @@ main = hspec do
     ToolDispatchSpec.spec
     ToolDSLSpec.spec
     GrokToolsSpec.spec
+    GrokTaskSpec.spec
     GhciSpec.spec
     IOSpec.spec
     CodexToolsSpec.spec

@@ -117,7 +117,8 @@ import Agent.Subagents
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor)
+import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, filterChildGrokTools)
+import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -320,18 +321,16 @@ runAgent options = do
     escPaused <- newIORef False
     let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
         provider = loaded.loadedProvider
-    multiCtx <- case provider of
-        OpenAIProvider -> do
-            registry <- newSubagentRegistry defaultSubagentConfig cwd
-                (\_ _ _ _ -> pure $ Left LoopNoResponseId)
-                (\_ _ -> pure ())
-            pure $ Just MultiAgentContext
-                { multiRegistry = registry
-                , multiSelfId = Nothing
-                , multiDepth = 0
-                }
-        _ -> pure Nothing
-    -- Per-subagent OpenAI transcripts / previous ids, shared across send_input.
+    multiCtx <- do
+        registry <- newSubagentRegistry defaultSubagentConfig cwd
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        pure $ Just MultiAgentContext
+            { multiRegistry = registry
+            , multiSelfId = Nothing
+            , multiDepth = 0
+            }
+    -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     pendingNotices <- newIORef ([] :: [Text])
     case multiCtx of
@@ -343,6 +342,7 @@ runAgent options = do
     coding <- codingToolsFor provider toolEnv (Just planHooks) multiCtx
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
+        agentTypesRef = coding.codingAgentTypes
         closeAll = do
             case multiCtx of
                 Just ctx -> closeSubagentRegistry ctx.multiRegistry
@@ -416,16 +416,50 @@ runAgent options = do
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
+                        case multiCtx of
+                            Just ctx ->
+                                setSubagentRunner ctx.multiRegistry $
+                                    runHttpSubagent
+                                        options
+                                        policy
+                                        planHooks
+                                        paramsRef
+                                        XAIProvider
+                                        (\childParamsRef childTranscript ->
+                                            xaiBackend xaiOptions loaded.loadedTokenProvider
+                                                (readIORef childParamsRef) childTranscript)
+                                        ctx.multiRegistry
+                                        subagentSessions
+                                        agentTypesRef
+                            Nothing -> pure ()
                         let backend =
-                                xaiBackend xaiOptions loaded.loadedTokenProvider
-                                    (readIORef paramsRef) transcriptRef
+                                withPendingNotices pendingNotices $
+                                    xaiBackend xaiOptions loaded.loadedTokenProvider
+                                        (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                        case multiCtx of
+                            Just ctx ->
+                                setSubagentRunner ctx.multiRegistry $
+                                    runHttpSubagent
+                                        options
+                                        policy
+                                        planHooks
+                                        paramsRef
+                                        OpenRouterProvider
+                                        (\childParamsRef childTranscript ->
+                                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                                (readIORef childParamsRef) childTranscript)
+                                        ctx.multiRegistry
+                                        subagentSessions
+                                        agentTypesRef
+                            Nothing -> pure ()
                         let backend =
-                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
-                                    (readIORef paramsRef) transcriptRef
+                                withPendingNotices pendingNotices $
+                                    openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                        (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
 
@@ -1422,6 +1456,81 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
                     , loopCancel = env.subCancel
                     }
             runLoop config previous prompt
+
+-- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
+runHttpSubagent
+    :: CliOptions
+    -> ApprovalPolicy
+    -> PlanModeHooks
+    -> IORef ResponseCreateParams
+    -> Provider
+    -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
+    -> SubagentRegistry
+    -> IORef (Map SubagentId SubagentSession)
+    -> IORef (Map SubagentId Text)
+    -> RunSubagent
+runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef =
+    \env previous prompt onEvent -> do
+        parentParams <- readIORef paramsRef
+        childEnv <- defaultToolEnv env.subCwd
+        let childToolEnv = childEnv { toolCancel = env.subCancel }
+            childCtx = MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Just env.subId
+                , multiDepth = env.subDepth
+                }
+        session <- lookupOrCreateSubagentSession sessionsRef env.subId
+        agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
+        coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
+        flip finally coding.codingClose do
+            today <- utctDay <$> getCurrentTime
+            let model = fromMaybe (defaultModelFor provider) parentParams.model
+                effort = case parentParams.reasoning of
+                    Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
+                    Nothing -> defaultEffortFor provider
+                baseInstructions =
+                    fromMaybe
+                        (systemPrompt provider env.subCwd today True)
+                        parentParams.instructions
+                instructions =
+                    baseInstructions
+                        <> "\n\n"
+                        <> grokSubagentSuffix agentType env.subId
+                tools = filterChildGrokTools agentType coding.codingAppTools
+                childParams = requestParams provider model instructions
+                    (schemasFromAppTools provider tools) effort
+            childParamsRef <- newIORef childParams
+            let backend = mkBackend childParamsRef session.subSessionTranscript
+                config = LoopConfig
+                    { loopBackend = backend
+                    , loopHandlers = appToolHandlers tools
+                    , loopDispatch = defaultLoopDispatch
+                    , loopMaxTurns = options.optMaxTurns
+                    , loopOnEvent = onEvent
+                    , loopApprove = \call -> childApprove policy tools call
+                    , loopCancel = env.subCancel
+                    }
+            -- XAI/OpenRouter ignore previous_response_id and replay local
+            -- transcripts; still pass previous for API symmetry.
+            runLoop config previous prompt
+
+grokSubagentSuffix :: Text -> SubagentId -> Text
+grokSubagentSuffix agentType agentId =
+    "You are a Grok Build subagent (type: "
+        <> agentType
+        <> "). Your agent id is "
+        <> agentId.unSubagentId
+        <> ". Complete the assigned task directly and report results clearly."
+        <> case agentType of
+            "explore" ->
+                "\n\n=== READ-ONLY MODE ===\n\
+                \Do not create, modify, or delete files. Use run_terminal_cmd only \
+                \for read-only commands (ls, git status, git log, git diff, find, cat, head, tail)."
+            "plan" ->
+                "\n\n=== READ-ONLY MODE ===\n\
+                \Do not create, modify, or delete files except plan.md while in plan mode. \
+                \Use run_terminal_cmd only for read-only commands."
+            _ -> ""
 
 lookupOrCreateSubagentSession
     :: IORef (Map SubagentId SubagentSession)

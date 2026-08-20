@@ -1,15 +1,20 @@
 module Agent.Tools.GrokSpec (spec) where
 
-import Agent.Loop (defaultLoopDispatch)
+import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import Agent.Provider (Provider(..))
+import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
+import Data.IORef
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (bracket, finally)
 import Data.Text (Text)
@@ -30,7 +35,8 @@ spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
         withTempSession \(session, ghci) -> do
             plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
-            let names = map (.appToolName) (grokTools session ghci plan)
+            typesRef <- newIORef (Map.empty :: Map SubagentId Text)
+            let names = map (.appToolName) (grokTools session ghci plan Nothing typesRef)
             names `shouldBe`
                 [ "read_file"
                 , "grep"
@@ -52,6 +58,19 @@ spec = describe "Agent.Tools.Grok" do
                 map (.appToolName) xai.codingAppTools `shouldBe` names
                 map (.appToolName) openrouter.codingAppTools `shouldBe` names)
                 `finally` (xai.codingClose >> openrouter.codingClose)
+
+
+    it "registers task when a multi-agent context is provided" do
+        withTempSession \(session, ghci) -> do
+            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            registry <- newSubagentRegistry defaultSubagentConfig session.grokEnv.toolCwd
+                (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ -> pure ())
+            typesRef <- newIORef Map.empty
+            let ctx = MultiAgentContext registry Nothing 0
+                names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
+            names `shouldContain` ["task"]
+            closeSubagentRegistry registry
 
     it "reads a file with grok line-number anchors" do
         withTempSession \(session, ghci) -> do
@@ -268,8 +287,9 @@ spec = describe "Agent.Tools.Grok" do
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
     plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+    typesRef <- newIORef (Map.empty :: Map SubagentId Text)
     result <- dispatchToolCall defaultLoopDispatch
-        (appToolHandlers (grokTools session ghci plan))
+        (appToolHandlers (grokTools session ghci plan Nothing typesRef))
         (functionToolCall "call-1" name arguments)
     pure result.output
 

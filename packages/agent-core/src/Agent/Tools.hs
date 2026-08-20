@@ -12,21 +12,29 @@ module Agent.Tools
     , appToolHandlers
     , CodingTools(..)
     , codingToolsFor
+    , filterChildGrokTools
     ) where
 
 import Agent.Provider (Provider(..))
+import Agent.Subagents (SubagentId)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.Grok (closeGrokSession, filterGrokToolsForType, grokTools, newGrokSession)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
+import Data.IORef
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 
 -- | Tools plus the session plan-mode env (shared across providers).
 data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
     , codingPlanMode :: !PlanModeEnv
     , codingClose :: !(IO ())
+      -- | Grok/OpenRouter: maps spawned agent ids to subagent_type.
+    , codingAgentTypes :: !(IORef (Map SubagentId Text))
     }
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
@@ -41,22 +49,25 @@ codingToolsFor
     -> IO CodingTools
 codingToolsFor provider env hooks multi = do
     plan <- newPlanModeEnv env.toolCwd hooks
+    typesRef <- newIORef Map.empty
     case provider of
         XAIProvider -> do
             session <- newGrokSession env
             ghci <- newGhciSession env
             pure CodingTools
-                { codingAppTools = grokTools session ghci plan
+                { codingAppTools = grokTools session ghci plan multi typesRef
                 , codingPlanMode = plan
                 , codingClose = closeGrokSession session >> closeGhciSession ghci
+                , codingAgentTypes = typesRef
                 }
         OpenRouterProvider -> do
             session <- newGrokSession env
             ghci <- newGhciSession env
             pure CodingTools
-                { codingAppTools = grokTools session ghci plan
+                { codingAppTools = grokTools session ghci plan multi typesRef
                 , codingPlanMode = plan
                 , codingClose = closeGrokSession session >> closeGhciSession ghci
+                , codingAgentTypes = typesRef
                 }
         OpenAIProvider -> do
             ghci <- newGhciSession env
@@ -65,4 +76,10 @@ codingToolsFor provider env hooks multi = do
                 { codingAppTools = tools
                 , codingPlanMode = plan
                 , codingClose = closeGhciSession ghci
+                , codingAgentTypes = typesRef
                 }
+
+-- | Re-export for CLI child runners.
+filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
+filterChildGrokTools = filterGrokToolsForType
+
