@@ -134,8 +134,8 @@ spec = do
                 renderEvent config (TextDelta "see `file.txt`")
                 buffered <- readIORef config.renderTextBuffer
                 buffered `shouldBe` "see `file.txt`"
-                liveRows <- readIORef config.renderLiveRows
-                liveRows `shouldSatisfy` (> 0)
+                live <- readIORef config.renderLiveActive
+                live `shouldBe` True
                 printed <- readIORef config.renderPrintedText
                 printed `shouldBe` True
                 renderEvent config (TurnFinished TurnOutput
@@ -149,7 +149,7 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
                 body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
-                readIORef config.renderLiveRows `shouldReturn` 0
+                readIORef config.renderLiveActive `shouldReturn` False
 
         it "restyles growing markdown across deltas" do
             withRenderConfig False True \config handle path -> do
@@ -157,11 +157,13 @@ spec = do
                 renderEvent config (TextDelta "le.txt`")
                 hClose handle
                 body <- Text.readFile path
-                -- Second delta should erase and redraw; final body styles the
-                -- closed code span (no raw backticks left).
+                -- Second delta should restore saved cursor and redraw; final
+                -- body styles the closed code span (no raw backticks left).
                 body `shouldSatisfy` Text.isInfixOf "file.txt"
                 body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` Text.isInfixOf "\ESC7"  -- DECSC
+                body `shouldSatisfy` Text.isInfixOf "\ESC8"  -- DECRC
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
@@ -235,8 +237,7 @@ withRenderConfig showThinking color action = do
     activityRef <- newIORef "thinking…"
     startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
-    liveRows <- newIORef (0 :: Int)
-    liveEndsNL <- newIORef False
+    liveActive <- newIORef False
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
     (path, handle) <- openTempFile tmp "agent-render-spec"
@@ -249,8 +250,7 @@ withRenderConfig showThinking color action = do
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
-                , renderLiveRows = liveRows
-                , renderLiveEndsWithNewline = liveEndsNL
+                , renderLiveActive = liveActive
                 , renderLock = lock
                 , renderStdout = handle
                 , renderStderr = handle

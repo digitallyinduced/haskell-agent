@@ -537,8 +537,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     printed <- newIORef False
     attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
-    liveRows <- newIORef (0 :: Int)
-    liveEndsNL <- newIORef False
+    liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
     activityRef <- newIORef "thinking…"
@@ -557,8 +556,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
-            , renderLiveRows = liveRows
-            , renderLiveEndsWithNewline = liveEndsNL
+            , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr

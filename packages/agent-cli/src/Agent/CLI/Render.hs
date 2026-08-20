@@ -56,10 +56,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import System.Console.ANSI (ConsoleLayer(..), SGR(..), getTerminalSize)
+import System.Console.ANSI (ConsoleLayer(..), SGR(..))
 import System.Console.ANSI.Codes
     ( clearFromCursorToScreenEndCode
-    , cursorUpLineCode
     , setCursorColumnCode
     )
 import System.IO (Handle, hFlush)
@@ -71,12 +70,9 @@ data RenderConfig = RenderConfig
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
-    -- | Display rows occupied by the last live color-mode redraw of the
-    -- assistant buffer. Used to move the cursor back before restyling.
-    , renderLiveRows :: !(IORef Int)
-    -- | Whether the last live paint ended with a newline (cursor sits on the
-    -- following empty row rather than at the end of the last content row).
-    , renderLiveEndsWithNewline :: !(IORef Bool)
+    -- | True after a live color-mode paint; next redraw restores the saved
+    -- cursor and clears from there before restyling the buffer.
+    , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
@@ -106,8 +102,7 @@ renderEventUnlocked config = \case
     ReasoningDelta _ -> pure ()
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
-        writeIORef config.renderLiveRows 0
-        writeIORef config.renderLiveEndsWithNewline False
+        writeIORef config.renderLiveActive False
         writeIORef config.renderActivityRef "thinking…"
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
@@ -144,18 +139,20 @@ renderAssistantText color text =
 
 -- | Live color-mode redraw: restyle the full buffer and replace the previous
 -- painted region in-place so tokens appear as they stream.
+--
+-- Uses DECSC/DECRC (ESC 7 / ESC 8) instead of counting display rows. Row
+-- counting breaks on soft-wrap, wide glyphs, and background erase sequences
+-- from 'paintBackgroundLines', which left garbled leftover text on redraw.
 redrawLiveAssistant :: RenderConfig -> Text -> IO ()
 redrawLiveAssistant config raw
     | Text.null raw = pure ()
     | otherwise = do
-        width <- terminalWidth
         let painted = renderAssistantText True raw
-            rows = visibleDisplayRows width painted
-            endsNL = Text.isSuffixOf "\n" painted
         eraseLiveAssistant config
+        -- Save cursor at the start of this paint so the next delta can return.
+        Text.hPutStr config.renderStdout "\ESC7"
         writeIORef config.renderPrintedText True
-        writeIORef config.renderLiveRows rows
-        writeIORef config.renderLiveEndsWithNewline endsNL
+        writeIORef config.renderLiveActive True
         Text.hPutStr config.renderStdout painted
         hFlush config.renderStdout
 
@@ -166,10 +163,9 @@ finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
     buffered <- readIORef config.renderTextBuffer
     writeIORef config.renderTextBuffer ""
-    liveRows <- readIORef config.renderLiveRows
-    writeIORef config.renderLiveRows 0
-    writeIORef config.renderLiveEndsWithNewline False
-    if liveRows > 0
+    live <- readIORef config.renderLiveActive
+    writeIORef config.renderLiveActive False
+    if live
         then do
             writeIORef config.renderPrintedText True
             pure True
@@ -187,38 +183,21 @@ finalizeAssistantBuffer config assistantText = do
 
 eraseLiveAssistant :: RenderConfig -> IO ()
 eraseLiveAssistant config = do
-    rows <- readIORef config.renderLiveRows
-    endsNL <- readIORef config.renderLiveEndsWithNewline
-    when (rows > 0) (eraseRows config rows endsNL)
-    writeIORef config.renderLiveRows 0
-    writeIORef config.renderLiveEndsWithNewline False
-
-eraseRows :: RenderConfig -> Int -> Bool -> IO ()
-eraseRows config rows endsWithNewline
-    | rows <= 0 = pure ()
-    | otherwise = do
-        -- After a trailing newline the cursor sits on the empty row below
-        -- the content, so move up @rows@; otherwise @rows - 1@.
-        let upCount
-                | endsWithNewline = rows
-                | rows > 1 = rows - 1
-                | otherwise = 0
-            up = if upCount > 0 then Text.pack (cursorUpLineCode upCount) else ""
-            home = Text.pack (setCursorColumnCode 1)
-            clear = Text.pack clearFromCursorToScreenEndCode
-        Text.hPutStr config.renderStdout (up <> home <> clear)
+    live <- readIORef config.renderLiveActive
+    when live do
+        -- Restore to the saved start of the previous live paint, then clear
+        -- everything below so soft-wrapped leftovers disappear.
+        Text.hPutStr config.renderStdout $
+            "\ESC8"
+                <> Text.pack (setCursorColumnCode 0)
+                <> Text.pack clearFromCursorToScreenEndCode
         hFlush config.renderStdout
+    writeIORef config.renderLiveActive False
 
-terminalWidth :: IO Int
-terminalWidth = do
-    -- getTerminalSize may probe stdin; non-TTY / EOF (unit tests) → 80.
-    result <- tryIO getTerminalSize
-    pure $ case result of
-        Right (Just (_height, width)) | width > 0 -> width
-        _ -> 80
 
 -- | How many terminal rows a painted assistant block occupies, accounting for
 -- soft wrap at @width@. ANSI/OSC sequences do not consume columns.
+-- Kept for tests / diagnostics; live redraw no longer depends on it.
 visibleDisplayRows :: Int -> Text -> Int
 visibleDisplayRows width painted
     | Text.null painted = 0
@@ -231,7 +210,9 @@ visibleDisplayRows width painted
                 | otherwise = parts
             rowCount line =
                 let cols = Text.length (stripAnsiOsc line)
-                in max 1 ((cols + width' - 1) `div` width')
+                in if cols == 0
+                    then 1
+                    else max 1 ((cols + width' - 1) `div` width')
         in sum (map rowCount logical)
 
 -- | Drop CSI and OSC-8 hyperlink wrappers so length matches visible cells.
@@ -245,11 +226,11 @@ stripAnsiOsc = go
                 (_, after) = Text.break isCsiFinal rest
             in go (Text.drop 1 after)
         | Text.isPrefixOf "\ESC]8;" t =
-            case Text.breakOn "\ESC\\" (Text.drop 5 t) of
+            case Text.breakOn "\ESC\\" (Text.drop 4 t) of
                 (_params, rest)
                     | Text.isPrefixOf "\ESC\\" rest -> go (Text.drop 2 rest)
                     | otherwise ->
-                        case Text.break (== '\a') (Text.drop 5 t) of
+                        case Text.break (== '\a') (Text.drop 4 t) of
                             (_params, rest2)
                                 | Text.isPrefixOf "\a" rest2 -> go (Text.drop 1 rest2)
                                 | otherwise -> go (Text.drop 1 t)
