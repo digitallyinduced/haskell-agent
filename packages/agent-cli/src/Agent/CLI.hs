@@ -8,6 +8,14 @@ import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
+    ( RenderConfig(..)
+    , clearThinking
+    , formatLoopError
+    , putTextLn
+    , renderAssistantText
+    , renderEvent
+    , summarizeToolCall
+    )
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, worktreeRoot)
 import Agent.Loop
@@ -67,8 +75,9 @@ runAgent options = do
     let provider = loaded.loadedProvider
         model = fromMaybe (defaultModelFor provider) options.optModel
         instructions = systemPrompt provider cwd today (isOneShot options)
+        effort = fromMaybe (defaultEffortFor provider) options.optEffort
         params = requestParams model instructions
-            (schemasFromAppTools provider tools) options.optEffort
+            (schemasFromAppTools provider tools) effort
         policy = resolveApprovalPolicy options isTty
     paramsRef <- newIORef params
     prompt <- loadPrompt options
@@ -103,14 +112,17 @@ runSession
 runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
+    thinkingVisible <- newIORef False
     ioLock <- newMVar ()
     previous <- newIORef Nothing
     policyRef <- newIORef policy
     stdoutTty <- hIsTerminalDevice stdout
+    stderrTty <- hIsTerminalDevice stderr
     noColor <- lookupEnv "NO_COLOR"
     let useColor = stdoutTty && maybe True (\_ -> False) noColor
         render = RenderConfig
-            { renderShowReasoning = options.optShowReasoning
+            { renderShowThinking = stderrTty
+            , renderThinkingVisible = thinkingVisible
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
@@ -130,18 +142,19 @@ runSession options policy tools prompt paramsRef backend = do
             }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config previous printed text
+            ok <- runOneTurn config render previous printed text
             if ok then putTrailingNewline printed else exitFailure
-        Nothing -> repl config previous printed paramsRef policyRef
+        Nothing -> repl config render previous printed paramsRef policyRef
 
 repl
     :: LoopConfig
+    -> RenderConfig
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef ResponseCreateParams
     -> IORef ApprovalPolicy
     -> IO ()
-repl config previous printed paramsRef policyRef = do
+repl config render previous printed paramsRef policyRef = do
     putStr "agent> "
     hFlush stdout
     done <- isEOF
@@ -155,7 +168,7 @@ repl config previous printed paramsRef policyRef = do
                     ReplQuit -> pure ()
                     ReplPrompt text -> do
                         writeIORef printed False
-                        _ <- runOneTurn config previous printed text
+                        _ <- runOneTurn config render previous printed text
                         putTrailingNewline printed
                         continue
                     ReplShowEffort -> do
@@ -173,17 +186,19 @@ repl config previous printed paramsRef policyRef = do
                         Text.hPutStrLn stderr err
                         continue
   where
-    continue = repl config previous printed paramsRef policyRef
+    continue = repl config render previous printed paramsRef policyRef
 
 runOneTurn
     :: LoopConfig
+    -> RenderConfig
     -> IORef (Maybe Text)
     -> IORef Bool
     -> Text
     -> IO Bool
-runOneTurn config previous printed prompt = do
+runOneTurn config render previous printed prompt = do
     prev <- readIORef previous
     result <- runLoop config prev prompt
+    clearThinking render
     case result of
         Left err -> do
             putTextLn stderr (formatLoopError err)

@@ -21,7 +21,6 @@ spec = do
                 , "--yolo"
                 , "--max-turns", "3"
                 , "--effort", "high"
-                , "--show-reasoning"
                 , "-p", "hello"
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
@@ -30,9 +29,8 @@ spec = do
                     , optCwd = Just "/tmp/work"
                     , optYolo = True
                     , optMaxTurns = 3
-                    , optEffort = "high"
+                    , optEffort = Just "high"
                     , optPrompt = Just "hello"
-                    , optShowReasoning = True
                     })
 
         it "parses --worktree" do
@@ -47,9 +45,9 @@ spec = do
 
         it "accepts xhigh effort" do
             parseArgs ["--effort", "xhigh"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "xhigh" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "xhigh" })
             parseArgs ["--effort", "HIGH"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = "high" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
 
         it "rejects unknown effort levels" do
             parseArgs ["--effort", "max"] `shouldSatisfy` isLeft
@@ -96,6 +94,12 @@ spec = do
             parseApprovalAnswer "n" `shouldBe` Deny
             parseApprovalAnswer "no" `shouldBe` Deny
             parseApprovalAnswer "maybe" `shouldBe` Deny
+
+    describe "defaultEffortFor" do
+        it "defaults grok/xai to high and other providers to medium" do
+            defaultEffortFor XAIProvider `shouldBe` "high"
+            defaultEffortFor OpenAIProvider `shouldBe` "medium"
+            defaultEffortFor OpenRouterProvider `shouldBe` "medium"
 
     describe "isOneShot" do
         it "is true for -p and --prompt-file" do

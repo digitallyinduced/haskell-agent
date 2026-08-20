@@ -98,6 +98,11 @@ spec = do
                 >>= (`shouldBe` Just (Aeson.String "low"))
             effortOf (withEffort "medium" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "medium"))
+            effortOf (withEffort "low" sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "low"))
+            -- Unset effort defaults to high for Grok.
+            effortOf (clearEffort sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "high"))
 
     describe "classifyFailure" do
         it "types a bare 429 and honours the Retry-After header" do
@@ -219,6 +224,10 @@ reasoningConfig effort = ReasoningConfig
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =
     ResponseCreateParams { reasoning = Just (reasoningConfig effort), .. }
+
+clearEffort :: ResponseCreateParams -> ResponseCreateParams
+clearEffort ResponseCreateParams { reasoning = _, .. } =
+    ResponseCreateParams { reasoning = Nothing, .. }
 
 setInstructions :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 setInstructions newInstructions ResponseCreateParams { instructions = _, .. } =
