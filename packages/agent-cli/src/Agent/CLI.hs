@@ -24,11 +24,13 @@ import Agent.CLI.Render
     , summarizeToolCall
     )
 import Agent.CLI.Style
-    ( roleError
+    ( cliWindowTitle
+    , roleError
     , roleMuted
     , rolePrompt
     , roleSuccess
     , roleWarn
+    , setCliWindowTitle
     )
 import Agent.CLI.Session
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
@@ -64,6 +66,7 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
+import Control.Monad (when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -157,6 +160,7 @@ runAgent options = do
     projectRoot <- resolveProjectRoot cwd
     projectSettings <- loadProjectSettings projectRoot
     isTty <- hIsTerminalDevice stdin
+    stdoutTty <- hIsTerminalDevice stdout
     let requestedProvider = case resumed of
             Just (meta, _) -> Just meta.metaProvider
             Nothing -> options.optProvider
@@ -191,6 +195,10 @@ runAgent options = do
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
         prompt <- loadPrompt options
+        let titleHint = case resumed of
+                Just (meta, _) -> Just meta.metaTitle
+                Nothing -> sessionTitleFromPrompt <$> prompt
+        setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
         agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
@@ -595,6 +603,11 @@ runOneTurn config render previous printed transcriptRef persist agentsContext pr
                             }
                     handle' <- appendTurn handle turn
                     writeIORef slotRef (Right handle')
+                    when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                        tty <- hIsTerminalDevice stdout
+                        setCliWindowTitle tty stdout
+                            (cliWindowTitle handle'.sessionMeta.metaCwd
+                                (Just handle'.sessionMeta.metaTitle))
             pure True
 
 
