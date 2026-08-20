@@ -112,7 +112,7 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
-import Agent.OpenAI.LoopBackend (openAiBackend)
+import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
@@ -478,6 +478,7 @@ runAgent options = do
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
                                 wsLock <- newMVar ()
+                                wsHealthy <- newIORef True
                                 case multiCtx of
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
@@ -487,6 +488,8 @@ runAgent options = do
                                                 planHooks
                                                 paramsRef
                                                 wsLock
+                                                loaded.loadedTokenProvider
+                                                wsHealthy
                                                 conn
                                                 ctx.multiRegistry
                                                 subagentSessions
@@ -494,7 +497,11 @@ runAgent options = do
                                                 agentTypesRef
                                     Nothing -> pure ()
                                 let lockedBackend =
-                                        lockedOpenAiBackend wsLock conn
+                                        lockedOpenAiBackend
+                                            wsLock
+                                            loaded.loadedTokenProvider
+                                            wsHealthy
+                                            conn
                                             (readIORef paramsRef)
                                             transcriptRef
                                     noticingBackend =
@@ -1606,12 +1613,15 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
 -- and 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
     :: MVar ()
+    -> TokenProvider
+    -> IORef Bool
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-lockedOpenAiBackend wsLock conn getParams transcript =
-    let Backend submit = openAiBackend conn getParams transcript
+lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript =
+    let Backend submit =
+            openAiBackendReconnecting provider connectionHealthy conn getParams transcript
     in Backend \previous inputs onEvent ->
         withMVar wsLock \_ -> submit previous inputs onEvent
 
@@ -1632,13 +1642,15 @@ runCodexSubagent
     -> PlanModeHooks
     -> IORef ResponseCreateParams
     -> MVar ()
+    -> TokenProvider
+    -> IORef Bool
     -> CodexConn
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> IORef (Map SubagentId Text)
     -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock conn registry sessionsRef storeRootRef typesRef =
+runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef =
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
@@ -1679,7 +1691,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
                     (schemasFromAppTools OpenAIProvider tools) effort
             childParamsRef <- newIORef childParams
             let backend =
-                    lockedOpenAiBackend wsLock conn
+                    lockedOpenAiBackend wsLock tokenProvider connectionHealthy conn
                         (readIORef childParamsRef)
                         session.subSessionTranscript
                 config = LoopConfig

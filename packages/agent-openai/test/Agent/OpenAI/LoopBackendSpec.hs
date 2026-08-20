@@ -195,6 +195,66 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+    describe "openAiBackendWithConnectionRecovery" do
+        it "replays on a fresh connection when the reusable socket dies before output" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure $ Left $ ConnectionError "socket closed"
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            first <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            second <- backend.submitTurn (Just "resp-fresh")
+                [UserMessage "two"] (const (pure ()))
+            first `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            second `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 2
+
+        it "does not replay after loop-visible output was already streamed" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            events <- newIORef []
+            let sendCurrent _request _previous onEvent = do
+                    onEvent (deltaEvent EventOutputTextDelta "partial")
+                    pure $ Left $ ConnectionError "socket closed"
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                streamingBackend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- streamingBackend.submitTurn Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Left (ConnectionError "socket closed")
+            reverse <$> readIORef events `shouldReturn` [TextDelta "partial"]
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 0
+
+        it "does not treat provider errors as a dead connection" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent =
+                    pure $ Left $ ProviderError OverloadedError "busy" Nothing
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                providerErrorBackend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- providerErrorBackend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (ProviderError OverloadedError "busy" Nothing)
+            readIORef healthy `shouldReturn` True
+            readIORef freshCalls `shouldReturn` 0
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
