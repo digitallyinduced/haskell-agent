@@ -4,14 +4,17 @@ module Agent.CLI.Render
     , clearThinking
     , formatLoopError
     , putTextLn
+    , renderAssistantText
     , renderEvent
     , summarizeToolCall
     , truncateToolOutput
     ) where
 
+import Agent.CLI.Markdown (renderMarkdown)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent.MVar (MVar, withMVar)
+import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -25,9 +28,11 @@ import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
-    -- | True while the static "thinking…" status line is on stderr.
+      -- | True while the static "thinking…" status line is on stderr.
     , renderThinkingVisible :: !(IORef Bool)
+    , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
+    , renderTextBuffer :: !(IORef Text)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
@@ -39,19 +44,55 @@ renderEvent config event =
 
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
-    TextDelta delta -> do
-        clearThinkingUnlocked config
-        writeIORef config.renderPrintedText True
-        Text.hPutStr config.renderStdout delta
-        hFlush config.renderStdout
+    TextDelta delta ->
+        if config.renderColor
+            then do
+                clearThinkingUnlocked config
+                modifyIORef' config.renderTextBuffer (<> delta)
+            else do
+                clearThinkingUnlocked config
+                writeIORef config.renderPrintedText True
+                Text.hPutStr config.renderStdout delta
+                hFlush config.renderStdout
     ReasoningDelta _ -> pure ()
-    TurnStarted -> showThinkingUnlocked config
-    TurnFinished _ -> clearThinkingUnlocked config
+    TurnStarted -> do
+        writeIORef config.renderTextBuffer ""
+        showThinkingUnlocked config
+    -- Flush styled text on every completed turn. Pre-tool prose ("I'll check…")
+    -- is shown before tool lines; the final tool-free turn is the main answer.
+    TurnFinished turn -> do
+        clearThinkingUnlocked config
+        when config.renderColor do
+            didPrint <- flushAssistantBuffer config turn.assistantText
+            when (didPrint && not (null turn.toolCalls)) do
+                putTextLn config.renderStdout ""
     ToolStarted call -> do
         clearThinkingUnlocked config
         putTextLn config.renderStderr ("→ " <> summarizeToolCall call)
     ToolFinished result ->
         putTextLn config.renderStderr (truncateToolOutput result.output)
+
+-- | Style assistant markdown when color is enabled; otherwise return plain text.
+renderAssistantText :: Bool -> Text -> Text
+renderAssistantText = renderMarkdown
+
+-- | End-of-turn flush for color mode: prefer streamed deltas, else the
+-- completed 'assistantText' from non-streaming backends.
+-- Returns whether anything was written.
+flushAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
+flushAssistantBuffer config assistantText = do
+    buffered <- readIORef config.renderTextBuffer
+    writeIORef config.renderTextBuffer ""
+    let raw
+            | not (Text.null buffered) = buffered
+            | otherwise = fromMaybe "" assistantText
+    if Text.null raw
+        then pure False
+        else do
+            writeIORef config.renderPrintedText True
+            Text.hPutStr config.renderStdout (renderMarkdown True raw)
+            hFlush config.renderStdout
+            pure True
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
 clearThinking :: RenderConfig -> IO ()

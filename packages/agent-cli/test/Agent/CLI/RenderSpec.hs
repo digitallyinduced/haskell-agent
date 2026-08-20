@@ -45,7 +45,7 @@ spec = do
 
     describe "renderEvent" do
         it "keeps concurrent tool lines intact" do
-            withRenderConfig False \config handle path -> do
+            withRenderConfig False False \config handle path -> do
                 let events =
                         [ ToolStarted (functionToolCall cid "list_dir" args)
                         | i <- [1 :: Int .. 80]
@@ -67,7 +67,7 @@ spec = do
                     ]
 
         it "shows a static thinking status until the first tool or text" do
-            withRenderConfig True \config handle path -> do
+            withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 visible <- readIORef config.renderThinkingVisible
                 visible `shouldBe` True
@@ -82,20 +82,53 @@ spec = do
                 body `shouldSatisfy` ("→ list_dir ." `Text.isInfixOf`)
 
         it "ignores reasoning deltas" do
-            withRenderConfig True \config handle path -> do
+            withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 renderEvent config (ReasoningDelta "secret plan")
                 hClose handle
                 body <- Text.readFile path
                 body `shouldBe` "thinking…"
 
+        it "buffers colored TextDelta until TurnFinished" do
+            withRenderConfig False True \config handle path -> do
+                renderEvent config (TextDelta "see `file.txt`")
+                buffered <- readIORef config.renderTextBuffer
+                buffered `shouldBe` "see `file.txt`"
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "file.txt"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+
+        it "flushes pre-tool assistant prose before tool lines" do
+            withRenderConfig False True \config handle path -> do
+                let call = functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"
+                renderEvent config (TextDelta "checking `src`")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = [call]
+                    , assistantText = Nothing
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "src"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                readIORef config.renderTextBuffer `shouldReturn` ""
+
 withRenderConfig
     :: Bool
+    -> Bool
     -> (RenderConfig -> Handle -> FilePath -> IO ())
     -> IO ()
-withRenderConfig showThinking action = do
+withRenderConfig showThinking color action = do
     printed <- newIORef False
     thinking <- newIORef False
+    textBuffer <- newIORef ""
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
     (path, handle) <- openTempFile tmp "agent-render-spec"
@@ -104,7 +137,9 @@ withRenderConfig showThinking action = do
         let config = RenderConfig
                 { renderShowThinking = showThinking
                 , renderThinkingVisible = thinking
+                , renderColor = color
                 , renderPrintedText = printed
+                , renderTextBuffer = textBuffer
                 , renderLock = lock
                 , renderStdout = handle
                 , renderStderr = handle

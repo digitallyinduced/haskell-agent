@@ -12,6 +12,7 @@ import Agent.CLI.Render
     , clearThinking
     , formatLoopError
     , putTextLn
+    , renderAssistantText
     , renderEvent
     , summarizeToolCall
     )
@@ -43,7 +44,7 @@ import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
 import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
-import System.Environment (getArgs)
+import System.Environment (getArgs, lookupEnv)
 import System.Exit (die, exitFailure)
 import System.IO (hFlush, hIsTerminalDevice, hPutStrLn, isEOF, stderr, stdin, stdout)
 
@@ -110,15 +111,21 @@ runSession
     -> IO ()
 runSession options policy tools prompt paramsRef backend = do
     printed <- newIORef False
+    textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
     ioLock <- newMVar ()
     previous <- newIORef Nothing
     policyRef <- newIORef policy
+    stdoutTty <- hIsTerminalDevice stdout
     stderrTty <- hIsTerminalDevice stderr
-    let render = RenderConfig
+    noColor <- lookupEnv "NO_COLOR"
+    let useColor = stdoutTty && maybe True (\_ -> False) noColor
+        render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
+            , renderColor = useColor
             , renderPrintedText = printed
+            , renderTextBuffer = textBuffer
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
@@ -200,8 +207,11 @@ runOneTurn config render previous printed prompt = do
             writeIORef previous (Just loopResult.finalResponseId)
             printedText <- readIORef printed
             case (printedText, loopResult.finalText) of
-                (False, Just text) | not (Text.null (Text.strip text)) ->
-                    putTextLn stdout text
+                (False, Just text) | not (Text.null (Text.strip text)) -> do
+                    color <- hIsTerminalDevice stdout
+                    noColor <- lookupEnv "NO_COLOR"
+                    let useColor = color && maybe True (\_ -> False) noColor
+                    putTextLn stdout (renderAssistantText useColor text)
                 _ -> pure ()
             pure True
 
