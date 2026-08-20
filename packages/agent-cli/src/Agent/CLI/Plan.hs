@@ -7,23 +7,45 @@ module Agent.CLI.Plan
     , parsePlanDecisionAnswer
     ) where
 
-import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
+import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , readApprovalLine
+    , readChoiceSelection
+    , readReplLine
+    )
 import Agent.CLI.Interrupt (InterruptState)
-import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess, roleWarn)
+import Agent.CLI.Style
+    ( roleMuted
+    , rolePrompt
+    , roleSuccess
+    , roleWarn
+    , solarizedCyan
+    , style
+    )
 import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
+import Data.IORef (IORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import System.Console.ANSI
+    ( ConsoleIntensity(..)
+    , ConsoleLayer(..)
+    , SGR(..)
+    )
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
 
-cliPlanHooks :: InterruptState -> IO Bool -> PlanModeHooks
-cliPlanHooks interrupt resolveColor = PlanModeHooks
-    { planConfirmEnter = confirmEnter resolveColor
-    , planDecideExit = decideExit interrupt resolveColor
-    , planAskQuestion = askQuestion interrupt resolveColor
+-- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
+-- arrow keys / single-key answers are not stolen mid-turn.
+cliPlanHooks :: InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
+cliPlanHooks interrupt escPaused resolveColor = PlanModeHooks
+    { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
+    , planDecideExit = withStdinPaused escPaused . decideExit interrupt resolveColor
+    , planAskQuestion = \q opts ->
+        withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
     }
 
 confirmEnter :: IO Bool -> Text -> IO Bool
@@ -93,36 +115,33 @@ askQuestion interrupt resolveColor question options = do
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr (roleMuted color question)
-    case options of
-        [] -> pure ()
-        opts ->
-            mapM_
-                (\(i, opt) ->
-                    putTextLn stderr
-                        (roleMuted color
-                            (Text.pack (show (i :: Int)) <> ") " <> opt)))
-                (zip [1 ..] opts)
     if not isTty
         then pure Nothing
-        else do
-            let chrome =
-                    rolePrompt color "answer> "
-                        <> if color
-                            then Text.pack clearFromCursorToLineEndCode
-                            else mempty
-            readReplLine interrupt chrome >>= \case
-                ReplEof -> pure Nothing
-                ReplQuitInterrupt -> throwIO UserInterrupt
-                ReplText text
-                    | Text.null (Text.strip text) -> pure Nothing
-                    | otherwise ->
-                        pure (Just (resolveChoice options (Text.strip text)))
-resolveChoice :: [Text] -> Text -> Text
-resolveChoice options answer =
-    case reads (Text.unpack answer) of
-        [(n :: Int, "")]
-            | n >= 1 && n <= length options -> options !! (n - 1)
-        _ -> answer
+        else case options of
+            [] -> do
+                let chrome =
+                        rolePrompt color "answer> "
+                            <> if color
+                                then Text.pack clearFromCursorToLineEndCode
+                                else mempty
+                readReplLine interrupt chrome >>= \case
+                    ReplEof -> pure Nothing
+                    ReplQuitInterrupt -> throwIO UserInterrupt
+                    ReplText text
+                        | Text.null (Text.strip text) -> pure Nothing
+                        | otherwise -> pure (Just (Text.strip text))
+            opts ->
+                readChoiceSelection (formatChoiceLine color) opts
+
+formatChoiceLine :: Bool -> Bool -> Text -> Text
+formatChoiceLine color selected label
+    | selected =
+        style color
+            [ SetConsoleIntensity BoldIntensity
+            , SetRGBColor Foreground solarizedCyan
+            ]
+            label
+    | otherwise = roleMuted color label
 
 parsePlanDecisionAnswer :: Text -> Maybe PlanDecision
 parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of

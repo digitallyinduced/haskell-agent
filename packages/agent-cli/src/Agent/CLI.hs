@@ -280,7 +280,9 @@ runAgent options = do
         hFlush stderr
         color <- resolveColor stderr
         putTextLn stderr (roleMuted color msg)
-    let planHooks = cliPlanHooks interrupt (resolveColor stderr)
+    -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
+    escPaused <- newIORef False
+    let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
     coding <- codingToolsFor loaded.loadedProvider toolEnv (Just planHooks)
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
@@ -326,7 +328,7 @@ runAgent options = do
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                    initialPrevious persist projectRoot Nothing agentsContext interrupt
+                                    initialPrevious persist projectRoot Nothing agentsContext escPaused interrupt
                                     (openAiBackend conn (readIORef paramsRef) transcriptRef))
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
@@ -337,14 +339,14 @@ runAgent options = do
                                 xaiBackend xaiOptions loaded.loadedTokenProvider
                                     (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext interrupt backend
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         let backend =
                                 openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                     (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext interrupt backend
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt backend
 
 preparePersistence
     :: CliOptions
@@ -446,12 +448,12 @@ runSession
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> InterruptState
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext interrupt backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext escPaused interrupt backend = do
     printed <- newIORef False
-    escPaused <- newIORef False
     attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
     liveRows <- newIORef (0 :: Int)
