@@ -57,6 +57,7 @@ jsonTool name description parameters readOnly handler = AppTool
     , appToolHandler = handler
     , appToolKind = JsonFunction
     , appToolReadOnly = readOnly
+    , appToolIsReadOnlyCall = Nothing
     }
 
 --------------------------------------------------------------------------------
@@ -145,6 +146,7 @@ applyPatchTool env = AppTool
     , appToolHandler = typedTool "apply_patch" (runApplyPatch env)
     , appToolKind = FreeformApplyPatch
     , appToolReadOnly = False
+    , appToolIsReadOnlyCall = Nothing
     }
 
 applyPatchDescription :: Text

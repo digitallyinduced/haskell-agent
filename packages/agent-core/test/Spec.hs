@@ -7,6 +7,7 @@ import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.CodexSpec as CodexToolsSpec
 import qualified Agent.Tools.GrokSpec as GrokToolsSpec
+import qualified Agent.Tools.Grok.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
@@ -19,6 +20,7 @@ main = hspec do
     ToolDispatchSpec.spec
     ToolDSLSpec.spec
     GrokToolsSpec.spec
+    GhciSpec.spec
     IOSpec.spec
     CodexToolsSpec.spec
     WebSocketSpec.spec

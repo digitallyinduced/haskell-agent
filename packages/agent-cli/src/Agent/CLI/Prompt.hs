@@ -32,8 +32,11 @@ ghciGuidance :: Text
 ghciGuidance =
     Text.unlines
         [ "Prefer ghci for scripting."
-        , "When you need a short program, calculation, or one-off script, use ghci rather than Python, Node, bash, or compiling a binary."
-        , "Drive ghci with stdin or -e so it does not wait for interactive input."
+        , "When you need a short program, calculation, or one-off script, use the run_ghci tool (Grok/OpenRouter) or ghci rather than Python, Node, bash, or compiling a binary."
+        , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
+        , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
+        , "Prefer run_terminal_cmd for OS commands, package installs, servers, and anything that is not Haskell evaluation."
+        , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
 codexSystemPrompt :: FilePath -> Day -> Text
