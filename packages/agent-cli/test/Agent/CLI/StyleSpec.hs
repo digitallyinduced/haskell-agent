@@ -18,8 +18,8 @@ spec = do
 
         it "restores a base wash after nested styling" do
             let out = styleBase True agentBackground [] "hi"
-            -- Reset then reopen palette 236 (combined into one SGR sequence).
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;236m"
+            -- Reset then reopen Solarized base03 (combined into one SGR sequence).
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;0;43;54m"
 
     describe "paintBackgroundLines" do
         it "leaves text unchanged when color is off" do
@@ -27,7 +27,7 @@ spec = do
 
         it "paints each line and preserves a trailing newline" do
             let out = paintBackgroundLines True agentBackground "a\nb\n"
-            Text.count "\ESC[48;5;236m" out `shouldBe` 2
+            Text.count "\ESC[48;2;0;43;54m" out `shouldBe` 2
             out `shouldSatisfy` Text.isSuffixOf "\n"
             out `shouldSatisfy` Text.isInfixOf "\ESC[0K"
 
@@ -39,9 +39,9 @@ spec = do
 
         it "keeps the user wash under the prompt glyph" do
             let out = rolePrompt True "λ>"
-            -- Background may share an SGR sequence with bold/cyan attrs.
-            out `shouldSatisfy` Text.isInfixOf "48;5;17"
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;17m"
+            -- Background may share an SGR sequence with bold/cyan attrs (truecolor).
+            out `shouldSatisfy` Text.isInfixOf "48;2;7;54;66"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;7;54;66m"
 
     describe "cliWindowTitle" do
         it "uses the cwd basename when no session title is set" do

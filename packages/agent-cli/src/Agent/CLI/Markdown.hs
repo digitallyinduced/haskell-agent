@@ -3,16 +3,25 @@ module Agent.CLI.Markdown
     ( renderMarkdown
     ) where
 
-import Agent.CLI.Style (agentBackground, styleBase)
+import Agent.CLI.Style
+    ( agentBackground
+    , solarizedBase01
+    , solarizedBlue
+    , solarizedCyan
+    , solarizedGreen
+    , solarizedMagenta
+    , solarizedViolet
+    , solarizedYellow
+    , styleBase
+    )
 import Control.Applicative ((<|>))
 import Data.Char (isAlphaNum, isDigit, isSpace)
+import Data.Colour (Colour)
 import Data.List (transpose)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
-    ( Color(..)
-    , ColorIntensity(..)
-    , ConsoleIntensity(..)
+    ( ConsoleIntensity(..)
     , ConsoleLayer(..)
     , SGR(..)
     , Underlining(..)
@@ -49,13 +58,8 @@ renderBlocks = go
                     if Text.null info
                         then []
                         else
-                            [ md
-                                [ SetConsoleIntensity FaintIntensity
-                                , SetColor Foreground Dull Cyan
-                                ]
-                                info
-                            ]
-                styledBody = map (md [SetConsoleIntensity FaintIntensity]) body
+                            [ md [fg solarizedCyan] info ]
+                styledBody = map (md [fg solarizedBase01]) body
             in header ++ styledBody ++ go after
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
@@ -77,10 +81,10 @@ renderBlocks = go
             let body
                     | Text.any (`elem` ['`', '*', '_', '[']) quote = styleInline quote
                     | otherwise = md quoteStyle quote
-            in (md [SetConsoleIntensity FaintIntensity] "│ " <> body)
+            in (md [fg solarizedBase01] "│ " <> body)
                 : go rest
         | isThematicBreak line =
-            md [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
+            md [fg solarizedBase01] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
@@ -94,22 +98,25 @@ headingPrefixStyle level =
 
 headingColor :: Int -> [SGR]
 headingColor = \case
-    1 -> [SetColor Foreground Dull Magenta]
-    2 -> [SetColor Foreground Dull Cyan]
-    3 -> [SetColor Foreground Dull Blue]
-    4 -> [SetColor Foreground Dull Yellow]
-    5 -> [SetColor Foreground Dull Green]
-    _ -> []
+    1 -> [fg solarizedMagenta]
+    2 -> [fg solarizedCyan]
+    3 -> [fg solarizedBlue]
+    4 -> [fg solarizedYellow]
+    5 -> [fg solarizedGreen]
+    _ -> [fg solarizedViolet]
 
 listMarkerStyle :: [SGR]
 listMarkerStyle =
     [ SetConsoleIntensity BoldIntensity
-    , SetColor Foreground Dull Cyan
+    , fg solarizedCyan
     ]
 
--- | Blockquote body: faint so it sits behind surrounding prose.
+fg :: Colour Float -> SGR
+fg = SetRGBColor Foreground
+
+-- | Blockquote body: muted so it sits behind surrounding prose.
 quoteStyle :: [SGR]
-quoteStyle = [SetConsoleIntensity FaintIntensity]
+quoteStyle = [fg solarizedBase01]
 
 data FenceMarker = BacktickFence !Int | TildeFence !Int
 
@@ -283,13 +290,13 @@ styleInline = Text.concat . go Nothing
 
     codeStyle =
         [ SetConsoleIntensity BoldIntensity
-        , SetColor Foreground Dull Cyan
+        , fg solarizedCyan
         ]
     linkStyle =
-        [ SetColor Foreground Dull Blue
+        [ fg solarizedBlue
         , SetUnderlining SingleUnderline
         ]
-    urlStyle = [SetConsoleIntensity FaintIntensity]
+    urlStyle = [fg solarizedBase01]
 
 takeInlineCode :: Text -> Maybe (Text, Text)
 takeInlineCode t =

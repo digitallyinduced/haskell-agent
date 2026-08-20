@@ -1,5 +1,8 @@
 -- | Shared ANSI roles for TTY chrome and markdown. Callers pass a color
 -- flag; when 'False' (pipes, 'NO_COLOR', tests) text is unchanged.
+--
+-- Palette is Solarized Dark (Ethan Schoonover): truecolor RGB, not the
+-- 256-color approximation, so washes match a Solarized terminal theme.
 module Agent.CLI.Style
     ( style
     , styleBase
@@ -18,16 +21,25 @@ module Agent.CLI.Style
     , roleWarn
     , roleMuted
     , roleSuccess
+    , solarizedCyan
+    , solarizedMagenta
+    , solarizedYellow
+    , solarizedRed
+    , solarizedGreen
+    , solarizedBlue
+    , solarizedViolet
+    , solarizedOrange
+    , solarizedBase01
     , cliWindowTitle
     , setCliWindowTitle
     ) where
 
+import Data.Colour (Colour)
+import Data.Colour.SRGB (sRGB24)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
-    ( Color(..)
-    , ColorIntensity(..)
-    , ConsoleIntensity(..)
+    ( ConsoleIntensity(..)
     , ConsoleLayer(..)
     , SGR(..)
     , hSetTitle
@@ -39,13 +51,39 @@ import System.Console.ANSI.Codes
 import System.FilePath (takeFileName)
 import System.IO (Handle)
 
--- | Deep navy strip behind the REPL prompt and typed input.
-userBackground :: [SGR]
-userBackground = [SetPaletteColor Background 17]
+-- Solarized Dark (https://ethanschoonover.com/solarized/)
+solarizedBase03, solarizedBase02, solarizedBase01 :: Colour Float
+solarizedBase03 = sRGB24 0x00 0x2b 0x36
+solarizedBase02 = sRGB24 0x07 0x36 0x42
+solarizedBase01 = sRGB24 0x58 0x6e 0x75
 
--- | Charcoal strip behind assistant stdout lines.
+solarizedYellow, solarizedOrange, solarizedRed :: Colour Float
+solarizedYellow = sRGB24 0xb5 0x89 0x00
+solarizedOrange = sRGB24 0xcb 0x4b 0x16
+solarizedRed = sRGB24 0xdc 0x32 0x2f
+
+solarizedMagenta, solarizedViolet, solarizedBlue :: Colour Float
+solarizedMagenta = sRGB24 0xd3 0x36 0x82
+solarizedViolet = sRGB24 0x6c 0x71 0xc4
+solarizedBlue = sRGB24 0x26 0x8b 0xd2
+
+solarizedCyan, solarizedGreen :: Colour Float
+solarizedCyan = sRGB24 0x2a 0xa1 0x98
+solarizedGreen = sRGB24 0x85 0x99 0x00
+
+fg :: Colour Float -> SGR
+fg = SetRGBColor Foreground
+
+bg :: Colour Float -> SGR
+bg = SetRGBColor Background
+
+-- | Solarized base02 strip behind the REPL prompt and typed input.
+userBackground :: [SGR]
+userBackground = [bg solarizedBase02]
+
+-- | Solarized base03 strip behind assistant stdout lines.
 agentBackground :: [SGR]
-agentBackground = [SetPaletteColor Background 236]
+agentBackground = [bg solarizedBase03]
 
 -- | Apply SGR attributes when @color@ is 'True'; otherwise return @text@.
 -- Ends with a full 'Reset'.
@@ -64,9 +102,9 @@ styleBase color base attrs text
 
 -- | Open a background wash and leave it active (for live typed input).
 beginBackground :: Bool -> [SGR] -> Text
-beginBackground color bg
-    | not color || null bg = ""
-    | otherwise = Text.pack (setSGRCode bg)
+beginBackground color bgAttrs
+    | not color || null bgAttrs = ""
+    | otherwise = Text.pack (setSGRCode bgAttrs)
 
 -- | Clear all SGR after a background wash.
 endBackground :: Bool -> Text
@@ -77,21 +115,21 @@ endBackground color
 -- | Prefix each line with @bg@, extend the wash to the terminal edge via
 -- clear-to-EOL, then reset. Preserves a trailing newline on @text@.
 paintBackgroundLines :: Bool -> [SGR] -> Text -> Text
-paintBackgroundLines color bg text
-    | not color || null bg || Text.null text = text
+paintBackgroundLines color bgAttrs text
+    | not color || null bgAttrs || Text.null text = text
     | otherwise =
         let endsWithNewline = Text.isSuffixOf "\n" text
             parts = Text.splitOn "\n" text
             lines_
                 | endsWithNewline && not (null parts) = init parts
                 | otherwise = parts
-            painted = map (paintLine bg) lines_
+            painted = map (paintLine bgAttrs) lines_
         in Text.intercalate "\n" painted
             <> if endsWithNewline then "\n" else ""
 
 paintLine :: [SGR] -> Text -> Text
-paintLine bg line =
-    Text.pack (setSGRCode bg)
+paintLine bgAttrs line =
+    Text.pack (setSGRCode bgAttrs)
         <> line
         <> Text.pack clearFromCursorToLineEndCode
         <> Text.pack (setSGRCode [Reset])
@@ -100,53 +138,52 @@ rolePrompt :: Bool -> Text -> Text
 rolePrompt color =
     styleBase color userBackground
         [ SetConsoleIntensity BoldIntensity
-        , SetColor Foreground Dull Cyan
+        , fg solarizedCyan
         ]
 
 roleToolArrow :: Bool -> Text -> Text
-roleToolArrow color = style color [SetConsoleIntensity FaintIntensity]
+roleToolArrow color = style color [fg solarizedBase01]
 
 roleToolName :: Bool -> Text -> Text
 roleToolName color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , SetColor Foreground Dull Magenta
+        , fg solarizedMagenta
         ]
 
 roleToolDetail :: Bool -> Text -> Text
-roleToolDetail color = style color [SetConsoleIntensity FaintIntensity]
+roleToolDetail color = style color [fg solarizedBase01]
 
 roleToolOutput :: Bool -> Text -> Text
-roleToolOutput color = style color [SetConsoleIntensity FaintIntensity]
+roleToolOutput color = style color [fg solarizedBase01]
 
 roleThinking :: Bool -> Text -> Text
 roleThinking color =
     style color
-        [ SetConsoleIntensity FaintIntensity
-        , SetColor Foreground Dull Yellow
+        [ fg solarizedYellow
         ]
 
 roleError :: Bool -> Text -> Text
 roleError color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , SetColor Foreground Vivid Red
+        , fg solarizedRed
         ]
 
 roleWarn :: Bool -> Text -> Text
 roleWarn color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , SetColor Foreground Dull Yellow
+        , fg solarizedYellow
         ]
 
 roleMuted :: Bool -> Text -> Text
-roleMuted color = style color [SetConsoleIntensity FaintIntensity]
+roleMuted color = style color [fg solarizedBase01]
 
 roleSuccess :: Bool -> Text -> Text
 roleSuccess color =
     style color
-        [ SetColor Foreground Dull Green
+        [ fg solarizedGreen
         ]
 
 -- | Window title: session name when known, otherwise the working directory.
