@@ -220,4 +220,5 @@ usage = unlines
     , "reasoning effort. /model [NAME] shows or changes the model."
     , "/always-approve (or :yolo) toggles auto-approve."
     , "/session prints the current session id. Ctrl-D or :q exits."
+    , "Ctrl-C prints a --resume command when a session has been persisted."
     ]

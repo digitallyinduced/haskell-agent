@@ -44,7 +44,13 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception (finally, try)
+import Control.Exception
+    ( AsyncException(UserInterrupt)
+    , catch
+    , finally
+    , throwIO
+    , try
+    )
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -54,7 +60,7 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, getProgName, lookupEnv)
 import System.FilePath ((</>))
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
@@ -170,30 +176,32 @@ runAgent options = do
         prompt <- loadPrompt options
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
-        case provider of
-            OpenAIProvider ->
-                try @CodexAuthFailed
-                    (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                        runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist
-                            (openAiBackend conn (readIORef paramsRef) transcriptRef))
-                    >>= \case
-                        Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                        Right () -> pure ()
-            XAIProvider -> do
-                xaiOptions <- XAI.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
-            OpenRouterProvider -> do
-                openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend =
-                        openRouterBackend openRouterOptions credential
-                            (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
+        progName <- getProgName
+        withInterruptResume progName persist do
+            case provider of
+                OpenAIProvider ->
+                    try @CodexAuthFailed
+                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                            runSession options provider policy tools prompt paramsRef transcriptRef
+                                initialPrevious persist
+                                (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                        >>= \case
+                            Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                            Right () -> pure ()
+                XAIProvider -> do
+                    xaiOptions <- XAI.clientOptionsFromEnv
+                    credential <- firstCredential loaded
+                    let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist backend
+                OpenRouterProvider -> do
+                    openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                    credential <- firstCredential loaded
+                    let backend =
+                            openRouterBackend openRouterOptions credential
+                                (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist backend
 
 preparePersistence
     :: CliOptions
@@ -238,6 +246,35 @@ isLeftSlot :: Either a b -> Bool
 isLeftSlot = \case
     Left _ -> True
     Right _ -> False
+
+-- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
+withInterruptResume
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO a
+    -> IO a
+withInterruptResume progName persist action =
+    action `catch` \(e :: AsyncException) ->
+        case e of
+            UserInterrupt -> do
+                printResumeHint progName persist
+                throwIO e
+            _ -> throwIO e
+
+printResumeHint
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+printResumeHint progName = \case
+    Nothing -> pure ()
+    Just slotRef -> do
+        slot <- readIORef slotRef
+        case slot of
+            Left _ -> pure ()
+            Right handle -> do
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession

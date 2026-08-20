@@ -35,6 +35,13 @@ spec = describe "Agent.CLI.Session" do
             let long = Text.replicate 100 "a"
             Text.length (sessionTitleFromPrompt long) `shouldBe` 72
 
+    describe "resumeHint" do
+        it "prints a copy-pasteable --resume line" do
+            resumeHint "agent-cli" "2026-08-20-abcd1234"
+                `shouldBe` "Resume this session with: agent-cli --resume 2026-08-20-abcd1234"
+            resumeHint "grok" "2026-08-20-abcd1234"
+                `shouldBe` "Resume this session with: grok --resume 2026-08-20-abcd1234"
+
     describe "createSession/appendTurn/loadSession" do
         it "round-trips meta and transcript items with private modes" $
             withTempDir "agent-sessions-" \root -> do
