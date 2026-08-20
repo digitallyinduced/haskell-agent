@@ -73,6 +73,15 @@ cabal repl agent-cli
 
 Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as built libraries here, so changes in `agent-core` / providers need a repl restart or the multi-package command above.
 
+### CLI UI changes
+
+When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval prompts, markdown rendering, status lines, etc.):
+
+- Always exercise the live agent in **tmux** before opening a PR.
+- Prefer `tmux new-session` / `tmux send-keys` / `tmux capture-pane` so the TTY path is real (raw mode, Esc cancel, haskeline, washes).
+- Do not rely only on unit tests for visual/TTY behavior; confirm the prompt and interactions look right in the captured pane.
+- Only open the PR after that tmux smoke check passes.
+
 ### pitfalls
 
 - Exit the agent (`:q` or Ctrl-D) before `:r`; a live stdin/WebSocket session blocks GHCi.
