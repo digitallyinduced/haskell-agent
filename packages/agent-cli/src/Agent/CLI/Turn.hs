@@ -1,0 +1,224 @@
+-- | Execute one model turn and commit its observable session state.
+module Agent.CLI.Turn
+    ( runOneTurn
+    ) where
+
+import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.Interrupt (withTurnCancel)
+import Agent.CLI.Plan (extractProposedPlan)
+import Agent.CLI.Render
+    ( RenderConfig(..)
+    , clearThinking
+    , formatElapsed
+    , formatLoopErrorColored
+    , formatTurnStatus
+    , putTextLn
+    , renderAssistantText
+    )
+import Agent.CLI.Session
+    ( SessionHandle(..)
+    , SessionMeta(..)
+    , SessionTurn(..)
+    , appendTurn
+    , ensureSession
+    )
+import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Style
+    ( cliWindowTitle
+    , glyphSession
+    , roleMuted
+    , setCliWindowTitle
+    )
+import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
+import Agent.Loop
+    ( LoopConfig(..)
+    , LoopError(..)
+    , LoopResult(..)
+    , TurnInput(..)
+    , addTokenUsage
+    , runLoopInputs
+    )
+import Agent.OpenAI.LoopBackend (toolResultToItem)
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeEnv(..)
+    , PlanModeHooks(..)
+    , PlanModeState(..)
+    , activatePlanMode
+    , deactivatePlanMode
+    , isPlanModeActive
+    , planFilePath
+    , planModeReminder
+    , writePlanMarkdown
+    )
+import Control.Monad (unless, when)
+import Data.IORef
+    ( atomicModifyIORef'
+    , modifyIORef'
+    , readIORef
+    , writeIORef
+    )
+import Data.Maybe (isNothing)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import System.IO (hIsTerminalDevice, stderr, stdout)
+
+runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO Bool
+runOneTurn env@SessionEnv
+    { sessionLoop = config
+    , sessionRender = render
+    , sessionPrevious = previous
+    , sessionPrinted = printed
+    , sessionTranscript = transcriptRef
+    , sessionPersist = persist
+    , sessionPlanMode = planMode
+    , sessionAgentsContext = agentsContext
+    , sessionEscPaused = escPaused
+    , sessionInterrupt = interrupt
+    , sessionStoreRoot = storeRoot
+    , sessionUsage = usageRef
+    } promptText inputs =
+  withTurnCancel interrupt config.loopCancel $
+  withEscCancel config.loopCancel escPaused do
+    pending <- readIORef planMode.planStateRef
+    when (pending == PlanPending) (activatePlanMode planMode)
+    -- Create the session directory before tools run so first-turn subagents
+    -- can persist under agents/<id>/ as they complete.
+    case persist of
+        Just slotRef -> do
+            created <- isLeftSlot <$> readIORef slotRef
+            handle <- ensureSession slotRef
+            writeIORef planMode.planSessionDir (Just handle.sessionDir)
+            writeIORef storeRoot (Just handle.sessionDir)
+            when created do
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color
+                        (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+        Nothing -> pure ()
+    prev <- readIORef previous
+    beforeItems <- readIORef transcriptRef
+    pendingAgents <- atomicModifyIORef' agentsContext \pendingCtx -> (Nothing, pendingCtx)
+    planActive <- isPlanModeActive planMode
+    planPath <- planFilePath planMode
+    let planReminder =
+            if planActive
+                then Just (planModeReminder planPath)
+                else Nothing
+        baseInputs = case pendingAgents of
+            Just agents | null beforeItems && isNothing prev ->
+                UserMessage agents : inputs
+            _ -> inputs
+        turnInputs0 = case planReminder of
+            Just reminder -> UserMessage reminder : baseInputs
+            Nothing -> baseInputs
+    turnInputs <- stampTurnInputs turnInputs0
+    startedAt <- readIORef render.renderStartedAt
+    result <- runLoopInputs config prev turnInputs
+    clearThinking render
+    finishedAt <- getCurrentTime
+    let elapsedDetail extra = case startedAt of
+            Nothing -> extra
+            Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
+    case result of
+        Left (LoopCancelled toolResults) -> do
+            unless (null toolResults) do
+                modifyIORef' transcriptRef
+                    (<> map toolResultToItem toolResults)
+            color <- resolveColor stderr
+            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
+            pure True
+        Left err -> do
+            color <- resolveColor stderr
+            putTextLn stderr (formatLoopErrorColored color err)
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
+            pure False
+        Right loopResult -> do
+            writeIORef previous (Just loopResult.finalResponseId)
+            modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
+            do
+                color <- resolveColor stderr
+                model <- readIORef render.renderModelRef
+                let turns = Text.pack (show loopResult.turnsUsed)
+                    unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
+                    usageDetail = formatTokenUsage loopResult.tokenUsage
+                    extra =
+                        if Text.null usageDetail
+                            then model <> " · " <> turns <> unit
+                            else model <> " · " <> turns <> unit <> " · " <> usageDetail
+                putTextLn stderr
+                    (formatTurnStatus color "ok" (elapsedDetail extra))
+            followUp <- handleProposedPlan planMode loopResult.finalText
+            printedText <- readIORef printed
+            let assistantText =
+                    fmap stripBracketedTimestamps loopResult.finalText
+            case (printedText, assistantText) of
+                (False, Just text) | not (Text.null (Text.strip text)) -> do
+                    useColor <- resolveColor stdout
+                    putTextLn stdout (renderAssistantText useColor text)
+                _ -> pure ()
+            afterItems <- readIORef transcriptRef
+            let newItems = drop (length beforeItems) afterItems
+            case persist of
+                Nothing -> pure ()
+                Just slotRef -> do
+                    now <- getCurrentTime
+                    handle <- ensureSession slotRef
+                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                    writeIORef storeRoot (Just handle.sessionDir)
+                    let turn = SessionTurn
+                            { turnAt = now
+                            , turnUserText = promptText
+                            , turnAssistantText = assistantText
+                            , turnResponseId = Just loopResult.finalResponseId
+                            , turnItems = newItems
+                            , turnUsage = Just loopResult.tokenUsage
+                            }
+                    handle' <- appendTurn handle turn
+                    writeIORef slotRef (Right handle')
+                    when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                        tty <- hIsTerminalDevice stdout
+                        setCliWindowTitle tty stdout
+                            (cliWindowTitle handle'.sessionMeta.metaCwd
+                                (Just handle'.sessionMeta.metaTitle))
+            case followUp of
+                Nothing -> pure True
+                Just notes -> do
+                    writeIORef printed False
+                    _ <- runOneTurn env notes [UserMessage notes]
+                    pure True
+
+isLeftSlot :: Either a b -> Bool
+isLeftSlot = \case
+    Left _ -> True
+    Right _ -> False
+
+handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
+handleProposedPlan planMode = \case
+    Nothing -> pure Nothing
+    Just text -> do
+        active <- isPlanModeActive planMode
+        case (active, extractProposedPlan text) of
+            (True, Just planBody) -> do
+                _ <- writePlanMarkdown planMode planBody
+                let PlanModeHooks{ planDecideExit = decideExit } = planMode.planHooks
+                decision <- decideExit planBody
+                case decision of
+                    PlanApprove -> do
+                        deactivatePlanMode planMode
+                        pure Nothing
+                    PlanCancel -> do
+                        deactivatePlanMode planMode
+                        pure Nothing
+                    PlanRequestChanges notes ->
+                        pure $ Just $
+                            "The user requested changes to the plan. Stay in plan mode and revise.\n\
+                            \Feedback:\n"
+                                <> notes
+            _ -> pure Nothing

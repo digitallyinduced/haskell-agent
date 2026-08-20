@@ -36,6 +36,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.Approval
                     , Agent.CLI.Auth
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -59,10 +60,13 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Style
+                    , Agent.CLI.Terminal
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
+                    , Agent.CLI.Turn
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
@@ -97,7 +101,8 @@ test-suite agent-cli-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.CLI.AuthSpec
+    other-modules:    Agent.CLI.ApprovalSpec
+                    , Agent.CLI.AuthSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
