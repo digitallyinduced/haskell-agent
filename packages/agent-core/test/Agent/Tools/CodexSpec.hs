@@ -8,10 +8,11 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.ApplyPatch (parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
 import Data.Text (Text)
@@ -31,13 +32,13 @@ spec = describe "Agent.Tools.Codex" do
     it "advertises Codex wire names and not Grok names" do
         withTempEnv \env -> do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
-            (openai, closeOpenai) <- codingToolsFor OpenAIProvider env
-            let names = map (.appToolName) openai
+            coding <- codingToolsFor OpenAIProvider env Nothing
+            let names = map (.appToolName) coding.codingAppTools
             names `shouldBe` ["shell_command", "apply_patch", "update_plan", "run_ghci"]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
-            closeOpenai
+            coding.codingClose
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do
@@ -151,7 +152,8 @@ runFn env name arguments = withCodexTools env \tools -> do
 withCodexTools :: ToolEnv -> ([AppTool] -> IO a) -> IO a
 withCodexTools env action = do
     ghci <- newGhciSession env
-    tools <- codexTools env ghci
+    plan <- newPlanModeEnv env.toolCwd Nothing
+    tools <- codexTools env ghci plan
     action tools `finally` closeGhciSession ghci
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a

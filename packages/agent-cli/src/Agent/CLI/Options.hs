@@ -230,6 +230,8 @@ usage = unlines
     , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model [NAME] shows or changes the model."
+    , "/plan [description] enters plan mode (read-only except plan.md);"
+    , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json (answering a at a permission"
     , "prompt does the same). /paste [TEXT] sends the clipboard image (macOS)"

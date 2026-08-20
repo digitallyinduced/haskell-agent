@@ -155,7 +155,7 @@ spec = describe "runLoop" do
                 , assistantText = Just "understood"
                 }
             ]
-        let config = (testConfig backend) { loopApprove = \_ -> pure False }
+        let config = (testConfig backend) { loopApprove = \_ -> pure (Right False) }
         result <- runLoop config Nothing "please"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
@@ -287,7 +287,7 @@ testConfig backend = LoopConfig
     , loopDispatch = defaultLoopDispatch
     , loopMaxTurns = defaultLoopMaxTurns
     , loopOnEvent = \_ -> pure ()
-    , loopApprove = \_ -> pure True
+    , loopApprove = \_ -> pure (Right True)
     }
 
 data EchoArgs = EchoArgs { message :: Text }

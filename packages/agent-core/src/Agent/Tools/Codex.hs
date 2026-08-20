@@ -21,6 +21,10 @@ import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , isPlanModeActive
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
@@ -35,13 +39,13 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-codexTools :: ToolEnv -> GhciSession -> IO [AppTool]
-codexTools env ghci = do
+codexTools :: ToolEnv -> GhciSession -> PlanModeEnv -> IO [AppTool]
+codexTools env ghci planMode = do
     planRef <- newIORef []
     pure
         [ shellCommandTool env
         , applyPatchTool env
-        , updatePlanTool planRef
+        , updatePlanTool planMode planRef
         , runGhciTool ghci
         ]
 
@@ -196,8 +200,8 @@ instance FromJSON UpdatePlanArgs where
             Just value -> parseJSON value
         pure UpdatePlanArgs { explanation, plan }
 
-updatePlanTool :: IORef [PlanItem] -> AppTool
-updatePlanTool planRef = jsonTool "update_plan" updatePlanDescription
+updatePlanTool :: PlanModeEnv -> IORef [PlanItem] -> AppTool
+updatePlanTool planMode planRef = jsonTool "update_plan" updatePlanDescription
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional explanation for this plan update."
     , PropertySchema "plan" (PropertyArray (PropertyObject
@@ -207,16 +211,26 @@ updatePlanTool planRef = jsonTool "update_plan" updatePlanDescription
         ])) True $ Just "The list of steps"
     ]
     True
-    (typedTool "update_plan" (runUpdatePlan planRef))
+    (typedTool "update_plan" (runUpdatePlan planMode planRef))
 
 updatePlanDescription :: Text
 updatePlanDescription =
     "Updates the task plan.\n\
     \Provide an optional explanation and a list of plan items, each with a step and status.\n\
-    \At most one step can be in_progress at a time."
+    \At most one step can be in_progress at a time.\n\
+    \This is a progress checklist, not Plan Mode. It errors while Plan Mode is active."
 
-runUpdatePlan :: IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
-runUpdatePlan planRef args
+runUpdatePlan :: PlanModeEnv -> IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
+runUpdatePlan planMode planRef args = do
+    active <- isPlanModeActive planMode
+    if active
+        then pure $ Left
+            "update_plan is unavailable in Plan Mode. Write the design to plan.md \
+            \and present it with a <proposed_plan> block when ready."
+        else runUpdatePlanBody planRef args
+
+runUpdatePlanBody :: IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
+runUpdatePlanBody planRef args
     | any (\item -> item.status `notElem` ["pending", "in_progress", "completed"]) args.plan =
         pure (Left "Each plan status must be pending, in_progress, or completed.")
     | length (filter (\item -> item.status == "in_progress") args.plan) > 1 =

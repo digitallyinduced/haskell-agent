@@ -10,6 +10,7 @@ module Agent.Tools
     , ToolEnv(..)
     , defaultToolEnv
     , appToolHandlers
+    , CodingTools(..)
     , codingToolsFor
     ) where
 
@@ -17,29 +18,49 @@ import Agent.Provider (Provider(..))
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
+
+-- | Tools plus the session plan-mode env (shared across providers).
+data CodingTools = CodingTools
+    { codingAppTools :: ![AppTool]
+    , codingPlanMode :: !PlanModeEnv
+    , codingClose :: !(IO ())
+    }
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
 -- Every provider gets a persistent GHCi session for 'run_ghci'.
--- Grok/OpenRouter also keep a persistent shell session. The second action
+-- Grok/OpenRouter also keep a persistent shell session. 'codingClose'
 -- closes owned sessions; run it in 'finally'.
-codingToolsFor :: Provider -> ToolEnv -> IO ([AppTool], IO ())
-codingToolsFor provider env = case provider of
-    XAIProvider -> do
-        session <- newGrokSession env
-        ghci <- newGhciSession env
-        pure
-            ( grokTools session ghci
-            , closeGrokSession session >> closeGhciSession ghci
-            )
-    OpenRouterProvider -> do
-        session <- newGrokSession env
-        ghci <- newGhciSession env
-        pure
-            ( grokTools session ghci
-            , closeGrokSession session >> closeGhciSession ghci
-            )
-    OpenAIProvider -> do
-        ghci <- newGhciSession env
-        tools <- codexTools env ghci
-        pure (tools, closeGhciSession ghci)
+codingToolsFor
+    :: Provider
+    -> ToolEnv
+    -> Maybe PlanModeHooks
+    -> IO CodingTools
+codingToolsFor provider env hooks = do
+    plan <- newPlanModeEnv env.toolCwd hooks
+    case provider of
+        XAIProvider -> do
+            session <- newGrokSession env
+            ghci <- newGhciSession env
+            pure CodingTools
+                { codingAppTools = grokTools session ghci plan
+                , codingPlanMode = plan
+                , codingClose = closeGrokSession session >> closeGhciSession ghci
+                }
+        OpenRouterProvider -> do
+            session <- newGrokSession env
+            ghci <- newGhciSession env
+            pure CodingTools
+                { codingAppTools = grokTools session ghci plan
+                , codingPlanMode = plan
+                , codingClose = closeGrokSession session >> closeGhciSession ghci
+                }
+        OpenAIProvider -> do
+            ghci <- newGhciSession env
+            tools <- codexTools env ghci plan
+            pure CodingTools
+                { codingAppTools = tools
+                , codingPlanMode = plan
+                , codingClose = closeGhciSession ghci
+                }

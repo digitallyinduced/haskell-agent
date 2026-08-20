@@ -41,13 +41,22 @@ import Agent.Tools.IO
     , resolveUnderCwd
     , writeTextFile
     )
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , askUserQuestionTool
+    , enterPlanModeTool
+    , exitPlanModeTool
+    , isPlanFileEditTarget
+    , isPlanModeActive
+    , planFilePath
+    , planModeBlockedEditMessage
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
     , ToolEnv(..)
     )
 import Data.Aeson (FromJSON(..), Object)
-import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Parser)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -59,20 +68,24 @@ import System.Exit (ExitCode(..))
 import System.FilePath (takeExtension, (</>))
 import System.Process (readProcessWithExitCode)
 
--- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash, get_task_output, kill_task}.
+-- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash,
+-- get_task_output, kill_task, enter_plan_mode, exit_plan_mode, ask_user_question}.
 -- Local extension: run_ghci (persistent GHCi with per-call purity approval).
-grokTools :: GrokSession -> GhciSession -> [AppTool]
-grokTools session ghci =
+grokTools :: GrokSession -> GhciSession -> PlanModeEnv -> [AppTool]
+grokTools session ghci planMode =
     let env = session.grokEnv
     in
         [ readFileTool env
         , grepTool env
         , listDirTool env
-        , searchReplaceTool env
+        , searchReplaceTool env planMode
         , runTerminalCmdTool session
         , runGhciTool ghci
         , getTaskOutputTool session
         , killTaskTool session
+        , enterPlanModeTool planMode
+        , exitPlanModeTool planMode
+        , askUserQuestionTool planMode
         ]
 
 jsonTool
@@ -525,8 +538,8 @@ instance FromJSON SearchReplaceArgs where
         <*> reqText object "new_string"
         <*> (fromMaybe False <$> optBool object "replace_all")
 
-searchReplaceTool :: ToolEnv -> AppTool
-searchReplaceTool env = jsonTool "search_replace" searchReplaceDescription
+searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
+searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
         "The path to the file to modify. You can use either a relative path in the workspace or an absolute path."
     , PropertySchema "old_string" PropertyString True $ Just
@@ -537,7 +550,7 @@ searchReplaceTool env = jsonTool "search_replace" searchReplaceDescription
         "Replace all occurrences of old_string (default false)"
     ]
     False
-    (typedTool "search_replace" (runSearchReplace env))
+    (typedTool "search_replace" (runSearchReplace env planMode))
 
 searchReplaceDescription :: Text
 searchReplaceDescription =
@@ -547,8 +560,24 @@ searchReplaceDescription =
     \- old_string must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set replace_all to change every occurrence (handy for renaming an identifier).\n\
     \- To create a new file, set old_string to an empty string. An empty old_string cannot overwrite an existing non-empty file."
 
-runSearchReplace :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
-runSearchReplace env args
+runSearchReplace :: ToolEnv -> PlanModeEnv -> SearchReplaceArgs -> IO (Either Text Text)
+runSearchReplace env planMode args = do
+    active <- isPlanModeActive planMode
+    if not active
+        then runSearchReplaceBody env args
+        else do
+            planPath <- planFilePath planMode
+            resolved <- resolveUnderCwd env (Text.unpack args.filePath)
+            case resolved of
+                Left err -> pure (Left err)
+                Right path
+                    | isPlanFileEditTarget planPath path ->
+                        runSearchReplaceBody env args
+                    | otherwise ->
+                        pure (Left (planModeBlockedEditMessage planPath))
+
+runSearchReplaceBody :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
+runSearchReplaceBody env args
     | args.oldString == args.newString =
         pure (Left "Old string and new string are the same")
     | Text.null args.oldString = createNewFile env args

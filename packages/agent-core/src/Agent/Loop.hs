@@ -77,7 +77,9 @@ data LoopConfig = LoopConfig
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
-    , loopApprove :: !(ToolCall -> IO Bool)
+    -- | 'Left' denies with that tool-output message; 'Right True' runs the
+    -- tool; 'Right False' uses the usual user-rejection string.
+    , loopApprove :: !(ToolCall -> IO (Either Text Bool))
     }
 
 data LoopResult = LoopResult
@@ -162,12 +164,20 @@ runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do
     config.loopOnEvent (ToolStarted call)
     approved <- config.loopApprove call
-    result <- if approved
-        then dispatchToolCall config.loopDispatch config.loopHandlers call
-        else pure ToolCallResult
-            { callId = call.callId
-            , output = "Tool call rejected by user."
-            , callKind = call.callKind
-            }
+    result <- case approved of
+        Left denial ->
+            pure ToolCallResult
+                { callId = call.callId
+                , output = denial
+                , callKind = call.callKind
+                }
+        Right False ->
+            pure ToolCallResult
+                { callId = call.callId
+                , output = "Tool call rejected by user."
+                , callKind = call.callKind
+                }
+        Right True ->
+            dispatchToolCall config.loopDispatch config.loopHandlers call
     config.loopOnEvent (ToolFinished result)
     pure result
