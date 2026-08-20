@@ -130,6 +130,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -160,6 +161,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path

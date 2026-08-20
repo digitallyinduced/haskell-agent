@@ -8,7 +8,6 @@ module Agent.CLI
     , run
     ) where
 
-import Agent.CLI.Accounts (runAccountsList, runAccountsRemove, runLogin)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -235,9 +234,6 @@ devMain = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
-        Right (LoginAccount provider label) -> runLogin provider label >> pure DevQuit
-        Right ListAccounts -> runAccountsList >> pure DevQuit
-        Right (RemoveAccount accountId) -> runAccountsRemove accountId >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -253,9 +249,6 @@ run = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
-        Right (LoginAccount provider label) -> runLogin provider label
-        Right ListAccounts -> runAccountsList
-        Right (RemoveAccount accountId) -> runAccountsRemove accountId
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of

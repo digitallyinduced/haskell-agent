@@ -259,6 +259,7 @@ spec = describe "Agent.Subagents" do
                 { finalResponseId = "c"
                 , finalText = Just prompt
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right (agentId, path) <-
@@ -279,6 +280,7 @@ spec = describe "Agent.Subagents" do
                     { finalResponseId = "c"
                     , finalText = Just prompt
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
