@@ -93,7 +93,29 @@ flagsHaveRecursiveForce args =
         in x == "--force" || Text.isPrefixOf "--force=" x
 
 tokenize :: Text -> [Text]
-tokenize = filter (not . Text.null) . Text.words
+tokenize = map Text.pack . go [] . Text.unpack
+  where
+    go acc [] = reverse (filter (not . null) acc)
+    go acc cs =
+        let cs' = dropWhile isHorzSpace cs
+        in case cs' of
+            [] -> reverse (filter (not . null) acc)
+            '\'' : rest ->
+                let (body, after) = break (== '\'') rest
+                    rest' = case after of
+                        '\'' : more -> more
+                        _ -> after
+                in go (body : acc) rest'
+            '"' : rest ->
+                let (body, after) = break (== '"') rest
+                    rest' = case after of
+                        '"' : more -> more
+                        _ -> after
+                in go (body : acc) rest'
+            _ ->
+                let (tok, rest) = break isHorzSpace cs'
+                in go (tok : acc) rest
+    isHorzSpace c = c == ' ' || c == '\t' || c == '\n'
 
 -- | Minimal JSON string-field extractor for @{"command":"..."}@ payloads.
 -- Avoids pulling aeson into this leaf helper; sufficient for our tool args.

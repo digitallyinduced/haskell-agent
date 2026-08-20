@@ -113,6 +113,13 @@ spec = describe "Agent.Tools.Codex" do
                 ]
         parsed `shouldSatisfy` either (const False) ((== 3) . length)
 
+    it "rejects rm -rf via shell_command even before execution" do
+        withTempEnv \env -> do
+            output <- runFn env "shell_command"
+                "{\"command\":\"rm -rf /tmp/should-not-run\",\"workdir\":\".\"}"
+            output `shouldSatisfy` Text.isInfixOf "Blocked dangerous shell command"
+            output `shouldSatisfy` Text.isInfixOf "rm -rf"
+
     it "runs shell_command and times out" do
         withTempEnv \env -> do
             output <- runFn env "shell_command"
