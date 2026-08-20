@@ -129,8 +129,9 @@ spec = describe "Agent.Tools.Grok" do
         withTempEnv \env -> do
             Text.writeFile (env.toolCwd </> ".gitignore") "secret.txt\n"
             Text.writeFile (env.toolCwd </> "secret.txt") "hidden\n"
-            _ <- runTool env "run_terminal_cmd"
+            initOut <- runTool env "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
+            initOut `shouldSatisfy` Text.isPrefixOf "exit: 0"
             output <- runTool env "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"
