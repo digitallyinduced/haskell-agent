@@ -46,7 +46,7 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (finally, try)
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -174,7 +174,7 @@ runAgent options = do
             OpenAIProvider ->
                 try @CodexAuthFailed
                     (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                        runSession options policy tools prompt paramsRef transcriptRef
+                        runSession options provider policy tools prompt paramsRef transcriptRef
                             initialPrevious persist
                             (openAiBackend conn (readIORef paramsRef) transcriptRef))
                     >>= \case
@@ -184,7 +184,7 @@ runAgent options = do
                 xaiOptions <- XAI.clientOptionsFromEnv
                 credential <- firstCredential loaded
                 let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
-                runSession options policy tools prompt paramsRef transcriptRef
+                runSession options provider policy tools prompt paramsRef transcriptRef
                     initialPrevious persist backend
             OpenRouterProvider -> do
                 openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -192,7 +192,7 @@ runAgent options = do
                 let backend =
                         openRouterBackend openRouterOptions credential
                             (readIORef paramsRef) transcriptRef
-                runSession options policy tools prompt paramsRef transcriptRef
+                runSession options provider policy tools prompt paramsRef transcriptRef
                     initialPrevious persist backend
 
 preparePersistence
@@ -250,6 +250,7 @@ isJustCwd options = case options.optCwd of
 
 runSession
     :: CliOptions
+    -> Provider
     -> ApprovalPolicy
     -> [AppTool]
     -> Maybe Text
@@ -259,7 +260,7 @@ runSession
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> Backend
     -> IO ()
-runSession options policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -293,11 +294,12 @@ runSession options policy tools prompt paramsRef transcriptRef initialPrevious p
             ok <- runOneTurn config render previous printed transcriptRef persist text
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
-            repl config render previous printed paramsRef policyRef transcriptRef persist
+            repl config render provider previous printed paramsRef policyRef transcriptRef persist
 
 repl
     :: LoopConfig
     -> RenderConfig
+    -> Provider
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef ResponseCreateParams
@@ -305,7 +307,7 @@ repl
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> IO ()
-repl config render previous printed paramsRef policyRef transcriptRef persist = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -347,6 +349,36 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                                         writeIORef slotRef
                                             (Right handle { sessionMeta = meta })
                         continue
+                    ReplShowModel -> do
+                        params <- readIORef paramsRef
+                        Text.putStrLn ("model: " <> currentModel params)
+                        continue
+                    ReplSetModel name -> do
+                        modifyIORef' paramsRef (setModel name)
+                        clearedChain <- case provider of
+                            OpenAIProvider ->
+                                atomicModifyIORef' previous \prev ->
+                                    (Nothing, isJust prev)
+                            _ -> pure False
+                        if clearedChain
+                            then Text.putStrLn
+                                ("model set to " <> name
+                                    <> " (conversation continued locally)")
+                            else Text.putStrLn ("model set to " <> name)
+                        case persist of
+                            Nothing -> pure ()
+                            Just slotRef -> do
+                                slot <- readIORef slotRef
+                                case slot of
+                                    Left pending ->
+                                        writeIORef slotRef
+                                            (Left pending { createModel = name })
+                                    Right handle -> do
+                                        let meta = handle.sessionMeta { metaModel = name }
+                                        writeSessionMeta handle.sessionMetaPath meta
+                                        writeIORef slotRef
+                                            (Right handle { sessionMeta = meta })
+                        continue
                     ReplToggleAlwaysApprove -> do
                         toggleAlwaysApprove policyRef
                         continue
@@ -372,7 +404,8 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                         Text.hPutStrLn stderr (roleError color err)
                         continue
   where
-    continue = repl config render previous printed paramsRef policyRef transcriptRef persist
+    continue =
+        repl config render provider previous printed paramsRef policyRef transcriptRef persist
 
 runOneTurn
     :: LoopConfig

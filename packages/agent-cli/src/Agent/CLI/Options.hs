@@ -217,6 +217,7 @@ usage = unlines
     , ""
     , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
-    , "reasoning effort. /always-approve (or :yolo) toggles auto-approve."
+    , "reasoning effort. /model [NAME] shows or changes the model."
+    , "/always-approve (or :yolo) toggles auto-approve."
     , "/session prints the current session id. Ctrl-D or :q exits."
     ]
