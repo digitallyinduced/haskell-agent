@@ -1,0 +1,66 @@
+module Agent.OpenAI.CompactionSpec (spec) where
+
+import Agent.OpenAI.Compaction
+import Agent.OpenAI.Responses.Types
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Text as Text
+import Test.Hspec
+
+spec :: Spec
+spec = do
+    describe "buildLocalCompactedHistory" do
+        it "keeps recent user texts and an assistant summary" do
+            let history =
+                    [ user "one"
+                    , assistant "a1"
+                    , user "two"
+                    , assistant "a2"
+                    , user "three"
+                    ]
+                compacted = buildLocalCompactedHistory 2 history "did stuff"
+            length compacted `shouldBe` 3
+            compacted `shouldSatisfy` any isSummary
+            -- newest users retained
+            let texts = [userOnly m | MessageItem m <- compacted, m.role == RoleUser]
+            texts `shouldBe` ["two", "three"]
+
+        it "skips prior /compact user markers" do
+            let history = [user "/compact", user "keep me", assistant "x"]
+                compacted = buildLocalCompactedHistory 3 history "summary"
+            let texts = [userOnly m | MessageItem m <- compacted, m.role == RoleUser]
+            texts `shouldBe` ["keep me"]
+
+    describe "isCompactSessionTurn" do
+        it "recognizes compact markers" do
+            isCompactSessionTurn "/compact" `shouldBe` True
+            isCompactSessionTurn "/compact focus auth" `shouldBe` True
+            isCompactSessionTurn "hello" `shouldBe` False
+
+  where
+    user text = MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , role = RoleUser
+        , status = Nothing
+        , phase = Nothing
+        , extraFields = KeyMap.empty
+        }
+    assistant text = MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , role = RoleAssistant
+        , status = Nothing
+        , phase = Nothing
+        , extraFields = KeyMap.empty
+        }
+    isSummary (MessageItem m) =
+        m.role == RoleAssistant
+            && case m.content of
+                MessageContentParts (InputTextPart text _ _ : _) ->
+                    Text.isPrefixOf summaryPrefix text
+                _ -> False
+    isSummary _ = False
+    userOnly m = case m.content of
+        MessageContentParts (InputTextPart text _ _ : _) -> text
+        MessageContentText text -> text
+        _ -> ""
