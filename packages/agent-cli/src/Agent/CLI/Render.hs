@@ -22,6 +22,11 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Progress
+    ( osc9ProgressIndeterminate
+    , osc9ProgressRemove
+    , wrapOscForTmux
+    )
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -56,7 +61,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -67,6 +72,7 @@ import System.Console.ANSI.Codes
     ( clearFromCursorToScreenEndCode
     , setCursorColumnCode
     )
+import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
@@ -89,6 +95,7 @@ data RenderConfig = RenderConfig
     , renderModelRef :: !(IORef Text)
     , renderActivityRef :: !(IORef Text)
     , renderStartedAt :: !(IORef (Maybe UTCTime))
+    , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     }
 
 -- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
@@ -275,6 +282,7 @@ startThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
+        emitNativeProgress config True
         -- A live reasoning block already owns stderr; don't overlay a spinner.
         live <- readIORef config.renderReasoningLive
         unless live do
@@ -302,6 +310,20 @@ stopThinkingSpinnerUnlocked config = do
             hFlush config.renderStderr
         writeIORef config.renderThinkingVisible False
 
+-- | Ghostty (and Windows Terminal / ConEmu) native loading indicator.
+-- Harmless no-op on terminals that do not implement OSC 9;4.
+emitNativeProgress :: RenderConfig -> Bool -> IO ()
+emitNativeProgress config active
+    | not config.renderNativeProgress = pure ()
+    | otherwise = do
+        inTmux <- isJust <$> lookupEnv "TMUX"
+        let seq_ =
+                wrapOscForTmux inTmux $
+                    if active then osc9ProgressIndeterminate else osc9ProgressRemove
+        void $ tryIO do
+            Text.hPutStr config.renderStderr seq_
+            hFlush config.renderStderr
+
 spinnerLoop :: RenderConfig -> Int -> IO ()
 spinnerLoop config frame = do
     threadDelay 80000
@@ -311,7 +333,10 @@ spinnerLoop config frame = do
             next = (frame + 1) `mod` length frames
         withMVar config.renderLock \_ -> do
             still <- readIORef config.renderThinkingVisible
-            when still (paintThinkingFrame config next)
+            when still do
+                -- Ghostty hides OSC 9;4 after ~15s without an update.
+                when (next == 0) (emitNativeProgress config True)
+                paintThinkingFrame config next
         spinnerLoop config next
 
 paintThinkingFrame :: RenderConfig -> Int -> IO ()
@@ -356,12 +381,15 @@ appendReasoningUnlocked config delta
         -- First summary token replaces the one-line spinner; later tokens
         -- restyle the live truncated block in place. Elapsed time on the
         -- header updates with each delta rather than a dedicated spinner.
+        -- Keep Ghostty's native bar up until the round is committed.
         stopThinkingSpinnerUnlocked config
+        emitNativeProgress config True
         redrawLiveReasoning config True elapsed buffered
 
 commitThinkingUnlocked :: RenderConfig -> IO ()
 commitThinkingUnlocked config = do
     stopThinkingSpinnerUnlocked config
+    emitNativeProgress config False
     buffered <- readIORef config.renderReasoningBuffer
     writeIORef config.renderReasoningBuffer ""
     if Text.null (Text.strip buffered)

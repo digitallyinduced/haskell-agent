@@ -15,6 +15,7 @@ import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
+import qualified Agent.CLI.ProgressSpec as ProgressSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
@@ -42,6 +43,7 @@ main = hspec do
     OptionsSpec.spec
     PermissionSpec.spec
     PlanSpec.spec
+    ProgressSpec.spec
     ProjectSpec.spec
     PromptSpec.spec
     RenderSpec.spec

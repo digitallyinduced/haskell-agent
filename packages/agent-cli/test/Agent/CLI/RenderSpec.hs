@@ -250,6 +250,17 @@ spec = do
                 hClose handle
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC]9;4;")
+
+        it "emits Ghostty OSC 9;4 while thinking and clears it after" do
+            withRenderConfigNative True False True \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "plan")
+                clearThinking config
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` containsOsc9 3
+                body `shouldSatisfy` containsOsc9 0
 
     describe "formatThinkingBlock" do
         it "headers a live preview and a finished duration" do
@@ -283,12 +294,27 @@ spec = do
             let painted = "\ESC[1mabcdefghij\ESC[0m"
             visibleDisplayRows 5 painted `shouldBe` 2
 
+containsOsc9 :: Int -> Text.Text -> Bool
+containsOsc9 state body =
+    let raw = "\ESC]9;4;" <> Text.pack (show state) <> "\BEL"
+        wrapped = "\ESCPtmux;\ESC" <> raw <> "\ESC\\"
+    in raw `Text.isInfixOf` body || wrapped `Text.isInfixOf` body
+
 withRenderConfig
     :: Bool
     -> Bool
     -> (RenderConfig -> Handle -> FilePath -> IO ())
     -> IO ()
-withRenderConfig showThinking color action = do
+withRenderConfig showThinking color =
+    withRenderConfigNative showThinking color False
+
+withRenderConfigNative
+    :: Bool
+    -> Bool
+    -> Bool
+    -> (RenderConfig -> Handle -> FilePath -> IO ())
+    -> IO ()
+withRenderConfigNative showThinking color native action = do
     printed <- newIORef False
     thinking <- newIORef False
     spinner <- newIORef Nothing
@@ -320,6 +346,7 @@ withRenderConfig showThinking color action = do
                 , renderModelRef = modelRef
                 , renderActivityRef = activityRef
                 , renderStartedAt = startedAt
+                , renderNativeProgress = native
                 }
         action config handle path
         clearThinking config
