@@ -23,6 +23,8 @@ import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
+import Data.IORef
+import qualified Data.Map.Strict as Map
 import Test.Hspec
 
 spec :: Spec
@@ -119,7 +121,8 @@ withTempTools action =
         session <- newGrokSession env
         ghci <- newGhciSession env
         plan <- newPlanModeEnv env.toolCwd Nothing
-        pure (dir, (session, ghci), grokTools session ghci plan)
+        typesRef <- newIORef Map.empty
+        pure (dir, (session, ghci), grokTools session ghci plan Nothing typesRef)
     release (dir, (session, ghci), _) = do
         closeGrokSession session
         closeGhciSession ghci

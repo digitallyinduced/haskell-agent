@@ -48,6 +48,7 @@ library
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.Shell
+                    , Agent.Tools.Grok.Task
                     , Agent.Tools.Ghci
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
@@ -87,6 +88,7 @@ test-suite agent-core-test
                     , Agent.Tools.CodexSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.GrokSpec
+                    , Agent.Tools.Grok.TaskSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.PlanModeSpec
