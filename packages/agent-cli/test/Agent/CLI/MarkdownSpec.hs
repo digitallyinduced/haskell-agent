@@ -23,15 +23,41 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "use `code` here"
             Text.count "`code`" out `shouldBe` 1
 
-        it "keeps fence body at normal intensity and drops fence markers" do
+        it "dims fence bodies and drops fence markers" do
             let out = renderMarkdown True "```haskell\nmain = pure ()\n```"
             out `shouldSatisfy` Text.isInfixOf "main = pure ()"
             out `shouldSatisfy` (not . Text.isInfixOf "```")
             out `shouldSatisfy` Text.isInfixOf "haskell"
+            out `shouldSatisfy` Text.isInfixOf "\ESC["
 
         it "supports tilde fences" do
             let out = renderMarkdown True "~~~\nbody\n~~~"
-            out `shouldBe` "body"
+            out `shouldSatisfy` Text.isInfixOf "body"
+            out `shouldSatisfy` (not . Text.isInfixOf "~~~")
+
+        it "colors heading markers by level" do
+            let h1 = renderMarkdown True "# Title"
+                h2 = renderMarkdown True "## Title"
+            h1 `shouldSatisfy` Text.isInfixOf "Title"
+            h1 `shouldSatisfy` Text.isInfixOf "\ESC["
+            h2 `shouldSatisfy` Text.isInfixOf "Title"
+            h1 `shouldSatisfy` (/= h2)
+
+        it "colors unordered and ordered list markers" do
+            let ul = renderMarkdown True "- item"
+                ol = renderMarkdown True "1. item"
+            ul `shouldSatisfy` Text.isInfixOf "item"
+            ul `shouldSatisfy` Text.isInfixOf "\ESC["
+            ul `shouldSatisfy` (not . Text.isInfixOf "- item")
+            ol `shouldSatisfy` Text.isInfixOf "item"
+            ol `shouldSatisfy` Text.isInfixOf "\ESC["
+
+        it "mutes plain blockquotes" do
+            let out = renderMarkdown True "> note"
+            out `shouldSatisfy` Text.isInfixOf "note"
+            out `shouldSatisfy` Text.isInfixOf "│"
+            out `shouldSatisfy` Text.isInfixOf "\ESC["
+            out `shouldSatisfy` (not . Text.isInfixOf "> note")
 
         it "styles bold markers" do
             let out = renderMarkdown True "say **hello** there"
