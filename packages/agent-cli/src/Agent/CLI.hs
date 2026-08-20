@@ -8,7 +8,12 @@ module Agent.CLI
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
-import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
+import Agent.CLI.Clipboard
+    ( ClipboardContent(..)
+    , formatImageSize
+    , readClipboard
+    , readClipboardImages
+    )
 import Agent.CLI.Command
 import Agent.CLI.Input (readApprovalLine, readReplLine)
 import Agent.CLI.Options
@@ -430,6 +435,7 @@ runSession
 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
     escPaused <- newIORef False
+    attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
     ioLock <- newMVar ()
@@ -468,7 +474,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+                transcriptRef persist planMode projectRoot tokenProvider agentsContext
+                escPaused attachmentsRef
 
 repl
     :: LoopConfig
@@ -485,8 +492,9 @@ repl
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> IORef [ImageAttachment]
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -518,39 +526,102 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
+                        pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
                         writeIORef printed False
+                        let turnInputs =
+                                if null pendingImages
+                                    then [UserMessage text]
+                                    else
+                                        [ UserMultimodal
+                                            { userText = text
+                                            , userImages = pendingImages
+                                            }
+                                        ]
                         _ <- runOneTurn config render previous printed
                             transcriptRef persist planMode agentsContext escPaused text
-                            [UserMessage text]
+                            turnInputs
                         putTrailingNewline printed
                         continue
-                    ReplPaste caption -> do
-                        clipboard <- readClipboardImage
-                        case clipboard of
+                    ReplPaste{pasteImmediate, pasteCaption} -> do
+                        color <- resolveColor stdout
+                        errColor <- resolveColor stderr
+                        imagesResult <- readClipboardImages
+                        case imagesResult of
                             Left err -> do
-                                color <- resolveColor stderr
-                                Text.hPutStrLn stderr (roleError color err)
+                                -- Fall back to a richer clipboard sniff for better errors.
+                                content <- readClipboard
+                                case content of
+                                    ClipboardText _ ->
+                                        Text.hPutStrLn stderr (roleError errColor
+                                            "clipboard has text, not an image (paste text normally into the prompt)")
+                                    ClipboardPaths paths ->
+                                        Text.hPutStrLn stderr (roleError errColor
+                                            ("clipboard has file path(s), but no loadable image: "
+                                                <> Text.intercalate ", " (map Text.pack paths)))
+                                    ClipboardEmpty ->
+                                        Text.hPutStrLn stderr (roleError errColor err)
+                                    ClipboardImage image ->
+                                        -- Shouldn't happen if readClipboardImages failed, but be safe.
+                                        modifyIORef' attachmentsRef (<> [image])
                                 continue
-                            Right image -> do
-                                let promptText =
-                                        if Text.null caption
-                                            then "See attached image."
-                                            else caption
-                                    size = formatImageSize (BS.length image.imageBytes)
-                                color <- resolveColor stdout
-                                Text.putStrLn
-                                    (roleMuted color
-                                        (glyphOk <> "pasted " <> image.imageMime <> " (" <> size <> ")"))
-                                writeIORef printed False
-                                _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext escPaused promptText
-                                    [ UserMultimodal
-                                        { userText = promptText
-                                        , userImages = [image]
-                                        }
-                                    ]
-                                putTrailingNewline printed
+                            Right [] -> do
+                                Text.hPutStrLn stderr (roleError errColor "no image found on the clipboard")
                                 continue
+                            Right images -> do
+                                let sizes =
+                                        Text.intercalate ", "
+                                            [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
+                                            | img <- images
+                                            ]
+                                if pasteImmediate
+                                    then do
+                                        let promptText =
+                                                if Text.null pasteCaption
+                                                    then "See attached image."
+                                                    else pasteCaption
+                                        Text.putStrLn
+                                            (roleMuted color (glyphOk <> "pasted " <> sizes))
+                                        writeIORef printed False
+                                        _ <- runOneTurn config render previous printed
+                                            transcriptRef persist planMode agentsContext escPaused promptText
+                                            [ UserMultimodal
+                                                { userText = promptText
+                                                , userImages = images
+                                                }
+                                            ]
+                                        putTrailingNewline printed
+                                        continue
+                                    else do
+                                        modifyIORef' attachmentsRef (<> images)
+                                        pending <- readIORef attachmentsRef
+                                        Text.putStrLn
+                                            (roleMuted color
+                                                (glyphOk
+                                                    <> "attached "
+                                                    <> sizes
+                                                    <> " — send with next message ("
+                                                    <> Text.pack (show (length pending))
+                                                    <> " queued)"))
+                                        continue
+                    ReplShowAttachments -> do
+                        pending <- readIORef attachmentsRef
+                        color <- resolveColor stdout
+                        if null pending
+                            then Text.putStrLn (roleMuted color (glyphSession <> "attachments: (none)"))
+                            else Text.putStrLn $ roleMuted color $
+                                glyphSession
+                                    <> "attachments: "
+                                    <> Text.intercalate ", "
+                                        [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
+                                        | img <- pending
+                                        ]
+                        continue
+                    ReplClearAttachments -> do
+                        writeIORef attachmentsRef []
+                        color <- resolveColor stdout
+                        Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
+                        continue
+
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -638,7 +709,8 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+            transcriptRef persist planMode projectRoot tokenProvider agentsContext
+            escPaused attachmentsRef
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -1002,8 +1074,8 @@ toggleAlwaysApprove policyRef projectRoot = do
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color glyphOk <> "auto-approve on (saved for project)"
-        _ -> roleMuted color glyphSession <> "auto-approve off (saved for project)")
+        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
+        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
