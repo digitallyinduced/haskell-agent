@@ -320,10 +320,11 @@ runRipgrep rgPath path args _limit = do
             GrepContent -> ["--heading", "--with-filename", "--line-number"]
             GrepFilesWithMatches -> ["--files-with-matches"]
             GrepCount -> ["--count"]
+        -- All options must come before `--`; ripgrep treats everything after
+        -- as paths, so a trailing `--glob` becomes "No such file or directory".
         rgArgs = concat
             [ modeFlags
             , ["--color=never", "--max-columns", "1000"]
-            , ["--regexp", Text.unpack args.pattern, "--", path]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before
             , maybe [] (\n -> ["-A", show n]) args.after
@@ -331,6 +332,7 @@ runRipgrep rgPath path args _limit = do
             , ["-i" | args.caseInsensitive]
             , maybe [] (\t -> ["--type", Text.unpack t]) args.fileType
             , if args.multiline then ["-U", "--multiline-dotall"] else []
+            , ["--regexp", Text.unpack args.pattern, "--", path]
             ]
     (code, stdout, stderr) <- readProcessWithExitCode rgPath rgArgs ""
     let raw = Text.pack stdout
