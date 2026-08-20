@@ -23,9 +23,8 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
 import qualified Data.ByteString as BS
-import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory
     ( canonicalizePath
@@ -37,6 +36,7 @@ import System.Directory
     , renameFile
     )
 import System.Exit (ExitCode(..))
+import System.IO.Error (catchIOError, ioError, isAlreadyInUseError)
 import System.FilePath
     ( addTrailingPathSeparator
     , isAbsolute
@@ -100,8 +100,24 @@ isInside root path =
     let root' = addTrailingPathSeparator root
     in path == root || root' `isPrefixOf` path
 
+-- | GHC Handle locks throw @isAlreadyInUseError@ when another Handle
+-- still has the path open. Retry briefly so overlapping tool calls
+-- (e.g. parallel @search_replace@) can wait the lock out.
+lockRetryDelaysUs :: [Int]
+lockRetryDelaysUs = [1000, 2000, 4000, 8000, 16000]
+
+retryOnBusy :: IO a -> IO a
+retryOnBusy action = go lockRetryDelaysUs
+  where
+    go [] = action
+    go (delayUs : rest) =
+        catchIOError action \err ->
+            if isAlreadyInUseError err
+                then threadDelay delayUs >> go rest
+                else ioError err
+
 readTextFile :: FilePath -> IO (Either Text Text)
-readTextFile path = try @SomeException (BS.readFile path) >>= \case
+readTextFile path = try @SomeException (retryOnBusy (BS.readFile path)) >>= \case
     Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
     Right bytes
         | BS.elem 0 (BS.take 8192 bytes) ->
@@ -112,7 +128,7 @@ readTextFile path = try @SomeException (BS.readFile path) >>= \case
 writeTextFile :: FilePath -> Text -> IO (Either Text ())
 writeTextFile path content = do
     createDirectoryIfMissing True (takeDirectory path)
-    try @SomeException (Text.writeFile path content) >>= \case
+    try @SomeException (retryOnBusy (BS.writeFile path (encodeUtf8 content))) >>= \case
         Left err -> pure $ Left $ "Failed to write file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
