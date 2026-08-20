@@ -55,6 +55,7 @@ library
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
+                    , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SubagentStore

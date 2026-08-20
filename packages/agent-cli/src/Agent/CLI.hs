@@ -2,6 +2,8 @@
 module Agent.CLI
     ( DevResult(..)
     , afterDev
+    , applyReplMode
+    , cycleReplInteraction
     , devMain
     , formatReplStatusLine
     , formatTokenUsage
@@ -28,7 +30,13 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLine)
+import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLineWithInitial)
+import Agent.CLI.ReplMode
+    ( ReplMode(..)
+    , cycleReplMode
+    , replModeFromState
+    , replModeLabel
+    )
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
@@ -595,18 +603,18 @@ printResumeHint progName = \case
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
--- | Idle prompt chrome: model, reasoning effort, approval mode on the left;
--- session token totals right-aligned when the TTY width is known.
+-- | Idle prompt chrome: model, reasoning effort, interaction mode on the
+-- left; session token totals right-aligned when the TTY width is known.
 formatReplStatusLine
     :: Bool
     -> Maybe Int
     -> Text
     -> Text
-    -> ApprovalPolicy
+    -> ReplMode
     -> TokenUsage
     -> Text
-formatReplStatusLine color width model effort policy usage =
-    let left = "  " <> model <> " · " <> effort <> " · " <> approvalLabel policy
+formatReplStatusLine color width model effort mode usage =
+    let left = "  " <> model <> " · " <> effort <> " · " <> replModeLabel mode
         right = formatTokenUsage usage
         padded = case width of
             Just cols | cols > 0, not (Text.null right) ->
@@ -617,11 +625,33 @@ formatReplStatusLine color width model effort policy usage =
             _ | Text.null right -> left
             _ -> left <> "  " <> right
     in roleMuted color padded
-  where
-    approvalLabel = \case
-        ApproveAll -> "yolo"
-        PromptMutating -> "ask"
-        DenyMutating -> "deny"
+
+-- | Apply a cycled idle mode: plan pending vs always-approve vs ask.
+-- Always-approve still persists to project settings, matching /always-approve.
+applyReplMode
+    :: PlanModeEnv
+    -> IORef ApprovalPolicy
+    -> FilePath
+    -> ReplMode
+    -> IO ()
+applyReplMode planMode policyRef projectRoot = \case
+    ReplModePlan ->
+        writeIORef planMode.planStateRef PlanPending
+    ReplModeAlwaysApprove -> do
+        deactivatePlanMode planMode
+        writeIORef policyRef ApproveAll
+        saveProjectAutoApprove projectRoot True
+    ReplModeNormal -> do
+        deactivatePlanMode planMode
+        current <- readIORef policyRef
+        when (current == ApproveAll) do
+            writeIORef policyRef PromptMutating
+            saveProjectAutoApprove projectRoot False
+
+-- | Pure next-mode helper used by tests and the Shift+Tab handler.
+cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
+cycleReplInteraction planState policy =
+    cycleReplMode (replModeFromState planState policy)
 
 -- | Compact session totals: @1.2k in · 340 out@. Cached tokens are shown
 -- only when the provider reported a non-zero cache hit.
@@ -800,12 +830,42 @@ repl
     -> IORef TokenUsage
     -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset =
+    replWithDraft config render provider previous printed paramsRef policyRef
+        transcriptRef persist planMode projectRoot tokenProvider agentsContext
+        escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset ""
+
+replWithDraft
+    :: LoopConfig
+    -> RenderConfig
+    -> Provider
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef ResponseCreateParams
+    -> IORef ApprovalPolicy
+    -> IORef [ResponseItem]
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> PlanModeEnv
+    -> FilePath
+    -> Maybe TokenProvider
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef [ImageAttachment]
+    -> IORef Int
+    -> InterruptState
+    -> SubagentStoreRoot
+    -> IORef TokenUsage
+    -> IO ()
+    -> Text
+    -> IO DevResult
+replWithDraft config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset draft = do
     stdoutColor <- resolveColor stdout
-    planActive <- isPlanModeActive planMode
-    planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
+    planState <- readIORef planMode.planStateRef
+    let planActive = planState == PlanActive
+        planPending = planState == PlanPending
     params <- readIORef paramsRef
     policy <- readIORef policyRef
+    let idleMode = replModeFromState planState policy
     -- Status sits on the line above λ so haskeline can keep the cursor on
     -- the input. Haskeline cannot park a persistent footer under the draft.
     -- Token totals sit on the right of that line when the TTY width is known.
@@ -814,7 +874,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     Text.putStrLn $ formatReplStatusLine stdoutColor termCols
         (currentModel params)
         (currentEffort params)
-        policy
+        idleMode
         usage
     hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
@@ -822,6 +882,8 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     let modeTag
             | planActive = roleWarn stdoutColor "[plan] "
             | planPending = roleMuted stdoutColor "[plan…] "
+            | idleMode == ReplModeAlwaysApprove =
+                roleSuccess stdoutColor "[yolo] "
             | otherwise = ""
         chromePrompt =
             beginBackground stdoutColor userBackground
@@ -830,7 +892,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    mline <- readReplLine interrupt chromePrompt
+    mline <- readReplLineWithInitial interrupt chromePrompt draft
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
@@ -841,6 +903,14 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
+        ReplCycleMode keptDraft -> do
+            let next = cycleReplInteraction planState policy
+            applyReplMode planMode policyRef projectRoot next
+            -- Haskeline already advanced a line; walk back over the
+            -- previous status + prompt so the next chrome replaces them.
+            putStr "\ESC[2A\r\ESC[J"
+            hFlush stdout
+            continueWith keptDraft
         ReplPasted pasted ->
             submitLine continue stdoutColor True pasted
         ReplText line ->
@@ -1185,10 +1255,12 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
                         continue
-    continue =
-        repl config render provider previous printed paramsRef policyRef
+    continue = continueWith ""
+    continueWith keptDraft =
+        replWithDraft config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
             escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset
+            keptDraft
 
 applyModelChange
     :: Provider
