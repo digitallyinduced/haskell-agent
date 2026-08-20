@@ -56,7 +56,8 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception (finally, try)
+import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (catchAsync, finally, throwIO, try)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -67,7 +68,7 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.Aeson.KeyMap as KeyMap
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, getProgName, lookupEnv)
 import System.FilePath ((</>))
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
@@ -184,30 +185,32 @@ runAgent options = do
         agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
-        case provider of
-            OpenAIProvider ->
-                try @CodexAuthFailed
-                    (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                        runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist Nothing agentsContext
-                            (openAiBackend conn (readIORef paramsRef) transcriptRef))
-                    >>= \case
-                        Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                        Right () -> pure ()
-            XAIProvider -> do
-                xaiOptions <- XAI.clientOptionsFromEnv
-                let backend =
-                        xaiBackend xaiOptions loaded.loadedTokenProvider
-                            (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
-            OpenRouterProvider -> do
-                openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                let backend =
-                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
-                            (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
+        progName <- getProgName
+        withInterruptResume progName persist do
+            case provider of
+                OpenAIProvider ->
+                    try @_ @CodexAuthFailed
+                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                            runSession options provider policy tools prompt paramsRef transcriptRef
+                                initialPrevious persist Nothing agentsContext
+                                (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                        >>= \case
+                            Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                            Right () -> pure ()
+                XAIProvider -> do
+                    xaiOptions <- XAI.clientOptionsFromEnv
+                    let backend =
+                            xaiBackend xaiOptions loaded.loadedTokenProvider
+                                (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
+                OpenRouterProvider -> do
+                    openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                    let backend =
+                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                (readIORef paramsRef) transcriptRef
+                    runSession options provider policy tools prompt paramsRef transcriptRef
+                        initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
     :: CliOptions
@@ -252,6 +255,38 @@ isLeftSlot :: Either a b -> Bool
 isLeftSlot = \case
     Left _ -> True
     Right _ -> False
+
+-- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
+withInterruptResume
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO a
+    -> IO a
+withInterruptResume progName persist action =
+    action `catchAsync` \(e :: AsyncException) ->
+        case e of
+            UserInterrupt -> do
+                printResumeHint progName persist
+                throwIO e
+            _ -> throwIO e
+
+printResumeHint
+    :: String
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+printResumeHint progName = \case
+    Nothing -> pure ()
+    Just slotRef -> do
+        slot <- readIORef slotRef
+        case slot of
+            Left _ -> pure ()
+            Right handle -> do
+                -- Drop an in-place "thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                hFlush stderr
+                color <- resolveColor stderr
+                putTextLn stderr
+                    (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession

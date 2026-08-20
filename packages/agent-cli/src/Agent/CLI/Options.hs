@@ -233,4 +233,5 @@ usage = unlines
     , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits."
+    , "Ctrl-C prints a --resume command when a session has been persisted."
     ]
