@@ -7,7 +7,7 @@ module Agent.CLI.Auth
     , reloadableFileCredentialProvider
     ) where
 
-import Agent.Broker (BrokerOptions(..), newBrokerTokenProvider)
+import Agent.Broker (BrokerOptions(..), newBrokerTokenProviderFor)
 import Agent.Error (ApiError(..), ErrorType(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
@@ -77,10 +77,15 @@ loadBroker url requested = do
     case token of
         Nothing -> pure (Left "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN")
         Just serviceToken -> do
-            provider <- newBrokerTokenProvider BrokerOptions
-                { baseUrl = Text.unpack url
-                , serviceToken
-                }
+            let supportedProviders = case requested of
+                    Just selected -> [selected]
+                    Nothing -> [OpenAIProvider, XAIProvider, OpenRouterProvider]
+            provider <- newBrokerTokenProviderFor
+                BrokerOptions
+                    { baseUrl = Text.unpack url
+                    , serviceToken
+                    }
+                supportedProviders
             first <- getNextToken provider Nothing
             case first of
                 Left err -> pure (Left ("broker: " <> show err))

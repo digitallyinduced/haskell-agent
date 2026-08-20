@@ -37,8 +37,9 @@ toEvent = \case
     PickerKeyChar c -> PickerType c
 
 -- | Open the picker when stdin is a TTY; otherwise print the catalog.
--- Returns @Just name@ on confirm, @Nothing@ on cancel / EOF / non-TTY.
-pickModel :: Bool -> Provider -> Text -> IO (Maybe Text)
+-- Returns the provider/model choice on confirm and @Nothing@ on cancel, EOF,
+-- or non-TTY input.
+pickModel :: Bool -> Provider -> Text -> IO (Maybe ModelOption)
 pickModel color provider current = do
     isTty <- hIsTerminalDevice stdin
     if not isTty
@@ -60,16 +61,19 @@ formatCatalogListing color provider current =
             roleMuted color
                 (glyphSessionLike
                     <> "model: "
+                    <> providerSlug provider
+                    <> "/"
                     <> current
-                    <> " · "
-                    <> providerSlug provider)
+                    <> " · all providers")
         rows =
             map
                 (\opt ->
                     let mark
-                            | opt.modelId == current =
-                                roleSuccess color (glyphOk <> opt.modelId)
-                            | otherwise = roleMuted color ("  " <> opt.modelId)
+                            | isCurrent provider current opt =
+                                roleSuccess color
+                                    (glyphOk <> formatOptionName opt)
+                            | otherwise =
+                                roleMuted color ("  " <> formatOptionName opt)
                         label = case opt.modelLabel of
                             Nothing -> ""
                             Just l -> roleMuted color ("  " <> l)
@@ -86,9 +90,9 @@ renderPickerFrame color state =
         header =
             rolePrompt color "model"
                 <> roleMuted color
-                    (" · "
+                    (" · all providers · current "
                         <> providerSlug state.pickerProvider
-                        <> " · current "
+                        <> "/"
                         <> state.pickerCurrent)
         filterLine
             | Text.null state.pickerFilter =
@@ -100,21 +104,22 @@ renderPickerFrame color state =
             [] -> [roleMuted color "(no matches)"]
             opts ->
                 zipWith
-                    (\i opt -> renderRow color (i == idx) state.pickerCurrent opt)
+                    (\i opt -> renderRow color (i == idx)
+                        state.pickerProvider state.pickerCurrent opt)
                     [0 ..]
                     opts
         footer =
             roleMuted color "↑↓/jk · enter · esc/q · type to filter"
     in Text.intercalate "\n" (header : filterLine : body <> [footer])
 
-renderRow :: Bool -> Bool -> Text -> ModelOption -> Text
-renderRow color selected current opt =
+renderRow :: Bool -> Bool -> Provider -> Text -> ModelOption -> Text
+renderRow color selected currentProvider current opt =
     let cursor = if selected then roleWarn color "› " else "  "
         name
-            | selected = roleSuccess color opt.modelId
-            | otherwise = roleMuted color opt.modelId
+            | selected = roleSuccess color (formatOptionName opt)
+            | otherwise = roleMuted color (formatOptionName opt)
         currentMark
-            | opt.modelId == current = roleSuccess color " ✓"
+            | isCurrent currentProvider current opt = roleSuccess color " ✓"
             | otherwise = ""
         label = case opt.modelLabel of
             Nothing -> ""
@@ -124,3 +129,10 @@ renderRow color selected current opt =
 -- Matches Style.glyphSession without pulling unicode env probing here.
 glyphSessionLike :: Text
 glyphSessionLike = "⧉ "
+
+formatOptionName :: ModelOption -> Text
+formatOptionName opt = providerSlug opt.modelProvider <> " · " <> opt.modelId
+
+isCurrent :: Provider -> Text -> ModelOption -> Bool
+isCurrent provider current opt =
+    opt.modelProvider == provider && opt.modelId == current
