@@ -39,6 +39,7 @@ library
                     , Agent.CLI.Auth
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Command
+                    , Agent.CLI.Input
                     , Agent.CLI.Markdown
                     , Agent.CLI.Options
                     , Agent.CLI.Project
@@ -58,6 +59,7 @@ library
                     , bytestring
                     , directory
                     , filepath
+                    , haskeline >= 0.8 && < 0.9
                     , process
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
@@ -80,6 +82,7 @@ test-suite agent-cli-test
     other-modules:    Agent.CLI.AuthSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.InputSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.ProjectSpec
@@ -98,6 +101,7 @@ test-suite agent-cli-test
                     , bytestring
                     , directory
                     , filepath
+                    , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
                     , process
                     , text

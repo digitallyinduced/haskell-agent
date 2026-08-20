@@ -5,6 +5,7 @@ import Test.Hspec (hspec)
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
@@ -20,6 +21,7 @@ main = hspec do
     AuthSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    InputSpec.spec
     MarkdownSpec.spec
     OptionsSpec.spec
     ProjectSpec.spec
