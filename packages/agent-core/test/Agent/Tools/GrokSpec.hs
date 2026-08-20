@@ -133,8 +133,9 @@ spec = describe "Agent.Tools.Grok" do
         withTempSession \session -> do
             Text.writeFile (session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
             Text.writeFile (session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
-            _ <- runTool session "run_terminal_cmd"
+            initOut <- runTool session "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
+            initOut `shouldSatisfy` Text.isPrefixOf "exit: 0"
             output <- runTool session "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"

@@ -80,7 +80,12 @@
 
                 haskellPackages = pkgs.haskellPackages.extend (
                     final: _previous: {
-                        agent-core = final.callCabal2nix "agent-core" agentCoreSource { };
+                        agent-core = pkgs.haskell.lib.addTestToolDepends
+                            (final.callCabal2nix "agent-core" agentCoreSource { })
+                            [
+                                pkgs.git
+                                pkgs.ripgrep
+                            ];
                         agent-openai = final.callCabal2nix "agent-openai" agentOpenaiSource { };
                         agent-xai = final.callCabal2nix "agent-xai" agentXaiSource { };
                         agent-openrouter = final.callCabal2nix "agent-openrouter" agentOpenrouterSource { };
