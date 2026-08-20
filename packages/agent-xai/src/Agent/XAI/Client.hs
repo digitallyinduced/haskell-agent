@@ -4,16 +4,31 @@ module Agent.XAI.Client
     , createResponse
     , createResponseWith
     , createResponseWithEvents
+    , createResponseWithEventsPolicy
+    , retryTransientXaiResultWithPolicy
     ) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , ErrorType(..)
+    )
 import Agent.OpenAI.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
-import Agent.XAI.Error (classifyFailure)
+import Agent.XAI.Error
+    ( capacityRetryAfterSeconds
+    , classifyFailure
+    , isCapacityBody
+    )
 import Agent.XAI.Options
 import Agent.XAI.Request (buildRequest)
 import Agent.XAI.Stream (buildResponse, parseSseEvents)
 import Control.Exception.Safe (tryAny)
+import Control.Retry
+    ( RetryPolicyM
+    , constantDelay
+    , limitRetries
+    , retrying
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -43,21 +58,42 @@ createResponseWith options credential request =
 -- | Send one request and deliver every decoded typed Responses event before
 -- returning the assembled terminal response. The current HTTP backend buffers
 -- the response body, so callbacks run in wire order after the body completes.
+-- Transient capacity / overload failures wait 30s and retry a few times before
+-- surfacing to the loop.
 createResponseWithEvents
     :: ClientOptions
     -> Credential
     -> ResponseCreateParams
     -> StreamEventCallback
     -> IO (Either ApiError Response)
-createResponseWithEvents options credential request onEvent
+createResponseWithEvents options credential request onEvent =
+    createResponseWithEventsPolicy defaultTransientPolicy options credential request onEvent
+  where
+    defaultTransientPolicy =
+        constantDelay (capacityRetryAfterSeconds * 1_000_000) <> limitRetries 3
+
+-- | Same as 'createResponseWithEvents', with an injectable retry policy so
+-- tests can use a zero delay without waiting on the production 30s backoff.
+createResponseWithEventsPolicy
+    :: RetryPolicyM IO
+    -> ClientOptions
+    -> Credential
+    -> ResponseCreateParams
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+createResponseWithEventsPolicy policy options credential request onEvent
     | credential.provider /= XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "agent-xai requires an xAI credential"
         Nothing
-    | otherwise = tryAny performRequest >>= \case
-        Left exception -> pure $ Left $ ConnectionError
-            ("xAI request failed: " <> Text.pack (show exception))
-        Right response -> handleResponse response
+    | otherwise =
+        retryTransientXaiResultWithPolicy policy performOnce
   where
+    performOnce =
+        tryAny performRequest >>= \case
+            Left exception -> pure $ Left $ ConnectionError
+                ("xAI request failed: " <> Text.pack (show exception))
+            Right response -> handleResponse response
+
     performRequest = do
         httpRequest <- parseRequest ("POST " <> trimSlash options.baseUrl <> "/responses")
         httpLBS
@@ -95,6 +131,35 @@ createResponseWithEvents options credential request onEvent
             [(seconds, "")] -> Just (max 1 seconds)
             _ -> Nothing
         [] -> Nothing
+
+-- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
+-- connection drops and quota errors are left to the caller. Production uses a
+-- 30s constant delay so capacity pressure can clear between attempts.
+retryTransientXaiResultWithPolicy
+    :: RetryPolicyM IO
+    -> IO (Either ApiError value)
+    -> IO (Either ApiError value)
+retryTransientXaiResultWithPolicy policy request =
+    retrying policy shouldRetry (const request)
+  where
+    shouldRetry _retryStatus = \case
+        Left apiError | isCapacityRetryable apiError -> pure True
+        _ -> pure False
+
+-- | Capacity text is classified as 'OverloadedError' with a 30s interval.
+-- Keep a ConnectionError fallback for older wrappers that still prefix the
+-- same message, and retry ordinary 5xx / overload shapes the same way.
+isCapacityRetryable :: ApiError -> Bool
+isCapacityRetryable = \case
+    ProviderError OverloadedError _ _ -> True
+    ProviderError ServiceUnavailableError _ _ -> True
+    ProviderError ApiErrorType _ _ -> True
+    HttpError status _
+        | status `elem` [408, 409, 425] -> True
+        | status >= 500 && status < 600 -> True
+        | otherwise -> False
+    ConnectionError message -> isCapacityBody message
+    _ -> False
 
 trimSlash :: String -> String
 trimSlash = reverse . dropWhile (== '/') . reverse
