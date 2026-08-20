@@ -43,6 +43,7 @@ library
                     , Agent.Tools.Codex
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Prompt
+                    , Agent.Tools.Grok.Shell
                     , Agent.Tools.IO
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket

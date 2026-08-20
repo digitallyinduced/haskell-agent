@@ -22,6 +22,8 @@ data GrokPromptTools = GrokPromptTools
     , grokExecute :: !Text
     , grokSearch :: !Text
     , grokList :: !Text
+    , grokGetOutput :: !Text
+    , grokKill :: !Text
     } deriving (Eq, Show)
 
 codingGrokPromptTools :: GrokPromptTools
@@ -31,6 +33,8 @@ codingGrokPromptTools = GrokPromptTools
     , grokExecute = "run_terminal_cmd"
     , grokSearch = "grep"
     , grokList = "list_dir"
+    , grokGetOutput = "get_task_output"
+    , grokKill = "kill_task"
     }
 
 grokSystemPrompt :: GrokPromptTools -> FilePath -> Day -> Bool -> Text
@@ -40,6 +44,7 @@ grokSystemPrompt tools cwd today isNonInteractive =
         , environment cwd today
         , workPolicy
         , toolCalling tools
+        , backgroundTasks tools
         , communication
         , formatting
         ]
@@ -89,6 +94,20 @@ toolCalling tools =
         <> "` exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.\n\
     \- Do not mention tools this session does not register.\n\
     \</tool_calling>"
+
+backgroundTasks :: GrokPromptTools -> Text
+backgroundTasks tools =
+    "<background_tasks>\n\
+    \- Run a long-lived command you own (a build, test suite, or server) as a background command in `"
+        <> tools.grokExecute
+        <> "`, then continue independent work; its completion is reported to you.\n\
+    \- Use `"
+        <> tools.grokGetOutput
+        <> "` for a snapshot of current output, or for one bounded wait when no independent work remains — NOT for repeated status polling.\n\
+    \- Use `"
+        <> tools.grokKill
+        <> "` to stop a background task.\n\
+    \</background_tasks>"
 
 communication :: Text
 communication = Text.unlines

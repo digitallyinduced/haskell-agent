@@ -1,6 +1,7 @@
 -- | Shared filesystem and process helpers for coding tools.
 module Agent.Tools.IO
     ( CommandResult(..)
+    , RunningCommand(..)
     , resolveUnderCwd
     , readTextFile
     , writeTextFile
@@ -8,12 +9,14 @@ module Agent.Tools.IO
     , renameTextFile
     , listDirectoryEntries
     , runShellCommand
+    , startShellCommand
     , truncateText
     ) where
 
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
 import Control.Exception (SomeException, evaluate, try)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
@@ -44,6 +47,7 @@ import System.FilePath
 import System.IO (hClose)
 import System.Process
     ( CreateProcess(..)
+    , ProcessHandle
     , StdStream(..)
     , createProcess
     , interruptProcessGroupOf
@@ -139,6 +143,11 @@ data CommandResult = CommandResult
     , commandTimedOut :: !Bool
     } deriving (Eq, Show)
 
+data RunningCommand = RunningCommand
+    { runningHandle :: !ProcessHandle
+    , runningResult :: !(MVar CommandResult)
+    }
+
 -- | Run a shell command in @workdir@, killing the process group on timeout.
 runShellCommand
     :: ToolEnv
@@ -197,6 +206,55 @@ runShellCommand env workdir command timeoutMs = do
                 , commandStderr = "Failed to capture command output"
                 , commandTimedOut = False
                 }
+
+-- | Start a command without waiting. The result is written to 'runningResult'
+-- when the process exits. Use 'interruptProcessGroupOf' on 'runningHandle' to kill it.
+startShellCommand
+    :: ToolEnv
+    -> FilePath
+    -> String
+    -> IO (Either Text RunningCommand)
+startShellCommand env workdir command = do
+    let spec = (shell command)
+            { cwd = Just workdir
+            , std_in = CreatePipe
+            , std_out = CreatePipe
+            , std_err = CreatePipe
+            , create_group = True
+            }
+    try @SomeException (createProcess spec) >>= \case
+        Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
+        Right (Just hin, Just hout, Just herr, processHandle) -> do
+            hClose hin
+            resultVar <- newEmptyMVar
+            _ <- forkIO do
+                result <- try @SomeException do
+                    outBytes <- BS.hGetContents hout
+                    errBytes <- BS.hGetContents herr
+                    _ <- evaluate (BS.length outBytes + BS.length errBytes)
+                    code <- waitForProcess processHandle
+                    pure (outBytes, errBytes, code)
+                putMVar resultVar $ case result of
+                    Left exception -> CommandResult
+                        { commandExitCode = Just 127
+                        , commandStdout = ""
+                        , commandStderr = Text.pack (show exception)
+                        , commandTimedOut = False
+                        }
+                    Right (outBytes, errBytes, code) -> CommandResult
+                        { commandExitCode = Just (exitCodeInt code)
+                        , commandStdout = truncateText env.toolStdoutCap
+                            (decodeUtf8With lenientDecode outBytes)
+                        , commandStderr = truncateText env.toolStdoutCap
+                            (decodeUtf8With lenientDecode errBytes)
+                        , commandTimedOut = False
+                        }
+            pure $ Right RunningCommand
+                { runningHandle = processHandle
+                , runningResult = resultVar
+                }
+        Right _ ->
+            pure $ Left "Failed to capture command output"
 
 exitCodeInt :: ExitCode -> Int
 exitCodeInt = \case

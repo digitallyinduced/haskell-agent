@@ -5,6 +5,8 @@
 -- Do not rename these to match Codex; Grok models are trained on this dialect.
 module Agent.Tools.Grok
     ( grokTools
+    , newGrokSession
+    , GrokSession
     ) where
 
 import Agent.ToolArgs
@@ -20,12 +22,20 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Control.Applicative ((<|>))
+import Agent.Tools.Grok.Shell
+    ( GrokSession(..)
+    , hasUnwaitedBackgroundOp
+    , killTask
+    , newGrokSession
+    , readTaskOutput
+    , runForeground
+    , startBackground
+    )
 import Agent.Tools.IO
     ( CommandResult(..)
     , listDirectoryEntries
     , readTextFile
     , resolveUnderCwd
-    , runShellCommand
     , writeTextFile
     )
 import Agent.Tools.Types
@@ -45,15 +55,19 @@ import System.Exit (ExitCode(..))
 import System.FilePath (takeExtension, (</>))
 import System.Process (readProcessWithExitCode)
 
--- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash}.
-grokTools :: ToolEnv -> [AppTool]
-grokTools env =
-    [ readFileTool env
-    , grepTool env
-    , listDirTool env
-    , searchReplaceTool env
-    , runTerminalCmdTool env
-    ]
+-- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash, get_task_output, kill_task}.
+grokTools :: GrokSession -> [AppTool]
+grokTools session =
+    let env = session.grokEnv
+    in
+        [ readFileTool env
+        , grepTool env
+        , listDirTool env
+        , searchReplaceTool env
+        , runTerminalCmdTool session
+        , getTaskOutputTool session
+        , killTaskTool session
+        ]
 
 jsonTool
     :: Text
@@ -652,8 +666,8 @@ readTimeout text =
         [(n, "")] -> Just n
         _ -> Nothing
 
-runTerminalCmdTool :: ToolEnv -> AppTool
-runTerminalCmdTool env = jsonTool "run_terminal_cmd" terminalDescription
+runTerminalCmdTool :: GrokSession -> AppTool
+runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
     [ PropertySchema "command" PropertyString True $ Just
         "The bash command to run."
     , PropertySchema "timeout" PropertyInteger False $ Just
@@ -664,7 +678,7 @@ runTerminalCmdTool env = jsonTool "run_terminal_cmd" terminalDescription
         "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
     ]
     False
-    (typedTool "run_terminal_cmd" (runTerminal env))
+    (typedTool "run_terminal_cmd" (runTerminal session))
 
 terminalDescription :: Text
 terminalDescription =
@@ -672,22 +686,73 @@ terminalDescription =
     \- Always set a timeout for commands that may hang.\n\
     \- Prefer dedicated tools (read_file, grep, list_dir, search_replace) over shell equivalents when they exist."
 
-runTerminal :: ToolEnv -> TerminalArgs -> IO (Either Text Text)
-runTerminal env args
+runTerminal :: GrokSession -> TerminalArgs -> IO (Either Text Text)
+runTerminal session args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
-    | args.background =
+    | not args.background && hasUnwaitedBackgroundOp args.command =
         pure $ Left
-            "Background execution is not available yet. Run the command in the foreground without background=true."
+            "The command contains a background '&'. Set background=true to run it as a background task, or append `wait` if you meant to wait for the children."
+    | args.background = startBackground session args.command
     | otherwise = do
         let timeoutMs = min 300000 (max 1 (fromMaybe 120000 args.timeout))
-        result <- runShellCommand env env.toolCwd (Text.unpack args.command) timeoutMs
+        result <- runForeground session (Text.unpack args.command) timeoutMs
         let body = stripAnsi (combinedOutput result)
         if result.commandTimedOut
             then pure $ Right $ "exit: killed (timeout)\n" <> body
             else
                 let code = fromMaybe 1 result.commandExitCode
                 in pure $ Right $ "exit: " <> Text.pack (show code) <> "\n" <> body
+
+data TaskOutputArgs = TaskOutputArgs
+    { taskId :: Text
+    , timeout :: Maybe Int
+    }
+
+instance FromJSON TaskOutputArgs where
+    parseJSON = objectArgs \object -> TaskOutputArgs
+        <$> reqText object "task_id"
+        <*> optionalTimeout object
+
+getTaskOutputTool :: GrokSession -> AppTool
+getTaskOutputTool session = jsonTool "get_task_output" getTaskOutputDescription
+    [ PropertySchema "task_id" PropertyString True $ Just
+        "The task id returned by a background run_terminal_cmd."
+    , PropertySchema "timeout" PropertyInteger False $ Just
+        "Optional wait in milliseconds. If omitted, return a snapshot immediately."
+    ]
+    True
+    (typedTool "get_task_output" (runGetTaskOutput session))
+
+getTaskOutputDescription :: Text
+getTaskOutputDescription =
+    "Read output from a background task started with run_terminal_cmd.\n\
+    \Use this for a snapshot of current output, or one bounded wait — not a polling loop."
+
+runGetTaskOutput :: GrokSession -> TaskOutputArgs -> IO (Either Text Text)
+runGetTaskOutput session args =
+    Right . stripAnsi <$> readTaskOutput session args.taskId args.timeout
+
+newtype KillTaskArgs = KillTaskArgs { taskId :: Text }
+
+instance FromJSON KillTaskArgs where
+    parseJSON = objectArgs \object -> KillTaskArgs <$> reqText object "task_id"
+
+killTaskTool :: GrokSession -> AppTool
+killTaskTool session = jsonTool "kill_task" killTaskDescription
+    [ PropertySchema "task_id" PropertyString True $ Just
+        "The task id returned by a background run_terminal_cmd."
+    ]
+    False
+    (typedTool "kill_task" (runKillTask session))
+
+killTaskDescription :: Text
+killTaskDescription =
+    "Kill a background task started with run_terminal_cmd."
+
+runKillTask :: GrokSession -> KillTaskArgs -> IO (Either Text Text)
+runKillTask session args =
+    Right . stripAnsi <$> killTask session args.taskId
 
 combinedOutput :: CommandResult -> Text
 combinedOutput result

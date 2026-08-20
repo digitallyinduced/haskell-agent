@@ -4,7 +4,8 @@ import Agent.Loop (defaultLoopDispatch)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
-import Agent.Tools.Grok (grokTools)
+import Agent.Tools.Grok (grokTools, newGrokSession)
+import Agent.Tools.Grok.Shell (GrokSession(..), hasUnwaitedBackgroundOp)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception (bracket)
 import Data.Text (Text)
@@ -23,139 +24,197 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
-        withTempEnv \env -> do
-            let names = map (.appToolName) (grokTools env)
+        withTempSession \session -> do
+            let names = map (.appToolName) (grokTools session)
             names `shouldBe`
                 [ "read_file"
                 , "grep"
                 , "list_dir"
                 , "search_replace"
                 , "run_terminal_cmd"
+                , "get_task_output"
+                , "kill_task"
                 ]
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
-            xai <- codingToolsFor XAIProvider env
+            xai <- codingToolsFor XAIProvider session.grokEnv
             map (.appToolName) xai `shouldBe` names
-            openrouter <- codingToolsFor OpenRouterProvider env
+            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv
             map (.appToolName) openrouter `shouldBe` names
 
     it "reads a file with grok line-number anchors" do
-        withTempEnv \env -> do
-            let path = env.toolCwd </> "sample.txt"
+        withTempSession \session -> do
+            let path = session.grokEnv.toolCwd </> "sample.txt"
             Text.writeFile path (Text.unlines ["alpha", "bravo", "charlie"])
-            output <- runTool env "read_file" "{\"target_file\":\"sample.txt\"}"
+            output <- runTool session "read_file" "{\"target_file\":\"sample.txt\"}"
             output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
             output `shouldSatisfy` Text.isInfixOf "bravo"
 
     it "rejects a path that escapes cwd" do
-        withTempEnv \env -> do
-            let name = takeFileName env.toolCwd <> "-outside.txt"
-                outsider = takeDirectory env.toolCwd </> name
+        withTempSession \session -> do
+            let cwd = session.grokEnv.toolCwd
+                name = takeFileName cwd <> "-outside.txt"
+                outsider = takeDirectory cwd </> name
             Text.writeFile outsider "secret"
-            relative <- runTool env "read_file"
+            relative <- runTool session "read_file"
                 ("{\"target_file\":\"../" <> Text.pack name <> "\"}")
             relative `shouldSatisfy` Text.isInfixOf "escapes"
-            absolute <- runTool env "read_file" "{\"target_file\":\"/etc/passwd\"}"
+            absolute <- runTool session "read_file" "{\"target_file\":\"/etc/passwd\"}"
             absolute `shouldSatisfy` Text.isInfixOf "escapes"
 
     it "lists directory entries with a trailing slash for folders" do
-        withTempEnv \env -> do
-            createDirectoryIfMissing True (env.toolCwd </> "sub")
-            Text.writeFile (env.toolCwd </> "a.txt") "x"
-            output <- runTool env "list_dir" "{\"target_directory\":\".\"}"
+        withTempSession \session -> do
+            createDirectoryIfMissing True (session.grokEnv.toolCwd </> "sub")
+            Text.writeFile (session.grokEnv.toolCwd </> "a.txt") "x"
+            output <- runTool session "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
 
     it "creates a file with empty old_string and replaces a unique match" do
-        withTempEnv \env -> do
-            created <- runTool env "search_replace"
+        withTempSession \session -> do
+            created <- runTool session "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"\",\"new_string\":\"hello world\\n\"}"
             created `shouldSatisfy` Text.isInfixOf "created successfully"
-            doesFileExist (env.toolCwd </> "new.txt") `shouldReturn` True
+            doesFileExist (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` True
 
-            updated <- runTool env "search_replace"
+            updated <- runTool session "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"hello\",\"new_string\":\"goodbye\"}"
             updated `shouldSatisfy` Text.isInfixOf "updated successfully"
-            Text.readFile (env.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
+            Text.readFile (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
 
     it "refuses a non-unique search_replace without replace_all" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "dup.txt") "aaa bbb aaa\n"
-            output <- runTool env "search_replace"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
+            output <- runTool session "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
             output `shouldSatisfy` Text.isInfixOf "multiple times"
 
     it "grep finds a literal match" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "hit.txt") "needle in haystack\n"
-            output <- runTool env "grep" "{\"pattern\":\"needle\"}"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            output <- runTool session "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "runs a foreground shell command" do
-        withTempEnv \env -> do
-            output <- runTool env "run_terminal_cmd"
+        withTempSession \session -> do
+            output <- runTool session "run_terminal_cmd"
                 "{\"command\":\"echo hi\",\"description\":\"print hi\"}"
             output `shouldSatisfy` Text.isPrefixOf "exit: 0"
             output `shouldSatisfy` Text.isInfixOf "hi"
 
     it "times out a long-running shell command" do
-        withTempEnv \env -> do
-            output <- runTool env "run_terminal_cmd"
+        withTempSession \session -> do
+            output <- runTool session "run_terminal_cmd"
                 "{\"command\":\"sleep 5\",\"timeout\":200,\"description\":\"timeout test\"}"
             output `shouldSatisfy` Text.isPrefixOf "exit: killed (timeout)"
 
     it "starts read_file from a negative offset" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
-            output <- runTool env "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
+            output <- runTool session "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
             output `shouldNotSatisfy` Text.isInfixOf "beyond the end"
             output `shouldSatisfy` Text.isInfixOf "d"
 
     it "wraps grep output in a workspace_result card" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "hit.txt") "needle in haystack\n"
-            output <- runTool env "grep" "{\"pattern\":\"needle\"}"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            output <- runTool session "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "<workspace_result"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "hints the nearest line when search_replace misses" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
-            output <- runTool env "search_replace"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
+            output <- runTool session "search_replace"
                 "{\"file_path\":\"near.txt\",\"old_string\":\"xyz unique\",\"new_string\":\"x\"}"
             output `shouldSatisfy` Text.isInfixOf "Nearest match: line 2"
 
     it "refuses to edit a gitignored file" do
-        withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> ".gitignore") "secret.txt\n"
-            Text.writeFile (env.toolCwd </> "secret.txt") "hidden\n"
-            _ <- runTool env "run_terminal_cmd"
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
+            Text.writeFile (session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
+            _ <- runTool session "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
-            output <- runTool env "search_replace"
+            output <- runTool session "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"
 
-    it "rejects background run_terminal_cmd in v1" do
-        withTempEnv \env -> do
-            output <- runTool env "run_terminal_cmd"
-                "{\"command\":\"echo hi\",\"description\":\"bg\",\"background\":true}"
-            output `shouldSatisfy` Text.isInfixOf "Background execution is not available"
+    it "persists cwd and exported env across run_terminal_cmd calls" do
+        withTempSession \session -> do
+            _ <- runTool session "run_terminal_cmd"
+                "{\"command\":\"mkdir nest && cd nest && export GROK_SESSION_VAR=persisted\",\"description\":\"cd and export\"}"
+            pwdOut <- runTool session "run_terminal_cmd"
+                "{\"command\":\"pwd\",\"description\":\"show cwd\"}"
+            pwdOut `shouldSatisfy` Text.isInfixOf "nest"
+            envOut <- runTool session "run_terminal_cmd"
+                "{\"command\":\"echo $GROK_SESSION_VAR\",\"description\":\"show env\"}"
+            envOut `shouldSatisfy` Text.isInfixOf "persisted"
+
+    it "rejects an un-waited & in a foreground command" do
+        withTempSession \session -> do
+            output <- runTool session "run_terminal_cmd"
+                "{\"command\":\"sleep 1 &\",\"description\":\"ampersand\"}"
+            output `shouldSatisfy` Text.isInfixOf "background '&'"
+            waited <- runTool session "run_terminal_cmd"
+                "{\"command\":\"sleep 0.1 & wait\",\"description\":\"wait for child\"}"
+            waited `shouldSatisfy` Text.isPrefixOf "exit: 0"
+
+    it "runs a background command, waits for output, and kills a task" do
+        withTempSession \session -> do
+            started <- runTool session "run_terminal_cmd"
+                "{\"command\":\"sleep 0.3 && echo bgdone\",\"description\":\"bg echo\",\"background\":true}"
+            started `shouldSatisfy` Text.isInfixOf "task_id:"
+            let taskId = taskIdFrom started
+            snapshot <- runTool session "get_task_output"
+                ("{\"task_id\":\"" <> taskId <> "\"}")
+            snapshot `shouldSatisfy` \text ->
+                Text.isInfixOf "still running" text || Text.isInfixOf "bgdone" text
+            finished <- runTool session "get_task_output"
+                ("{\"task_id\":\"" <> taskId <> "\",\"timeout\":5000}")
+            finished `shouldSatisfy` Text.isInfixOf "exit: 0"
+            finished `shouldSatisfy` Text.isInfixOf "bgdone"
+
+            longRunning <- runTool session "run_terminal_cmd"
+                "{\"command\":\"sleep 30\",\"description\":\"bg sleep\",\"background\":true}"
+            let killId = taskIdFrom longRunning
+            killed <- runTool session "kill_task"
+                ("{\"task_id\":\"" <> killId <> "\"}")
+            killed `shouldSatisfy` Text.isInfixOf killId
+
+    describe "hasUnwaitedBackgroundOp" do
+        it "detects a trailing bare ampersand" do
+            hasUnwaitedBackgroundOp "sleep 1 &" `shouldBe` True
+            hasUnwaitedBackgroundOp "sleep 1&" `shouldBe` True
+        it "allows &&, 2>&1, quoted ampersands, and trailing wait" do
+            hasUnwaitedBackgroundOp "true && echo x" `shouldBe` False
+            hasUnwaitedBackgroundOp "cmd 2>&1" `shouldBe` False
+            hasUnwaitedBackgroundOp "echo 'foo & bar'" `shouldBe` False
+            hasUnwaitedBackgroundOp "sleep 1 & wait" `shouldBe` False
+            hasUnwaitedBackgroundOp "echo hi" `shouldBe` False
 
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
 
-runTool :: ToolEnv -> Text -> Text -> IO Text
-runTool env name arguments = do
+runTool :: GrokSession -> Text -> Text -> IO Text
+runTool session name arguments = do
     result <- dispatchToolCall defaultLoopDispatch
-        (appToolHandlers (grokTools env))
+        (appToolHandlers (grokTools session))
         (functionToolCall "call-1" name arguments)
     pure result.output
 
-withTempEnv :: (ToolEnv -> IO a) -> IO a
-withTempEnv action = do
+taskIdFrom :: Text -> Text
+taskIdFrom output =
+    case [tid | line <- Text.lines output, Just tid <- [Text.stripPrefix "task_id: " line]] of
+        (tid : _) -> tid
+        [] -> error ("missing task_id in:\n" <> Text.unpack output)
+
+withTempSession :: (GrokSession -> IO a) -> IO a
+withTempSession action = do
     tmp <- getTemporaryDirectory
     bracket
         (mkdtemp (tmp </> "agent-grok-XXXXXX"))
         (\dir -> removeDirectoryRecursive dir)
-        (\dir -> action (defaultToolEnv dir))
+        \dir -> do
+            session <- newGrokSession (defaultToolEnv dir)
+            action session
