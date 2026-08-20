@@ -87,7 +87,7 @@ spec = describe "Agent.Tools.Ghci" do
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =
-    bracket acquire release \dir -> action (defaultToolEnv dir)
+    bracket acquire release \dir -> defaultToolEnv dir >>= action
   where
     acquire = do
         tmp <- getTemporaryDirectory
@@ -101,7 +101,8 @@ withTempGhci action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-")
-        ghci <- newGhciSession (defaultToolEnv dir)
+        env <- defaultToolEnv dir
+        ghci <- newGhciSession env
         pure (dir, ghci)
     release (dir, ghci) = do
         closeGhciSession ghci
@@ -114,7 +115,7 @@ withTempTools action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-tools-")
-        let env = defaultToolEnv dir
+        env <- defaultToolEnv dir
         session <- newGrokSession env
         ghci <- newGhciSession env
         plan <- newPlanModeEnv env.toolCwd Nothing

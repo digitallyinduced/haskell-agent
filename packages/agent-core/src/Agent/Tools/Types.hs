@@ -7,6 +7,7 @@ module Agent.Tools.Types
     , toolAllowsWithoutPrompt
     ) where
 
+import Agent.Cancel (CancelFlag, newCancelFlag)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolCall, ToolHandler)
 import Data.Text (Text)
@@ -32,13 +33,18 @@ data AppTool = AppTool
 data ToolEnv = ToolEnv
     { toolCwd :: !FilePath
     , toolStdoutCap :: !Int
-    } deriving (Eq, Show)
-
-defaultToolEnv :: FilePath -> ToolEnv
-defaultToolEnv cwd = ToolEnv
-    { toolCwd = dropTrailingPathSeparator cwd
-    , toolStdoutCap = 100000
+      -- | Soft-cancel latch for the active turn. Shell tools race against it.
+    , toolCancel :: !CancelFlag
     }
+
+defaultToolEnv :: FilePath -> IO ToolEnv
+defaultToolEnv cwd = do
+    cancel <- newCancelFlag
+    pure ToolEnv
+        { toolCwd = dropTrailingPathSeparator cwd
+        , toolStdoutCap = 100000
+        , toolCancel = cancel
+        }
 
 appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)

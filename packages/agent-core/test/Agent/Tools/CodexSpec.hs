@@ -162,4 +162,4 @@ withTempEnv action = do
     bracket
         (mkdtemp (tmp </> "agent-codex-XXXXXX"))
         removeDirectoryRecursive
-        (\dir -> action (defaultToolEnv dir))
+        (\dir -> defaultToolEnv dir >>= action)

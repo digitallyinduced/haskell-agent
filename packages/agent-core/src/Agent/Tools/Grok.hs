@@ -736,7 +736,9 @@ runTerminal session args
         let timeoutMs = min 300000 (max 1 (fromMaybe 120000 args.timeout))
         result <- runForeground session (Text.unpack args.command) timeoutMs
         let body = stripAnsi (combinedOutput result)
-        if result.commandTimedOut
+        if result.commandCancelled
+            then pure $ Right $ "exit: cancelled\n" <> body
+            else if result.commandTimedOut
             then pure $ Right $ "exit: killed (timeout)\n" <> body
             else
                 let code = fromMaybe 1 result.commandExitCode

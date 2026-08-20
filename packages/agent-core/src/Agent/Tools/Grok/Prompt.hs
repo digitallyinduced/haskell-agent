@@ -99,6 +99,7 @@ toolCalling tools =
         <> "` instead of ls). Reserve `"
         <> tools.grokExecute
         <> "` exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.\n\
+    \- Use `web_search` to look up current public information on the internet.\n\
     \- Do not mention tools this session does not register.\n\
     \</tool_calling>"
 

@@ -50,6 +50,7 @@ codexSystemPrompt cwd today =
         , "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- Track multi-step work with update_plan (progress checklist; unavailable in Plan Mode)."
         , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
+        , "- Look up current public information with web_search."
         , ""
         , "Plan Mode: when a developer reminder says plan mode is active, explore read-only,"
         , "write the design to plan.md only, and present the final plan in a <proposed_plan>"

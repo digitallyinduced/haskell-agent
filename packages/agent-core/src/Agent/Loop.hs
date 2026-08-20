@@ -18,6 +18,7 @@ module Agent.Loop
     , runLoopInputs
     ) where
 
+import Agent.Cancel (CancelFlag, isCancelled, resetCancel)
 import Agent.Error (ApiError)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -80,6 +81,9 @@ data LoopConfig = LoopConfig
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+      -- | Soft-cancel latch. When set, the loop stops after the current tool
+      -- batch instead of asking the model for another step.
+    , loopCancel :: !CancelFlag
     }
 
 data LoopResult = LoopResult
@@ -92,10 +96,14 @@ data LoopError
     = LoopTransport ApiError
     | LoopMaxTurns TurnOutput
     | LoopNoResponseId
+    -- | Soft-cancel after tools ran. Carries the tool results that must be
+    -- committed to the local transcript so function_call items are not left
+    -- without matching outputs.
+    | LoopCancelled [ToolCallResult]
     deriving (Eq, Show)
 
 defaultLoopMaxTurns :: Int
-defaultLoopMaxTurns = 50
+defaultLoopMaxTurns = 500
 
 -- | CLI-facing formatter: unknown tools, handler errors, and crashes stay
 -- in-band as tool output so the model can continue.
@@ -128,6 +136,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
     -- Tools run with mapConcurrently. Serialize onEvent so a printer
     -- (hPutStrLn on String is not atomic) cannot interleave characters.
     eventLock <- newMVar ()
+    resetCancel config0.loopCancel
     let config = config0
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event
@@ -138,26 +147,33 @@ runLoopInputs config0 previousResponseId firstInputs = do
                     Just turn -> Left (LoopMaxTurns turn)
                     Nothing -> Left LoopNoResponseId
             | otherwise = do
-                config.loopOnEvent TurnStarted
-                result <- config.loopBackend.submitTurn prev inputs config.loopOnEvent
-                case result of
-                    Left err -> pure (Left (LoopTransport err))
-                    Right turn
-                        | Text.null turn.responseId ->
-                            pure (Left LoopNoResponseId)
-                        | otherwise -> do
-                            config.loopOnEvent (TurnFinished turn)
-                            let nextTurnsUsed = turnsUsed + 1
-                            if null turn.toolCalls
-                                then pure $ Right LoopResult
-                                    { finalResponseId = turn.responseId
-                                    , finalText = turn.assistantText
-                                    , turnsUsed = nextTurnsUsed
-                                    }
-                                else do
-                                    results <- mapConcurrently (runOne config) turn.toolCalls
-                                    go (Just turn.responseId) nextTurnsUsed
-                                        (map CompletedTool results) (Just turn)
+                cancelled <- isCancelled config.loopCancel
+                if cancelled
+                    then pure (Left (LoopCancelled []))
+                    else do
+                        config.loopOnEvent TurnStarted
+                        result <- config.loopBackend.submitTurn prev inputs config.loopOnEvent
+                        case result of
+                            Left err -> pure (Left (LoopTransport err))
+                            Right turn
+                                | Text.null turn.responseId ->
+                                    pure (Left LoopNoResponseId)
+                                | otherwise -> do
+                                    config.loopOnEvent (TurnFinished turn)
+                                    let nextTurnsUsed = turnsUsed + 1
+                                    if null turn.toolCalls
+                                        then pure $ Right LoopResult
+                                            { finalResponseId = turn.responseId
+                                            , finalText = turn.assistantText
+                                            , turnsUsed = nextTurnsUsed
+                                            }
+                                        else do
+                                            results <- mapConcurrently (runOne config) turn.toolCalls
+                                            cancelledAfter <- isCancelled config.loopCancel
+                                            if cancelledAfter
+                                                then pure (Left (LoopCancelled results))
+                                                else go (Just turn.responseId) nextTurnsUsed
+                                                    (map CompletedTool results) (Just turn)
     go previousResponseId 0 firstInputs Nothing
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult

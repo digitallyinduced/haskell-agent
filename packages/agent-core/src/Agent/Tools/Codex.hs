@@ -119,7 +119,9 @@ runShell env args = do
         Left err -> pure (Left err)
         Right dir -> do
             result <- runShellCommand env dir (Text.unpack args.command) timeoutMs
-            if result.commandTimedOut
+            if result.commandCancelled
+                then pure $ Left "Error: Command cancelled"
+                else if result.commandTimedOut
                 then pure $ Left $
                     "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
                 else

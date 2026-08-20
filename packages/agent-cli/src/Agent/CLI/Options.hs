@@ -76,7 +76,7 @@ defaultCliOptions = CliOptions
     , optWorktree = False
     , optYolo = False
     , optNoYolo = False
-    , optMaxTurns = 50
+    , optMaxTurns = 500
     , optEffort = Nothing
     , optPrompt = Nothing
     , optPromptFile = Nothing
@@ -221,7 +221,7 @@ usage = unlines
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
-    , "      --max-turns N       Stop after N model turns (default: 50)"
+    , "      --max-turns N       Stop after N model turns (default: 500)"
     , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh"
     , "                          (default: high for xai/grok, medium otherwise)"
     , "      --version           Print the agent-cli version"
@@ -240,7 +240,8 @@ usage = unlines
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits."
     , "Ctrl-C prints a --resume command when a session has been persisted."
-    , "Under `repl` (nix develop), :reload returns to GHCi, reloads modules,"
-    , "and resumes the same session."
+    , "Under `repl` (nix develop), first open passes --worktree unless the"
+    , "cwd is already under ~/.haskell-agent/worktrees. :reload returns to"
+    , "GHCi, reloads modules, and resumes the same session."
 
     ]

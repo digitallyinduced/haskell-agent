@@ -2,6 +2,7 @@
 module Agent.CLI.Tools
     ( lookupAppTool
     , schemasFromAppTools
+    , webSearchTool
     ) where
 
 import Agent.OpenAI.Responses.Types
@@ -19,8 +20,17 @@ import Data.Text (Text)
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name = find (\tool -> tool.appToolName == name)
 
+-- | Built-in Responses @web_search@ tool, enabled for every provider by default.
+-- The host runs the search server-side; the agent loop never dispatches it.
+webSearchTool :: ResponseTool
+webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
+    { tag = "web_search"
+    , fields = KeyMap.empty
+    }
+
 schemasFromAppTools :: Provider -> [AppTool] -> [ResponseTool]
-schemasFromAppTools provider = map (schemaFromAppTool provider)
+schemasFromAppTools provider tools =
+    webSearchTool : map (schemaFromAppTool provider) tools
 
 schemaFromAppTool :: Provider -> AppTool -> ResponseTool
 schemaFromAppTool provider tool = case tool.appToolKind of

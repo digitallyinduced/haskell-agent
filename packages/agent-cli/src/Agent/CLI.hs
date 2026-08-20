@@ -7,6 +7,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Input (readApprovalLine, readReplLine)
@@ -36,6 +37,9 @@ import Agent.CLI.Style
     ( beginBackground
     , cliWindowTitle
     , endBackground
+    , glyphOk
+    , glyphSession
+    , glyphWarn
     , roleError
     , roleMuted
     , rolePrompt
@@ -45,7 +49,7 @@ import Agent.CLI.Style
     , userBackground
     )
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
-import Agent.CLI.Worktree (createWorktree, worktreeRoot)
+import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -55,7 +59,7 @@ import Agent.ProjectInstructions
     , globalAgentsHomeDir
     , loadedInstructionFiles
     )
-import Agent.OpenAI.LoopBackend (openAiBackend)
+import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
 import Agent.Provider
@@ -83,7 +87,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
-import Agent.Tools.Types (AppTool(..), defaultToolEnv, toolAllowsWithoutPrompt)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
@@ -91,7 +95,7 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -128,11 +132,18 @@ afterDev = \case
         ]
 
 -- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
+-- On first open (no resume pointer), passes @--worktree@ unless the cwd is
+-- already under @~/.haskell-agent/worktrees@.
 devMain :: IO DevResult
 devMain = do
     home <- getHomeDirectory
     resumeId <- readDevResumePointer home
-    let args = maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) resumeId
+    args <- case resumeId of
+        Just sessionId -> pure ["--resume", Text.unpack sessionId]
+        Nothing -> do
+            cwd <- makeAbsolute =<< getCurrentDirectory
+            root <- makeAbsolute (worktreeRoot home)
+            pure $ if isUnderWorktreeRoot root cwd then [] else ["--worktree"]
     case parseArgs args of
         Left err -> do
             clearDevResumePointer home
@@ -224,7 +235,7 @@ runAgent options = do
             | options.optWorktree -> do
                 createWorktree source (worktreeRoot home) >>= either die \path -> do
                     color <- resolveColor stderr
-                    putTextLn stderr (roleMuted color ("worktree: " <> Text.pack path))
+                    putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> Text.pack path))
                     pure path
             | otherwise -> pure source
     setCurrentDirectory cwd
@@ -247,8 +258,9 @@ runAgent options = do
             | otherwise -> pure ()
         Nothing -> pure ()
 
+    toolEnv <- defaultToolEnv cwd
     let planHooks = cliPlanHooks (resolveColor stderr)
-    coding <- codingToolsFor loaded.loadedProvider (defaultToolEnv cwd) (Just planHooks)
+    coding <- codingToolsFor loaded.loadedProvider toolEnv (Just planHooks)
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
     flip finally coding.codingClose do
@@ -291,7 +303,7 @@ runAgent options = do
                 OpenAIProvider ->
                     try @_ @CodexAuthFailed
                         (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                            runSession options provider policy tools planMode prompt paramsRef transcriptRef
+                            runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                 initialPrevious persist projectRoot Nothing agentsContext
                                 (openAiBackend conn (readIORef paramsRef) transcriptRef))
                         >>= \case
@@ -302,14 +314,14 @@ runAgent options = do
                     let backend =
                             xaiBackend xaiOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools planMode prompt paramsRef transcriptRef
+                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                         initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
                 OpenRouterProvider -> do
                     openRouterOptions <- OpenRouter.clientOptionsFromEnv
                     let backend =
                             openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools planMode prompt paramsRef transcriptRef
+                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                         initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
@@ -335,7 +347,7 @@ preparePersistence options root provider model cwd effort prompt resumed =
             color <- resolveColor stderr
             putTextLn stderr
                 (roleMuted color
-                    ("session: " <> meta.metaId <> " (resumed)"))
+                    (glyphSession <> "session: " <> meta.metaId <> " (resumed)"))
             Just <$> newIORef (Right handle)
         Nothing
             | shouldPersist options ->
@@ -402,6 +414,7 @@ runSession
     -> Provider
     -> ApprovalPolicy
     -> [AppTool]
+    -> ToolEnv
     -> PlanModeEnv
     -> Maybe Text
     -> IORef ResponseCreateParams
@@ -413,8 +426,9 @@ runSession
     -> IORef (Maybe Text)
     -> Backend
     -> IO DevResult
-runSession options provider policy tools planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
+    escPaused <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
     ioLock <- newMVar ()
@@ -440,18 +454,20 @@ runSession options provider policy tools planMode prompt paramsRef transcriptRef
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    approveToolDecision policyRef tools planMode call projectRoot
+                    withStdinPaused escPaused $
+                        approveToolDecision policyRef tools planMode call projectRoot
+            , loopCancel = toolEnv.toolCancel
             }
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext text [UserMessage text]
+                planMode agentsContext escPaused text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext
+                transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
 
 repl
     :: LoopConfig
@@ -467,8 +483,9 @@ repl
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -502,7 +519,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist planMode agentsContext text
+                            transcriptRef persist planMode agentsContext escPaused text
                             [UserMessage text]
                         putTrailingNewline printed
                         continue
@@ -522,10 +539,10 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                 color <- resolveColor stdout
                                 Text.putStrLn
                                     (roleMuted color
-                                        ("pasted " <> image.imageMime <> " (" <> size <> ")"))
+                                        (glyphOk <> "pasted " <> image.imageMime <> " (" <> size <> ")"))
                                 writeIORef printed False
                                 _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext promptText
+                                    transcriptRef persist planMode agentsContext escPaused promptText
                                     [ UserMultimodal
                                         { userText = promptText
                                         , userImages = [image]
@@ -536,12 +553,12 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
-                        Text.putStrLn (roleMuted color ("effort: " <> currentEffort params))
+                        Text.putStrLn (roleMuted color (glyphSession <> "effort: " <> currentEffort params))
                         continue
                     ReplSetEffort level -> do
                         color <- resolveColor stdout
                         modifyIORef' paramsRef (setReasoningEffort level)
-                        Text.putStrLn (roleMuted color ("effort set to " <> level))
+                        Text.putStrLn (roleMuted color (glyphOk <> "effort set to " <> level))
                         case persist of
                             Nothing -> pure ()
                             Just slotRef -> do
@@ -558,7 +575,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplShowModel -> do
                         params <- readIORef paramsRef
-                        Text.putStrLn ("model: " <> currentModel params)
+                        Text.putStrLn (glyphSession <> "model: " <> currentModel params)
                         continue
                     ReplSetModel name -> do
                         modifyIORef' paramsRef (setModel name)
@@ -591,7 +608,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash planMode persist maybeDescription
-                            config render previous printed transcriptRef agentsContext
+                            config render previous printed transcriptRef agentsContext escPaused
                         continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -608,7 +625,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                     Right handle ->
                                         Text.putStrLn
                                             (roleMuted color
-                                                ("session: " <> handle.sessionMeta.metaId))
+                                                (glyphSession <> "session: " <> handle.sessionMeta.metaId))
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
@@ -620,7 +637,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext
+            transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -672,7 +689,7 @@ requestReload persist = do
             writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
-                    ("reloading; session " <> handle.sessionMeta.metaId))
+                    (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
             pure DevReload
 
 enterPlanFromSlash
@@ -685,9 +702,10 @@ enterPlanFromSlash
     -> IORef Bool
     -> IORef [ResponseItem]
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> IO ()
 enterPlanFromSlash planMode persist maybeDescription config render previous printed
-    transcriptRef agentsContext = do
+    transcriptRef agentsContext escPaused = do
     color <- resolveColor stderr
     case persist of
         Just slotRef -> do
@@ -695,22 +713,23 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
             putTextLn stderr
                 (roleMuted color
-                    ("session: " <> handle.sessionMeta.metaId))
+                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
         Nothing -> pure ()
     case maybeDescription of
         Nothing -> do
             writeIORef planMode.planStateRef PlanPending
             putTextLn stderr
                 (roleMuted color
-                    "plan mode armed; send a prompt to activate (or /plan <description>)")
+                    (glyphSession
+                        <> "plan mode armed; send a prompt to activate (or /plan <description>)"))
         Just description -> do
             activatePlanMode planMode
             path <- planFilePath planMode
             putTextLn stderr
-                (roleMuted color ("plan mode on (" <> Text.pack path <> ")"))
+                (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext description [UserMessage description]
+                planMode agentsContext escPaused description [UserMessage description]
             putTrailingNewline printed
 
 runOneTurn
@@ -722,10 +741,12 @@ runOneTurn
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> PlanModeEnv
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext promptText inputs = do
+runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused promptText inputs =
+  withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
     case persist of
@@ -755,6 +776,13 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
+        Left (LoopCancelled toolResults) -> do
+            unless (null toolResults) do
+                modifyIORef' transcriptRef
+                    (<> map toolResultToItem toolResults)
+            color <- resolveColor stderr
+            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            pure True
         Left err -> do
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color err)
@@ -782,7 +810,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                             color <- resolveColor stderr
                             putTextLn stderr
                                 (roleMuted color
-                                    ("session: " <> handle.sessionMeta.metaId))
+                                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
@@ -803,7 +831,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Just notes -> do
                     writeIORef printed False
                     _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext notes [UserMessage notes]
+                        planMode agentsContext escPaused notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
@@ -858,7 +886,7 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color
-                        ("agents.md: loaded "
+                        (glyphSession <> "agents.md: loaded "
                             <> Text.pack (show (length files))
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
@@ -919,7 +947,7 @@ approveToolDecision policyRef tools planMode call projectRoot = do
                             color <- resolveColor stderr
                             let question =
                                     roleWarn color
-                                        ("Allow " <> summarizeToolCall call <> "? [y/N/a] ")
+                                        (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
                             readApprovalLine question >>= \case
                                 Nothing -> pure (Right False)
                                 Just raw -> case parseApprovalAnswer raw of
@@ -929,7 +957,7 @@ approveToolDecision policyRef tools planMode call projectRoot = do
                                         saveProjectAutoApprove projectRoot True
                                         putTextLn stderr
                                             (roleSuccess color
-                                                "auto-approve on (saved for project)")
+                                                glyphOk <> "auto-approve on (saved for project)")
                                         pure (Right True)
                                     Deny -> pure (Right False)
 
@@ -970,8 +998,8 @@ toggleAlwaysApprove policyRef projectRoot = do
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color "auto-approve on (saved for project)"
-        _ -> roleMuted color "auto-approve off (saved for project)")
+        ApproveAll -> roleSuccess color glyphOk <> "auto-approve on (saved for project)"
+        _ -> roleMuted color glyphSession <> "auto-approve off (saved for project)")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

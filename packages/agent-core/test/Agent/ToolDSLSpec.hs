@@ -42,6 +42,7 @@ spec = do
             prompt `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
             prompt `shouldSatisfy` Text.isInfixOf "get_task_output"
             prompt `shouldSatisfy` Text.isInfixOf "kill_task"
+            prompt `shouldSatisfy` Text.isInfixOf "web_search"
             prompt `shouldSatisfy` Text.isInfixOf "<tool_calling>"
             prompt `shouldSatisfy` Text.isInfixOf "<work_policy>"
             prompt `shouldSatisfy` Text.isInfixOf "<background_tasks>"

@@ -288,7 +288,7 @@ withTempSession action = do
         (mkdtemp (tmp </> "agent-grok-XXXXXX"))
         (\dir -> removeDirectoryRecursive dir)
         \dir -> do
-            let env = defaultToolEnv dir
+            env <- defaultToolEnv dir
             session <- newGrokSession env
             ghci <- newGhciSession env
             action (session, ghci) `finally` (closeGrokSession session >> closeGhciSession ghci)
