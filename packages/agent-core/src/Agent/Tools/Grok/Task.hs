@@ -199,6 +199,9 @@ resumeTask
     -> IO (Either Text Text)
 resumeTask ctx typesRef args resumeId = do
     let agentId = SubagentId resumeId
+    _ <- case ctx.multiResumeFromDisk of
+        Just restore -> restore agentId
+        Nothing -> pure (Right ())
     status <- getStatus ctx.multiRegistry agentId
     case status of
         NotFound -> pure (Left ("unknown subagent id: " <> resumeId))

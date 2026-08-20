@@ -20,11 +20,13 @@ module Agent.Subagents
     , setSubagentOnComplete
     , closeSubagentRegistry
     , spawnSubagent
+    , restoreSubagent
     , waitSubagents
     , sendInput
     , closeSubagent
     , resumeSubagent
     , getStatus
+    , getPreviousResponseId
     , listLive
     , encodeStatus
     , isFinalStatus
@@ -446,6 +448,51 @@ shutdownRecord registry record = do
             pure ()
     releaseSlot registry record
 
+-- | Re-admit a previously persisted agent that is not currently in the
+-- in-memory map (e.g. after close, or across a process restart within the
+-- same session directory). Does not start a worker; callers follow with
+-- 'sendInput'. Does not consume a concurrency slot until the next turn.
+restoreSubagent
+    :: SubagentRegistry
+    -> SubagentId
+    -> Maybe SubagentId
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+restoreSubagent registry agentId parentId depth nickname previous = do
+    existing <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
+    case existing of
+        Just _ -> pure (Right agentId)
+        Nothing -> do
+            cancelFlag <- newCancelFlag
+            mailbox <- newTQueueIO
+            statusVar <- newTVarIO (Completed Nothing)
+            asyncVar <- newTVarIO Nothing
+            slotHeld <- newTVarIO False
+            previousVar <- newTVarIO previous
+            let record = SubagentRecord
+                    { recordId = agentId
+                    , recordParent = parentId
+                    , recordDepth = depth
+                    , recordNickname = nickname
+                    , recordStatus = statusVar
+                    , recordCancel = cancelFlag
+                    , recordMailbox = mailbox
+                    , recordAsync = asyncVar
+                    , recordSlotHeld = slotHeld
+                    , recordPreviousResponseId = previousVar
+                    }
+            atomically do
+                closed <- readTVar registry.registryClosed
+                if closed
+                    then pure ()
+                    else modifyTVar' registry.registryAgents (Map.insert agentId record)
+            closed <- atomically $ readTVar registry.registryClosed
+            if closed
+                then pure (Left "Subagent registry is closed.")
+                else pure (Right agentId)
+
 resumeSubagent
     :: SubagentRegistry
     -> SubagentId
@@ -464,6 +511,13 @@ resumeSubagent registry agentId = do
 
 getStatus :: SubagentRegistry -> SubagentId -> IO SubagentStatus
 getStatus registry agentId = atomically (readStatusSTM registry agentId)
+
+getPreviousResponseId :: SubagentRegistry -> SubagentId -> IO (Maybe Text)
+getPreviousResponseId registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    case Map.lookup agentId agents of
+        Nothing -> pure Nothing
+        Just record -> readTVar record.recordPreviousResponseId
 
 readStatusSTM :: SubagentRegistry -> SubagentId -> STM SubagentStatus
 readStatusSTM registry agentId = do

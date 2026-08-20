@@ -55,6 +55,7 @@ library
                     , Agent.CLI.Render
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.SubagentStore
                     , Agent.CLI.Style
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -110,6 +111,7 @@ test-suite agent-cli-test
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli

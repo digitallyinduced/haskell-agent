@@ -12,6 +12,7 @@ module Agent.Tools
     , appToolHandlers
     , CodingTools(..)
     , codingToolsFor
+    , codingToolsForWithTypes
     , filterChildGrokTools
     ) where
 
@@ -48,8 +49,20 @@ codingToolsFor
     -> Maybe MultiAgentContext
     -> IO CodingTools
 codingToolsFor provider env hooks multi = do
-    plan <- newPlanModeEnv env.toolCwd hooks
     typesRef <- newIORef Map.empty
+    codingToolsForWithTypes provider env hooks multi typesRef
+
+-- | Same as 'codingToolsFor', but reuses an existing agent-type map so the
+-- host can wire resume-from-disk before tools are built.
+codingToolsForWithTypes
+    :: Provider
+    -> ToolEnv
+    -> Maybe PlanModeHooks
+    -> Maybe MultiAgentContext
+    -> IORef (Map SubagentId Text)
+    -> IO CodingTools
+codingToolsForWithTypes provider env hooks multi typesRef = do
+    plan <- newPlanModeEnv env.toolCwd hooks
     case provider of
         XAIProvider -> do
             session <- newGrokSession env

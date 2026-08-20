@@ -51,6 +51,7 @@ spec = describe "Agent.Tools.Codex" do
                     { multiRegistry = registry
                     , multiSelfId = Nothing
                     , multiDepth = 0
+                    , multiResumeFromDisk = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools

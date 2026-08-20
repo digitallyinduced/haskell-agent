@@ -6,6 +6,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
 import Control.Monad (unless)
 import Data.IORef
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -199,3 +200,22 @@ spec = describe "Agent.Subagents" do
         threadDelay 50000
         seen <- readIORef notices
         seen `shouldBe` [(agentId, Completed (Just "notify-me"))]
+
+    it "restores a missing agent id into the registry" do
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ previous prompt _ -> pure $ Right LoopResult
+                { finalResponseId = fromMaybe "resp" previous
+                , finalText = Just prompt
+                , turnsUsed = 1
+                })
+            (\_ _ -> pure ())
+        let agentId = SubagentId "agent-restored-1"
+        Right _ <- restoreSubagent registry agentId Nothing 1 Nothing (Just "prev-1")
+        status <- getStatus registry agentId
+        status `shouldBe` Completed Nothing
+        previous <- getPreviousResponseId registry agentId
+        previous `shouldBe` Just "prev-1"
+        Right _ <- sendInput registry agentId "follow" False
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses `shouldBe` Just (Completed (Just "follow"))
