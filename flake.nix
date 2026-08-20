@@ -144,7 +144,6 @@
                         (with haskellPackages; [
                             cabal-install
                             ghcid
-                            haskell-language-server
                         ])
                         ++ (with pkgs; [
                             cabal2nix
