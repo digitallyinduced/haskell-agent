@@ -9,6 +9,7 @@ import Agent.ToolDispatch
     , noArgsTool
     )
 import Agent.Tools.Grok.Task
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool(..), AppToolKind(..))
 import Data.IORef
@@ -29,7 +30,7 @@ spec = describe "Agent.Tools.Grok.Task" do
                 })
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 Nothing
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
             tool = taskTool ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -56,7 +57,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 Nothing
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
             tool = taskTool ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"

@@ -2,9 +2,11 @@ module Main (main) where
 
 import qualified Agent.CancelSpec as CancelSpec
 import qualified Agent.ErrorSpec as ErrorSpec
+import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
+import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
@@ -21,9 +23,11 @@ main :: IO ()
 main = hspec do
     CancelSpec.spec
     ErrorSpec.spec
+    JsonTextSpec.spec
     LoopSpec.spec
     ProjectInstructionsSpec.spec
     SubagentsSpec.spec
+    TaskPathSpec.spec
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
     ToolDSLSpec.spec

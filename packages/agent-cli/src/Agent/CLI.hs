@@ -8,6 +8,7 @@ module Agent.CLI
     , run
     ) where
 
+import Agent.CLI.Accounts (runAccountsList, runAccountsRemove, runLogin)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -28,7 +29,7 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), readReplLine)
+import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLine)
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
@@ -87,6 +88,7 @@ import Agent.CLI.Style
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
+import Agent.JsonText (jsonTextFieldDefault)
 import Agent.Loop
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -132,6 +134,7 @@ import Agent.Subagents
     , formatCompletionNotice
     , getPreviousResponseId
     , getStatus
+    , getTaskPath
     , newSubagentRegistry
     , restoreSubagent
     , setSubagentOnComplete
@@ -145,6 +148,7 @@ import Agent.Tools
     , filterChildGrokTools
     )
 import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType, recordAgentType)
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -231,6 +235,9 @@ devMain = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (LoginAccount provider label) -> runLogin provider label >> pure DevQuit
+        Right ListAccounts -> runAccountsList >> pure DevQuit
+        Right (RemoveAccount accountId) -> runAccountsRemove accountId >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -246,6 +253,9 @@ run = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (LoginAccount provider label) -> runLogin provider label
+        Right ListAccounts -> runAccountsList
+        Right (RemoveAccount accountId) -> runAccountsRemove accountId
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -360,6 +370,7 @@ runAgent options = do
             { multiRegistry = registry
             , multiSelfId = Nothing
             , multiDepth = 0
+            , multiTaskPath = taskPathRoot
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             }
@@ -694,6 +705,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
+    reasoningBuffer <- newIORef ""
+    reasoningLive <- newIORef False
     activityRef <- newIORef "thinking…"
     startedAtRef <- newIORef Nothing
     allowedToolsRef <- newIORef Set.empty
@@ -726,6 +739,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
             , renderThinkingSpinner = spinnerRef
+            , renderReasoningBuffer = reasoningBuffer
+            , renderReasoningLive = reasoningLive
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
@@ -825,11 +840,21 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
+        ReplPasted pasted ->
+            submitLine continue stdoutColor True pasted
         ReplText line ->
-            let stripped = Text.strip line
-            in if Text.null stripped
-                then continue
-                else case parseReplLine stripped of
+            submitLine continue stdoutColor False line
+  where
+    submitLine continue color pasted line =
+        let stripped = Text.strip line
+        in if Text.null stripped
+            then continue
+            else do
+                when pasted do
+                    let chip = formatPasteChip stripped
+                    when (chip /= stripped) do
+                        Text.putStrLn (roleMuted color chip)
+                case parseReplLine stripped of
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -841,7 +866,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         case pastedImages of
                             Just images@(_:_) -> do
                                 queueAttachedImages
-                                    attachmentsRef previewIdRef stdoutColor images
+                                    attachmentsRef previewIdRef color images
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
@@ -1159,7 +1184,6 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
                         continue
-  where
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
@@ -1654,7 +1678,7 @@ planModeBlocksCall _planMode active planPath call
     | not active = pure False
     | call.name == "apply_patch" = pure True
     | call.name == "search_replace" =
-        let target = jsonArg "file_path" call.arguments
+        let target = jsonTextFieldDefault "file_path" call.arguments
         in pure $
             Text.null target
                 || not (isPlanFileEditTarget planPath (Text.unpack target))
@@ -1664,18 +1688,11 @@ isPlanFileWrite :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
 isPlanFileWrite _planMode active planPath call
     | not active = pure False
     | call.name == "search_replace" =
-        let target = jsonArg "file_path" call.arguments
+        let target = jsonTextFieldDefault "file_path" call.arguments
         in pure $
             not (Text.null target)
                 && isPlanFileEditTarget planPath (Text.unpack target)
     | otherwise = pure False
-
-jsonArg :: Text -> Text -> Text
-jsonArg key arguments = case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
 toggleAlwaysApprove policyRef projectRoot = do
@@ -1830,12 +1847,14 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
+        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
         -- Inherit soft-cancel from the registry-owned child flag.
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 }
         -- Child tools create their own PlanModeEnv; sync store root from parent
@@ -1899,11 +1918,13 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
+        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 }
         session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId

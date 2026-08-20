@@ -2,6 +2,7 @@ module Agent.SubagentsSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
 import Agent.Subagents
+import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
 import Control.Monad (unless)
@@ -251,3 +252,41 @@ spec = describe "Agent.Subagents" do
         status1 `shouldBe` Completed Nothing
         previous <- getPreviousResponseId registry agentId
         previous `shouldBe` Just "prev"
+
+    it "spawns at a task path and resolves relative targets" do
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "c"
+                , finalText = Just prompt
+                , turnsUsed = 1
+                })
+            (\_ _ -> pure ())
+        Right (agentId, path) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "worker" "do it" Nothing
+        taskPathText path `shouldBe` "/root/worker"
+        resolved <- resolveAgentTarget registry taskPathRoot "worker"
+        resolved `shouldBe` Right agentId
+        agents <- listAgents registry (Just "/root")
+        map (\(p, _, _) -> taskPathText p) agents `shouldContain` ["/root/worker"]
+        closeSubagentRegistry registry
+
+    it "queueMessage does not kick an idle agent" do
+        started <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ _ prompt _ -> do
+                atomicModifyIORef' started \n -> (n + 1, ())
+                pure $ Right LoopResult
+                    { finalResponseId = "c"
+                    , finalText = Just prompt
+                    , turnsUsed = 1
+                    })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        before <- readIORef started
+        Right _ <- queueMessage registry agentId "queued-only"
+        threadDelay 50000
+        after <- readIORef started
+        after `shouldBe` before
+        status <- getStatus registry agentId
+        status `shouldBe` Completed (Just "one")

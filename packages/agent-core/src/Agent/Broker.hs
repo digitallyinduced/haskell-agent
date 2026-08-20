@@ -6,6 +6,7 @@ module Agent.Broker
     , newBrokerTokenProviderWithClock
     ) where
 
+import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider
     ( AccountFailure(..)
@@ -192,7 +193,7 @@ fetchBrokerTokenExcluding options supportedProviders failed excludedAccountIds =
                     Right token -> pure (Right (Just token))
   where
     requestToken = do
-        request <- parseRequest (trimSlash options.baseUrl <> "/api/v1/token")
+        request <- parseRequest (trimTrailingSlash options.baseUrl <> "/api/v1/token")
         httpLBS
             $ addFailureHeaders failed
             $ setRequestMethod "POST"
@@ -238,5 +239,3 @@ brokerHttpError status body
         } <- Aeson.eitherDecode body = CredentialsExhausted retryAt
     | otherwise = HttpError status "broker could not issue an access token"
 
-trimSlash :: String -> String
-trimSlash = reverse . dropWhile (== '/') . reverse

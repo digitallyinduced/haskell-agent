@@ -2,6 +2,7 @@ module Agent.Tools.CodexSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
@@ -51,11 +52,12 @@ spec = describe "Agent.Tools.Codex" do
                     { multiRegistry = registry
                     , multiSelfId = Nothing
                     , multiDepth = 0
+                    , multiTaskPath = taskPathRoot
                     , multiResumeFromDisk = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools
-            names `shouldContain` ["spawn_agent", "wait_agent", "send_input", "close_agent", "resume_agent"]
+            names `shouldContain` ["spawn_agent", "wait_agent", "send_message", "followup_task", "list_agents", "interrupt_agent"]
             coding.codingClose
             closeSubagentRegistry registry
 

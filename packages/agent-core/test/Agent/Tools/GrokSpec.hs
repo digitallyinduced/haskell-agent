@@ -8,6 +8,7 @@ import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToo
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
@@ -67,7 +68,7 @@ spec = describe "Agent.Tools.Grok" do
                 (\_ _ _ _ -> pure $ Left LoopNoResponseId)
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
-            let ctx = MultiAgentContext registry Nothing 0 Nothing
+            let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
                 names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
             names `shouldContain` ["task"]
             closeSubagentRegistry registry

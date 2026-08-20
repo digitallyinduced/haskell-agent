@@ -6,6 +6,7 @@ module Agent.OpenRouter.Client
     , createResponseWithEvents
     ) where
 
+import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
@@ -61,7 +62,7 @@ createResponseWithEvents options credential request onEvent
         Right response -> handleResponse response
   where
     performRequest = do
-        httpRequest <- parseRequest ("POST " <> trimSlash options.baseUrl <> "/responses")
+        httpRequest <- parseRequest ("POST " <> trimTrailingSlash options.baseUrl <> "/responses")
         httpLBS
             $ setRequestBodyLBS (Aeson.encode (buildRequest options request))
             $ setRequestHeader "Authorization"
@@ -105,5 +106,3 @@ nonEmptyText :: Maybe Text -> Maybe Text
 nonEmptyText (Just value) | not (Text.null (Text.strip value)) = Just value
 nonEmptyText _ = Nothing
 
-trimSlash :: String -> String
-trimSlash = reverse . dropWhile (== '/') . reverse
