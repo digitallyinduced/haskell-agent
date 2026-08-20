@@ -13,6 +13,7 @@ module Agent.Tools.Ghci
     , classifyGhciInput
     , typeLooksEffectful
     , runGhciTool
+    , defaultGhciExtensions
     ) where
 
 import Agent.ToolArgs
@@ -331,9 +332,30 @@ restartProcess session =
         mapM_ shutdownProcess current
         Just <$> spawnProcess session.ghciEnv
 
+-- | Extra @-X@ flags on top of GHC2021. Matches @agent-cli@ / @agent-core@
+-- @default-extensions@ so snippets the model writes (@"hello"@, @\\case@,
+-- @do@ after @id@, @person.name@) work without LANGUAGE pragmas.
+--
+-- GHC2021 already includes NamedFieldPuns, TypeApplications, and
+-- ScopedTypeVariables. NoFieldSelectors is set explicitly because GHC2021
+-- turns FieldSelectors on.
+defaultGhciExtensions :: [String]
+defaultGhciExtensions =
+    [ "BlockArguments"
+    , "OverloadedStrings"
+    , "OverloadedRecordDot"
+    , "DuplicateRecordFields"
+    , "NoFieldSelectors"
+    , "LambdaCase"
+    , "RecordWildCards"
+    ]
+
+ghciArgs :: [String]
+ghciArgs = "-v0" : "-XGHC2021" : map ("-X" <>) defaultGhciExtensions
+
 spawnProcess :: ToolEnv -> IO GhciProcess
 spawnProcess env = do
-    let spec = (proc "ghci" ["-v0"])
+    let spec = (proc "ghci" ghciArgs)
             { cwd = Just env.toolCwd
             , std_in = CreatePipe
             , std_out = CreatePipe
@@ -466,7 +488,10 @@ ghciDescription =
     "Evaluate Haskell in a persistent GHCi session for this agent.\n\
     \Bindings and loaded modules persist across calls.\n\
     \Pure expressions auto-approve; IO and side-effecting GHCi commands need approval.\n\
-    \Prefer this over shell tools for calculations, type exploration, and small Haskell scripts."
+    \Prefer this over shell tools for calculations, type exploration, and small Haskell scripts.\n\
+    \The session starts with GHC2021 plus BlockArguments, OverloadedStrings, \
+    \OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, \
+    \and RecordWildCards — LANGUAGE pragmas are not required for those."
 
 isGhciReadOnlyCall :: GhciSession -> ToolCall -> IO Bool
 isGhciReadOnlyCall session call =

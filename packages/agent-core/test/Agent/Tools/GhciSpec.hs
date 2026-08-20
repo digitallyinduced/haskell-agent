@@ -13,6 +13,7 @@ import Agent.Tools.Ghci
     , classifyGhci
     , classifyGhciInput
     , closeGhciSession
+    , defaultGhciExtensions
     , evalGhci
     , newGhciSession
     , typeLooksEffectful
@@ -46,6 +47,19 @@ spec = describe "Agent.Tools.Ghci" do
             typeLooksEffectful "id :: a -> a" `shouldBe` False
             typeLooksEffectful "getLine :: IO String" `shouldBe` True
 
+    describe "defaultGhciExtensions" do
+        it "covers the extra extensions this repo enables on top of GHC2021" do
+            defaultGhciExtensions
+                `shouldBe`
+                    [ "BlockArguments"
+                    , "OverloadedStrings"
+                    , "OverloadedRecordDot"
+                    , "DuplicateRecordFields"
+                    , "NoFieldSelectors"
+                    , "LambdaCase"
+                    , "RecordWildCards"
+                    ]
+
     it "persists bindings across evalGhci calls" do
         withTempGhci \ghci -> do
             bind <- evalGhci ghci "let x = 41 + 1" 10000
@@ -54,6 +68,20 @@ spec = describe "Agent.Tools.Ghci" do
             value <- evalGhci ghci "x" 10000
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "evaluates OverloadedStrings and LambdaCase without LANGUAGE pragmas" do
+        withTempGhci \ghci -> do
+            str <- evalGhci ghci "\"hello\"" 10000
+            str.ghciOk `shouldBe` True
+            str.ghciOutput `shouldSatisfy` Text.isInfixOf "hello"
+            lam <- evalGhci ghci "(\\case 1 -> True; _ -> False) 1" 10000
+            lam.ghciOk `shouldBe` True
+            lam.ghciOutput `shouldSatisfy` Text.isInfixOf "True"
+            shown <- evalGhci ghci ":show language" 10000
+            shown.ghciOk `shouldBe` True
+            mapM_
+                (\ext -> shown.ghciOutput `shouldSatisfy` Text.isInfixOf (Text.pack ext))
+                defaultGhciExtensions
 
     it "classifies putStrLn as effectful and 1+1 as pure" do
         withTempGhci \ghci -> do

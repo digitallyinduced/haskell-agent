@@ -52,6 +52,8 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
         grok `shouldSatisfy` Text.isInfixOf "run_ghci"
         openai `shouldSatisfy` Text.isInfixOf "run_ghci"
+        grok `shouldSatisfy` Text.isInfixOf "OverloadedStrings"
+        openai `shouldSatisfy` Text.isInfixOf "LambdaCase"
         grok `shouldSatisfy` Text.isInfixOf "Pure expressions do not need user approval"
 
     it "picks the documented default models" do
