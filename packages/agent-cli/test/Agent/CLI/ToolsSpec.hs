@@ -15,16 +15,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "enables built-in web_search ahead of app tools" do
+        case schemasFromAppTools OpenAIProvider [jsonTool] of
+            KnownResponseTool ToolWebSearch tagged : _ -> do
+                tagged.tag `shouldBe` "web_search"
+                tagged.fields `shouldBe` KeyMap.empty
+            other -> expectationFailure ("expected web_search first, got " <> show other)
+
     it "builds a strict function tool for OpenAI JSON tools" do
         case schemasFromAppTools OpenAIProvider [jsonTool] of
-            [FunctionToolValue tool] -> do
+            [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
     it "builds a loose grok-build function tool for xAI" do
         case schemasFromAppTools XAIProvider [jsonTool] of
-            [FunctionToolValue tool] -> do
+            [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Nothing
                 required_ tool `shouldBe` Just (Aeson.toJSON (["target_file"] :: [Text]))
@@ -33,7 +40,7 @@ spec = describe "schemasFromAppTools" do
 
     it "registers apply_patch as a custom Lark tool" do
         case schemasFromAppTools OpenAIProvider [patchTool] of
-            [KnownResponseTool ToolCustom tagged] -> do
+            [_, KnownResponseTool ToolCustom tagged] -> do
                 tagged.tag `shouldBe` "custom"
                 KeyMap.lookup "name" tagged.fields
                     `shouldBe` Just (Aeson.String "apply_patch")
