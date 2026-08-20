@@ -161,7 +161,7 @@ spec = describe "runLoop" do
                 }
             ]
         config0 <- testConfig backend
-        let config = config0 { loopApprove = \_ -> pure False }
+        let config = config0 { loopApprove = \_ -> pure (Right False) }
         result <- runLoop config Nothing "please"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
@@ -326,7 +326,7 @@ testConfig backend = do
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()
-        , loopApprove = \_ -> pure True
+        , loopApprove = \_ -> pure (Right True)
         , loopCancel = cancel
         }
 

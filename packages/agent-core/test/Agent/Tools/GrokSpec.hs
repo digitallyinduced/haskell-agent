@@ -3,10 +3,11 @@ module Agent.Tools.GrokSpec (spec) where
 import Agent.Loop (defaultLoopDispatch)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
-import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (readMVar)
@@ -28,7 +29,8 @@ spec :: Spec
 spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
         withTempSession \(session, ghci) -> do
-            let names = map (.appToolName) (grokTools session ghci)
+            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            let names = map (.appToolName) (grokTools session ghci plan)
             names `shouldBe`
                 [ "read_file"
                 , "grep"
@@ -38,15 +40,18 @@ spec = describe "Agent.Tools.Grok" do
                 , "run_ghci"
                 , "get_task_output"
                 , "kill_task"
+                , "enter_plan_mode"
+                , "exit_plan_mode"
+                , "ask_user_question"
                 ]
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
-            (xai, closeXai) <- codingToolsFor XAIProvider session.grokEnv
-            (openrouter, closeOr) <- codingToolsFor OpenRouterProvider session.grokEnv
+            xai <- codingToolsFor XAIProvider session.grokEnv Nothing
+            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing
             (do
-                map (.appToolName) xai `shouldBe` names
-                map (.appToolName) openrouter `shouldBe` names)
-                `finally` (closeXai >> closeOr)
+                map (.appToolName) xai.codingAppTools `shouldBe` names
+                map (.appToolName) openrouter.codingAppTools `shouldBe` names)
+                `finally` (xai.codingClose >> openrouter.codingClose)
 
     it "reads a file with grok line-number anchors" do
         withTempSession \(session, ghci) -> do
@@ -255,8 +260,9 @@ spec = describe "Agent.Tools.Grok" do
 
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
+    plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
     result <- dispatchToolCall defaultLoopDispatch
-        (appToolHandlers (grokTools session ghci))
+        (appToolHandlers (grokTools session ghci plan))
         (functionToolCall "call-1" name arguments)
     pure result.output
 

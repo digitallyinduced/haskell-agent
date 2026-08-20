@@ -24,6 +24,9 @@ data GrokPromptTools = GrokPromptTools
     , grokList :: !Text
     , grokGetOutput :: !Text
     , grokKill :: !Text
+    , grokEnterPlan :: !Text
+    , grokExitPlan :: !Text
+    , grokAskUser :: !Text
     } deriving (Eq, Show)
 
 codingGrokPromptTools :: GrokPromptTools
@@ -35,6 +38,9 @@ codingGrokPromptTools = GrokPromptTools
     , grokList = "list_dir"
     , grokGetOutput = "get_task_output"
     , grokKill = "kill_task"
+    , grokEnterPlan = "enter_plan_mode"
+    , grokExitPlan = "exit_plan_mode"
+    , grokAskUser = "ask_user_question"
     }
 
 grokSystemPrompt :: GrokPromptTools -> FilePath -> Day -> Bool -> Text
@@ -45,6 +51,7 @@ grokSystemPrompt tools cwd today isNonInteractive =
         , workPolicy
         , toolCalling tools
         , backgroundTasks tools
+        , planMode tools
         , communication
         , formatting
         ]
@@ -109,6 +116,20 @@ backgroundTasks tools =
         <> tools.grokKill
         <> "` to stop a background task.\n\
     \</background_tasks>"
+
+planMode :: GrokPromptTools -> Text
+planMode tools =
+    "<plan_mode>\n\
+    \- For tasks with genuine architectural ambiguity, call `"
+        <> tools.grokEnterPlan
+        <> "` (requires user approval) or follow a user `/plan` toggle.\n\
+    \- While plan mode is active, only the session `plan.md` file may be edited; other file edits are rejected.\n\
+    \- Explore with read/search tools, clarify with `"
+        <> tools.grokAskUser
+        <> "` when needed, write the plan to `plan.md`, then call `"
+        <> tools.grokExitPlan
+        <> "` so the user can approve, request changes, or cancel.\n\
+    \</plan_mode>"
 
 communication :: Text
 communication = Text.unlines

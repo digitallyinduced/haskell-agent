@@ -75,6 +75,14 @@ spec = do
             parseReplLine "/model grok-4.5 extra"
                 `shouldBe` ReplCommandError "usage: /model [NAME]"
 
+        it "enters plan mode with optional description" do
+            parseReplLine "/plan" `shouldBe` ReplPlan Nothing
+            parseReplLine "  /Plan  " `shouldBe` ReplPlan Nothing
+            parseReplLine "/plan redesign auth"
+                `shouldBe` ReplPlan (Just "redesign auth")
+            parseReplLine "/plan   keep  spaces"
+                `shouldBe` ReplPlan (Just "keep  spaces")
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError

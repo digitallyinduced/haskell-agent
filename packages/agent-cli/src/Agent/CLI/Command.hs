@@ -24,6 +24,8 @@ data ReplAction
     | ReplShowModel
     | ReplSetModel Text
     | ReplToggleAlwaysApprove
+    | ReplPlan (Maybe Text)
+    -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplShowSession
     | ReplReloadAuth
     | ReplPaste Text
@@ -53,6 +55,11 @@ parseSlash line = case Text.words line of
     command : args
         | Text.toLower command == "/effort" -> parseEffortCommand args
         | Text.toLower command == "/model" -> parseModelCommand args
+        | Text.toLower command == "/plan" ->
+            let description =
+                    Text.strip (Text.drop (Text.length command) line)
+            in ReplPlan
+                (if Text.null description then Nothing else Just description)
         | Text.toLower command == "/session" ->
             if null args
                 then ReplShowSession

@@ -3,8 +3,9 @@ module Agent.Tools.GhciSpec (spec) where
 import Agent.Loop (defaultLoopDispatch)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Provider (Provider(..))
-import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Ghci
     ( GhciClass(..)
     , GhciResult(..)
@@ -16,7 +17,7 @@ import Agent.Tools.Ghci
     , newGhciSession
     , typeLooksEffectful
     )
-import Agent.Tools.Types (AppTool(..), ToolEnv)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
@@ -80,9 +81,9 @@ spec = describe "Agent.Tools.Ghci" do
 
     it "is registered for OpenAI via codingToolsFor" do
         withTempEnv \env -> do
-            (tools, closeTools) <- codingToolsFor OpenAIProvider env
-            map (.appToolName) tools `shouldContain` ["run_ghci"]
-            closeTools
+            coding <- codingToolsFor OpenAIProvider env Nothing
+            map (.appToolName) coding.codingAppTools `shouldContain` ["run_ghci"]
+            coding.codingClose
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =
@@ -117,7 +118,8 @@ withTempTools action =
         env <- defaultToolEnv dir
         session <- newGrokSession env
         ghci <- newGhciSession env
-        pure (dir, (session, ghci), grokTools session ghci)
+        plan <- newPlanModeEnv env.toolCwd Nothing
+        pure (dir, (session, ghci), grokTools session ghci plan)
     release (dir, (session, ghci), _) = do
         closeGrokSession session
         closeGhciSession ghci

@@ -181,6 +181,9 @@ toolDetail call = case call.name of
     "shell_command" -> firstLine (jsonField "command" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"
+    "enter_plan_mode" -> "enter"
+    "exit_plan_mode" -> "exit"
+    "ask_user_question" -> firstLine (jsonField "question" call.arguments)
     _ -> ""
 
 jsonField :: Text -> Text -> Text
