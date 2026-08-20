@@ -50,6 +50,10 @@ data ReplAction
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
     | ReplCompact (Maybe Text)
     -- ^ Optional focus note for what to keep while compacting history.
+    | ReplClear
+      -- ^ Soft-reset live transcript; keep the same session id.
+    | ReplNew
+      -- ^ Start a fresh persisted session id with empty history.
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -72,6 +76,8 @@ slashCommands =
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
+    , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
+    , cmd "new" [] "/new" "Start a fresh persisted session id"
     , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image to the next prompt"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
@@ -134,6 +140,14 @@ parseSlash line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplCompact
                     (if Text.null focus then Nothing else Just focus)
+            "clear" ->
+                if null args
+                    then ReplClear
+                    else ReplCommandError "usage: /clear"
+            "new" ->
+                if null args
+                    then ReplNew
+                    else ReplCommandError "usage: /new"
             "reload-auth" ->
                 if null args
                     then ReplReloadAuth

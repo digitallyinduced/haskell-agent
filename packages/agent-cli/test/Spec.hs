@@ -17,6 +17,7 @@ import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
+import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
@@ -42,6 +43,7 @@ main = hspec do
     ProjectSpec.spec
     PromptSpec.spec
     RenderSpec.spec
+    ReplStatusSpec.spec
     ResumeSpec.spec
     StyleSpec.spec
     TimestampSpec.spec

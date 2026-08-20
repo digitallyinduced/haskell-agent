@@ -10,7 +10,12 @@ module Agent.OpenAI.Compaction
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
+    , isClearSessionTurn
+    , isNewSessionTurn
+    , isTranscriptResetTurn
     , compactSessionUserText
+    , clearSessionUserText
+    , newSessionUserText
     ) where
 
 import Agent.OpenAI.Responses.Types
@@ -127,3 +132,23 @@ isCompactSessionTurn :: Text -> Bool
 isCompactSessionTurn text =
     let stripped = Text.strip text
     in stripped == "/compact" || Text.isPrefixOf "/compact " stripped
+
+clearSessionUserText :: Text
+clearSessionUserText = "/clear"
+
+newSessionUserText :: Text
+newSessionUserText = "/new"
+
+isClearSessionTurn :: Text -> Bool
+isClearSessionTurn text = Text.strip text == clearSessionUserText
+
+isNewSessionTurn :: Text -> Bool
+isNewSessionTurn text = Text.strip text == newSessionUserText
+
+-- | Turns that replace the live transcript with their turnItems snapshot
+-- (compact) or empty it (/clear, /new).
+isTranscriptResetTurn :: Text -> Bool
+isTranscriptResetTurn text =
+    isCompactSessionTurn text
+        || isClearSessionTurn text
+        || isNewSessionTurn text

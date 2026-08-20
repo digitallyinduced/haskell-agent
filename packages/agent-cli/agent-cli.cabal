@@ -107,6 +107,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PermissionSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
+                    , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec

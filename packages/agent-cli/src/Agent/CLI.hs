@@ -3,6 +3,7 @@ module Agent.CLI
     ( DevResult(..)
     , afterDev
     , devMain
+    , formatReplStatusLine
     , run
     ) where
 
@@ -88,8 +89,10 @@ import Agent.ProjectInstructions
     , loadedInstructionFiles
     )
 import Agent.OpenAI.Compaction
-    ( compactSessionUserText
-    , isCompactSessionTurn
+    ( clearSessionUserText
+    , compactSessionUserText
+    , isTranscriptResetTurn
+    , newSessionUserText
     )
 import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
@@ -116,6 +119,7 @@ import Agent.Subagents
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , closeSubagentRegistry
+    , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
     , getPreviousResponseId
@@ -176,7 +180,7 @@ import Data.Time.Clock (diffUTCTime, getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
@@ -437,8 +441,8 @@ runAgent options = do
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                    initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    subagentStoreRoot noticingBackend)
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                                    multiCtx subagentSessions pendingNotices subagentStoreRoot noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -466,8 +470,8 @@ runAgent options = do
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            subagentStoreRoot backend
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -492,8 +496,8 @@ runAgent options = do
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            subagentStoreRoot backend
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot backend
 
 preparePersistence
     :: CliOptions
@@ -571,6 +575,22 @@ printResumeHint progName = \case
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
+-- | Idle prompt chrome: model, reasoning effort, approval mode.
+formatReplStatusLine :: Bool -> Text -> Text -> ApprovalPolicy -> Text
+formatReplStatusLine color model effort policy =
+    roleMuted color $
+        "  "
+            <> model
+            <> " · "
+            <> effort
+            <> " · "
+            <> approvalLabel policy
+  where
+    approvalLabel = \case
+        ApproveAll -> "yolo"
+        PromptMutating -> "ask"
+        DenyMutating -> "deny"
+
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
@@ -593,14 +613,19 @@ runSession
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> FilePath
+    -> FilePath
+    -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
+    -> Maybe MultiAgentContext
+    -> IORef (Map SubagentId SubagentSession)
+    -> IORef [Text]
     -> SubagentStoreRoot
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext escPaused interrupt storeRoot backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     textBuffer <- newIORef ""
@@ -613,6 +638,17 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
+    let sessionReset = do
+            resetLiveConversation previous transcriptRef attachmentsRef planMode
+            writeIORef pendingNotices []
+            writeIORef subagentSessions Map.empty
+            case multiCtx of
+                Just ctx -> resetSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+            freshAgents <-
+                loadAgentsContext options provider home cwd [] Nothing
+            fresh <- readIORef freshAgents
+            writeIORef agentsContext fresh
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
     useColor <- resolveColor stdout
@@ -661,7 +697,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
                 transcriptRef persist planMode projectRoot tokenProvider agentsContext
-                escPaused attachmentsRef interrupt storeRoot
+                escPaused attachmentsRef interrupt storeRoot sessionReset
 
 repl
     :: LoopConfig
@@ -681,11 +717,21 @@ repl
     -> IORef [ImageAttachment]
     -> InterruptState
     -> SubagentStoreRoot
+    -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt storeRoot = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt storeRoot sessionReset = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
+    params <- readIORef paramsRef
+    policy <- readIORef policyRef
+    -- Status sits on the line above λ so haskeline can keep the cursor on
+    -- the input. Haskeline cannot park a persistent footer under the draft.
+    Text.putStrLn $ formatReplStatusLine stdoutColor
+        (currentModel params)
+        (currentEffort params)
+        policy
+    hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let modeTag
@@ -906,6 +952,106 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplResume maybeId -> do
                         handleResume maybeId persist
                         continue
+                    ReplClear -> do
+                        sessionReset
+                        color <- resolveColor stderr
+                        case persist of
+                            Nothing ->
+                                Text.hPutStrLn stderr
+                                    (roleMuted color (glyphOk <> "conversation cleared"))
+                            Just slotRef -> do
+                                now <- getCurrentTime
+                                slot <- readIORef slotRef
+                                case slot of
+                                    Left _ ->
+                                        Text.hPutStrLn stderr
+                                            (roleMuted color (glyphOk <> "conversation cleared"))
+                                    Right handle -> do
+                                        let turn = SessionTurn
+                                                { turnAt = now
+                                                , turnUserText = clearSessionUserText
+                                                , turnAssistantText =
+                                                    Just "Conversation cleared."
+                                                , turnResponseId = Nothing
+                                                , turnItems = []
+                                                }
+                                        handle' <- appendTurnKeepTitle handle turn
+                                        let meta = handle'.sessionMeta
+                                                { metaLastResponseId = Nothing
+                                                , metaUpdatedAt = now
+                                                }
+                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        writeIORef slotRef
+                                            (Right handle'{sessionMeta = meta})
+                                        Text.hPutStrLn stderr
+                                            (roleMuted color
+                                                (glyphOk
+                                                    <> "conversation cleared (session "
+                                                    <> meta.metaId
+                                                    <> ")"))
+                        continue
+                    ReplNew -> do
+                        sessionReset
+                        color <- resolveColor stderr
+                        case persist of
+                            Nothing -> do
+                                Text.hPutStrLn stderr
+                                    (roleMuted color
+                                        (glyphOk <> "started a fresh conversation"))
+                                continue
+                            Just slotRef -> do
+                                now <- getCurrentTime
+                                params <- readIORef paramsRef
+                                home <- getHomeDirectory
+                                slot <- readIORef slotRef
+                                let model = currentModel params
+                                    effort = currentEffort params
+                                    create = case slot of
+                                        Left pending ->
+                                            pending
+                                                { createModel = model
+                                                , createEffort = effort
+                                                , createTitleHint = Nothing
+                                                }
+                                        Right handle ->
+                                            SessionCreate
+                                                { createRoot =
+                                                    takeDirectory handle.sessionDir
+                                                , createProvider = provider
+                                                , createModel = model
+                                                , createCwd =
+                                                    handle.sessionMeta.metaCwd
+                                                , createEffort = effort
+                                                , createTitleHint = Nothing
+                                                }
+                                handle <- createSession create
+                                let turn = SessionTurn
+                                        { turnAt = now
+                                        , turnUserText = newSessionUserText
+                                        , turnAssistantText =
+                                            Just "Started a new session."
+                                        , turnResponseId = Nothing
+                                        , turnItems = []
+                                        }
+                                handle' <- appendTurnKeepTitle handle turn
+                                let meta = handle'.sessionMeta
+                                        { metaLastResponseId = Nothing
+                                        , metaUpdatedAt = now
+                                        }
+                                writeSessionMeta handle'.sessionMetaPath meta
+                                writeIORef slotRef
+                                    (Right handle'{sessionMeta = meta})
+                                writeIORef planMode.planSessionDir
+                                    (Just handle'.sessionDir)
+                                writeIORef storeRoot (Just handle'.sessionDir)
+                                tty <- hIsTerminalDevice stdout
+                                setCliWindowTitle tty stdout
+                                    (cliWindowTitle meta.metaCwd
+                                        (Just meta.metaTitle))
+                                Text.hPutStrLn stderr
+                                    (roleMuted color
+                                        (glyphOk <> "new session: " <> meta.metaId))
+                                continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
                         case persist of
@@ -938,7 +1084,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
-            escPaused attachmentsRef interrupt storeRoot
+            escPaused attachmentsRef interrupt storeRoot sessionReset
 
 applyModelChange
     :: Provider
@@ -1737,14 +1883,29 @@ childApprove policy tools call = case policy of
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
 -- xAI/OpenRouter force @store = false@ and replay local transcripts instead.
 
+
+-- | Drop live conversation state without touching persisted session files.
+resetLiveConversation
+    :: IORef (Maybe Text)
+    -> IORef [ResponseItem]
+    -> IORef [ImageAttachment]
+    -> PlanModeEnv
+    -> IO ()
+resetLiveConversation previous transcriptRef attachmentsRef planMode = do
+    writeIORef previous Nothing
+    writeIORef transcriptRef []
+    writeIORef attachmentsRef []
+    deactivatePlanMode planMode
+
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
 foldSessionItems = go []
   where
     go acc [] = acc
     go acc (turn:rest)
-        | isCompactSessionTurn turn.turnUserText
-            && not (null turn.turnItems) =
+        | isTranscriptResetTurn turn.turnUserText =
+            -- /clear and /new store an empty snapshot; /compact stores the
+            -- rebuilt history. Either way, turnItems replaces prior history.
             go turn.turnItems rest
         | otherwise = go (acc <> turn.turnItems) rest
 
