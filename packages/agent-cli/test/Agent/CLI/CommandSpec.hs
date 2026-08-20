@@ -56,6 +56,14 @@ spec = do
             parseReplLine "/reload-auth now"
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
+        it "clears or starts a new session" do
+            parseReplLine "/clear" `shouldBe` ReplClear
+            parseReplLine "/new" `shouldBe` ReplNew
+            parseReplLine "/clear now"
+                `shouldBe` ReplCommandError "usage: /clear"
+            parseReplLine "/new now"
+                `shouldBe` ReplCommandError "usage: /new"
+
         it "compacts with optional focus text" do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
             parseReplLine "/compact focus auth"
