@@ -41,6 +41,7 @@ library
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Command
                     , Agent.CLI.Input
+                    , Agent.CLI.Interrupt
                     , Agent.CLI.Markdown
                     , Agent.CLI.Options
                     , Agent.CLI.Plan
@@ -88,6 +89,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.InputSpec
+                    , Agent.CLI.InterruptSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec

@@ -10,7 +10,13 @@ import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
-import Agent.CLI.Input (readApprovalLine, readReplLine)
+import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
+import Agent.CLI.Interrupt
+    ( InterruptState
+    , newInterruptState
+    , withCtrlCHandler
+    , withTurnCancel
+    )
 import Agent.CLI.Options
 import Agent.CLI.Plan
     ( cliPlanHooks
@@ -261,7 +267,13 @@ runAgent options = do
         Nothing -> pure ()
 
     toolEnv <- defaultToolEnv cwd
-    let planHooks = cliPlanHooks (resolveColor stderr)
+    interrupt <- newInterruptState \msg -> do
+        -- Drop an in-place "thinking…" status so the hint is its own line.
+        Text.hPutStr stderr "\r\ESC[K"
+        hFlush stderr
+        color <- resolveColor stderr
+        putTextLn stderr (roleMuted color msg)
+    let planHooks = cliPlanHooks interrupt (resolveColor stderr)
     coding <- codingToolsFor loaded.loadedProvider toolEnv (Just planHooks)
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
@@ -300,31 +312,32 @@ runAgent options = do
                     Left _ -> pure ()
             Nothing -> pure ()
         progName <- getProgName
-        withInterruptResume progName persist do
-            case provider of
-                OpenAIProvider ->
-                    try @_ @CodexAuthFailed
-                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                            runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                initialPrevious persist projectRoot Nothing agentsContext
-                                (openAiBackend conn (readIORef paramsRef) transcriptRef))
-                        >>= \case
-                            Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                            Right result -> pure result
-                XAIProvider -> do
-                    xaiOptions <- XAI.clientOptionsFromEnv
-                    let backend =
-                            xaiBackend xaiOptions loaded.loadedTokenProvider
-                                (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
-                OpenRouterProvider -> do
-                    openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                    let backend =
-                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
-                                (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
+        withCtrlCHandler interrupt $
+            withInterruptResume progName persist do
+                case provider of
+                    OpenAIProvider ->
+                        try @_ @CodexAuthFailed
+                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                                runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                                    initialPrevious persist projectRoot Nothing agentsContext interrupt
+                                    (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                            >>= \case
+                                Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                                Right result -> pure result
+                    XAIProvider -> do
+                        xaiOptions <- XAI.clientOptionsFromEnv
+                        let backend =
+                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                    (readIORef paramsRef) transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext interrupt backend
+                    OpenRouterProvider -> do
+                        openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                        let backend =
+                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                    (readIORef paramsRef) transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                            initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext interrupt backend
 
 preparePersistence
     :: CliOptions
@@ -426,9 +439,10 @@ runSession
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
+    -> InterruptState
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext interrupt backend = do
     printed <- newIORef False
     escPaused <- newIORef False
     textBuffer <- newIORef ""
@@ -467,13 +481,13 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused text [UserMessage text]
+                planMode agentsContext escPaused interrupt text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+                transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused interrupt
 
 repl
     :: LoopConfig
@@ -490,8 +504,9 @@ repl
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> InterruptState
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused interrupt = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -508,14 +523,18 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    mline <- readReplLine chromePrompt
+    mline <- readReplLine interrupt chromePrompt
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
-        Nothing -> do
+        ReplEof -> do
             putStrLn ""
             pure DevQuit
-        Just line ->
+        ReplQuitInterrupt ->
+            -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
+            -- the --resume hint and the process exits.
+            throwIO UserInterrupt
+        ReplText line ->
             let stripped = Text.strip line
             in if Text.null stripped
                 then continue
@@ -525,7 +544,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist planMode agentsContext escPaused text
+                            transcriptRef persist planMode agentsContext escPaused interrupt text
                             [UserMessage text]
                         putTrailingNewline printed
                         continue
@@ -548,7 +567,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                         (glyphOk <> "pasted " <> image.imageMime <> " (" <> size <> ")"))
                                 writeIORef printed False
                                 _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext escPaused promptText
+                                    transcriptRef persist planMode agentsContext escPaused interrupt promptText
                                     [ UserMultimodal
                                         { userText = promptText
                                         , userImages = [image]
@@ -615,7 +634,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash planMode persist maybeDescription
-                            config render previous printed transcriptRef agentsContext escPaused
+                            config render previous printed transcriptRef agentsContext escPaused interrupt
                         continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -644,7 +663,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused
+            transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused interrupt
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -710,9 +729,10 @@ enterPlanFromSlash
     -> IORef [ResponseItem]
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> InterruptState
     -> IO ()
 enterPlanFromSlash planMode persist maybeDescription config render previous printed
-    transcriptRef agentsContext escPaused = do
+    transcriptRef agentsContext escPaused interrupt = do
     color <- resolveColor stderr
     case persist of
         Just slotRef -> do
@@ -736,7 +756,7 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused description [UserMessage description]
+                planMode agentsContext escPaused interrupt description [UserMessage description]
             putTrailingNewline printed
 
 runOneTurn
@@ -749,10 +769,12 @@ runOneTurn
     -> PlanModeEnv
     -> IORef (Maybe Text)
     -> IORef Bool
+    -> InterruptState
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused promptText inputs =
+runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt promptText inputs =
+  withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
@@ -852,7 +874,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Just notes -> do
                     writeIORef printed False
                     _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext escPaused notes [UserMessage notes]
+                        planMode agentsContext escPaused interrupt notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)

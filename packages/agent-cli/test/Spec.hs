@@ -7,8 +7,10 @@ import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.InputSpec as InputSpec
+import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
@@ -25,8 +27,10 @@ main = hspec do
     ClipboardSpec.spec
     CommandSpec.spec
     InputSpec.spec
+    InterruptSpec.spec
     MarkdownSpec.spec
     OptionsSpec.spec
+    PlanSpec.spec
     ProjectSpec.spec
     PromptSpec.spec
     RenderSpec.spec

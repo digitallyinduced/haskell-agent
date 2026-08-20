@@ -7,20 +7,23 @@ module Agent.CLI.Plan
     , parsePlanDecisionAnswer
     ) where
 
-import Agent.CLI.Input (readApprovalLine, readReplLine)
+import Agent.CLI.Input (ReplLine(..), readApprovalLine, readReplLine)
+import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess, roleWarn)
 import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
+import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (throwIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
 
-cliPlanHooks :: IO Bool -> PlanModeHooks
-cliPlanHooks resolveColor = PlanModeHooks
+cliPlanHooks :: InterruptState -> IO Bool -> PlanModeHooks
+cliPlanHooks interrupt resolveColor = PlanModeHooks
     { planConfirmEnter = confirmEnter resolveColor
-    , planDecideExit = decideExit resolveColor
-    , planAskQuestion = askQuestion resolveColor
+    , planDecideExit = decideExit interrupt resolveColor
+    , planAskQuestion = askQuestion interrupt resolveColor
     }
 
 confirmEnter :: IO Bool -> Text -> IO Bool
@@ -37,8 +40,8 @@ confirmEnter resolveColor reason = do
                 Just raw ->
                     pure $ Text.toLower (Text.strip raw) `elem` ["y", "yes"]
 
-decideExit :: IO Bool -> Text -> IO PlanDecision
-decideExit resolveColor planBody = do
+decideExit :: InterruptState -> IO Bool -> Text -> IO PlanDecision
+decideExit interrupt resolveColor planBody = do
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
@@ -48,10 +51,10 @@ decideExit resolveColor planBody = do
     putTextLn stderr (roleMuted color "──────────")
     if not isTty
         then pure PlanCancel
-        else promptDecision color
+        else promptDecision interrupt color
 
-promptDecision :: Bool -> IO PlanDecision
-promptDecision color = do
+promptDecision :: InterruptState -> Bool -> IO PlanDecision
+promptDecision interrupt color = do
     let question =
             roleWarn color
                 "Plan: [a]pprove / [s] request changes / [q] cancel? "
@@ -65,27 +68,28 @@ promptDecision color = do
                 putTextLn stderr (roleMuted color "plan cancelled")
                 pure PlanCancel
             Just (PlanRequestChanges _) -> do
-                notes <- readChangeNotes color
+                notes <- readChangeNotes interrupt color
                 pure (PlanRequestChanges notes)
             Nothing -> do
                 putTextLn stderr (roleMuted color "enter a, s, or q")
-                promptDecision color
+                promptDecision interrupt color
 
-readChangeNotes :: Bool -> IO Text
-readChangeNotes color = do
+readChangeNotes :: InterruptState -> Bool -> IO Text
+readChangeNotes interrupt color = do
     let chrome =
             rolePrompt color "changes> "
                 <> if color
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    readReplLine chrome >>= \case
-        Nothing -> pure "(no notes)"
-        Just text
+    readReplLine interrupt chrome >>= \case
+        ReplEof -> pure "(no notes)"
+        ReplQuitInterrupt -> throwIO UserInterrupt
+        ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
 
-askQuestion :: IO Bool -> Text -> [Text] -> IO (Maybe Text)
-askQuestion resolveColor question options = do
+askQuestion :: InterruptState -> IO Bool -> Text -> [Text] -> IO (Maybe Text)
+askQuestion interrupt resolveColor question options = do
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr (roleMuted color question)
@@ -106,13 +110,13 @@ askQuestion resolveColor question options = do
                         <> if color
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            readReplLine chrome >>= \case
-                Nothing -> pure Nothing
-                Just text
+            readReplLine interrupt chrome >>= \case
+                ReplEof -> pure Nothing
+                ReplQuitInterrupt -> throwIO UserInterrupt
+                ReplText text
                     | Text.null (Text.strip text) -> pure Nothing
                     | otherwise ->
                         pure (Just (resolveChoice options (Text.strip text)))
-
 resolveChoice :: [Text] -> Text -> Text
 resolveChoice options answer =
     case reads (Text.unpack answer) of
