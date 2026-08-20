@@ -171,6 +171,7 @@ toolDetail call = case call.name of
     "search_replace" -> jsonField "file_path" call.arguments
     "grep" -> jsonField "pattern" call.arguments
     "run_terminal_cmd" -> firstLine (jsonField "command" call.arguments)
+    "run_ghci" -> firstLine (jsonField "expression" call.arguments)
     "shell_command" -> firstLine (jsonField "command" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"

@@ -23,6 +23,32 @@ spec = do
                         MessageContentParts [InputTextPart "hello" Nothing KeyMap.empty]
                 other -> expectationFailure ("expected one user message, got " <> show other)
 
+        it "encodes multimodal turns as input_text plus input_image data URLs" do
+            let image = ImageAttachment "image/png" "png-bytes"
+            case turnInputsToItems
+                    [UserMultimodal "see this" [image]] of
+                [MessageItem message] -> do
+                    message.role `shouldBe` RoleUser
+                    case message.content of
+                        MessageContentParts
+                            [ InputTextPart text Nothing _
+                            , InputImagePart
+                                { detail
+                                , fileId
+                                , imageUrl
+                                }
+                            ] -> do
+                            text `shouldBe` "see this"
+                            detail `shouldBe` Just "auto"
+                            fileId `shouldBe` Nothing
+                            imageUrl `shouldBe`
+                                Just "data:image/png;base64,cG5nLWJ5dGVz"
+                        other ->
+                            expectationFailure
+                                ("expected text+image parts, got " <> show other)
+                other ->
+                    expectationFailure ("expected one user message, got " <> show other)
+
         it "encodes function results as function_call_output strings" do
             let items = turnInputsToItems
                     [CompletedTool (functionResult "c1" "echoed")]

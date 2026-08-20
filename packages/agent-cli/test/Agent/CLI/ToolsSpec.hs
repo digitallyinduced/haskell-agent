@@ -56,6 +56,7 @@ jsonTool = AppTool
     , appToolHandler = noArgsTool "read_file" (pure (Right "ok"))
     , appToolKind = JsonFunction
     , appToolReadOnly = True
+    , appToolIsReadOnlyCall = Nothing
     }
 
 patchTool :: AppTool
@@ -66,6 +67,7 @@ patchTool = AppTool
     , appToolHandler = noArgsTool "apply_patch" (pure (Right "ok"))
     , appToolKind = FreeformApplyPatch
     , appToolReadOnly = False
+    , appToolIsReadOnlyCall = Nothing
     }
 
 required_ :: FunctionTool -> Maybe Aeson.Value

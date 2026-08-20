@@ -127,6 +127,34 @@ spec = do
             classifyFailure 503 Nothing "unavailable"
                 `shouldBe` HttpError 503 "unavailable"
 
+        it "types capacity pressure as OverloadedError with a 30s retry" do
+            let body =
+                    "The model is currently at capacity due to high demand. \
+                    \Please try again in a few minutes, or use a higher service \
+                    \tier for priority processing: \
+                    \https://docs.x.ai/developers/advanced-api-usage/priority-processing"
+            classifyFailure 503 Nothing body
+                `shouldBe` ProviderError OverloadedError body (Just 30)
+            classifyFailure 429 (Just 12) body
+                `shouldBe` ProviderError OverloadedError body (Just 12)
+
+    describe "classifyStreamError" do
+        it "types unstructured capacity stream errors as OverloadedError" do
+            let message =
+                    "The model is currently at capacity due to high demand. \
+                    \Please try again in a few minutes, or use a higher service \
+                    \tier for priority processing"
+                streamError = ResponseStreamError
+                    { errorType = Nothing
+                    , code = Nothing
+                    , message
+                    , param = Nothing
+                    , retryAfter = Nothing
+                    , extraFields = mempty
+                    }
+            classifyStreamError streamError
+                `shouldBe` ProviderError OverloadedError message (Just 30)
+
     describe "SSE assembly" do
         it "decodes typed event constructors and builds the merged final response" do
             let sse = Text.intercalate ""

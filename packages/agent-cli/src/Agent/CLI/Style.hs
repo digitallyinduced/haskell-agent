@@ -18,6 +18,8 @@ module Agent.CLI.Style
     , roleWarn
     , roleMuted
     , roleSuccess
+    , cliWindowTitle
+    , setCliWindowTitle
     ) where
 
 import Data.Text (Text)
@@ -28,11 +30,14 @@ import System.Console.ANSI
     , ConsoleIntensity(..)
     , ConsoleLayer(..)
     , SGR(..)
+    , hSetTitle
     )
 import System.Console.ANSI.Codes
     ( clearFromCursorToLineEndCode
     , setSGRCode
     )
+import System.FilePath (takeFileName)
+import System.IO (Handle)
 
 -- | Deep navy strip behind the REPL prompt and typed input.
 userBackground :: [SGR]
@@ -143,3 +148,18 @@ roleSuccess color =
     style color
         [ SetColor Foreground Dull Green
         ]
+
+-- | Window title: session name when known, otherwise the working directory.
+cliWindowTitle :: FilePath -> Maybe Text -> Text
+cliWindowTitle cwd sessionTitle =
+    case sessionTitle of
+        Just title
+            | not (Text.null title)
+            , title /= "untitled" -> title
+        _ -> Text.pack (takeFileName cwd)
+
+-- | Set the terminal window title when @tty@ is 'True'; no-op otherwise.
+setCliWindowTitle :: Bool -> Handle -> Text -> IO ()
+setCliWindowTitle tty handle title
+    | not tty = pure ()
+    | otherwise = hSetTitle handle (Text.unpack title)

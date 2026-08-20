@@ -42,3 +42,16 @@ spec = do
             -- Background may share an SGR sequence with bold/cyan attrs.
             out `shouldSatisfy` Text.isInfixOf "48;5;17"
             out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;5;17m"
+
+    describe "cliWindowTitle" do
+        it "uses the cwd basename when no session title is set" do
+            cliWindowTitle "/tmp/haskell-agent" Nothing
+                `shouldBe` "haskell-agent"
+
+        it "prefers a real session title over cwd" do
+            cliWindowTitle "/tmp/haskell-agent" (Just "fix the title")
+                `shouldBe` "fix the title"
+
+        it "ignores untitled placeholders" do
+            cliWindowTitle "/tmp/haskell-agent" (Just "untitled")
+                `shouldBe` "haskell-agent"

@@ -23,6 +23,7 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Control.Applicative ((<|>))
+import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Grok.Shell
     ( GrokSession(..)
     , closeGrokSession
@@ -46,6 +47,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     )
 import Data.Aeson (FromJSON(..), Object)
+import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Parser)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -58,8 +60,9 @@ import System.FilePath (takeExtension, (</>))
 import System.Process (readProcessWithExitCode)
 
 -- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash, get_task_output, kill_task}.
-grokTools :: GrokSession -> [AppTool]
-grokTools session =
+-- Local extension: run_ghci (persistent GHCi with per-call purity approval).
+grokTools :: GrokSession -> GhciSession -> [AppTool]
+grokTools session ghci =
     let env = session.grokEnv
     in
         [ readFileTool env
@@ -67,6 +70,7 @@ grokTools session =
         , listDirTool env
         , searchReplaceTool env
         , runTerminalCmdTool session
+        , runGhciTool ghci
         , getTaskOutputTool session
         , killTaskTool session
         ]
@@ -85,6 +89,7 @@ jsonTool name description parameters readOnly handler = AppTool
     , appToolHandler = handler
     , appToolKind = JsonFunction
     , appToolReadOnly = readOnly
+    , appToolIsReadOnlyCall = Nothing
     }
 
 --------------------------------------------------------------------------------

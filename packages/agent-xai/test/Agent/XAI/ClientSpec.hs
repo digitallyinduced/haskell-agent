@@ -1,11 +1,12 @@
 -- | Functional tests for the xAI client against an in-process HTTP mock.
 module Agent.XAI.ClientSpec (spec) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenAI.Responses.Types
+import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
@@ -68,6 +69,69 @@ spec = do
 
             requests <- readIORef recorded
             length requests `shouldBe` 1
+
+        it "retries capacity stream errors before returning success" do
+            recorded <- newIORef []
+            attempts <- newIORef (0 :: Int)
+            let capacityMessage :: Text
+                capacityMessage =
+                    "The model is currently at capacity due to high demand. \
+                    \Please try again in a few minutes, or use a higher service \
+                    \tier for priority processing"
+                handler _request = do
+                    n <- atomicModifyIORef' attempts \i -> (i + 1, i + 1)
+                    pure $ if n == 1
+                        then sseResponse
+                            [ sseEvent "error" $ Aeson.object
+                                [ "type" Aeson..= ("error" :: Text)
+                                , "error" Aeson..= Aeson.object
+                                    [ "message" Aeson..= capacityMessage
+                                    ]
+                                ]
+                            ]
+                        else sseResponse
+                            [ outputItemDone (assistantMessage "hello after capacity")
+                            , completedEvent "resp-retry" []
+                            ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWithEventsPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    options
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                    (const (pure ()))
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-retry"
+
+            requests <- readIORef recorded
+            length requests `shouldBe` 2
+
+        it "retries capacity Left values under a zero-delay policy" do
+            let capacity = ProviderError OverloadedError
+                    "The model is currently at capacity due to high demand"
+                    (Just 30)
+            responses <- newIORef
+                [ Left capacity
+                , Left capacity
+                , Right ("completed" :: Text)
+                ]
+            result <- retryTransientXaiResultWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                (atomicModifyIORef' responses \case
+                    next : rest -> (rest, next)
+                    [] -> error "unexpected extra xAI request")
+            result `shouldBe` Right "completed"
+            readIORef responses `shouldReturn` []
+
+        it "does not retry quota errors" do
+            attempts <- newIORef (0 :: Int)
+            let quota = ProviderError UsageLimitReached "quota" (Just 3600)
+            result <- retryTransientXaiResultWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                (modifyIORef' attempts (+ 1)
+                    >> pure (Left quota :: Either ApiError Text))
+            result `shouldBe` Left quota
+            readIORef attempts `shouldReturn` 1
 
 --------------------------------------------------------------------------------
 -- Mock server

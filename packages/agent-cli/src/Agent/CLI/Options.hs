@@ -64,6 +64,8 @@ data CliOptions = CliOptions
     , optPromptFile :: !(Maybe FilePath)
     , optResume :: !(Maybe Text)
     , optSaveSession :: !Bool
+    , optAgentsMd :: !Bool
+      -- ^ Discover and inject AGENTS.md at session start (default: True).
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -80,6 +82,7 @@ defaultCliOptions = CliOptions
     , optPromptFile = Nothing
     , optResume = Nothing
     , optSaveSession = False
+    , optAgentsMd = True
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -93,12 +96,15 @@ isOneShot :: CliOptions -> Bool
 isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
--- @--no-yolo@ is set. Interactive sessions prompt on mutating tools.
-resolveApprovalPolicy :: CliOptions -> Bool -> ApprovalPolicy
-resolveApprovalPolicy options isTty
+-- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
+-- project settings already enabled auto-approve (and @--no-yolo@ was not set).
+resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
+resolveApprovalPolicy options isTty projectAutoApprove
     | options.optYolo && not options.optNoYolo = ApproveAll
     | options.optNoYolo && not isTty = DenyMutating
     | not isTty = ApproveAll
+    | options.optNoYolo = PromptMutating
+    | projectAutoApprove = ApproveAll
     | otherwise = PromptMutating
 
 parseArgs :: [String] -> Either String Command
@@ -156,6 +162,10 @@ parseOptions options = \case
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->
         parseOptions options { optSaveSession = True } rest
+    "--agents-md" : rest ->
+        parseOptions options { optAgentsMd = True } rest
+    "--no-agents-md" : rest ->
+        parseOptions options { optAgentsMd = False } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -207,6 +217,8 @@ usage = unlines
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
     , "      --save-session      Persist a one-shot (-p) run as a session"
+    , "      --agents-md         Discover and inject AGENTS.md (default)"
+    , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
@@ -218,6 +230,12 @@ usage = unlines
     , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model [NAME] shows or changes the model."
-    , "/always-approve (or :yolo) toggles auto-approve."
-    , "/session prints the current session id. Ctrl-D or :q exits."
+    , "/always-approve (or :yolo) toggles auto-approve and saves it under"
+    , "<project>/.haskell-agent/settings.json (answering a at a permission"
+    , "prompt does the same). /paste [TEXT] sends the clipboard image (macOS)"
+    , "with an optional caption. /session prints the current session id."
+    , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
+    , "auth failures also reload once and retry automatically."
+    , "Ctrl-D or :q exits."
+    , "Ctrl-C prints a --resume command when a session has been persisted."
     ]

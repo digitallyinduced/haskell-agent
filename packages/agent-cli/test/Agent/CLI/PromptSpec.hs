@@ -42,8 +42,9 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
         grok `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
         openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
-        grok `shouldSatisfy` Text.isInfixOf "stdin or -e"
-        openai `shouldSatisfy` Text.isInfixOf "stdin or -e"
+        grok `shouldSatisfy` Text.isInfixOf "run_ghci"
+        openai `shouldSatisfy` Text.isInfixOf "run_ghci"
+        grok `shouldSatisfy` Text.isInfixOf "Pure expressions do not need user approval"
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.5"

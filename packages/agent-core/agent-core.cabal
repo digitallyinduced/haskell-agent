@@ -35,6 +35,7 @@ library
                     , Agent.Provider
                     , Agent.Broker
                     , Agent.Loop
+                    , Agent.ProjectInstructions
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -44,6 +45,7 @@ library
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.Shell
+                    , Agent.Tools.Ghci
                     , Agent.Tools.IO
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
@@ -72,10 +74,12 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.ErrorSpec
                     , Agent.LoopSpec
+                    , Agent.ProjectInstructionsSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
                     , Agent.Tools.GrokSpec
+                    , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec

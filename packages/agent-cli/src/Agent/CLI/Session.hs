@@ -12,6 +12,7 @@ module Agent.CLI.Session
     , sessionTitleFromPrompt
     , writeSessionMeta
     , ensureSession
+    , resumeHint
     ) where
 
 import Agent.OpenAI.Responses.Types (ResponseItem)
@@ -23,7 +24,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.List (sortOn)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -247,6 +248,19 @@ sessionTitleFromPrompt prompt =
     in if Text.length oneLine <= 72
         then oneLine
         else Text.take 69 oneLine <> "..."
+
+-- | Copy-pasteable resume line printed on Ctrl-C, matching grok build.
+resumeHint :: String -> Text -> Text
+resumeHint progName sessionId =
+    "Resume this session with: "
+        <> shellSingleQuote progName
+        <> " --resume "
+        <> sessionId
+
+-- | POSIX single-quote so paths with spaces stay one shell word.
+shellSingleQuote :: String -> Text
+shellSingleQuote s =
+    "'" <> Text.replace "'" "'\\''" (Text.pack s) <> "'"
 
 allocateSessionDir :: FilePath -> UTCTime -> IO (Text, FilePath)
 allocateSessionDir root now = go (0 :: Int)
