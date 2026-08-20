@@ -33,6 +33,9 @@ import Agent.CLI.Style
     ( beginBackground
     , cliWindowTitle
     , endBackground
+    , glyphOk
+    , glyphSession
+    , glyphWarn
     , roleError
     , roleMuted
     , rolePrompt
@@ -211,7 +214,7 @@ runAgent options = do
             | options.optWorktree -> do
                 createWorktree source (worktreeRoot home) >>= either die \path -> do
                     color <- resolveColor stderr
-                    putTextLn stderr (roleMuted color ("worktree: " <> Text.pack path))
+                    putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> Text.pack path))
                     pure path
             | otherwise -> pure source
     setCurrentDirectory cwd
@@ -312,7 +315,7 @@ preparePersistence options root provider model cwd effort prompt resumed =
             color <- resolveColor stderr
             putTextLn stderr
                 (roleMuted color
-                    ("session: " <> meta.metaId <> " (resumed)"))
+                    (glyphSession <> "session: " <> meta.metaId <> " (resumed)"))
             Just <$> newIORef (Right handle)
         Nothing
             | shouldPersist options ->
@@ -495,7 +498,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                 color <- resolveColor stdout
                                 Text.putStrLn
                                     (roleMuted color
-                                        ("pasted " <> image.imageMime <> " (" <> size <> ")"))
+                                        (glyphOk <> "pasted " <> image.imageMime <> " (" <> size <> ")"))
                                 writeIORef printed False
                                 _ <- runOneTurn config render previous printed
                                     transcriptRef persist agentsContext escPaused promptText
@@ -509,12 +512,12 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
-                        Text.putStrLn (roleMuted color ("effort: " <> currentEffort params))
+                        Text.putStrLn (roleMuted color (glyphSession <> "effort: " <> currentEffort params))
                         continue
                     ReplSetEffort level -> do
                         color <- resolveColor stdout
                         modifyIORef' paramsRef (setReasoningEffort level)
-                        Text.putStrLn (roleMuted color ("effort set to " <> level))
+                        Text.putStrLn (roleMuted color (glyphOk <> "effort set to " <> level))
                         case persist of
                             Nothing -> pure ()
                             Just slotRef -> do
@@ -531,7 +534,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplShowModel -> do
                         params <- readIORef paramsRef
-                        Text.putStrLn ("model: " <> currentModel params)
+                        Text.putStrLn (glyphSession <> "model: " <> currentModel params)
                         continue
                     ReplSetModel name -> do
                         modifyIORef' paramsRef (setModel name)
@@ -542,9 +545,9 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                             _ -> pure False
                         if clearedChain
                             then Text.putStrLn
-                                ("model set to " <> name
+                                (glyphOk <> "model set to " <> name
                                     <> " (conversation continued locally)")
-                            else Text.putStrLn ("model set to " <> name)
+                            else Text.putStrLn (glyphOk <> "model set to " <> name)
                         case persist of
                             Nothing -> pure ()
                             Just slotRef -> do
@@ -566,18 +569,18 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         color <- resolveColor stdout
                         case persist of
                             Nothing ->
-                                Text.putStrLn (roleMuted color "session: (not persisted)")
+                                Text.putStrLn (roleMuted color (glyphSession <> "session: (not persisted)"))
                             Just slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
                                     Left _ ->
                                         Text.putStrLn
                                             (roleMuted color
-                                                "session: (pending until first turn)")
+                                                (glyphSession <> "session: (pending until first turn)"))
                                     Right handle ->
                                         Text.putStrLn
                                             (roleMuted color
-                                                ("session: " <> handle.sessionMeta.metaId))
+                                                (glyphSession <> "session: " <> handle.sessionMeta.metaId))
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
@@ -618,7 +621,7 @@ reloadAuth provider = \case
             Right credential -> do
                 color <- resolveColor stdout
                 Text.putStrLn $ roleSuccess color $
-                    "auth reloaded ("
+                    glyphOk <> "auth reloaded ("
                         <> providerSlug provider
                         <> " account "
                         <> credential.accountId
@@ -641,7 +644,7 @@ requestReload persist = do
             writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
-                    ("reloading; session " <> handle.sessionMeta.metaId))
+                    (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
             pure DevReload
 
 runOneTurn
@@ -702,7 +705,7 @@ runOneTurn config render previous printed transcriptRef persist agentsContext es
                             color <- resolveColor stderr
                             putTextLn stderr
                                 (roleMuted color
-                                    ("session: " <> handle.sessionMeta.metaId))
+                                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
@@ -748,7 +751,7 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color
-                        ("agents.md: loaded "
+                        (glyphSession <> "agents.md: loaded "
                             <> Text.pack (show (length files))
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
@@ -785,7 +788,7 @@ approveTool policyRef tools call projectRoot = do
             | otherwise -> do
                 color <- resolveColor stderr
                 let question =
-                        roleWarn color ("Allow " <> summarizeToolCall call <> "? [y/N/a] ")
+                        roleWarn color (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
                 readApprovalLine question >>= \case
                     Nothing -> pure False
                     Just raw -> case parseApprovalAnswer raw of
@@ -794,7 +797,7 @@ approveTool policyRef tools call projectRoot = do
                             writeIORef policyRef ApproveAll
                             saveProjectAutoApprove projectRoot True
                             putTextLn stderr
-                                (roleSuccess color "auto-approve on (saved for project)")
+                                (roleSuccess color (glyphOk <> "auto-approve on (saved for project)"))
                             pure True
                         Deny -> pure False
 
@@ -807,8 +810,8 @@ toggleAlwaysApprove policyRef projectRoot = do
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color "auto-approve on (saved for project)"
-        _ -> roleMuted color "auto-approve off (saved for project)")
+        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
+        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

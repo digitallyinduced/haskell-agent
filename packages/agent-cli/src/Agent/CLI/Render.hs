@@ -15,6 +15,11 @@ module Agent.CLI.Render
 import Agent.CLI.Markdown (renderMarkdown)
 import Agent.CLI.Style
     ( agentBackground
+    , glyphCancel
+    , glyphErr
+    , glyphThink
+    , glyphTool
+    , glyphToolOut
     , paintBackgroundLines
     , roleError
     , roleMuted
@@ -124,7 +129,7 @@ showThinkingUnlocked config
             then pure ()
             else do
                 Text.hPutStr config.renderStderr
-                    (roleThinking config.renderColor "thinking…")
+                    (roleThinking config.renderColor (glyphThink <> "thinking…"))
                 hFlush config.renderStderr
                 writeIORef config.renderThinkingVisible True
 
@@ -159,7 +164,7 @@ summarizeToolCall call =
 formatToolStarted :: Bool -> ToolCall -> Text
 formatToolStarted color call =
     let detail = toolDetail call
-        arrow = roleToolArrow color "→ "
+        arrow = roleToolArrow color glyphTool
         name = roleToolName color call.name
     in if Text.null detail
         then arrow <> name
@@ -202,7 +207,9 @@ truncateToolOutput output =
         shortened
             | Text.length line <= 160 = line
             | otherwise = Text.take 157 line <> "..."
-    in if Text.null shortened then "(empty)" else shortened
+    in if Text.null shortened
+        then glyphToolOut <> "(empty)"
+        else glyphToolOut <> shortened
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')
@@ -214,11 +221,11 @@ formatLoopError = formatLoopErrorColored False
 formatLoopErrorColored :: Bool -> LoopError -> Text
 formatLoopErrorColored color = \case
     LoopTransport err ->
-        roleError color ("transport error: " <> Text.pack (show err))
+        roleError color (glyphErr <> "transport error: " <> Text.pack (show err))
     LoopMaxTurns turn ->
-        roleError color "stopped: max turns reached"
+        roleError color (glyphErr <> "stopped: max turns reached")
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
     LoopNoResponseId ->
-        roleError color "transport error: response had no id"
+        roleError color (glyphErr <> "transport error: response had no id")
     LoopCancelled _ ->
-        roleMuted color "cancelled"
+        roleMuted color (glyphCancel <> "cancelled")

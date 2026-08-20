@@ -21,6 +21,14 @@ module Agent.CLI.Style
     , roleWarn
     , roleMuted
     , roleSuccess
+    , glyphTool
+    , glyphToolOut
+    , glyphOk
+    , glyphErr
+    , glyphWarn
+    , glyphCancel
+    , glyphSession
+    , glyphThink
     , solarizedCyan
     , solarizedMagenta
     , solarizedYellow
@@ -185,6 +193,17 @@ roleSuccess color =
     style color
         [ fg solarizedGreen
         ]
+
+-- | Shared Unicode chrome for TTY status lines.
+glyphTool, glyphToolOut, glyphOk, glyphErr, glyphWarn, glyphCancel, glyphSession, glyphThink :: Text
+glyphTool = "▸ "
+glyphToolOut = "┊ "
+glyphOk = "✓ "
+glyphErr = "✗ "
+glyphWarn = "⚠ "
+glyphCancel = "⊘ "
+glyphSession = "⧉ "
+glyphThink = "◌ "
 
 -- | Window title: session name when known, otherwise the working directory.
 cliWindowTitle :: FilePath -> Maybe Text -> Text
