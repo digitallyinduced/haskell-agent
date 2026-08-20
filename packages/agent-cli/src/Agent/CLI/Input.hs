@@ -25,7 +25,7 @@ import System.Directory
     , getHomeDirectory
     )
 import System.FilePath (takeDirectory, (</>))
-import System.IO (hFlush, hIsTerminalDevice, isEOF, stdin, stdout)
+import System.IO (hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
 import System.Posix.Files (setFileMode)
 import System.Posix.Types (FileMode)
 
@@ -34,7 +34,7 @@ replHistoryPath :: FilePath -> FilePath
 replHistoryPath home = home </> ".haskell-agent" </> "history"
 
 -- | Read a REPL prompt line. Persists history under 'replHistoryPath' when
--- stdin is a TTY. 'Nothing' means EOF.
+-- stdin is a TTY. 'Nothing' means EOF. The prompt is drawn on stdout.
 readReplLine :: Text -> IO (Maybe Text)
 readReplLine prompt = do
     isTty <- hIsTerminalDevice stdin
@@ -49,20 +49,21 @@ readReplLine prompt = do
                     , autoAddHistory = True
                     }
                 prompt
-        else readPlainLine prompt
+        else do
+            Text.hPutStr stdout prompt
+            hFlush stdout
+            readAnswerOnly
 
--- | Read a one-shot approval answer without touching REPL history.
+-- | Read a one-shot approval answer. The question is always written to
+-- stderr (matching the pre-haskeline behavior) so redirected stdout does
+-- not swallow the prompt. Uses cooked 'getLine' so answer echo stays on
+-- the controlling TTY rather than haskeline's stdout handle. Does not
+-- touch REPL history.
 readApprovalLine :: Text -> IO (Maybe Text)
 readApprovalLine prompt = do
-    isTty <- hIsTerminalDevice stdin
-    if isTty
-        then readEditedLine
-            defaultSettings
-                { historyFile = Nothing
-                , autoAddHistory = False
-                }
-            prompt
-        else readPlainLine prompt
+    Text.hPutStr stderr prompt
+    hFlush stderr
+    readAnswerOnly
 
 readEditedLine :: Settings IO -> Text -> IO (Maybe Text)
 readEditedLine settings prompt =
@@ -73,10 +74,8 @@ readEditedLine settings prompt =
             withInterrupt $
                 fmap (fmap Text.pack) (getInputLine (Text.unpack prompt))
 
-readPlainLine :: Text -> IO (Maybe Text)
-readPlainLine prompt = do
-    Text.putStr prompt
-    hFlush stdout
+readAnswerOnly :: IO (Maybe Text)
+readAnswerOnly = do
     done <- isEOF
     if done
         then pure Nothing
