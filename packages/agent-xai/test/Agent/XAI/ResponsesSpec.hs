@@ -100,6 +100,10 @@ spec = do
                 >>= (`shouldBe` Just (Aeson.String "medium"))
             effortOf (withEffort "low" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "low"))
+            effortOf (withEffort "xhigh" sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "high"))
+            effortOf (withEffort "max" sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "high"))
             -- Unset effort defaults to high for Grok.
             effortOf (clearEffort sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))

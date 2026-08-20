@@ -28,8 +28,10 @@ spec = do
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
 
         it "sets a valid effort level" do
+            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
             parseReplLine "/effort high" `shouldBe` ReplSetEffort "high"
             parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
+            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort "max"
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
 
         it "toggles always-approve from slash and colon aliases" do
@@ -128,9 +130,10 @@ spec = do
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
-                    "effort must be low, medium, high, or xhigh (got bogus)"
+                    "effort must be none, low, medium, high, xhigh, or max (got bogus)"
             parseReplLine "/effort high extra"
-                `shouldBe` ReplCommandError "usage: /effort [low|medium|high|xhigh]"
+                `shouldBe` ReplCommandError
+                    "usage: /effort [none|low|medium|high|xhigh|max]"
             parseReplLine "/bogus"
                 `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
             parseReplLine "/"
@@ -170,6 +173,8 @@ spec = do
 
         it "completes effort and model arguments" do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
+            slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
+            slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
             slashCompletionCandidates "m/" "grok-4"
                 `shouldSatisfy` (\xs ->
                     "grok-4.6" `elem` xs
@@ -187,7 +192,8 @@ spec = do
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
-                `shouldSatisfy` ("/effort [low|medium|high|xhigh]" `isInfixOf`)
+                `shouldSatisfy`
+                    ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

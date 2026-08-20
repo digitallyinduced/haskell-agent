@@ -14,7 +14,7 @@ module Agent.CLI.Command
     ) where
 
 import Agent.CLI.Models (catalogModelIds)
-import Agent.CLI.Options (parseEffort)
+import Agent.CLI.Options (parseEffort, reasoningEfforts)
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.OpenAI.Responses.Types
 
@@ -71,7 +71,7 @@ slashCommands :: [SlashCommand]
 slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one"
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
-    , cmd "effort" [] "/effort [low|medium|high|xhigh]" "Show or set reasoning effort"
+    , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort"
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
@@ -212,7 +212,7 @@ parseEffortCommand = \case
     [level] -> case parseEffort level of
         Right effort -> ReplSetEffort effort
         Left err -> ReplCommandError (Text.pack err)
-    _ -> ReplCommandError "usage: /effort [low|medium|high|xhigh]"
+    _ -> ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
 
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
@@ -323,7 +323,7 @@ completeSlashArgs cmd word =
 
 argCompletions :: SlashCommand -> [Text]
 argCompletions spec = case spec.slashName of
-    "effort" -> ["low", "medium", "high", "xhigh"]
+    "effort" -> reasoningEfforts
     "model" -> catalogModelIds
     "help" -> map (.slashName) slashCommands
     "paste" -> ["--send"]
