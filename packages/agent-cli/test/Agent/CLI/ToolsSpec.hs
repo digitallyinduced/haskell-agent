@@ -10,7 +10,9 @@ import Agent.Tools.Types (AppTool(..), AppToolKind(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Foldable (toList)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -47,8 +49,12 @@ spec = describe "schemasFromAppTools" do
                 case KeyMap.lookup "format" tagged.fields of
                     Just (Aeson.Object format) -> do
                         KeyMap.lookup "syntax" format `shouldBe` Just (Aeson.String "lark")
-                        KeyMap.lookup "definition" format
-                            `shouldBe` Just (Aeson.String applyPatchGrammar)
+                        let definition = KeyMap.lookup "definition" format
+                        definition `shouldBe` Just (Aeson.String applyPatchGrammar)
+                        definition `shouldSatisfy` \case
+                            Just (Aeson.String grammar) ->
+                                Text.isInfixOf "%import common.LF" grammar
+                            _ -> False
                     other -> expectationFailure ("expected format object, got " <> show other)
             other -> expectationFailure ("expected custom tool, got " <> show other)
 
@@ -69,6 +75,28 @@ spec = describe "schemasFromAppTools" do
                 KeyMap.lookup "name" tagged.fields
                     `shouldBe` Just (Aeson.String "collaboration")
             other -> expectationFailure ("expected namespace tool, got " <> show other)
+
+    it "omits an empty required list from reserved collaboration schemas" do
+        let wait = patchTool
+                { appToolName = "wait_agent"
+                , appToolKind = JsonFunction
+                , appToolParameters =
+                    [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
+                }
+        case schemasFromAppTools OpenAIProvider [wait] of
+            [_, KnownResponseTool ToolNamespace tagged] ->
+                case KeyMap.lookup "tools" tagged.fields of
+                    Just (Aeson.Array tools) -> case toList tools of
+                        [Aeson.Object tool] -> do
+                            Just (Aeson.Object parameters) <-
+                                pure (KeyMap.lookup "parameters" tool)
+                            KeyMap.lookup "required" parameters `shouldBe` Nothing
+                        other -> expectationFailure
+                            ("expected one nested tool, got " <> show other)
+                    other -> expectationFailure
+                        ("expected namespace tools, got " <> show other)
+            other -> expectationFailure
+                ("expected collaboration namespace, got " <> show other)
 
 jsonTool :: AppTool
 jsonTool = AppTool

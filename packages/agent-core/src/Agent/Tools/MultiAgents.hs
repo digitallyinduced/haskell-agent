@@ -17,8 +17,6 @@ import Agent.Subagents
     , encodeStatus
     , interruptSubagent
     , listAgents
-    , maxWaitTimeoutMs
-    , minWaitTimeoutMs
     , queueMessage
     , resolveAgentTarget
     , sendInput
@@ -28,7 +26,6 @@ import Agent.Subagents
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
-    , taskPathRoot
     , taskPathText
     )
 import Agent.ToolArgs
@@ -117,7 +114,6 @@ jsonTool name description parameters readOnly handler = AppTool
 data SpawnAgentArgs = SpawnAgentArgs
     { taskName :: Text
     , message :: Text
-    , agentType :: Maybe Text
     , model :: Maybe Text
     , reasoningEffort :: Maybe Text
     , forkTurns :: Maybe Text
@@ -127,7 +123,6 @@ instance FromJSON SpawnAgentArgs where
     parseJSON = objectArgs \object_ -> SpawnAgentArgs
         <$> reqText object_ "task_name"
         <*> reqText object_ "message"
-        <*> optText object_ "agent_type"
         <*> optText object_ "model"
         <*> optText object_ "reasoning_effort"
         <*> optText object_ "fork_turns"
@@ -136,16 +131,14 @@ spawnAgentTool :: MultiAgentContext -> AppTool
 spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
     [ PropertySchema "task_name" PropertyString True $ Just
         "Task name for the new agent. Use lowercase letters, digits, and underscores."
-    , PropertySchema "message" PropertyString True $ Just
-        "Initial plain-text task for the new agent."
-    , PropertySchema "agent_type" PropertyString False $ Just
-        "Optional agent type override. Omit unless explicitly asked."
+    , PropertySchema "message"
+        (encryptedString "Initial plain-text task for the new agent.") True Nothing
     , PropertySchema "model" PropertyString False $ Just
         "Model override for the new agent. Omit unless an explicit override is needed."
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Reasoning effort override for the new agent. Omit to inherit the parent effort."
     , PropertySchema "fork_turns" PropertyString False $ Just
-        "Optional number of turns to fork. Defaults to all. Use none, all, or a positive integer. Full-history fork is not supported yet; none starts fresh (the default behavior)."
+        "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
     ]
     False
     (typedTool "spawn_agent" (runSpawn ctx))
@@ -164,7 +157,7 @@ runSpawn ctx args
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
     | otherwise = do
-        _ <- pure (args.agentType, args.model, args.reasoningEffort, args.forkTurns)
+        _ <- pure (args.model, args.reasoningEffort, args.forkTurns)
         result <- spawnSubagentAt
             ctx.multiRegistry
             ctx.multiSelfId
@@ -208,16 +201,8 @@ instance FromJSON WaitAgentArgs where
 
 waitAgentTool :: MultiAgentContext -> AppTool
 waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
-    [ PropertySchema "targets" (PropertyArray PropertyString) False $ Just
-        "Optional agent task names or ids to wait on. Omit to wait for any live agent."
-    , PropertySchema "timeout_ms" PropertyInteger False $ Just $
-        "Timeout in milliseconds. Defaults to "
-            <> Text.pack (show defaultWaitTimeoutMs)
-            <> ", min "
-            <> Text.pack (show minWaitTimeoutMs)
-            <> ", max "
-            <> Text.pack (show maxWaitTimeoutMs)
-            <> "."
+    [ PropertySchema "timeout_ms" PropertyNumber False $ Just
+        "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True
     (typedTool "wait_agent" (runWait ctx))
@@ -296,8 +281,8 @@ sendMessageTool :: MultiAgentContext -> AppTool
 sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Relative or canonical task name to message (from spawn_agent)."
-    , PropertySchema "message" PropertyString True $ Just
-        "Message text to queue on the target agent."
+    , PropertySchema "message"
+        (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
     False
     (typedTool "send_message" (runSendMessage ctx))
@@ -322,8 +307,8 @@ followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
-    , PropertySchema "message" PropertyString True $ Just
-        "Message text to send to the target agent."
+    , PropertySchema "message"
+        (encryptedString "Message text to send to the target agent.") True Nothing
     ]
     False
     (typedTool "followup_task" (runFollowup ctx))
@@ -416,6 +401,13 @@ interruptDescription :: Text
 interruptDescription =
     "Interrupt an agent's current turn, if any, and return its previous status. \
     \The agent remains available for messages and follow-up tasks."
+
+encryptedString :: Text -> PropertyType
+encryptedString description = PropertyRaw $ object
+    [ "type" .= ("string" :: Text)
+    , "description" .= description
+    , "encrypted" .= True
+    ]
 
 runInterrupt :: MultiAgentContext -> InterruptAgentArgs -> IO (Either Text Text)
 runInterrupt ctx args = do
