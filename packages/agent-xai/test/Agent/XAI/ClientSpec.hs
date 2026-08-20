@@ -40,7 +40,7 @@ spec = do
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer token-a"
             lookup "X-XAI-Token-Auth" request.headers `shouldBe` Just "xai-grok-cli"
-            requestModel request `shouldBe` Just "grok-4.5"
+            requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]
 
@@ -54,7 +54,7 @@ spec = do
                         , "response" Aeson..= Aeson.object
                             [ "id" Aeson..= ("resp-failed" :: Text)
                             , "created_at" Aeson..= (0 :: Int)
-                            , "model" Aeson..= ("grok-4.5" :: Text)
+                            , "model" Aeson..= ("grok-4.6" :: Text)
                             , "status" Aeson..= ("failed" :: Text)
                             , "incomplete_details" Aeson..= Aeson.object
                                 ["reason" Aeson..= ("overloaded" :: Text)]
@@ -186,7 +186,7 @@ completedEvent responseId output = sseEvent "response.completed" $ Aeson.object
     , "response" Aeson..= Aeson.object
         [ "id" Aeson..= responseId
         , "created_at" Aeson..= (0 :: Int)
-        , "model" Aeson..= ("grok-4.5" :: Text)
+        , "model" Aeson..= ("grok-4.6" :: Text)
         , "status" Aeson..= ("completed" :: Text)
         , "output" Aeson..= output
         , "usage" Aeson..= Aeson.object

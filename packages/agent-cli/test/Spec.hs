@@ -8,6 +8,8 @@ import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
+import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
@@ -26,6 +28,8 @@ main = hspec do
     CommandSpec.spec
     InputSpec.spec
     MarkdownSpec.spec
+    ModelPickerSpec.spec
+    ModelsSpec.spec
     OptionsSpec.spec
     ProjectSpec.spec
     PromptSpec.spec

@@ -55,6 +55,6 @@ spec = describe "systemPrompt" do
         grok `shouldSatisfy` Text.isInfixOf "Pure expressions do not need user approval"
 
     it "picks the documented default models" do
-        defaultModelFor XAIProvider `shouldBe` "grok-4.5"
+        defaultModelFor XAIProvider `shouldBe` "grok-4.6"
         defaultModelFor OpenAIProvider `shouldBe` "gpt-5.6-luna"
         defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"

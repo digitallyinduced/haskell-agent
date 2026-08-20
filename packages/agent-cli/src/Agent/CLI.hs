@@ -16,6 +16,7 @@ import Agent.CLI.Clipboard
     )
 import Agent.CLI.Command
 import Agent.CLI.Input (readApprovalLine, readReplLine)
+import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Options
 import Agent.CLI.Plan
     ( cliPlanHooks
@@ -652,35 +653,24 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (Right handle { sessionMeta = meta })
                         continue
                     ReplShowModel -> do
+                        color <- resolveColor stderr
                         params <- readIORef paramsRef
-                        Text.putStrLn (glyphSession <> "model: " <> currentModel params)
-                        continue
+                        let current = currentModel params
+                        pickModel color provider current >>= \case
+                            Nothing -> continue
+                            Just name
+                                | name == current -> do
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            (glyphSession <> "model: " <> name))
+                                    continue
+                                | otherwise -> do
+                                    applyModelChange
+                                        provider name paramsRef render previous persist
+                                    continue
                     ReplSetModel name -> do
-                        modifyIORef' paramsRef (setModel name)
-                        writeIORef render.renderModelRef name
-                        clearedChain <- case provider of
-                            OpenAIProvider ->
-                                atomicModifyIORef' previous \prev ->
-                                    (Nothing, isJust prev)
-                            _ -> pure False
-                        if clearedChain
-                            then Text.putStrLn
-                                ("model set to " <> name
-                                    <> " (conversation continued locally)")
-                            else Text.putStrLn ("model set to " <> name)
-                        case persist of
-                            Nothing -> pure ()
-                            Just slotRef -> do
-                                slot <- readIORef slotRef
-                                case slot of
-                                    Left pending ->
-                                        writeIORef slotRef
-                                            (Left pending { createModel = name })
-                                    Right handle -> do
-                                        let meta = handle.sessionMeta { metaModel = name }
-                                        writeSessionMeta handle.sessionMetaPath meta
-                                        writeIORef slotRef
-                                            (Right handle { sessionMeta = meta })
+                        applyModelChange
+                            provider name paramsRef render previous persist
                         continue
                     ReplToggleAlwaysApprove -> do
                         toggleAlwaysApprove policyRef projectRoot
@@ -718,6 +708,44 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
             escPaused attachmentsRef
+
+applyModelChange
+    :: Provider
+    -> Text
+    -> IORef ResponseCreateParams
+    -> RenderConfig
+    -> IORef (Maybe Text)
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO ()
+applyModelChange provider name paramsRef render previous persist = do
+    color <- resolveColor stdout
+    modifyIORef' paramsRef (setModel name)
+    writeIORef render.renderModelRef name
+    clearedChain <- case provider of
+        OpenAIProvider ->
+            atomicModifyIORef' previous \prev ->
+                (Nothing, isJust prev)
+        _ -> pure False
+    if clearedChain
+        then Text.putStrLn
+            (roleMuted color
+                (glyphOk <> "model set to " <> name
+                    <> " (conversation continued locally)"))
+        else Text.putStrLn
+            (roleMuted color (glyphOk <> "model set to " <> name))
+    case persist of
+        Nothing -> pure ()
+        Just slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                Left pending ->
+                    writeIORef slotRef
+                        (Left pending { createModel = name })
+                Right handle -> do
+                    let meta = handle.sessionMeta { metaModel = name }
+                    writeSessionMeta handle.sessionMetaPath meta
+                    writeIORef slotRef
+                        (Right handle { sessionMeta = meta })
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case

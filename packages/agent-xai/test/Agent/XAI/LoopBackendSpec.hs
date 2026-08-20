@@ -108,7 +108,7 @@ spec = do
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
-baseParams = defaultResponseCreateParams { model = Just "grok-4.5" }
+baseParams = defaultResponseCreateParams { model = Just "grok-4.6" }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =
@@ -201,7 +201,7 @@ testResponse :: Text -> [ResponseItem] -> Response
 testResponse responseId output = case Aeson.fromJSON $ Aeson.object
     [ "id" Aeson..= responseId
     , "created_at" Aeson..= (0 :: Int)
-    , "model" Aeson..= ("grok-4.5" :: Text)
+    , "model" Aeson..= ("grok-4.6" :: Text)
     , "status" Aeson..= ("completed" :: Text)
     , "output" Aeson..= output
     ] of

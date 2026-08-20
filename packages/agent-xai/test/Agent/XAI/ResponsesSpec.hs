@@ -19,19 +19,19 @@ spec = do
     describe "mapModel" do
         it "prefers exact overrides, passes grok names through, and falls back otherwise" do
             let options = defaultClientOptions
-                    { modelOverrides = [("gpt-5.6-sol", "grok-4.5-mini")]
-                    , defaultModel = "grok-4.5"
+                    { modelOverrides = [("gpt-5.6-sol", "grok-4.6-mini")]
+                    , defaultModel = "grok-4.6"
                     }
-            mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.5-mini"
+            mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.6-mini"
             mapModel options "grok-3" `shouldBe` "grok-3"
-            mapModel options "gpt-5.6-terra" `shouldBe` "grok-4.5"
+            mapModel options "gpt-5.6-terra" `shouldBe` "grok-4.6"
 
     describe "buildRequest" do
         it "maps canonical Responses fields onto the Grok proxy dialect" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
 
-            KeyMap.lookup "model" object `shouldBe` Just (Aeson.String "grok-4.5")
+            KeyMap.lookup "model" object `shouldBe` Just (Aeson.String "grok-4.6")
             KeyMap.lookup "store" object `shouldBe` Just (Aeson.Bool False)
             KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
             KeyMap.lookup "reasoning" object `shouldBe` Just (Aeson.object
@@ -161,7 +161,7 @@ spec = do
                     [ sseBlock "response.output_item.done"
                         "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"echo\",\"arguments\":\"{}\"}}"
                     , sseBlock "response.completed"
-                        "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"created_at\":0,\"model\":\"grok-4.5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}"
+                        "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"created_at\":0,\"model\":\"grok-4.6\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}"
                     ]
             events <- expectRight (parseSseEvents sse)
             map responseStreamEventType events
@@ -174,7 +174,7 @@ spec = do
 
         it "reads the event type from the data object when no event line exists" do
             events <- expectRight $ parseSseEvents
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"created_at\":0,\"model\":\"grok-4.5\",\"status\":\"completed\"}}\n\n"
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"created_at\":0,\"model\":\"grok-4.6\",\"status\":\"completed\"}}\n\n"
             map responseStreamEventType events `shouldBe` [EventResponseCompleted]
 
         it "surfaces typed stream errors" do
@@ -185,7 +185,7 @@ spec = do
 
         it "maps response.failed and missing completion to transport-level errors" do
             failedEvents <- expectRight $ parseSseEvents $ sseBlock "response.failed"
-                "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp-f\",\"created_at\":0,\"model\":\"grok-4.5\",\"status\":\"failed\",\"incomplete_details\":{\"reason\":\"overloaded\"}}}"
+                "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp-f\",\"created_at\":0,\"model\":\"grok-4.6\",\"status\":\"failed\",\"incomplete_details\":{\"reason\":\"overloaded\"}}}"
             case buildResponse failedEvents of
                 Left (ConnectionError message) ->
                     message `shouldSatisfy` Text.isInfixOf "overloaded"
