@@ -18,14 +18,15 @@ module Agent.CLI.Session
     , readDevResumePointer
     , clearDevResumePointer
     , resumeHint
-
+    , sessionUsageFromTurns
     ) where
 
+import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
 import Control.Exception (try)
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
@@ -98,6 +99,9 @@ data SessionMeta = SessionMeta
     , metaEffort :: !Text
     , metaTitle :: !Text
     , metaLastResponseId :: !(Maybe Text)
+    , metaInputTokens :: !Int
+    , metaOutputTokens :: !Int
+    , metaCachedTokens :: !Int
     } deriving (Eq, Show)
 
 instance ToJSON SessionMeta where
@@ -112,6 +116,9 @@ instance ToJSON SessionMeta where
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
         , "lastResponseId" .= meta.metaLastResponseId
+        , "inputTokens" .= meta.metaInputTokens
+        , "outputTokens" .= meta.metaOutputTokens
+        , "cachedTokens" .= meta.metaCachedTokens
         ]
 
 instance FromJSON SessionMeta where
@@ -131,6 +138,9 @@ instance FromJSON SessionMeta where
             <*> o .: "effort"
             <*> o .: "title"
             <*> o .:? "lastResponseId"
+            <*> (o .:? "inputTokens" .!= 0)
+            <*> (o .:? "outputTokens" .!= 0)
+            <*> (o .:? "cachedTokens" .!= 0)
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
@@ -138,6 +148,7 @@ data SessionTurn = SessionTurn
     , turnAssistantText :: !(Maybe Text)
     , turnResponseId :: !(Maybe Text)
     , turnItems :: ![ResponseItem]
+    , turnUsage :: !(Maybe TokenUsage)
     } deriving (Eq, Show)
 
 instance ToJSON SessionTurn where
@@ -147,6 +158,7 @@ instance ToJSON SessionTurn where
         , "assistantText" .= turn.turnAssistantText
         , "responseId" .= turn.turnResponseId
         , "items" .= turn.turnItems
+        , "usage" .= turn.turnUsage
         ]
 
 instance FromJSON SessionTurn where
@@ -157,6 +169,7 @@ instance FromJSON SessionTurn where
             <*> o .:? "assistantText"
             <*> o .:? "responseId"
             <*> o .: "items"
+            <*> o .:? "usage"
 
 data SessionHandle = SessionHandle
     { sessionDir :: !FilePath
@@ -194,6 +207,9 @@ createSession spec = do
             , metaEffort = spec.createEffort
             , metaTitle = title
             , metaLastResponseId = Nothing
+            , metaInputTokens = 0
+            , metaOutputTokens = 0
+            , metaCachedTokens = 0
             }
         handle = SessionHandle
             { sessionDir = dir
@@ -230,6 +246,12 @@ appendTurn handle turn = do
                 if meta0.metaTitle == "untitled" && not (Text.null turn.turnUserText)
                     then sessionTitleFromPrompt turn.turnUserText
                     else meta0.metaTitle
+            , metaInputTokens =
+                meta0.metaInputTokens + maybe 0 (.inputTokens) turn.turnUsage
+            , metaOutputTokens =
+                meta0.metaOutputTokens + maybe 0 (.outputTokens) turn.turnUsage
+            , metaCachedTokens =
+                meta0.metaCachedTokens + maybe 0 (.cachedTokens) turn.turnUsage
             }
     writeSessionMeta handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
@@ -300,6 +322,18 @@ sessionTitleFromPrompt prompt =
     in if Text.length oneLine <= 72
         then oneLine
         else Text.take 69 oneLine <> "..."
+
+sessionUsageFromMeta :: SessionMeta -> TokenUsage
+sessionUsageFromMeta meta = TokenUsage
+    { inputTokens = meta.metaInputTokens
+    , outputTokens = meta.metaOutputTokens
+    , cachedTokens = meta.metaCachedTokens
+    }
+
+-- | Session totals come from meta. Older sessions without those fields
+-- decode as zero and start accumulating from new turns.
+sessionUsageFromTurns :: SessionMeta -> [SessionTurn] -> TokenUsage
+sessionUsageFromTurns meta _turns = sessionUsageFromMeta meta
 
 -- | Copy-pasteable resume line printed on Ctrl-C, matching grok build.
 resumeHint :: String -> Text -> Text

@@ -119,22 +119,32 @@ findHandler name handlers =
     find ((== name) . handlerName) handlers
         <|> find ((== stripNamespace name) . handlerName) handlers
 
--- | Codex namespaced tools may arrive as @multi_agent_v1.spawn_agent@ or
--- @multi_agent_v1spawn_agent@ (concatenated Display form). Match the bare
--- function name either way.
+-- | Codex namespaced tools may arrive as @collaboration.spawn_agent@ or
+-- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
 stripNamespace :: Text -> Text
 stripNamespace name
+    | Just rest <- Text.stripPrefix "collaboration." name = rest
+    | Just rest <- Text.stripPrefix "collaboration" name
+    , rest `elem` multiAgentBareNames =
+        rest
     | Just rest <- Text.stripPrefix "multi_agent_v1." name = rest
     | Just rest <- Text.stripPrefix "multi_agent_v1" name
-    , rest `elem`
-        [ "spawn_agent"
-        , "wait_agent"
-        , "send_input"
-        , "close_agent"
-        , "resume_agent"
-        ] =
+    , rest `elem` multiAgentBareNames =
         rest
     | otherwise = name
+
+multiAgentBareNames :: [Text]
+multiAgentBareNames =
+    [ "spawn_agent"
+    , "wait_agent"
+    , "send_message"
+    , "followup_task"
+    , "list_agents"
+    , "interrupt_agent"
+    , "send_input"
+    , "close_agent"
+    , "resume_agent"
+    ]
 
 handlerName :: ToolHandler -> Text
 handlerName = \case

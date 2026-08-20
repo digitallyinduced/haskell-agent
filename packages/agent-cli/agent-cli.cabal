@@ -51,6 +51,7 @@ library
                     , Agent.CLI.Permission
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
+                    , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
@@ -109,6 +110,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec

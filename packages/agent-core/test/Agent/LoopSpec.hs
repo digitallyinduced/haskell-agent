@@ -18,16 +18,10 @@ spec = describe "runLoop" do
     it "threads previous_response_id and sends only CompletedTool on the follow-up" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
-                , assistantText = Just "calling echo"
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "done"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                (Just "calling echo")
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
             ]
         config <- testConfig backend
         result <- runLoop config Nothing "hello"
@@ -35,6 +29,7 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-2"
             , finalText = Just "done"
             , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
             }
         seen <- readIORef submissions
         seen `shouldBe`
@@ -45,11 +40,7 @@ spec = describe "runLoop" do
     it "accepts multimodal first turns via runLoopInputs" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-m"
-                , toolCalls = []
-                , assistantText = Just "saw it"
-                }
+            [ Right $ emptyTurnOutput "resp-m" [] (Just "saw it")
             ]
         let image = ImageAttachment "image/png" "abc"
             inputs =
@@ -64,6 +55,7 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-m"
             , finalText = Just "saw it"
             , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
             }
         seen <- readIORef submissions
         seen `shouldBe` [(Nothing, inputs)]
@@ -73,19 +65,12 @@ spec = describe "runLoop" do
         maxInFlight <- newIORef (0 :: Int)
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls =
-                    [ functionToolCall "c1" "a" "{}"
-                    , functionToolCall "c2" "b" "{}"
-                    ]
-                , assistantText = Nothing
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "a" "{}"
+                , functionToolCall "c2" "b" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         let onEvent _ = do
                 now <- atomicModifyIORef' inFlight \n -> (n + 1, n + 1)
@@ -106,6 +91,7 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-2"
             , finalText = Just "ok"
             , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
             }
         readIORef maxInFlight `shouldReturn` 1
 
@@ -124,19 +110,12 @@ spec = describe "runLoop" do
                 ]
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls =
-                    [ functionToolCall "c1" "a" "{}"
-                    , functionToolCall "c2" "b" "{}"
-                    ]
-                , assistantText = Nothing
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "a" "{}"
+                , functionToolCall "c2" "b" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         config0 <- testConfig backend
         result <- runLoop config0 { loopHandlers = handlers } Nothing "go"
@@ -144,22 +123,17 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-2"
             , finalText = Just "ok"
             , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
             }
         readIORef maxInFlight `shouldReturn` 2
 
     it "returns a denial as tool output when approval is refused" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"nope\"}"]
-                , assistantText = Nothing
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "understood"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"nope\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "understood")
             ]
         config0 <- testConfig backend
         let config = config0 { loopApprove = \_ -> pure (Right False) }
@@ -168,6 +142,7 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-2"
             , finalText = Just "understood"
             , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
             }
         seen <- readIORef submissions
         case seen of
@@ -189,16 +164,10 @@ spec = describe "runLoop" do
     it "keeps looping after a handler exception" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "explode" "{}"]
-                , assistantText = Nothing
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "survived"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "explode" "{}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "survived")
             ]
         let handlers = [noArgsTool "explode" (error "boom")]
         config0 <- testConfig backend
@@ -207,6 +176,7 @@ spec = describe "runLoop" do
             { finalResponseId = "resp-2"
             , finalText = Just "survived"
             , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
             }
         seen <- readIORef submissions
         case seen of
@@ -226,11 +196,7 @@ spec = describe "runLoop" do
         events <- newIORef []
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = []
-                , assistantText = Just "hi"
-                }
+            [ Right $ emptyTurnOutput "resp-1" [] (Just "hi")
             ]
         config0 <- testConfig backend
         let config = config0
@@ -240,27 +206,17 @@ spec = describe "runLoop" do
         seen <- reverse <$> readIORef events
         seen `shouldBe`
             [ TurnStarted
-            , TurnFinished TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = []
-                , assistantText = Just "hi"
-                }
+            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "hi"))
             ]
 
     it "emits ToolStarted and ToolFinished around each dispatched call" do
         events <- newIORef []
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
-                , assistantText = Nothing
-                }
-            , Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "done"
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
             ]
         config0 <- testConfig backend
         let config = config0
@@ -270,30 +226,22 @@ spec = describe "runLoop" do
         seen <- reverse <$> readIORef events
         seen `shouldBe`
             [ TurnStarted
-            , TurnFinished TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
-                , assistantText = Nothing
-                }
+            , TurnFinished $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
             , ToolStarted (functionToolCall "c1" "echo" "{\"message\":\"hi\"}")
             , ToolFinished (functionResult "c1" "echo:hi")
             , TurnStarted
-            , TurnFinished TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "done"
-                }
+            , TurnFinished (emptyTurnOutput "resp-2" [] (Just "done"))
             ]
 
 
     it "returns LoopCancelled when the cancel flag is set during tools" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
-            [ Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = [functionToolCall "c1" "slow" "{}"]
-                , assistantText = Nothing
-                }
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "slow" "{}"]
+                Nothing
             ]
         config0 <- testConfig backend
         let cancel = case config0 of
@@ -316,11 +264,7 @@ spec = describe "runLoop" do
         config0 <- testConfig $ Backend \_prev _inputs _onEvent -> do
             putMVar started ()
             threadDelay 2000000
-            pure $ Right TurnOutput
-                { responseId = "resp-slow"
-                , toolCalls = []
-                , assistantText = Just "too late"
-                }
+            pure $ Right (emptyTurnOutput "resp-slow" [] (Just "too late"))
         let cancel = case config0 of
                 LoopConfig{loopCancel = c} -> c
         _ <- forkIO do
@@ -328,6 +272,31 @@ spec = describe "runLoop" do
             requestCancel cancel
         result <- runLoop config0 Nothing "go"
         result `shouldBe` Left (LoopCancelled [])
+
+    it "sums token usage across model steps in one user turn" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-1"
+                , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                , assistantText = Just "calling"
+                , tokenUsage = TokenUsage 10 4 2
+                }
+            , Right TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "done"
+                , tokenUsage = TokenUsage 12 6 0
+                }
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "done"
+            , turnsUsed = 2
+            , tokenUsage = TokenUsage 22 10 2
+            }
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -379,8 +348,6 @@ endlessToolsBackend = do
     pure $ Backend \_prev _inputs _onEvent -> do
         n <- atomicModifyIORef' counter \i -> (i + 1, i + 1)
         let responseId = "resp-" <> Text.pack (show n)
-        pure $ Right TurnOutput
-            { responseId
-            , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
-            , assistantText = Nothing
-            }
+        pure $ Right $ emptyTurnOutput responseId
+            [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
+            Nothing

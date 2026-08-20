@@ -11,6 +11,8 @@ module Agent.CLI.Input
     , ChoiceKey(..)
     , parseChoiceKey
     , choiceMoveIndex
+    , classifyPastedText
+    , formatPasteChip
     , isCycleModeSentinel
     , dropCycleModeSentinel
     , replHistoryPath
@@ -99,10 +101,39 @@ import System.Posix.Types (FileMode)
 data ReplLine
     = ReplEof
     | ReplText Text
+    -- | Submitted text that arrived as a paste (bracketed paste, or a
+    -- multi-line / burst heuristic). @replText@ is the payload with CSI
+    -- paste wrappers stripped.
+    | ReplPasted Text
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
+
+-- | Strip terminal bracketed-paste wrappers (@CSI 200~@ / @CSI 201~@)
+-- and decide whether the buffer looks pasted rather than typed.
+classifyPastedText :: Text -> (Text, Bool)
+classifyPastedText raw =
+    let stripped = stripBracketedPaste raw
+        looksPasted =
+            raw /= stripped
+                || Text.count "\n" stripped >= 3
+    in (stripped, looksPasted)
+
+-- | Compact prompt chip for a multi-line paste. Single-line pastes stay inline.
+formatPasteChip :: Text -> Text
+formatPasteChip text =
+    let n = max 1 (length (Text.lines text))
+    in if n < 4
+        then text
+        else "[Pasted: " <> Text.pack (show n) <> " lines]"
+
+stripBracketedPaste :: Text -> Text
+stripBracketedPaste text =
+    Text.replace pasteEnd "" (Text.replace pasteStart "" text)
+  where
+    pasteStart = "\ESC[200~"
+    pasteEnd = "\ESC[201~"
 
 -- | @~/.haskell-agent/history@ given the user's home directory.
 replHistoryPath :: FilePath -> FilePath
@@ -165,19 +196,26 @@ readReplLineWithInitial interrupt prompt initial = do
             home <- getHomeDirectory
             let path = replHistoryPath home
             ensureHistoryParent path
-            readEditedLine interrupt
-                (setComplete completeSlash
-                    defaultSettings
-                        { historyFile = Just path
-                        , autoAddHistory = False
-                        })
-                prompt
-                initial
+            classifyLine <$>
+                readEditedLine interrupt
+                    (setComplete completeSlash
+                        defaultSettings
+                            { historyFile = Just path
+                            , autoAddHistory = False
+                            })
+                    prompt
+                    initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            fmap (maybe ReplEof ReplText) readAnswerOnly
-
+            fmap (maybe ReplEof (classifySubmitted . Text.strip)) readAnswerOnly
+  where
+    classifyLine = \case
+        ReplText text -> classifySubmitted text
+        other -> other
+    classifySubmitted text =
+        let (stripped, pasted) = classifyPastedText text
+        in if pasted then ReplPasted stripped else ReplText stripped
 -- | Read a one-shot approval answer. The question is always written to
 -- stderr (matching the pre-haskeline behavior) so redirected stdout does
 -- not swallow the prompt. Does not touch REPL history.
@@ -404,7 +442,6 @@ dropCycleModeSentinel = Text.filter (/= cycleModeSentinel)
 -- | Map CSI/SS3 Shift+Tab onto unused f24, then insert the sentinel and
 -- submit. haskeline canonicalizes the name "shift-tab" to Tab (stealing
 -- completion), so the sequences bind to a function key instead.
--- Exported so tests can assert the bind file parses.
 shiftTabPrefsText :: Text
 shiftTabPrefsText =
     Text.unlines
@@ -433,35 +470,52 @@ loadReplPrefs = do
 readEditedLine :: InterruptState -> Settings IO -> Text -> Text -> IO ReplLine
 readEditedLine interrupt settings prompt initial = do
     prefs <- loadReplPrefs
-    let go =
-            -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
-            -- handler for the duration of the prompt. Soft-warn / double-quit
-            -- are applied here via 'noteIdleCtrlC'.
-            handleInterrupt onInterrupt $
-                runInputTWithPrefs prefs settings $
-                    withInterrupt do
-                        result <- getInputLineWithInitial
-                            (Text.unpack prompt)
-                            (Text.unpack initial, "")
-                        case result of
-                            Nothing -> pure ReplEof
-                            Just raw
-                                | isCycleModeSentinel packed ->
-                                    -- Leave history unchanged; the REPL
-                                    -- restores @draft@ on the next prompt.
-                                    pure (ReplCycleMode (dropCycleModeSentinel packed))
-                                | otherwise -> do
-                                    unless (all (== ' ') raw) do
-                                        hist <- getHistory
-                                        putHistory (addHistory raw hist)
-                                    pure (ReplText packed)
-                              where
-                                packed = Text.pack raw
-        onInterrupt = do
-            noteIdleCtrlC interrupt >>= \case
-                ContinuePrompt -> go
-                QuitProcess -> pure ReplQuitInterrupt
-    go
+    withBracketedPaste (go prefs)
+  where
+    go prefs =
+        -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
+        -- handler for the duration of the prompt. Soft-warn / double-quit
+        -- are applied here via 'noteIdleCtrlC'.
+        handleInterrupt (onInterrupt prefs) $
+            runInputTWithPrefs prefs settings $
+                withInterrupt do
+                    result <- getInputLineWithInitial
+                        (Text.unpack prompt)
+                        (Text.unpack initial, "")
+                    case result of
+                        Nothing -> pure ReplEof
+                        Just raw
+                            | isCycleModeSentinel packed ->
+                                -- Leave history unchanged; the REPL
+                                -- restores @draft@ on the next prompt.
+                                pure (ReplCycleMode (dropCycleModeSentinel packed))
+                            | otherwise -> do
+                                unless (all (== ' ') raw) do
+                                    hist <- getHistory
+                                    putHistory (addHistory raw hist)
+                                pure (ReplText packed)
+                          where
+                            packed = Text.pack raw
+    onInterrupt prefs = do
+        noteIdleCtrlC interrupt >>= \case
+            ContinuePrompt -> go prefs
+            QuitProcess -> pure ReplQuitInterrupt
+
+-- | Ask the terminal to wrap pastes in CSI 200~ … CSI 201~ so we can
+-- distinguish them from typed keystrokes. Restored on exit.
+withBracketedPaste :: IO a -> IO a
+withBracketedPaste action = do
+    isTty <- hIsTerminalDevice stdin
+    if not isTty
+        then action
+        else bracket enable disable (const action)
+  where
+    enable = do
+        Text.hPutStr stdout "\ESC[?2004h"
+        hFlush stdout
+    disable _ = do
+        Text.hPutStr stdout "\ESC[?2004l"
+        hFlush stdout
 
 -- | Tab-complete slash command names and a few known argument tokens.
 completeSlash :: CompletionFunc IO

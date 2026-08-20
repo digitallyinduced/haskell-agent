@@ -52,7 +52,7 @@ spec = describe "schemasFromAppTools" do
                     other -> expectationFailure ("expected format object, got " <> show other)
             other -> expectationFailure ("expected custom tool, got " <> show other)
 
-    it "emits multi_agent_v1 as a Responses namespace tool" do
+    it "emits collaboration as a Responses namespace tool" do
         let spawn = AppTool
                 { appToolName = "spawn_agent"
                 , appToolDescription = "Spawn."
@@ -67,7 +67,7 @@ spec = describe "schemasFromAppTools" do
             [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
                 tagged.tag `shouldBe` "namespace"
                 KeyMap.lookup "name" tagged.fields
-                    `shouldBe` Just (Aeson.String "multi_agent_v1")
+                    `shouldBe` Just (Aeson.String "collaboration")
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
 jsonTool :: AppTool

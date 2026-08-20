@@ -55,7 +55,7 @@ schemaFromAppTool provider tool = case tool.appToolKind of
     FreeformApplyPatch ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
 
--- | Codex multi_agent_v1 namespace: nested non-strict function tools.
+-- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
 multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
     { tag = "namespace"

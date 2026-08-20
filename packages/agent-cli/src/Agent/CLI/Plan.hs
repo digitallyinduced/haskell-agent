@@ -106,6 +106,8 @@ readChangeNotes interrupt color = do
     readReplLine interrupt chrome >>= \case
         ReplEof -> pure "(no notes)"
         ReplQuitInterrupt -> throwIO UserInterrupt
+        ReplPasted text ->
+            if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
             readChangeNotes interrupt color
@@ -130,6 +132,10 @@ askQuestion interrupt resolveColor question options = do
                 readReplLine interrupt chrome >>= \case
                     ReplEof -> pure Nothing
                     ReplQuitInterrupt -> throwIO UserInterrupt
+                    ReplPasted text ->
+                        if Text.null (Text.strip text)
+                            then pure Nothing
+                            else pure (Just (Text.strip text))
                     ReplCycleMode _ ->
                         askQuestion interrupt resolveColor question []
                     ReplText text
