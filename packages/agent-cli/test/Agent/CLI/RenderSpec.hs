@@ -38,8 +38,8 @@ spec = do
 
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do
-            truncateToolOutput "Exit code: 0\nhello" `shouldBe` "Exit code: 0"
-            truncateToolOutput "   " `shouldBe` "(empty)"
+            truncateToolOutput "Exit code: 0\nhello" `shouldBe` "┊ Exit code: 0"
+            truncateToolOutput "   " `shouldBe` "┊ (empty)"
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -69,7 +69,7 @@ spec = do
                 let lines_ = filter (not . Text.null) (Text.lines body)
                 length lines_ `shouldBe` 80
                 lines_ `shouldMatchList`
-                    [ "→ list_dir packages/agent-" <> Text.pack (show i)
+                    [ "▸ list_dir packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
 
@@ -83,10 +83,10 @@ spec = do
                 visibleAfter `shouldBe` False
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` ("thinking…" `Text.isPrefixOf`)
+                body `shouldSatisfy` ("◌ thinking…" `Text.isPrefixOf`)
                 -- Clear uses CR + erase, so the tool summary shares the buffer
                 -- line with the status text rather than starting a new line.
-                body `shouldSatisfy` ("→ list_dir ." `Text.isInfixOf`)
+                body `shouldSatisfy` ("▸ list_dir ." `Text.isInfixOf`)
 
         it "ignores reasoning deltas" do
             withRenderConfig True False \config handle path -> do
@@ -94,7 +94,7 @@ spec = do
                 renderEvent config (ReasoningDelta "secret plan")
                 hClose handle
                 body <- Text.readFile path
-                body `shouldBe` "thinking…"
+                body `shouldBe` "◌ thinking…"
 
         it "buffers colored TextDelta until TurnFinished" do
             withRenderConfig False True \config handle path -> do
@@ -148,7 +148,7 @@ spec = do
                 renderEvent config TurnStarted
                 hClose handle
                 body <- Text.readFile path
-                body `shouldBe` "thinking…"
+                body `shouldBe` "◌ thinking…"
 
 withRenderConfig
     :: Bool

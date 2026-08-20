@@ -43,6 +43,17 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "48;2;7;54;66"
             out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;7;54;66m"
 
+    describe "chrome glyphs" do
+        it "exposes the shared Unicode markers" do
+            glyphTool `shouldBe` "▸ "
+            glyphOk `shouldBe` "✓ "
+            glyphErr `shouldBe` "✗ "
+            glyphWarn `shouldBe` "⚠ "
+            glyphCancel `shouldBe` "⊘ "
+            glyphSession `shouldBe` "⧉ "
+            glyphThink `shouldBe` "◌ "
+            glyphToolOut `shouldBe` "┊ "
+
     describe "cliWindowTitle" do
         it "uses the cwd basename when no session title is set" do
             cliWindowTitle "/tmp/haskell-agent" Nothing
