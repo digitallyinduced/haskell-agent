@@ -2,9 +2,12 @@ module Agent.SubagentsSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..))
 import Agent.Subagents
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
 import Control.Monad (unless)
+import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -12,7 +15,7 @@ spec :: Spec
 spec = describe "Agent.Subagents" do
     it "spawns a child, waits for completion, and returns final text" do
         registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
-            (\_ prompt _ -> pure $ Right LoopResult
+            (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "child"
                 , finalText = Just ("done:" <> prompt)
                 , turnsUsed = 1
@@ -26,7 +29,7 @@ spec = describe "Agent.Subagents" do
     it "rejects spawn past maxDepth" do
         let config = defaultSubagentConfig { maxDepth = Just 1 }
         registry <- newSubagentRegistry config "/tmp"
-            (\_ _ _ -> pure $ Right LoopResult
+            (\_ _ _ _ -> pure $ Right LoopResult
                 { finalResponseId = "x"
                 , finalText = Just "ok"
                 , turnsUsed = 1
@@ -41,7 +44,7 @@ spec = describe "Agent.Subagents" do
         gate <- newTVarIO False
         let config = defaultSubagentConfig { maxConcurrent = 1 }
         registry <- newSubagentRegistry config "/tmp"
-            (\_ _ _ -> do
+            (\_ _ _ _ -> do
                 atomically $ readTVar gate >>= \ready -> unless ready retry
                 pure $ Right LoopResult
                     { finalResponseId = "x"
@@ -66,9 +69,9 @@ spec = describe "Agent.Subagents" do
 
     it "supports nested spawn when depth is unlimited" do
         registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
-            (\_ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
-        setSubagentRunner registry \env prompt _ ->
+        setSubagentRunner registry \env _previous prompt _ ->
             if env.subDepth == 1
                 then do
                     Right gid <- spawnSubagent registry (Just env.subId) env.subDepth "nested" Nothing
@@ -91,3 +94,108 @@ spec = describe "Agent.Subagents" do
             Just (Completed (Just text)) ->
                 text `shouldSatisfy` Text.isPrefixOf "parent-of-agent-"
             other -> expectationFailure ("unexpected status: " <> show other)
+
+    it "waitSubagents returns when any target finishes" do
+        gate <- newTVarIO False
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ _ prompt _ -> case prompt of
+                "fast" -> pure $ Right LoopResult
+                    { finalResponseId = "fast"
+                    , finalText = Just "done-fast"
+                    , turnsUsed = 1
+                    }
+                _ -> do
+                    atomically $ readTVar gate >>= \ready -> unless ready retry
+                    pure $ Right LoopResult
+                        { finalResponseId = "slow"
+                        , finalText = Just "done-slow"
+                        , turnsUsed = 1
+                        })
+            (\_ _ -> pure ())
+        Right fast <- spawnSubagent registry Nothing 0 "fast" Nothing
+        Right slow <- spawnSubagent registry Nothing 0 "slow" Nothing
+        (statuses, timedOut) <- waitSubagents registry [fast, slow] 15000
+        timedOut `shouldBe` False
+        Map.lookup fast statuses `shouldBe` Just (Completed (Just "done-fast"))
+        -- Slow may still be running; wait only required any final.
+        Map.lookup slow statuses `shouldSatisfy` \case
+            Just Running -> True
+            Just Pending -> True
+            Just (Completed _) -> True
+            _ -> False
+        atomically $ writeTVar gate True
+        _ <- waitSubagents registry [slow] 15000
+        pure ()
+
+    it "passes previous response id on send_input follow-ups" do
+        seen <- newIORef ([] :: [Maybe Text])
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ previous prompt _ -> do
+                atomicModifyIORef' seen \xs -> (xs <> [previous], ())
+                pure $ Right LoopResult
+                    { finalResponseId = "resp-" <> prompt
+                    , finalText = Just prompt
+                    , turnsUsed = 1
+                    })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        Right _ <- sendInput registry agentId "two" False
+        _ <- waitSubagents registry [agentId] 15000
+        history <- readIORef seen
+        history `shouldBe` [Nothing, Just "resp-one"]
+
+    it "does not leave Running when send_input admission fails" do
+        gate <- newTVarIO False
+        let config = defaultSubagentConfig { maxConcurrent = 2 }
+        registry <- newSubagentRegistry config "/tmp"
+            (\_ _ prompt _ -> case prompt of
+                "hold" -> do
+                    atomically $ readTVar gate >>= \ready -> unless ready retry
+                    pure $ Right LoopResult
+                        { finalResponseId = "hold"
+                        , finalText = Just "holding"
+                        , turnsUsed = 1
+                        }
+                other -> pure $ Right LoopResult
+                    { finalResponseId = "done"
+                    , finalText = Just other
+                    , turnsUsed = 1
+                    })
+            (\_ _ -> pure ())
+        Right idle <- spawnSubagent registry Nothing 0 "idle" Nothing
+        _ <- waitSubagents registry [idle] 15000
+        Right holder <- spawnSubagent registry Nothing 0 "hold" Nothing
+        -- Free idle's slot, soft-resume without a slot, then fill both slots.
+        _ <- closeSubagent registry idle
+        Right _ <- resumeSubagent registry idle
+        Right filler <- spawnSubagent registry Nothing 0 "filler" Nothing
+        _ <- waitSubagents registry [filler] 15000
+        -- holder + filler occupy both slots; idle is Completed without a slot.
+        result <- sendInput registry idle "follow-up" False
+        result `shouldSatisfy` \case
+            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
+            Right _ -> False
+        status <- getStatus registry idle
+        status `shouldBe` Completed Nothing
+        atomically $ writeTVar gate True
+        _ <- waitSubagents registry [holder] 15000
+        pure ()
+
+    it "invokes onComplete when a child finishes" do
+        notices <- newIORef ([] :: [(SubagentId, SubagentStatus)])
+        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "c"
+                , finalText = Just prompt
+                , turnsUsed = 1
+                })
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId status ->
+            atomicModifyIORef' notices \xs -> (xs <> [(agentId, status)], ())
+        Right agentId <- spawnSubagent registry Nothing 0 "notify-me" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        -- Allow the completion callback a moment to run after status write.
+        threadDelay 50000
+        seen <- readIORef notices
+        seen `shouldBe` [(agentId, Completed (Just "notify-me"))]

@@ -45,7 +45,7 @@ spec = describe "Agent.Tools.Codex" do
     it "registers multi-agent tools when a registry is provided" do
         withTempEnv \env -> do
             registry <- newSubagentRegistry defaultSubagentConfig env.toolCwd
-                (\_ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ _ _ -> pure $ Left LoopNoResponseId)
                 (\_ _ -> pure ())
             let ctx = MultiAgentContext
                     { multiRegistry = registry

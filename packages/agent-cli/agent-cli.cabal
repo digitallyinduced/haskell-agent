@@ -64,6 +64,7 @@ library
                     , base >= 4.17 && < 5
                     , bytestring
                     , colour >= 2.3
+                    , containers
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9

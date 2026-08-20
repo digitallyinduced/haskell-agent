@@ -96,9 +96,12 @@ import Agent.Subagents
     , SubagentId(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
+    , SubagentStatus(..)
     , closeSubagentRegistry
     , defaultSubagentConfig
+    , formatCompletionNotice
     , newSubagentRegistry
+    , setSubagentOnComplete
     , setSubagentRunner
     )
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor)
@@ -132,6 +135,8 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -303,7 +308,7 @@ runAgent options = do
     multiCtx <- case provider of
         OpenAIProvider -> do
             registry <- newSubagentRegistry defaultSubagentConfig cwd
-                (\_ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ _ _ -> pure $ Left LoopNoResponseId)
                 (\_ _ -> pure ())
             pure $ Just MultiAgentContext
                 { multiRegistry = registry
@@ -311,6 +316,15 @@ runAgent options = do
                 , multiDepth = 0
                 }
         _ -> pure Nothing
+    -- Per-subagent OpenAI transcripts / previous ids, shared across send_input.
+    subagentSessions <- newIORef Map.empty
+    pendingNotices <- newIORef ([] :: [Text])
+    case multiCtx of
+        Just ctx ->
+            setSubagentOnComplete ctx.multiRegistry \agentId status ->
+                atomicModifyIORef' pendingNotices \xs ->
+                    (xs <> [formatCompletionNotice agentId status], ())
+        Nothing -> pure ()
     coding <- codingToolsFor provider toolEnv (Just planHooks) multiCtx
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
@@ -371,14 +385,17 @@ runAgent options = do
                                                 wsLock
                                                 conn
                                                 ctx.multiRegistry
+                                                subagentSessions
                                     Nothing -> pure ()
                                 let lockedBackend =
                                         lockedOpenAiBackend wsLock conn
                                             (readIORef paramsRef)
                                             transcriptRef
+                                    noticingBackend =
+                                        withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                     initialPrevious persist projectRoot Nothing agentsContext escPaused interrupt
-                                    lockedBackend)
+                                    noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -1207,6 +1224,10 @@ toggleAlwaysApprove policyRef projectRoot = do
         ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
         _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
+data SubagentSession = SubagentSession
+    { subSessionTranscript :: !(IORef [ResponseItem])
+    }
+
 -- | Serialize OpenAI WebSocket turns: parent and children share one connection,
 -- and 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
@@ -1220,7 +1241,17 @@ lockedOpenAiBackend wsLock conn getParams transcript =
     in Backend \previous inputs onEvent ->
         withMVar wsLock \_ -> submit previous inputs onEvent
 
--- | Child Codex agent: fresh transcript, same WS (locked), nested multi-agent tools.
+-- | Prepend drained subagent completion notices to the next parent turn.
+withPendingNotices :: IORef [Text] -> Backend -> Backend
+withPendingNotices pending (Backend submit) = Backend \previous inputs onEvent -> do
+    notices <- atomicModifyIORef' pending \xs -> ([], xs)
+    let prefixed
+            | null notices = inputs
+            | otherwise = UserMessage (Text.intercalate "\n\n" notices) : inputs
+    submit previous prefixed onEvent
+
+-- | Child Codex agent: per-agent transcript (retained across send_input), same
+-- WS (locked), nested multi-agent tools.
 runCodexSubagent
     :: CliOptions
     -> ApprovalPolicy
@@ -1229,9 +1260,10 @@ runCodexSubagent
     -> MVar ()
     -> CodexConn
     -> SubagentRegistry
+    -> IORef (Map SubagentId SubagentSession)
     -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock conn registry =
-    \env prompt onEvent -> do
+runCodexSubagent options policy planHooks paramsRef wsLock conn registry sessionsRef =
+    \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
         -- Inherit soft-cancel from the registry-owned child flag.
@@ -1241,6 +1273,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry =
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
                 }
+        session <- lookupOrCreateSubagentSession sessionsRef env.subId
         coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
@@ -1262,9 +1295,10 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry =
                 childParams = requestParams OpenAIProvider model instructions
                     (schemasFromAppTools OpenAIProvider tools) effort
             childParamsRef <- newIORef childParams
-            childTranscript <- newIORef ([] :: [ResponseItem])
             let backend =
-                    lockedOpenAiBackend wsLock conn (readIORef childParamsRef) childTranscript
+                    lockedOpenAiBackend wsLock conn
+                        (readIORef childParamsRef)
+                        session.subSessionTranscript
                 config = LoopConfig
                     { loopBackend = backend
                     , loopHandlers = appToolHandlers tools
@@ -1274,7 +1308,21 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry =
                     , loopApprove = \call -> childApprove policy tools call
                     , loopCancel = env.subCancel
                     }
-            runLoop config Nothing prompt
+            runLoop config previous prompt
+
+lookupOrCreateSubagentSession
+    :: IORef (Map SubagentId SubagentSession)
+    -> SubagentId
+    -> IO SubagentSession
+lookupOrCreateSubagentSession sessionsRef agentId = do
+    sessions <- readIORef sessionsRef
+    case Map.lookup agentId sessions of
+        Just session -> pure session
+        Nothing -> do
+            transcript <- newIORef ([] :: [ResponseItem])
+            let session = SubagentSession { subSessionTranscript = transcript }
+            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
+            pure session
 
 childApprove :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO (Either Text Bool)
 childApprove policy tools call = case policy of
