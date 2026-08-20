@@ -9,6 +9,7 @@ module Agent.OpenAI.LoopBackend
     , responseToTurnOutput
     , streamEventToLoopEvent
     , assistantTextFromResponse
+    , toolResultToItem
     , withRequestInput
     ) where
 

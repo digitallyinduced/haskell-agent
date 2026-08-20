@@ -1,5 +1,6 @@
 module Agent.LoopSpec (spec) where
 
+import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.ToolArgs (objectArgs, reqText)
@@ -27,7 +28,8 @@ spec = describe "runLoop" do
                 , assistantText = Just "done"
                 }
             ]
-        result <- runLoop (testConfig backend) Nothing "hello"
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "done"
@@ -55,7 +57,8 @@ spec = describe "runLoop" do
                     , userImages = [image]
                     }
                 ]
-        result <- runLoopInputs (testConfig backend) Nothing inputs
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing inputs
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-m"
             , finalText = Just "saw it"
@@ -92,7 +95,8 @@ spec = describe "runLoop" do
                 [ noArgsTool "a" (pure (Right "ok"))
                 , noArgsTool "b" (pure (Right "ok"))
                 ]
-            config = (testConfig backend)
+        config0 <- testConfig backend
+        let config = config0
                 { loopHandlers = handlers
                 , loopOnEvent = onEvent
                 }
@@ -133,7 +137,8 @@ spec = describe "runLoop" do
                 , assistantText = Just "ok"
                 }
             ]
-        result <- runLoop (testConfig backend) { loopHandlers = handlers } Nothing "go"
+        config0 <- testConfig backend
+        result <- runLoop config0 { loopHandlers = handlers } Nothing "go"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "ok"
@@ -155,7 +160,8 @@ spec = describe "runLoop" do
                 , assistantText = Just "understood"
                 }
             ]
-        let config = (testConfig backend) { loopApprove = \_ -> pure False }
+        config0 <- testConfig backend
+        let config = config0 { loopApprove = \_ -> pure False }
         result <- runLoop config Nothing "please"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
@@ -170,7 +176,8 @@ spec = describe "runLoop" do
 
     it "returns LoopMaxTurns when the model keeps calling tools" do
         backend <- endlessToolsBackend
-        let config = (testConfig backend) { loopMaxTurns = 1 }
+        config0 <- testConfig backend
+        let config = config0 { loopMaxTurns = 1 }
         result <- runLoop config Nothing "loop forever"
         case result of
             Left (LoopMaxTurns turn) -> do
@@ -193,7 +200,8 @@ spec = describe "runLoop" do
                 }
             ]
         let handlers = [noArgsTool "explode" (error "boom")]
-        result <- runLoop (testConfig backend) { loopHandlers = handlers } Nothing "go"
+        config0 <- testConfig backend
+        result <- runLoop config0 { loopHandlers = handlers } Nothing "go"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "survived"
@@ -209,7 +217,8 @@ spec = describe "runLoop" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
             [Left (ConnectionError "down")]
-        result <- runLoop (testConfig backend) Nothing "hello"
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
     it "emits TurnStarted and TurnFinished around each backend submit" do
@@ -222,7 +231,8 @@ spec = describe "runLoop" do
                 , assistantText = Just "hi"
                 }
             ]
-        let config = (testConfig backend)
+        config0 <- testConfig backend
+        let config = config0
                 { loopOnEvent = \event -> modifyIORef' events (event :)
                 }
         _ <- runLoop config Nothing "hello"
@@ -251,7 +261,8 @@ spec = describe "runLoop" do
                 , assistantText = Just "done"
                 }
             ]
-        let config = (testConfig backend)
+        config0 <- testConfig backend
+        let config = config0
                 { loopOnEvent = \event -> modifyIORef' events (event :)
                 }
         _ <- runLoop config Nothing "hello"
@@ -273,22 +284,51 @@ spec = describe "runLoop" do
                 }
             ]
 
+
+    it "returns LoopCancelled when the cancel flag is set during tools" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-1"
+                , toolCalls = [functionToolCall "c1" "slow" "{}"]
+                , assistantText = Nothing
+                }
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            handlers =
+                [ noArgsTool "slow" do
+                    requestCancel cancel
+                    threadDelay 10000
+                    pure (Right "should-not-continue")
+                ]
+            config = config0 { loopHandlers = handlers }
+        result <- runLoop config Nothing "go"
+        case result of
+            Left (LoopCancelled results) ->
+                results `shouldNotBe` []
+            other -> expectationFailure ("expected LoopCancelled, got " <> show other)
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
 
-testConfig :: Backend -> LoopConfig
-testConfig backend = LoopConfig
-    { loopBackend = backend
-    , loopHandlers =
-        [ typedTool "echo" $ \EchoArgs { message } ->
-            pure (Right ("echo:" <> message))
-        ]
-    , loopDispatch = defaultLoopDispatch
-    , loopMaxTurns = defaultLoopMaxTurns
-    , loopOnEvent = \_ -> pure ()
-    , loopApprove = \_ -> pure True
-    }
+testConfig :: Backend -> IO LoopConfig
+testConfig backend = do
+    cancel <- newCancelFlag
+    pure LoopConfig
+        { loopBackend = backend
+        , loopHandlers =
+            [ typedTool "echo" $ \EchoArgs { message } ->
+                pure (Right ("echo:" <> message))
+            ]
+        , loopDispatch = defaultLoopDispatch
+        , loopMaxTurns = defaultLoopMaxTurns
+        , loopOnEvent = \_ -> pure ()
+        , loopApprove = \_ -> pure True
+        , loopCancel = cancel
+        }
 
 data EchoArgs = EchoArgs { message :: Text }
 
