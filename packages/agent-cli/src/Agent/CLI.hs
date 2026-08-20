@@ -41,7 +41,7 @@ import Agent.CLI.Style
     , userBackground
     )
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
-import Agent.CLI.Worktree (createWorktree, worktreeRoot)
+import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -107,11 +107,18 @@ afterDev = \case
         ]
 
 -- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
+-- On first open (no resume pointer), passes @--worktree@ unless the cwd is
+-- already under @~/.haskell-agent/worktrees@.
 devMain :: IO DevResult
 devMain = do
     home <- getHomeDirectory
     resumeId <- readDevResumePointer home
-    let args = maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) resumeId
+    args <- case resumeId of
+        Just sessionId -> pure ["--resume", Text.unpack sessionId]
+        Nothing -> do
+            cwd <- makeAbsolute =<< getCurrentDirectory
+            root <- makeAbsolute (worktreeRoot home)
+            pure $ if isUnderWorktreeRoot root cwd then [] else ["--worktree"]
     case parseArgs args of
         Left err -> do
             clearDevResumePointer home

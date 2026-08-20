@@ -27,6 +27,15 @@ spec = describe "Agent.CLI.Worktree" do
             worktreeRoot "/home/marc"
                 `shouldBe` "/home/marc" </> ".haskell-agent" </> "worktrees"
 
+    describe "isUnderWorktreeRoot" do
+        it "matches the root and its subdirectories" do
+            let root = "/home/marc" </> ".haskell-agent" </> "worktrees"
+            isUnderWorktreeRoot root root `shouldBe` True
+            isUnderWorktreeRoot root (root </> "haskell-agent" </> "2026-08-20-abcd")
+                `shouldBe` True
+            isUnderWorktreeRoot root "/home/marc/src/haskell-agent" `shouldBe` False
+            isUnderWorktreeRoot root (root <> "-extra") `shouldBe` False
+
     describe "createWorktree" do
         it "adds a worktree under the injected root on a new branch" $
             withTempGitRepo \repo ->

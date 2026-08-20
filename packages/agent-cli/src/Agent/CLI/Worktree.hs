@@ -1,12 +1,13 @@
 -- | Create isolated git worktrees under @~/.haskell-agent/worktrees@.
 module Agent.CLI.Worktree
     ( createWorktree
+    , isUnderWorktreeRoot
     , worktreePath
     , worktreeRoot
     ) where
 
 import Data.Char (isSpace)
-import Data.List (dropWhileEnd, isInfixOf)
+import Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
@@ -14,12 +15,24 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Numeric (showHex)
 import System.Directory (createDirectoryIfMissing, doesPathExist)
 import System.Exit (ExitCode(..))
-import System.FilePath (takeFileName, (</>))
+import System.FilePath
+    ( addTrailingPathSeparator
+    , equalFilePath
+    , takeFileName
+    , (</>)
+    )
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: FilePath -> FilePath
 worktreeRoot home = home </> ".haskell-agent" </> "worktrees"
+
+-- | True when @path@ is @root@ or a subdirectory of it.
+-- Both paths should already be absolute (or otherwise comparable).
+isUnderWorktreeRoot :: FilePath -> FilePath -> Bool
+isUnderWorktreeRoot root path =
+    equalFilePath root path
+        || addTrailingPathSeparator root `isPrefixOf` path
 
 -- | @root/repo/YYYY-MM-DD-\<hex8\>@.
 worktreePath :: FilePath -> FilePath -> Day -> String -> FilePath

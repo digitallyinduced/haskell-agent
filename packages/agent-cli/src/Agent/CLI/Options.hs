@@ -238,7 +238,8 @@ usage = unlines
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits."
     , "Ctrl-C prints a --resume command when a session has been persisted."
-    , "Under `repl` (nix develop), :reload returns to GHCi, reloads modules,"
-    , "and resumes the same session."
+    , "Under `repl` (nix develop), first open passes --worktree unless the"
+    , "cwd is already under ~/.haskell-agent/worktrees. :reload returns to"
+    , "GHCi, reloads modules, and resumes the same session."
 
     ]
