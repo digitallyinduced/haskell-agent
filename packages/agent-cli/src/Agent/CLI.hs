@@ -2,6 +2,8 @@
 module Agent.CLI
     ( DevResult(..)
     , afterDev
+    , applyReplMode
+    , cycleReplInteraction
     , devMain
     , formatReplStatusLine
     , run
@@ -27,7 +29,13 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), readReplLine)
+import Agent.CLI.Input (ReplLine(..), readReplLineWithInitial)
+import Agent.CLI.ReplMode
+    ( ReplMode(..)
+    , cycleReplMode
+    , replModeFromState
+    , replModeLabel
+    )
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
@@ -583,21 +591,43 @@ printResumeHint progName = \case
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
--- | Idle prompt chrome: model, reasoning effort, approval mode.
-formatReplStatusLine :: Bool -> Text -> Text -> ApprovalPolicy -> Text
-formatReplStatusLine color model effort policy =
+-- | Idle prompt chrome: model, reasoning effort, interaction mode.
+formatReplStatusLine :: Bool -> Text -> Text -> ReplMode -> Text
+formatReplStatusLine color model effort mode =
     roleMuted color $
         "  "
             <> model
             <> " · "
             <> effort
             <> " · "
-            <> approvalLabel policy
-  where
-    approvalLabel = \case
-        ApproveAll -> "yolo"
-        PromptMutating -> "ask"
-        DenyMutating -> "deny"
+            <> replModeLabel mode
+
+-- | Apply a cycled idle mode: plan pending vs always-approve vs ask.
+-- Always-approve still persists to project settings, matching /always-approve.
+applyReplMode
+    :: PlanModeEnv
+    -> IORef ApprovalPolicy
+    -> FilePath
+    -> ReplMode
+    -> IO ()
+applyReplMode planMode policyRef projectRoot = \case
+    ReplModePlan -> do
+        writeIORef planMode.planStateRef PlanPending
+    ReplModeAlwaysApprove -> do
+        deactivatePlanMode planMode
+        writeIORef policyRef ApproveAll
+        saveProjectAutoApprove projectRoot True
+    ReplModeNormal -> do
+        deactivatePlanMode planMode
+        current <- readIORef policyRef
+        when (current == ApproveAll) do
+            writeIORef policyRef PromptMutating
+            saveProjectAutoApprove projectRoot False
+
+-- | Pure next-mode helper used by tests and the Shift+Tab handler.
+cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
+cycleReplInteraction planState policy =
+    cycleReplMode (replModeFromState planState policy)
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
@@ -729,24 +759,55 @@ repl
     -> SubagentStoreRoot
     -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset =
+    replWithDraft config render provider previous printed paramsRef policyRef
+        transcriptRef persist planMode projectRoot tokenProvider agentsContext
+        escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset ""
+
+replWithDraft
+    :: LoopConfig
+    -> RenderConfig
+    -> Provider
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef ResponseCreateParams
+    -> IORef ApprovalPolicy
+    -> IORef [ResponseItem]
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> PlanModeEnv
+    -> FilePath
+    -> Maybe TokenProvider
+    -> IORef (Maybe Text)
+    -> IORef Bool
+    -> IORef [ImageAttachment]
+    -> IORef Int
+    -> InterruptState
+    -> SubagentStoreRoot
+    -> IO ()
+    -> Text
+    -> IO DevResult
+replWithDraft config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset draft = do
     stdoutColor <- resolveColor stdout
-    planActive <- isPlanModeActive planMode
-    planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
+    planState <- readIORef planMode.planStateRef
+    let planActive = planState == PlanActive
+        planPending = planState == PlanPending
     params <- readIORef paramsRef
     policy <- readIORef policyRef
+    let idleMode = replModeFromState planState policy
     -- Status sits on the line above λ so haskeline can keep the cursor on
     -- the input. Haskeline cannot park a persistent footer under the draft.
     Text.putStrLn $ formatReplStatusLine stdoutColor
         (currentModel params)
         (currentEffort params)
-        policy
+        idleMode
     hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let modeTag
             | planActive = roleWarn stdoutColor "[plan] "
             | planPending = roleMuted stdoutColor "[plan…] "
+            | idleMode == ReplModeAlwaysApprove =
+                roleSuccess stdoutColor "[yolo] "
             | otherwise = ""
         chromePrompt =
             beginBackground stdoutColor userBackground
@@ -755,7 +816,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
-    mline <- readReplLine interrupt chromePrompt
+    mline <- readReplLineWithInitial interrupt chromePrompt draft
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
@@ -766,6 +827,14 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
+        ReplCycleMode keptDraft -> do
+            let next = cycleReplInteraction planState policy
+            applyReplMode planMode policyRef projectRoot next
+            -- Haskeline already advanced a line; walk back over the
+            -- previous status + prompt so the next chrome replaces them.
+            putStr "\ESC[2A\r\ESC[J"
+            hFlush stdout
+            continueWith keptDraft
         ReplText line ->
             let stripped = Text.strip line
             in if Text.null stripped
@@ -1095,10 +1164,12 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         Text.hPutStrLn stderr (roleError color err)
                         continue
   where
-    continue =
-        repl config render provider previous printed paramsRef policyRef
+    continue = continueWith ""
+    continueWith keptDraft =
+        replWithDraft config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
             escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
+            keptDraft
 
 applyModelChange
     :: Provider

@@ -4,9 +4,21 @@ import Agent.CLI.Input
     ( ChoiceKey(..)
     , approvalKeyText
     , choiceMoveIndex
+    , dropCycleModeSentinel
+    , isCycleModeSentinel
     , parseChoiceKey
     , replHistoryPath
+    , shiftTabPrefsText
     )
+import Control.Exception (bracket)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import System.Console.Haskeline (readPrefs)
+import System.Directory
+    ( getTemporaryDirectory
+    , removeFile
+    )
+import System.IO (hClose, openTempFile)
 import System.FilePath ((</>))
 import Test.Hspec
 
@@ -49,3 +61,23 @@ spec = do
             choiceMoveIndex 3 1 ChoiceUp `shouldBe` 0
             choiceMoveIndex 3 1 ChoiceDown `shouldBe` 2
             choiceMoveIndex 3 1 ChoiceEnter `shouldBe` 1
+
+    describe "cycle mode sentinel" do
+        it "detects and strips the Shift+Tab marker" do
+            let marked = "hello" <> Text.singleton '\xFFFC'
+            isCycleModeSentinel marked `shouldBe` True
+            dropCycleModeSentinel marked `shouldBe` "hello"
+            isCycleModeSentinel "hello" `shouldBe` False
+            dropCycleModeSentinel "hello" `shouldBe` "hello"
+
+        it "parses Shift+Tab keyseq and bind lines" $ do
+            tmp <- getTemporaryDirectory
+            bracket
+                (openTempFile tmp "haskeline-shift-tab")
+                (\(path, _) -> removeFile path)
+                \(path, handle) -> do
+                    Text.hPutStr handle shiftTabPrefsText
+                    hClose handle
+                    prefs <- readPrefs path
+                    show prefs `shouldSatisfy` ("f24" `Text.isInfixOf`) . Text.pack
+                    show prefs `shouldSatisfy` ("\\ESC[Z" `Text.isInfixOf`) . Text.pack

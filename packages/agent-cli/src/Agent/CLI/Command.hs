@@ -72,7 +72,7 @@ slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one"
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
     , cmd "effort" [] "/effort [low|medium|high|xhigh]" "Show or set reasoning effort"
-    , cmd "plan" [] "/plan [description]" "Enter plan mode"
+    , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
@@ -82,7 +82,7 @@ slashCommands =
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
-    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve"
+    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)"
     ]
   where
     cmd name aliases usage summary =

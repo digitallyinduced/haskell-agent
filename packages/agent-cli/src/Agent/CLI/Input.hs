@@ -4,13 +4,17 @@
 module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
+    , readReplLineWithInitial
     , readApprovalLine
     , readChoiceSelection
     , approvalKeyText
     , ChoiceKey(..)
     , parseChoiceKey
     , choiceMoveIndex
+    , isCycleModeSentinel
+    , dropCycleModeSentinel
     , replHistoryPath
+    , shiftTabPrefsText
     ) where
 
 import Agent.CLI.Command (slashCompletionCandidates)
@@ -19,8 +23,8 @@ import Agent.CLI.Interrupt
     , InterruptState
     , noteIdleCtrlC
     )
-import Control.Exception.Safe (bracket, catchIO, throwIO, tryIO)
-import Control.Monad (when)
+import Control.Exception.Safe (bracket, catchIO, finally, throwIO, tryIO)
+import Control.Monad (unless, when)
 import Data.Char (ord)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -34,11 +38,15 @@ import System.Console.ANSI.Codes
     , cursorUpCode
     )
 import System.Console.Haskeline
-    ( Settings(..)
+    ( Prefs
+    , Settings(..)
     , defaultSettings
-    , getInputLine
+    , getHistory
+    , getInputLineWithInitial
     , handleInterrupt
-    , runInputT
+    , putHistory
+    , readPrefs
+    , runInputTWithPrefs
     , setComplete
     , withInterrupt
     )
@@ -47,14 +55,19 @@ import System.Console.Haskeline.Completion
     , CompletionFunc
     , completeWordWithPrev
     )
+import System.Console.Haskeline.History (addHistory)
 import System.Directory
     ( createDirectoryIfMissing
+    , doesFileExist
     , getHomeDirectory
+    , getTemporaryDirectory
+    , removeFile
     )
 import System.FilePath (takeDirectory, (</>))
 import System.IO
     ( BufferMode(..)
     , Handle
+    , hClose
     , hFlush
     , hGetBuffering
     , hGetChar
@@ -62,6 +75,7 @@ import System.IO
     , hSetBuffering
     , hWaitForInput
     , isEOF
+    , openTempFile
     , stderr
     , stdin
     , stdout
@@ -85,6 +99,8 @@ import System.Posix.Types (FileMode)
 data ReplLine
     = ReplEof
     | ReplText Text
+    | ReplCycleMode Text
+    -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
 
@@ -137,7 +153,12 @@ choiceMoveIndex len idx key
 -- Haskeline installs its own SIGINT handler while reading, so idle Ctrl-C
 -- goes through 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
-readReplLine interrupt prompt = do
+readReplLine interrupt prompt =
+    readReplLineWithInitial interrupt prompt ""
+
+-- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
+readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
+readReplLineWithInitial interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -148,13 +169,15 @@ readReplLine interrupt prompt = do
                 (setComplete completeSlash
                     defaultSettings
                         { historyFile = Just path
-                        , autoAddHistory = True
+                        , autoAddHistory = False
                         })
                 prompt
+                initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
             fmap (maybe ReplEof ReplText) readAnswerOnly
+
 -- | Read a one-shot approval answer. The question is always written to
 -- stderr (matching the pre-haskeline behavior) so redirected stdout does
 -- not swallow the prompt. Does not touch REPL history.
@@ -366,22 +389,79 @@ withChoiceRawStdin action = do
             hSetBuffering stdin oldBuf
     bracket enter (const restore) \() -> action
 
-readEditedLine :: InterruptState -> Settings IO -> Text -> IO ReplLine
-readEditedLine interrupt settings prompt = go
-  where
-    go =
-        -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
-        -- handler for the duration of the prompt. Soft-warn / double-quit
-        -- are applied here via 'noteIdleCtrlC'.
-        handleInterrupt onInterrupt $
-            runInputT settings $
-                withInterrupt $
-                    fmap (maybe ReplEof (ReplText . Text.pack))
-                        (getInputLine (Text.unpack prompt))
-    onInterrupt = do
-        noteIdleCtrlC interrupt >>= \case
-            ContinuePrompt -> go
-            QuitProcess -> pure ReplQuitInterrupt
+-- | Object-replacement character inserted by the Shift+Tab haskeline
+-- bind so the line can finish. Must be 'isPrint' or haskeline drops
+-- the bind; stripped before the draft is restored.
+cycleModeSentinel :: Char
+cycleModeSentinel = '\xFFFC'
+
+isCycleModeSentinel :: Text -> Bool
+isCycleModeSentinel = Text.any (== cycleModeSentinel)
+
+dropCycleModeSentinel :: Text -> Text
+dropCycleModeSentinel = Text.filter (/= cycleModeSentinel)
+
+-- | Map CSI/SS3 Shift+Tab onto unused f24, then insert the sentinel and
+-- submit. haskeline canonicalizes the name "shift-tab" to Tab (stealing
+-- completion), so the sequences bind to a function key instead.
+-- Exported so tests can assert the bind file parses.
+shiftTabPrefsText :: Text
+shiftTabPrefsText =
+    Text.unlines
+        [ "keyseq: \"\\x1b[Z\" f24"
+        , "keyseq: \"\\x1b[1;2Z\" f24"
+        , "keyseq: \"\\x1bOZ\" f24"
+        , "bind: f24 " <> Text.singleton cycleModeSentinel <> " Return"
+        ]
+
+loadReplPrefs :: IO Prefs
+loadReplPrefs = do
+    home <- getHomeDirectory
+    let userPath = home </> ".haskeline"
+    exists <- doesFileExist userPath
+    userText <- if exists then Text.readFile userPath else pure ""
+    tmpDir <- getTemporaryDirectory
+    (path, handle) <- openTempFile tmpDir "haskell-agent-haskeline"
+    -- User prefs first, then ours, so later bind/keyseq lines win.
+    Text.hPutStr handle userText
+    unless (Text.null userText || Text.isSuffixOf "\n" userText) $
+        Text.hPutStr handle "\n"
+    Text.hPutStr handle shiftTabPrefsText
+    hClose handle
+    readPrefs path `finally` (removeFile path `catchIO` \_ -> pure ())
+
+readEditedLine :: InterruptState -> Settings IO -> Text -> Text -> IO ReplLine
+readEditedLine interrupt settings prompt initial = do
+    prefs <- loadReplPrefs
+    let go =
+            -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
+            -- handler for the duration of the prompt. Soft-warn / double-quit
+            -- are applied here via 'noteIdleCtrlC'.
+            handleInterrupt onInterrupt $
+                runInputTWithPrefs prefs settings $
+                    withInterrupt do
+                        result <- getInputLineWithInitial
+                            (Text.unpack prompt)
+                            (Text.unpack initial, "")
+                        case result of
+                            Nothing -> pure ReplEof
+                            Just raw
+                                | isCycleModeSentinel packed ->
+                                    -- Leave history unchanged; the REPL
+                                    -- restores @draft@ on the next prompt.
+                                    pure (ReplCycleMode (dropCycleModeSentinel packed))
+                                | otherwise -> do
+                                    unless (all (== ' ') raw) do
+                                        hist <- getHistory
+                                        putHistory (addHistory raw hist)
+                                    pure (ReplText packed)
+                              where
+                                packed = Text.pack raw
+        onInterrupt = do
+            noteIdleCtrlC interrupt >>= \case
+                ContinuePrompt -> go
+                QuitProcess -> pure ReplQuitInterrupt
+    go
 
 -- | Tab-complete slash command names and a few known argument tokens.
 completeSlash :: CompletionFunc IO

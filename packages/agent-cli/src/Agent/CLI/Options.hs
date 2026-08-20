@@ -231,6 +231,7 @@ usage = unlines
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model (alias /m) opens the model picker; /model NAME"
     , "sets it. /help [NAME] lists slash commands. Tab completes / commands."
+    , "Shift+Tab cycles idle mode: ask (normal) → plan → always-approve → ask."
     , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
     , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
