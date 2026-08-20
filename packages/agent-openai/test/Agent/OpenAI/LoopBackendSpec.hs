@@ -130,7 +130,7 @@ spec = do
                 }
             [(request, previous)] <- readIORef seen
             previous `shouldBe` Just "resp-prev"
-            request.model `shouldBe` Just "gpt-5.1-codex"
+            request.model `shouldBe` Just "gpt-5.6-luna"
             request.input `shouldBe` Just (ResponseInputItems (turnInputsToItems [UserMessage "hello"]))
             reverse <$> readIORef events `shouldReturn` [TextDelta "ok"]
 
@@ -194,7 +194,7 @@ spec = do
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
-baseParams = defaultResponseCreateParams { model = Just "gpt-5.1-codex" }
+baseParams = defaultResponseCreateParams { model = Just "gpt-5.6-luna" }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =

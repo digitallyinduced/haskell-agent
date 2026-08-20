@@ -56,5 +56,5 @@ spec = describe "systemPrompt" do
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.5"
-        defaultModelFor OpenAIProvider `shouldBe` "gpt-5.1-codex"
+        defaultModelFor OpenAIProvider `shouldBe` "gpt-5.6-luna"
         defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"
