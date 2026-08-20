@@ -5,6 +5,7 @@ module Agent.CLI.Render
     , formatLoopError
     , formatLoopErrorColored
     , formatToolStarted
+    , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -13,27 +14,31 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
-import Agent.CLI.Timestamp (stripBracketedTimestamps)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
     , glyphErr
-    , glyphThink
+    , glyphOk
     , glyphTool
+    , glyphToolAccent
     , glyphToolOut
     , paintBackgroundLines
     , roleError
     , roleMuted
+    , roleSuccess
     , roleThinking
     , roleToolArrow
     , roleToolDetail
     , roleToolName
     , roleToolOutput
+    , spinnerFrames
     )
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
-import Control.Monad (when)
+import Control.Exception.Safe (tryIO)
+import Control.Monad (void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -47,14 +52,15 @@ import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
-      -- | True while the static "thinking…" status line is on stderr.
     , renderThinkingVisible :: !(IORef Bool)
+    , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
+    , renderModelRef :: !(IORef Text)
     }
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
@@ -76,7 +82,7 @@ renderEventUnlocked config = \case
     ReasoningDelta _ -> pure ()
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
-        showThinkingUnlocked config
+        startThinkingSpinnerUnlocked config
     -- Flush styled text on every completed turn. Pre-tool prose ("I'll check…")
     -- is shown before tool lines; the final tool-free turn is the main answer.
     TurnFinished turn -> do
@@ -96,8 +102,7 @@ renderEventUnlocked config = \case
 -- Color mode also paints each line with 'agentBackground'.
 renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
-    paintBackgroundLines color agentBackground
-        (renderMarkdown color (stripBracketedTimestamps text))
+    paintBackgroundLines color agentBackground (renderMarkdown color text)
 
 -- | End-of-turn flush for color mode: prefer streamed deltas, else the
 -- completed 'assistantText' from non-streaming backends.
@@ -122,28 +127,63 @@ clearThinking :: RenderConfig -> IO ()
 clearThinking config =
     withMVar config.renderLock \_ -> clearThinkingUnlocked config
 
-showThinkingUnlocked :: RenderConfig -> IO ()
-showThinkingUnlocked config
+startThinkingSpinnerUnlocked :: RenderConfig -> IO ()
+startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
         visible <- readIORef config.renderThinkingVisible
         if visible
             then pure ()
             else do
-                Text.hPutStr config.renderStderr
-                    (roleThinking config.renderColor (glyphThink <> "thinking…"))
-                hFlush config.renderStderr
                 writeIORef config.renderThinkingVisible True
+                paintThinkingFrame config 0
+                tid <- forkIO (spinnerLoop config 0)
+                writeIORef config.renderThinkingSpinner (Just tid)
 
 clearThinkingUnlocked :: RenderConfig -> IO ()
 clearThinkingUnlocked config = do
+    mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
+    case mtid of
+        Just tid -> killThread tid
+        Nothing -> pure ()
     visible <- readIORef config.renderThinkingVisible
-    if not visible
-        then pure ()
-        else do
+    when visible do
+        void $ tryIO do
             Text.hPutStr config.renderStderr "\r\ESC[K"
             hFlush config.renderStderr
-            writeIORef config.renderThinkingVisible False
+        writeIORef config.renderThinkingVisible False
+
+spinnerLoop :: RenderConfig -> Int -> IO ()
+spinnerLoop config frame = do
+    threadDelay 80000
+    visible <- readIORef config.renderThinkingVisible
+    when visible do
+        let frames = spinnerFrames
+            next = (frame + 1) `mod` length frames
+        withMVar config.renderLock \_ -> do
+            still <- readIORef config.renderThinkingVisible
+            when still (paintThinkingFrame config next)
+        spinnerLoop config next
+
+paintThinkingFrame :: RenderConfig -> Int -> IO ()
+paintThinkingFrame config frame = do
+    let frames = spinnerFrames
+        glyph = frames !! (frame `mod` length frames)
+        line = roleThinking config.renderColor (glyph <> " thinking…")
+    void $ tryIO do
+        Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
+        hFlush config.renderStderr
+
+formatTurnStatus :: Bool -> Text -> Text -> Text
+formatTurnStatus color outcome detail =
+    let mark
+            | outcome == "ok" = roleSuccess color glyphOk
+            | outcome == "cancelled" = roleMuted color glyphCancel
+            | otherwise = roleError color glyphErr
+        body
+            | Text.null detail = outcome
+            | otherwise = outcome <> " · " <> detail
+    in mark <> roleMuted color body
 
 -- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
 -- 'String' is @hPutStr@ then @hPutChar '\n'@ over a @[Char]@ spine, so
@@ -213,8 +253,8 @@ truncateToolOutput output =
             | Text.length line <= 160 = line
             | otherwise = Text.take 157 line <> "..."
     in if Text.null shortened
-        then glyphToolOut <> "(empty)"
-        else glyphToolOut <> shortened
+        then glyphToolAccent <> glyphToolOut <> "(empty)"
+        else glyphToolAccent <> glyphToolOut <> shortened
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')

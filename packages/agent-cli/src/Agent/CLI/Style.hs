@@ -23,12 +23,18 @@ module Agent.CLI.Style
     , roleSuccess
     , glyphTool
     , glyphToolOut
+    , glyphToolAccent
     , glyphOk
     , glyphErr
     , glyphWarn
     , glyphCancel
     , glyphSession
     , glyphThink
+    , spinnerFrames
+    , ColorLevel(..)
+    , detectColorLevel
+    , adaptSgr
+    , osc8Link
     , solarizedCyan
     , solarizedMagenta
     , solarizedYellow
@@ -43,9 +49,10 @@ module Agent.CLI.Style
     ) where
 
 import Data.Colour (Colour)
-import Data.Colour.SRGB (sRGB24)
+import Data.Colour.SRGB (RGB(..), sRGB24, toSRGB24)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word8)
 import System.Console.ANSI
     ( ConsoleIntensity(..)
     , ConsoleLayer(..)
@@ -56,8 +63,10 @@ import System.Console.ANSI.Codes
     ( clearFromCursorToLineEndCode
     , setSGRCode
     )
+import System.Environment (lookupEnv)
 import System.FilePath (takeFileName)
 import System.IO (Handle)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- Solarized Dark (https://ethanschoonover.com/solarized/)
 solarizedBase03, solarizedBase02, solarizedBase01 :: Colour Float
@@ -194,16 +203,94 @@ roleSuccess color =
         [ fg solarizedGreen
         ]
 
--- | Shared Unicode chrome for TTY status lines.
-glyphTool, glyphToolOut, glyphOk, glyphErr, glyphWarn, glyphCancel, glyphSession, glyphThink :: Text
-glyphTool = "▸ "
-glyphToolOut = "┊ "
-glyphOk = "✓ "
-glyphErr = "✗ "
-glyphWarn = "⚠ "
-glyphCancel = "⊘ "
-glyphSession = "⧉ "
-glyphThink = "◌ "
+supportsUnicodeChrome :: Bool
+supportsUnicodeChrome = unsafePerformIO do
+    lang <- lookupEnv "LANG"
+    lc <- lookupEnv "LC_ALL"
+    lcctype <- lookupEnv "LC_CTYPE"
+    let hay = mconcat [lang, lc, lcctype]
+    pure $ case hay of
+        Nothing -> True
+        Just s ->
+            any (`Text.isInfixOf` Text.toLower (Text.pack s))
+                ["utf-8", "utf8"]
+{-# NOINLINE supportsUnicodeChrome #-}
+
+pickGlyph :: Text -> Text -> Text
+pickGlyph fancy ascii
+    | supportsUnicodeChrome = fancy
+    | otherwise = ascii
+
+glyphTool, glyphToolOut, glyphToolAccent, glyphOk, glyphErr :: Text
+glyphWarn, glyphCancel, glyphSession, glyphThink :: Text
+glyphTool = pickGlyph "◆ " "* "
+glyphToolOut = pickGlyph "┊ " "| "
+glyphToolAccent = pickGlyph "❙ " "| "
+glyphOk = pickGlyph "✓ " "+ "
+glyphErr = pickGlyph "✗ " "x "
+glyphWarn = pickGlyph "⚠ " "! "
+glyphCancel = pickGlyph "⊘ " "o "
+glyphSession = pickGlyph "⧉ " "# "
+glyphThink = pickGlyph "◌ " ". "
+
+spinnerFrames :: [Text]
+spinnerFrames
+    | supportsUnicodeChrome =
+        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    | otherwise =
+        ["|", "/", "-", "\\"]
+
+data ColorLevel = ColorNone | ColorBasic | Color256 | ColorTrue
+    deriving (Eq, Ord, Show)
+
+detectColorLevel :: IO ColorLevel
+detectColorLevel = do
+    noColor <- lookupEnv "NO_COLOR"
+    case noColor of
+        Just _ -> pure ColorNone
+        Nothing -> do
+            colorterm <- lookupEnv "COLORTERM"
+            term <- lookupEnv "TERM"
+            pure $ case fmap Text.toLower (Text.pack <$> colorterm) of
+                Just ct | ct `elem` ["truecolor", "24bit"] -> ColorTrue
+                _ -> case Text.pack <$> term of
+                    Just t
+                        | "256color" `Text.isInfixOf` t -> Color256
+                        | "color" `Text.isInfixOf` t -> ColorBasic
+                        | otherwise -> ColorBasic
+                    Nothing -> ColorTrue
+
+adaptSgr :: ColorLevel -> [SGR] -> [SGR]
+adaptSgr ColorTrue attrs = attrs
+adaptSgr ColorNone _ = []
+adaptSgr _ attrs = map adaptOne attrs
+
+adaptOne :: SGR -> SGR
+adaptOne = \case
+    SetRGBColor layer colour -> SetPaletteColor layer (rgbToXterm256 colour)
+    other -> other
+
+rgbToXterm256 :: Colour Float -> Word8
+rgbToXterm256 colour =
+    let RGB r g b = toSRGB24 colour
+        mx = maximum [r, g, b]
+        mn = minimum [r, g, b]
+    in if fromIntegral (mx - mn) < (24 :: Double)
+        then grayIndex (fromIntegral r)
+        else cubeIndex r g b
+  where
+    cubeIndex r g b =
+        let q x = min (5 :: Word8) (x `div` 51)
+        in 16 + 36 * q r + 6 * q g + q b
+    grayIndex avg =
+        let idx = round ((avg - 8) / 10) :: Int
+        in fromIntegral (max 0 (min 23 idx) + 232)
+
+osc8Link :: Bool -> Text -> Text -> Text
+osc8Link color url label
+    | not color || Text.null url = label
+    | otherwise =
+        "\ESC]8;;" <> url <> "\ESC\\" <> label <> "\ESC]8;;\ESC\\"
 
 -- | Window title: session name when known, otherwise the working directory.
 cliWindowTitle :: FilePath -> Maybe Text -> Text

@@ -45,14 +45,16 @@ spec = do
 
     describe "chrome glyphs" do
         it "exposes the shared Unicode markers" do
-            glyphTool `shouldBe` "▸ "
-            glyphOk `shouldBe` "✓ "
-            glyphErr `shouldBe` "✗ "
-            glyphWarn `shouldBe` "⚠ "
-            glyphCancel `shouldBe` "⊘ "
-            glyphSession `shouldBe` "⧉ "
-            glyphThink `shouldBe` "◌ "
-            glyphToolOut `shouldBe` "┊ "
+            glyphTool `shouldSatisfy` (`elem` ["◆ ", "* "])
+            glyphToolAccent `shouldSatisfy` (`elem` ["❙ ", "| "])
+            glyphOk `shouldSatisfy` (`elem` ["✓ ", "+ "])
+            glyphErr `shouldSatisfy` (`elem` ["✗ ", "x "])
+            glyphWarn `shouldSatisfy` (`elem` ["⚠ ", "! "])
+            glyphCancel `shouldSatisfy` (`elem` ["⊘ ", "o "])
+            glyphSession `shouldSatisfy` (`elem` ["⧉ ", "# "])
+            glyphThink `shouldSatisfy` (`elem` ["◌ ", ". "])
+            glyphToolOut `shouldSatisfy` (`elem` ["┊ ", "| "])
+            spinnerFrames `shouldSatisfy` (not . null)
 
     describe "cliWindowTitle" do
         it "uses the cwd basename when no session title is set" do

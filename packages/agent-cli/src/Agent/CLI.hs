@@ -27,6 +27,7 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
     , formatLoopErrorColored
+    , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -432,6 +433,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     escPaused <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
+    spinnerRef <- newIORef Nothing
+    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
     policyRef <- newIORef policy
@@ -440,12 +443,14 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     let render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
+            , renderThinkingSpinner = spinnerRef
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
+            , renderModelRef = modelRef
             }
         config = LoopConfig
             { loopBackend = backend
@@ -580,6 +585,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplSetModel name -> do
                         modifyIORef' paramsRef (setModel name)
+                        writeIORef render.renderModelRef name
                         clearedChain <- case provider of
                             OpenAIProvider ->
                                 atomicModifyIORef' previous \prev ->
@@ -784,13 +790,24 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     (<> map toolResultToItem toolResults)
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "cancelled" model)
             pure True
         Left err -> do
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color err)
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "error" model)
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
+            do
+                color <- resolveColor stderr
+                model <- readIORef render.renderModelRef
+                let turns = Text.pack (show loopResult.turnsUsed)
+                    unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
+                putTextLn stderr
+                    (formatTurnStatus color "ok" (model <> " · " <> turns <> unit))
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
             let assistantText =
