@@ -24,6 +24,7 @@ data ReplAction
     | ReplSetModel Text
     | ReplToggleAlwaysApprove
     | ReplShowSession
+    | ReplPaste Text
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -52,6 +53,8 @@ parseSlash line = case Text.words line of
             if null args
                 then ReplShowSession
                 else ReplCommandError "usage: /session"
+        | Text.toLower command == "/paste" ->
+            ReplPaste (Text.strip (Text.drop (Text.length command) line))
         | isAlwaysApproveAlias (Text.drop 1 command) ->
             if null args
                 then ReplToggleAlwaysApprove
