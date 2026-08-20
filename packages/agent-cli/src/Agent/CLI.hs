@@ -307,7 +307,7 @@ repl
     -> IO ()
 repl config render previous printed paramsRef policyRef transcriptRef persist = do
     stdoutColor <- resolveColor stdout
-    Text.putStr (rolePrompt stdoutColor "agent> ")
+    Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
     done <- isEOF
     if done
