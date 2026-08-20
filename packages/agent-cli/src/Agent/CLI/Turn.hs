@@ -1,11 +1,13 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( runOneTurn
+    ( TurnResult(..)
+    , runOneTurn
     ) where
 
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan)
+import Agent.CLI.ProviderFallback (isUsageExhausted)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
@@ -32,6 +34,7 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
+import Agent.Error (ApiError)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopError(..)
@@ -66,7 +69,12 @@ import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.IO (hIsTerminalDevice, stderr, stdout)
 
-runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO Bool
+data TurnResult
+    = TurnSucceeded
+    | TurnFailed
+    | TurnUsageExhausted ApiError
+
+runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
@@ -132,13 +140,20 @@ runOneTurn env@SessionEnv
             putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
             model <- readIORef render.renderModelRef
             putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
-            pure True
+            pure TurnSucceeded
         Left err -> do
-            color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color err)
-            model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
-            pure False
+            afterItems <- readIORef transcriptRef
+            case err of
+                LoopTransport apiError
+                    | length afterItems == length beforeItems
+                    , isUsageExhausted apiError ->
+                        pure (TurnUsageExhausted apiError)
+                _ -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr (formatLoopErrorColored color err)
+                    model <- readIORef render.renderModelRef
+                    putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
+                    pure TurnFailed
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
@@ -188,11 +203,10 @@ runOneTurn env@SessionEnv
                             (cliWindowTitle handle'.sessionMeta.metaCwd
                                 (Just handle'.sessionMeta.metaTitle))
             case followUp of
-                Nothing -> pure True
+                Nothing -> pure TurnSucceeded
                 Just notes -> do
                     writeIORef printed False
-                    _ <- runOneTurn env notes [UserMessage notes]
-                    pure True
+                    runOneTurn env notes [UserMessage notes]
 
 isLeftSlot :: Either a b -> Bool
 isLeftSlot = \case

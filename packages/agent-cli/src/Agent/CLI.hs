@@ -61,6 +61,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.ProviderFallback (fallbackCandidates)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
@@ -85,6 +86,7 @@ import Agent.CLI.Style
     , endBackground
     , glyphOk
     , glyphSession
+    , glyphWarn
     , roleError
     , roleMuted
     , rolePrompt
@@ -95,9 +97,10 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.Tools (schemasFromAppTools)
-import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Turn (TurnResult(..), runOneTurn)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
+import Agent.Error (ApiError)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
@@ -202,9 +205,19 @@ data DevResult
 data RunResult
     = RunQuit
     | RunReload
-    | RunSwitchProvider Text
-      -- ^ Persisted session id. Consumed after the current provider-specific
-      -- backend shuts down.
+    | RunSwitchProvider ProviderSwitch
+
+data ProviderSwitch = ProviderSwitch
+    { switchSessionId :: !Text
+    , switchPendingTurn :: !(Maybe PendingTurn)
+    , switchUnavailableProviders :: ![Provider]
+    }
+
+data PendingTurn = PendingTurn
+    { pendingPromptText :: !Text
+    , pendingInputs :: ![TurnInput]
+    , pendingExitAfter :: !Bool
+    }
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
 afterDev :: DevResult -> IO String
@@ -285,21 +298,26 @@ run = do
 -- produced, so resuming reconstructs auth, tools, prompt, and transport from
 -- the newly selected provider while keeping the local transcript.
 runAgentWithProviderSwitches :: CliOptions -> IO DevResult
-runAgentWithProviderSwitches options =
-    runAgent options >>= \case
-        RunSwitchProvider sessionId ->
-            runAgentWithProviderSwitches options
-                { optProvider = Nothing
-                , optModel = Nothing
-                , optCwd = Nothing
-                , optWorktree = False
-                , optEffort = Nothing
-                , optPrompt = Nothing
-                , optPromptFile = Nothing
-                , optResume = Just sessionId
-                }
-        RunQuit -> pure DevQuit
-        RunReload -> pure DevReload
+runAgentWithProviderSwitches options = go options Nothing []
+  where
+    go current pending unavailable =
+        runAgent current pending unavailable >>= \case
+            RunSwitchProvider providerSwitch ->
+                go
+                    current
+                        { optProvider = Nothing
+                        , optModel = Nothing
+                        , optCwd = Nothing
+                        , optWorktree = False
+                        , optEffort = Nothing
+                        , optPrompt = Nothing
+                        , optPromptFile = Nothing
+                        , optResume = Just providerSwitch.switchSessionId
+                        }
+                    providerSwitch.switchPendingTurn
+                    providerSwitch.switchUnavailableProviders
+            RunQuit -> pure DevQuit
+            RunReload -> pure DevReload
 
 runListSessions :: IO ()
 runListSessions = do
@@ -340,8 +358,8 @@ printTurn turn = do
         _ -> pure ()
     putStrLn ""
 
-runAgent :: CliOptions -> IO RunResult
-runAgent options = do
+runAgent :: CliOptions -> Maybe PendingTurn -> [Provider] -> IO RunResult
+runAgent options pendingTurn unavailableProviders = do
     home <- getHomeDirectory
     let root = sessionsRoot home
     resumed <- case options.optResume of
@@ -506,7 +524,7 @@ runAgent options = do
                                             transcriptRef
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
-                                runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                                runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
                                     multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef noticingBackend)
                             >>= \case
@@ -535,7 +553,7 @@ runAgent options = do
                                 withPendingNotices pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
-                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
                     OpenRouterProvider -> do
@@ -561,7 +579,7 @@ runAgent options = do
                                 withPendingNotices pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
-                        runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
+                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
 
@@ -653,6 +671,8 @@ runSession
     -> ToolEnv
     -> PlanModeEnv
     -> Maybe Text
+    -> Maybe PendingTurn
+    -> [Provider]
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
     -> Maybe Text
@@ -671,7 +691,7 @@ runSession
     -> IORef TokenUsage
     -> Backend
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -745,6 +765,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             { sessionLoop = config
             , sessionRender = render
             , sessionProvider = provider
+            , sessionUnavailableProviders = unavailableProviders
             , sessionPrevious = previous
             , sessionPrinted = printed
             , sessionParams = paramsRef
@@ -764,14 +785,59 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , sessionUsage = usageRef
             , sessionReset = sessionReset
             }
-    case prompt of
-        Just text -> do
-            ok <- runOneTurn env text [UserMessage text]
-            if ok
-                then putTrailingNewline printed >> pure RunQuit
-                else exitFailure
-        Nothing ->
-            repl env
+    case pendingTurn of
+        Just pending ->
+            runPendingTurn env pending
+        Nothing -> case prompt of
+            Just text -> do
+                result <- runOneTurn env text [UserMessage text]
+                finishTurn env True text [UserMessage text] result
+            Nothing ->
+                repl env
+
+runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
+runPendingTurn env pending = do
+    result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
+    finishTurn
+        env
+        pending.pendingExitAfter
+        pending.pendingPromptText
+        pending.pendingInputs
+        result
+
+finishTurn
+    :: SessionEnv
+    -> Bool
+    -> Text
+    -> [TurnInput]
+    -> TurnResult
+    -> IO RunResult
+finishTurn env exitAfter promptText inputs = \case
+    TurnSucceeded -> do
+        putTrailingNewline env.sessionPrinted
+        if exitAfter
+            then pure RunQuit
+            else repl env
+    TurnFailed ->
+        if exitAfter
+            then exitFailure
+            else do
+                putTrailingNewline env.sessionPrinted
+                repl env
+    TurnUsageExhausted apiError ->
+        requestAutomaticProviderFallback env promptText inputs apiError >>= \case
+            Just providerSwitch ->
+                pure $ RunSwitchProvider providerSwitch
+                    { switchPendingTurn = Just PendingTurn
+                        { pendingPromptText = promptText
+                        , pendingInputs = inputs
+                        , pendingExitAfter = exitAfter
+                        }
+                    }
+            Nothing ->
+                if exitAfter
+                    then exitFailure
+                    else repl env
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -888,9 +954,8 @@ replWithDraft env@SessionEnv
                                                     , userImages = pendingImages
                                                     }
                                                 ]
-                                _ <- runOneTurn env text turnInputs
-                                putTrailingNewline printed
-                                continue
+                                result <- runOneTurn env text turnInputs
+                                finishTurn env False text turnInputs result
                     ReplPaste{pasteImmediate, pasteCaption} -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
@@ -932,14 +997,14 @@ replWithDraft env@SessionEnv
                                         Text.putStrLn
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
-                                        _ <- runOneTurn env promptText
-                                            [ UserMultimodal
-                                                { userText = promptText
-                                                , userImages = images
-                                                }
-                                            ]
-                                        putTrailingNewline printed
-                                        continue
+                                        let turnInputs =
+                                                [ UserMultimodal
+                                                    { userText = promptText
+                                                    , userImages = images
+                                                    }
+                                                ]
+                                        result <- runOneTurn env promptText turnInputs
+                                        finishTurn env False promptText turnInputs result
                                     else do
                                         queueAttachedImages
                                             attachmentsRef previewIdRef color images
@@ -1060,9 +1125,11 @@ replWithDraft env@SessionEnv
                                                 , metaUpdatedAt = now
                                                 }
                                 continue
-                    ReplPlan maybeDescription -> do
-                        enterPlanFromSlash env maybeDescription
-                        continue
+                    ReplPlan maybeDescription ->
+                        enterPlanFromSlash env maybeDescription >>= \case
+                            Just providerSwitch ->
+                                pure (RunSwitchProvider providerSwitch)
+                            Nothing -> continue
                     ReplResume maybeId -> do
                         handleResume maybeId persist
                         continue
@@ -1290,7 +1357,56 @@ requestModelProviderSwitch choice persist = case persist of
                             <> "/"
                             <> choice.modelId
                             <> " (conversation continued locally)"
-                    pure $ Right (RunSwitchProvider handle.sessionMeta.metaId)
+                    pure $ Right $ RunSwitchProvider ProviderSwitch
+                        { switchSessionId = handle.sessionMeta.metaId
+                        , switchPendingTurn = Nothing
+                        , switchUnavailableProviders = []
+                        }
+
+requestAutomaticProviderFallback
+    :: SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> ApiError
+    -> IO (Maybe ProviderSwitch)
+requestAutomaticProviderFallback env _promptText _inputs apiError = do
+    let current = env.sessionProvider
+        unavailable = markUnavailable current env.sessionUnavailableProviders
+        candidates =
+            fallbackCandidates env.sessionUnavailableProviders current apiError
+    tryCandidates unavailable candidates
+  where
+    tryCandidates unavailable = \case
+        [] -> do
+            color <- resolveColor stderr
+            putTextLn stderr $ roleError color $
+                "usage exhausted; no other configured provider account is available"
+            pure Nothing
+        choice : rest ->
+            requestModelProviderSwitch choice env.sessionPersist >>= \case
+                Left _ ->
+                    tryCandidates
+                        (markUnavailable choice.modelProvider unavailable)
+                        rest
+                Right (RunSwitchProvider providerSwitch) -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr $ roleWarn color $
+                        glyphWarn
+                            <> providerSlug env.sessionProvider
+                            <> " usage exhausted; switching to best available model "
+                            <> providerSlug choice.modelProvider
+                            <> "/"
+                            <> choice.modelId
+                    pure $ Just providerSwitch
+                        { switchUnavailableProviders = unavailable
+                        }
+                Right _ ->
+                    tryCandidates unavailable rest
+
+markUnavailable :: Provider -> [Provider] -> [Provider]
+markUnavailable provider unavailable
+    | provider `elem` unavailable = unavailable
+    | otherwise = unavailable <> [provider]
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -1345,7 +1461,7 @@ requestReload persist = do
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
             pure RunReload
 
-enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO ()
+enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderSwitch)
 enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = persist, sessionPrinted = printed} maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
@@ -1364,6 +1480,7 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
                 (roleMuted color
                     (glyphSession
                         <> "plan mode armed; send a prompt to activate (or /plan <description>)"))
+            pure Nothing
         Just description -> do
             activatePlanMode planMode
             path <- planFilePath planMode
@@ -1371,8 +1488,24 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
             let planEnv = env { sessionStoreRoot = discardStore }
-            _ <- runOneTurn planEnv description [UserMessage description]
-            putTrailingNewline printed
+                inputs = [UserMessage description]
+            result <- runOneTurn planEnv description inputs
+            case result of
+                TurnUsageExhausted apiError ->
+                    requestAutomaticProviderFallback
+                        planEnv description inputs apiError >>= \case
+                            Nothing -> pure Nothing
+                            Just providerSwitch ->
+                                pure $ Just providerSwitch
+                                    { switchPendingTurn = Just PendingTurn
+                                        { pendingPromptText = description
+                                        , pendingInputs = inputs
+                                        , pendingExitAfter = False
+                                        }
+                                    }
+                _ -> do
+                    putTrailingNewline printed
+                    pure Nothing
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
 -- whatever instructions were already in history.

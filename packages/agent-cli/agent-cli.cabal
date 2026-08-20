@@ -55,6 +55,7 @@ library
                     , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
+                    , Agent.CLI.ProviderFallback
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
@@ -118,6 +119,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PermissionSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
+                    , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec

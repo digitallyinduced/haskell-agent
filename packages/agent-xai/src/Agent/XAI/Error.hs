@@ -66,6 +66,7 @@ isFreeLimitBody :: Text -> Bool
 isFreeLimitBody body =
     "grok.com/supergrok" `Text.isInfixOf` lowered
         || "upgrade to a grok subscription" `Text.isInfixOf` lowered
+        || "grok build usage balance exhausted" `Text.isInfixOf` lowered
   where
     lowered = Text.toLower body
 
