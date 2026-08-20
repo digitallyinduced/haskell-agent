@@ -33,7 +33,9 @@ spec = do
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
-            roleToolName False "read_file" `shouldBe` "read_file"
+            roleToolName False "Read" `shouldBe` "Read"
+            roleToolPath False "src/A.hs" `shouldBe` "src/A.hs"
+            roleToolCommand False "git status" `shouldBe` "git status"
             roleError False "boom" `shouldBe` "boom"
             roleMuted False "session: 1" `shouldBe` "session: 1"
 
@@ -52,7 +54,7 @@ spec = do
             glyphWarn `shouldSatisfy` (`elem` ["⚠ ", "! "])
             glyphCancel `shouldSatisfy` (`elem` ["⊘ ", "o "])
             glyphSession `shouldSatisfy` (`elem` ["⧉ ", "# "])
-            glyphThink `shouldSatisfy` (`elem` ["◌ ", ". "])
+            glyphThink `shouldSatisfy` (`elem` ["◆ ", "* "])
             glyphToolOut `shouldSatisfy` (`elem` ["┊ ", "| "])
             spinnerFrames `shouldSatisfy` (not . null)
 

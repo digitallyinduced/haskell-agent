@@ -15,6 +15,8 @@ module Agent.CLI.Style
     , roleToolArrow
     , roleToolName
     , roleToolDetail
+    , roleToolPath
+    , roleToolCommand
     , roleToolOutput
     , roleThinking
     , roleError
@@ -171,6 +173,14 @@ roleToolName color =
 roleToolDetail :: Bool -> Text -> Text
 roleToolDetail color = style color [fg solarizedBase01]
 
+-- | File paths on tool rows (Solarized orange).
+roleToolPath :: Bool -> Text -> Text
+roleToolPath color = style color [fg solarizedOrange]
+
+-- | Shell / GHCi command text on tool rows (Solarized yellow).
+roleToolCommand :: Bool -> Text -> Text
+roleToolCommand color = style color [fg solarizedYellow]
+
 roleToolOutput :: Bool -> Text -> Text
 roleToolOutput color = style color [fg solarizedBase01]
 
@@ -231,7 +241,7 @@ glyphErr = pickGlyph "✗ " "x "
 glyphWarn = pickGlyph "⚠ " "! "
 glyphCancel = pickGlyph "⊘ " "o "
 glyphSession = pickGlyph "⧉ " "# "
-glyphThink = pickGlyph "◌ " ". "
+glyphThink = pickGlyph "◆ " "* "
 
 spinnerFrames :: [Text]
 spinnerFrames

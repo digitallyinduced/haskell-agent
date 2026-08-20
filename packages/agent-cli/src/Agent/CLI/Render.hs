@@ -42,9 +42,11 @@ import Agent.CLI.Style
     , roleSuccess
     , roleThinking
     , roleToolArrow
+    , roleToolCommand
     , roleToolDetail
     , roleToolName
     , roleToolOutput
+    , roleToolPath
     , solarizedGreen
     , solarizedRed
     , spinnerFrames
@@ -126,7 +128,7 @@ renderEventUnlocked config = \case
         writeIORef config.renderLiveActive False
         writeIORef config.renderReasoningBuffer ""
         writeIORef config.renderReasoningLive False
-        writeIORef config.renderActivityRef "thinking…"
+        writeIORef config.renderActivityRef "Thinking…"
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
         startThinkingSpinnerUnlocked config
@@ -442,7 +444,9 @@ formatThinkingBlock color streaming elapsed raw =
             if streaming
                 then roleThinking color (glyphThink <> "Thinking…")
                     <> roleMuted color ("  " <> formatElapsed elapsed)
-                else roleThinking color (glyphThink <> "Thought for " <> formatElapsed elapsed)
+                else
+                    roleThinking color (glyphThink <> "Thought")
+                        <> roleMuted color (" for " <> formatElapsed elapsed)
         wrapped = wrapThinkingLines thinkingMaxWidth (Text.strip raw)
         preview
             | streaming = take thinkingPreviewLines wrapped
@@ -535,18 +539,80 @@ putTextLn handle text = do
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =
-    let detail = toolDetail call
-    in if Text.null detail then call.name else call.name <> " " <> detail
+    let verb = toolVerb call.name
+        detail = toolDetail call
+    in if Text.null detail then verb else verb <> " " <> detail
 
 -- | Colored tool-start line for stderr chrome.
+--
+-- Known coding tools use English verbs (Read / Listed / $) instead of
+-- wire names, matching grok-build's linear chrome while staying Solarized.
 formatToolStarted :: Bool -> ToolCall -> Text
 formatToolStarted color call =
-    let detail = toolDetail call
-        arrow = roleToolArrow color glyphTool
-        name = roleToolName color call.name
-    in if Text.null detail
-        then arrow <> name
-        else arrow <> name <> " " <> roleToolDetail color detail
+    let arrow = roleToolArrow color glyphTool
+        detail = toolDetail call
+    in case toolChrome call.name of
+        ToolChromeShell ->
+            let prompt = roleMuted color "$ "
+                command =
+                    if Text.null detail
+                        then roleMuted color "…"
+                        else roleToolCommand color detail
+            in arrow <> prompt <> command
+        ToolChrome verb kind ->
+            let name = roleToolName color verb
+                paintedDetail = case kind of
+                    ToolDetailNone -> ""
+                    ToolDetailMuted
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolDetail color detail
+                    ToolDetailPath
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolPath color detail
+                    ToolDetailCommand
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolCommand color detail
+            in arrow <> name <> paintedDetail
+
+data ToolChrome
+    = ToolChromeShell
+    | ToolChrome Text ToolDetailKind
+
+data ToolDetailKind
+    = ToolDetailNone
+    | ToolDetailMuted
+    | ToolDetailPath
+    | ToolDetailCommand
+
+toolChrome :: Text -> ToolChrome
+toolChrome = \case
+    "read_file" -> ToolChrome "Read" ToolDetailPath
+    "list_dir" -> ToolChrome "Listed" ToolDetailPath
+    "grep" -> ToolChrome "Searched" ToolDetailMuted
+    "search_replace" -> ToolChrome "Edited" ToolDetailPath
+    "apply_patch" -> ToolChrome "Edited" ToolDetailPath
+    "run_terminal_cmd" -> ToolChromeShell
+    "shell_command" -> ToolChromeShell
+    "run_ghci" -> ToolChromeShell
+    "get_task_output" -> ToolChrome "Read" ToolDetailMuted
+    "kill_task" -> ToolChrome "Killed" ToolDetailMuted
+    "task" -> ToolChrome "Ran" ToolDetailMuted
+    "spawn_agent" -> ToolChrome "Spawned" ToolDetailMuted
+    "wait_agent" -> ToolChrome "Waited" ToolDetailMuted
+    "send_message" -> ToolChrome "Sent" ToolDetailMuted
+    "followup_task" -> ToolChrome "Followed up" ToolDetailMuted
+    "list_agents" -> ToolChrome "Listed" ToolDetailMuted
+    "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
+    "update_plan" -> ToolChrome "Updated" ToolDetailMuted
+    "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
+    "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
+    "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
+    name -> ToolChrome name ToolDetailMuted
+
+toolVerb :: Text -> Text
+toolVerb name = case toolChrome name of
+    ToolChromeShell -> "$"
+    ToolChrome verb _ -> verb
 
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case call.name of
@@ -560,8 +626,10 @@ formatSearchReplaceDiff color arguments =
         oldText = jsonTextFieldDefault "old_string" arguments
         newText = jsonTextFieldDefault "new_string" arguments
         header = case (Text.null oldText, Text.null newText) of
-            (True, False) -> roleMuted color ("  create " <> path)
-            (False, True) -> roleMuted color ("  delete " <> path)
+            (True, False) ->
+                roleMuted color "  create " <> roleToolPath color path
+            (False, True) ->
+                roleMuted color "  delete " <> roleToolPath color path
             _ -> ""
         oldLines = Text.lines oldText
         newLines = Text.lines newText
