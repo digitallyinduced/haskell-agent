@@ -148,6 +148,8 @@ spec = do
                     , "session"
                     , "resume"
                     , "compact"
+                    , "clear"
+                    , "new"
                     , "reload-auth"
                     , "paste"
                     , "attachments"
@@ -182,6 +184,7 @@ spec = do
             let listing = Text.unpack (formatSlashHelp False Nothing)
             listing `shouldSatisfy` ("/model [NAME]" `isInfixOf`)
             listing `shouldSatisfy` ("Open the model picker" `isInfixOf`)
+            listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy` ("/effort [low|medium|high|xhigh]" `isInfixOf`)

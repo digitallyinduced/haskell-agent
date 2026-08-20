@@ -79,7 +79,7 @@ slashCommands =
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
     , cmd "new" [] "/new" "Start a fresh persisted session id"
     , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
-    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image to the next prompt"
+    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve"

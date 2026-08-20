@@ -4,6 +4,7 @@ module Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImage
     , readClipboardImages
+    , loadImagesFromPastedText
     , formatImageSize
     ) where
 
@@ -81,6 +82,60 @@ formatImageSize n
         Text.pack (show (n `div` 1024)) <> " KB"
     | otherwise =
         Text.pack (show (n `div` (1024 * 1024))) <> " MB"
+
+-- | Native Cmd+V of a Finder image often inserts POSIX path(s) rather than
+-- bitmap bytes. If the whole prompt (or every newline-separated token) is an
+-- existing image file, load them as attachments; otherwise return 'Nothing'
+-- so the prompt stays ordinary text.
+loadImagesFromPastedText :: Text -> IO (Maybe [ImageAttachment])
+loadImagesFromPastedText raw = do
+    let stripped = Text.strip raw
+        whole = normalizePastedPath stripped
+        lines_ =
+            filter (not . null)
+                (map normalizePastedPath (Text.splitOn "\n" stripped))
+    wholeOk <- if null whole then pure False else isImageFile whole
+    if wholeOk
+        then fmap toMaybe (readImageFile whole)
+        else if length lines_ > 1
+            then do
+                allImages <- and <$> mapM isImageFile lines_
+                if not allImages
+                    then pure Nothing
+                    else do
+                        loaded <- mapM readImageFile lines_
+                        pure $ case sequence loaded of
+                            Right images@(_:_) -> Just images
+                            _ -> Nothing
+            else pure Nothing
+  where
+    toMaybe = \case
+        Right img -> Just [img]
+        Left _ -> Nothing
+
+-- | Strip quotes and a @file://@ prefix so Finder / browser pastes match.
+normalizePastedPath :: Text -> FilePath
+normalizePastedPath raw =
+    let stripped = unquote (Text.strip raw)
+        unpacked = Text.unpack stripped
+    in case unpacked of
+        'f':'i':'l':'e':':':'/':'/':rest -> dropAuthority rest
+        _ -> unpacked
+  where
+    unquote t
+        | Text.length t >= 2
+        , Text.head t == Text.last t
+        , Text.head t `elem` ['"', '\''] =
+            Text.init (Text.drop 1 t)
+        | otherwise = t
+    -- @file:///tmp/x.png@ → @/tmp/x.png@; @file://localhost/tmp/x.png@ too.
+    dropAuthority rest =
+        case rest of
+            '/':_ -> rest
+            _ ->
+                case dropWhile (/= '/') rest of
+                    [] -> rest
+                    path -> path
 
 --------------------------------------------------------------------------------
 -- Platform readers

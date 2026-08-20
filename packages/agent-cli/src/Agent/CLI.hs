@@ -12,6 +12,7 @@ import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
+    , loadImagesFromPastedText
     , readClipboard
     , readClipboardImages
     )
@@ -19,6 +20,12 @@ import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , runProviderCompact
+    )
+import Agent.CLI.ImagePreview
+    ( detectImagePreviewProtocol
+    , previewColumnsFor
+    , previewRowsFor
+    , renderImagePreview
     )
 import Agent.CLI.Input (ReplLine(..), readReplLine)
 import Agent.CLI.Interrupt
@@ -181,6 +188,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs, getProgName, lookupEnv)
 import System.FilePath ((</>), takeDirectory)
+import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
@@ -628,6 +636,7 @@ runSession
 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
+    previewIdRef <- newIORef (1 :: Int)
     textBuffer <- newIORef ""
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
@@ -697,7 +706,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
                 transcriptRef persist planMode projectRoot tokenProvider agentsContext
-                escPaused attachmentsRef interrupt storeRoot sessionReset
+                escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
 
 repl
     :: LoopConfig
@@ -715,11 +724,12 @@ repl
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef [ImageAttachment]
+    -> IORef Int
     -> InterruptState
     -> SubagentStoreRoot
     -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef interrupt storeRoot sessionReset = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -764,22 +774,33 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
-                        pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
-                        writeIORef printed False
-                        let turnInputs =
-                                if null pendingImages
-                                    then [UserMessage text]
-                                    else
-                                        [ UserMultimodal
-                                            { userText = text
-                                            , userImages = pendingImages
-                                            }
-                                        ]
-                        _ <- runOneTurn config render previous printed
-                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot text
-                            turnInputs
-                        putTrailingNewline printed
-                        continue
+                        -- Native Cmd+V of a Finder image often pastes a path
+                        -- rather than bitmap bytes. Treat a prompt that is
+                        -- only image path(s) as an attach + in-terminal preview,
+                        -- matching Grok Build's paste chip.
+                        pastedImages <- loadImagesFromPastedText text
+                        case pastedImages of
+                            Just images@(_:_) -> do
+                                queueAttachedImages
+                                    attachmentsRef previewIdRef stdoutColor images
+                                continue
+                            _ -> do
+                                pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
+                                writeIORef printed False
+                                let turnInputs =
+                                        if null pendingImages
+                                            then [UserMessage text]
+                                            else
+                                                [ UserMultimodal
+                                                    { userText = text
+                                                    , userImages = pendingImages
+                                                    }
+                                                ]
+                                _ <- runOneTurn config render previous printed
+                                    transcriptRef persist planMode agentsContext escPaused interrupt storeRoot text
+                                    turnInputs
+                                putTrailingNewline printed
+                                continue
                     ReplPaste{pasteImmediate, pasteCaption} -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
@@ -817,6 +838,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                                 if Text.null pasteCaption
                                                     then "See attached image."
                                                     else pasteCaption
+                                        putImagePreview previewIdRef color images
                                         Text.putStrLn
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
@@ -830,16 +852,8 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                         putTrailingNewline printed
                                         continue
                                     else do
-                                        modifyIORef' attachmentsRef (<> images)
-                                        pending <- readIORef attachmentsRef
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphOk
-                                                    <> "attached "
-                                                    <> sizes
-                                                    <> " — send with next message ("
-                                                    <> Text.pack (show (length pending))
-                                                    <> " queued)"))
+                                        queueAttachedImages
+                                            attachmentsRef previewIdRef color images
                                         continue
                     ReplShowAttachments -> do
                         pending <- readIORef attachmentsRef
@@ -1084,7 +1098,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
-            escPaused attachmentsRef interrupt storeRoot sessionReset
+            escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
 
 applyModelChange
     :: Provider
@@ -1409,6 +1423,49 @@ resolveColor handle = do
     isTty <- hIsTerminalDevice handle
     noColor <- lookupEnv "NO_COLOR"
     pure (isTty && maybe True (\_ -> False) noColor)
+
+-- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
+-- (Kitty graphics or iTerm2 OSC 1337, matching Grok Build).
+queueAttachedImages
+    :: IORef [ImageAttachment]
+    -> IORef Int
+    -> Bool
+    -> [ImageAttachment]
+    -> IO ()
+queueAttachedImages attachmentsRef previewIdRef color images = do
+    modifyIORef' attachmentsRef (<> images)
+    pending <- readIORef attachmentsRef
+    let sizes =
+            Text.intercalate ", "
+                [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
+                | img <- images
+                ]
+    putImagePreview previewIdRef color images
+    Text.putStrLn
+        (roleMuted color
+            (glyphOk
+                <> "attached "
+                <> sizes
+                <> " — send with next message ("
+                <> Text.pack (show (length pending))
+                <> " queued)"))
+
+putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
+putImagePreview previewIdRef color images = do
+    protocol <- detectImagePreviewProtocol stdout
+    inTmux <- isJust <$> lookupEnv "TMUX"
+    size <- getTerminalSize
+    let (termRows, termCols) = fromMaybe (24, 80) size
+        columns = previewColumnsFor termCols
+        rows = previewRowsFor termRows
+    startId <- atomicModifyIORef' previewIdRef \n ->
+        (n + max 1 (length images), n)
+    case renderImagePreview protocol inTmux (roleMuted color) columns rows startId images of
+        Nothing -> pure ()
+        Just block -> do
+            -- Graphics sequences must not go through the Solarized wash.
+            Text.putStrLn block
+            hFlush stdout
 
 putTrailingNewline :: IORef Bool -> IO ()
 putTrailingNewline printed = do
