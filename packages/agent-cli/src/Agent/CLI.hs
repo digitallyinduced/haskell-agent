@@ -9,6 +9,7 @@ module Agent.CLI
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
+import Agent.CLI.Input (readApprovalLine, readReplLine)
 import Agent.CLI.Options
 import Agent.CLI.Project
     ( ProjectSettings(..)
@@ -87,7 +88,7 @@ import System.Environment (getArgs, getProgName, lookupEnv)
 import System.FilePath ((</>))
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
-import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
+import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
 
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
@@ -436,28 +437,25 @@ repl
 repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
     -- Prompt + typed input share a navy wash; clear-to-EOL paints the rest
-    -- of the line immediately. Reset after the line is read.
-    Text.putStr
-        ( beginBackground stdoutColor userBackground
-            <> rolePrompt stdoutColor "λ> "
-            <> if stdoutColor
-                then Text.pack clearFromCursorToLineEndCode
-                else mempty
-        )
+    -- of the line immediately. Haskeline redraws this prompt on edit.
+    let chromePrompt =
+            beginBackground stdoutColor userBackground
+                <> rolePrompt stdoutColor "λ> "
+                <> if stdoutColor
+                    then Text.pack clearFromCursorToLineEndCode
+                    else mempty
+    mline <- readReplLine chromePrompt
+    Text.putStr (endBackground stdoutColor)
     hFlush stdout
-    done <- isEOF
-    if done
-        then do
-            Text.putStr (endBackground stdoutColor)
+    case mline of
+        Nothing -> do
             putStrLn ""
             pure DevQuit
-        else do
-            line <- Text.strip <$> Text.getLine
-            Text.putStr (endBackground stdoutColor)
-            hFlush stdout
-            if Text.null line
+        Just line ->
+            let stripped = Text.strip line
+            in if Text.null stripped
                 then continue
-                else case parseReplLine line of
+                else case parseReplLine stripped of
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -760,22 +758,19 @@ approveTool policyRef tools call projectRoot = do
             | readOnly -> pure True
             | otherwise -> do
                 color <- resolveColor stderr
-                putTextLn stderr
-                    (roleWarn color ("Allow " <> summarizeToolCall call <> "? [y/N/a]"))
-                eof <- isEOF
-                if eof
-                    then pure False
-                    else do
-                        answer <- parseApprovalAnswer <$> Text.getLine
-                        case answer of
-                            AllowOnce -> pure True
-                            AllowAlways -> do
-                                writeIORef policyRef ApproveAll
-                                saveProjectAutoApprove projectRoot True
-                                putTextLn stderr
-                                    (roleSuccess color "auto-approve on (saved for project)")
-                                pure True
-                            Deny -> pure False
+                let question =
+                        roleWarn color ("Allow " <> summarizeToolCall call <> "? [y/N/a] ")
+                readApprovalLine question >>= \case
+                    Nothing -> pure False
+                    Just raw -> case parseApprovalAnswer raw of
+                        AllowOnce -> pure True
+                        AllowAlways -> do
+                            writeIORef policyRef ApproveAll
+                            saveProjectAutoApprove projectRoot True
+                            putTextLn stderr
+                                (roleSuccess color "auto-approve on (saved for project)")
+                            pure True
+                        Deny -> pure False
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
 toggleAlwaysApprove policyRef projectRoot = do
