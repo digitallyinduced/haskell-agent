@@ -39,6 +39,31 @@ spec = describe "runLoop" do
             , (Just "resp-1", [CompletedTool (functionResult "c1" "echo:hi")])
             ]
 
+    it "accepts multimodal first turns via runLoopInputs" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-m"
+                , toolCalls = []
+                , assistantText = Just "saw it"
+                }
+            ]
+        let image = ImageAttachment "image/png" "abc"
+            inputs =
+                [ UserMultimodal
+                    { userText = "see this"
+                    , userImages = [image]
+                    }
+                ]
+        result <- runLoopInputs (testConfig backend) Nothing inputs
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-m"
+            , finalText = Just "saw it"
+            , turnsUsed = 1
+            }
+        seen <- readIORef submissions
+        seen `shouldBe` [(Nothing, inputs)]
+
     it "serializes loopOnEvent across parallel tool calls" do
         inFlight <- newIORef (0 :: Int)
         maxInFlight <- newIORef (0 :: Int)

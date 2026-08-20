@@ -219,5 +219,6 @@ usage = unlines
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model [NAME] shows or changes the model."
     , "/always-approve (or :yolo) toggles auto-approve."
+    , "/paste [TEXT] sends the clipboard image (macOS) with an optional caption."
     , "/session prints the current session id. Ctrl-D or :q exits."
     ]
