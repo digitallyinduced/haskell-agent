@@ -11,7 +11,12 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
-import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
+import Agent.CLI.Approval
+    ( approveToolDecision
+    , childApprove
+    , toggleAlwaysApprove
+    )
+import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
@@ -33,28 +38,18 @@ import Agent.CLI.ImagePreview
 import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLineWithInitial)
 import Agent.CLI.ReplMode
     ( ReplMode(..)
-    , cycleReplMode
     , replModeFromState
-    , replModeLabel
     )
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
     , withCtrlCHandler
-    , withTurnCancel
     )
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options
-import Agent.CLI.Permission
-    ( PermissionChoice(..)
-    , promptPermission
-    )
 import Agent.CLI.Resume (pickResumeSession)
-import Agent.CLI.Plan
-    ( cliPlanHooks
-    , extractProposedPlan
-    )
+import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
     ( osc9ProgressRemove
     , wrapOscForTmux
@@ -63,21 +58,21 @@ import Agent.CLI.Project
     ( ProjectSettings(..)
     , loadProjectSettings
     , resolveProjectRoot
-    , saveProjectAutoApprove
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
     ( RenderConfig(..)
-    , clearThinking
-    , formatLoopErrorColored
-    , formatElapsed
-    , formatTurnStatus
     , putTextLn
-    , renderAssistantText
     , renderEvent
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Status
+    ( applyReplMode
+    , cycleReplInteraction
+    , formatReplStatusLine
+    , formatTokenUsage
+    )
 import Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
     , loadSubagentState
@@ -89,7 +84,6 @@ import Agent.CLI.Style
     , endBackground
     , glyphOk
     , glyphSession
-    , glyphWarn
     , roleError
     , roleMuted
     , rolePrompt
@@ -98,10 +92,10 @@ import Agent.CLI.Style
     , setCliWindowTitle
     , userBackground
     )
-import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
-import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
+import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.Tools (schemasFromAppTools)
+import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
-import Agent.JsonText (jsonTextFieldDefault)
 import Agent.Loop
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -117,7 +111,7 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
-import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
+import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
@@ -133,10 +127,8 @@ import Agent.Provider
     , getNextToken
     , providerSlug
     )
-import Agent.ToolDispatch (ToolCall(..))
 import Agent.Subagents
     ( RunSubagent
-    , SubagentConfig(..)
     , SubagentId(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
@@ -164,21 +156,14 @@ import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType, recordAgentT
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
-    ( PlanDecision(..)
-    , PlanModeEnv(..)
-    , PlanModeHooks(..)
+    ( PlanModeEnv(..)
+    , PlanModeHooks
     , PlanModeState(..)
     , activatePlanMode
     , deactivatePlanMode
-    , isPlanFileEditTarget
-    , isPlanModeActive
     , planFilePath
-    , planModeBlockedEditMessage
-    , planModeReminder
-    , writePlanMarkdown
     )
-import Agent.Tools.Dangerous (shellCommandBlocked)
-import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, toolAllowsWithoutPrompt)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
@@ -186,22 +171,18 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
-import Control.Monad (unless, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
+import Control.Monad (when)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
-import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Time.Clock (diffUTCTime, getCurrentTime, utctDay)
+import Data.Time.Clock (getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
 import System.Environment (getArgs, getProgName, lookupEnv)
@@ -596,11 +577,6 @@ preparePersistence options root provider model cwd effort prompt resumed =
                     })
             | otherwise -> pure Nothing
 
-isLeftSlot :: Either a b -> Bool
-isLeftSlot = \case
-    Left _ -> True
-    Right _ -> False
-
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
     :: String
@@ -632,92 +608,6 @@ printResumeHint progName = \case
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
-
--- | Idle prompt chrome: model, reasoning effort, interaction mode on the
--- left; session token totals right-aligned when the TTY width is known.
-formatReplStatusLine
-    :: Bool
-    -> Maybe Int
-    -> Text
-    -> Text
-    -> ReplMode
-    -> TokenUsage
-    -> Text
-formatReplStatusLine color width model effort mode usage =
-    let left = "  " <> model <> " · " <> effort <> " · " <> replModeLabel mode
-        right = formatTokenUsage usage
-        padded = case width of
-            Just cols | cols > 0, not (Text.null right) ->
-                let gap = cols - Text.length left - Text.length right
-                in if gap > 0
-                    then left <> Text.replicate gap " " <> right
-                    else left <> "  " <> right
-            _ | Text.null right -> left
-            _ -> left <> "  " <> right
-    in roleMuted color padded
-
--- | Apply a cycled idle mode: plan pending vs always-approve vs ask.
--- Always-approve still persists to project settings, matching /always-approve.
-applyReplMode
-    :: PlanModeEnv
-    -> IORef ApprovalPolicy
-    -> FilePath
-    -> ReplMode
-    -> IO ()
-applyReplMode planMode policyRef projectRoot = \case
-    ReplModePlan ->
-        writeIORef planMode.planStateRef PlanPending
-    ReplModeAlwaysApprove -> do
-        deactivatePlanMode planMode
-        writeIORef policyRef ApproveAll
-        saveProjectAutoApprove projectRoot True
-    ReplModeNormal -> do
-        deactivatePlanMode planMode
-        current <- readIORef policyRef
-        when (current == ApproveAll) do
-            writeIORef policyRef PromptMutating
-            saveProjectAutoApprove projectRoot False
-
--- | Pure next-mode helper used by tests and the Shift+Tab handler.
-cycleReplInteraction :: PlanModeState -> ApprovalPolicy -> ReplMode
-cycleReplInteraction planState policy =
-    cycleReplMode (replModeFromState planState policy)
-
--- | Compact session totals: @1.2k in · 340 out@. Cached tokens are shown
--- only when the provider reported a non-zero cache hit.
-formatTokenUsage :: TokenUsage -> Text
-formatTokenUsage usage
-    | usage == emptyTokenUsage = ""
-    | otherwise =
-        formatTokenCount usage.inputTokens
-            <> " in · "
-            <> formatTokenCount usage.outputTokens
-            <> " out"
-            <> cachedSuffix
-  where
-    cachedSuffix
-        | usage.cachedTokens > 0 =
-            " · " <> formatTokenCount usage.cachedTokens <> " cached"
-        | otherwise = ""
-
-formatTokenCount :: Int -> Text
-formatTokenCount n
-    | n < 0 = "0"
-    | n < 1000 = Text.pack (show n)
-    | n < 10000 =
-        let tenths = (n + 50) `div` 100
-            whole = tenths `div` 10
-            frac = tenths `mod` 10
-        in Text.pack (show whole <> "." <> show frac <> "k")
-    | n < 1000000 =
-        Text.pack (show ((n + 500) `div` 1000) <> "k")
-    | n < 10000000 =
-        let tenths = (n + 50000) `div` 100000
-            whole = tenths `div` 10
-            frac = tenths `mod` 10
-        in Text.pack (show whole <> "." <> show frac <> "M")
-    | otherwise =
-        Text.pack (show ((n + 500000) `div` 1000000) <> "M")
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
@@ -823,7 +713,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
                 withMVar ioLock \_ ->
                     withStdinPaused escPaused $
                         approveToolDecision
-                            policyRef allowedToolsRef tools planMode call projectRoot
+                            policyRef allowedToolsRef tools planMode call
             , loopCancel = toolEnv.toolCancel
             }
         env = SessionEnv
@@ -863,8 +753,7 @@ repl env = replWithDraft env ""
 
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
-    { sessionLoop = config
-    , sessionRender = render
+    { sessionRender = render
     , sessionProvider = provider
     , sessionPrevious = previous
     , sessionPrinted = printed
@@ -874,10 +763,7 @@ replWithDraft env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
-    , sessionHome = home
     , sessionTokenProvider = tokenProvider
-    , sessionAgentsContext = agentsContext
-    , sessionEscPaused = escPaused
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -1209,7 +1095,6 @@ replWithDraft env@SessionEnv
                             Just slotRef -> do
                                 now <- getCurrentTime
                                 params <- readIORef paramsRef
-                                home <- getHomeDirectory
                                 slot <- readIORef slotRef
                                 let model = currentModel params
                                     effort = currentEffort params
@@ -1464,159 +1349,6 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
             _ <- runOneTurn planEnv description [UserMessage description]
             putTrailingNewline printed
 
-runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO Bool
-runOneTurn env@SessionEnv
-    { sessionLoop = config
-    , sessionRender = render
-    , sessionPrevious = previous
-    , sessionPrinted = printed
-    , sessionTranscript = transcriptRef
-    , sessionPersist = persist
-    , sessionPlanMode = planMode
-    , sessionAgentsContext = agentsContext
-    , sessionEscPaused = escPaused
-    , sessionInterrupt = interrupt
-    , sessionStoreRoot = storeRoot
-    , sessionUsage = usageRef
-    } promptText inputs =
-  withTurnCancel interrupt config.loopCancel $
-  withEscCancel config.loopCancel escPaused do
-    pending <- readIORef planMode.planStateRef
-    when (pending == PlanPending) (activatePlanMode planMode)
-    -- Create the session directory before tools run so first-turn subagents
-    -- can persist under agents/<id>/ as they complete.
-    case persist of
-        Just slotRef -> do
-            created <- isLeftSlot <$> readIORef slotRef
-            handle <- ensureSession slotRef
-            writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            writeIORef storeRoot (Just handle.sessionDir)
-            when created do
-                color <- resolveColor stderr
-                putTextLn stderr
-                    (roleMuted color
-                        (glyphSession <> "session: " <> handle.sessionMeta.metaId))
-        Nothing -> pure ()
-    prev <- readIORef previous
-    beforeItems <- readIORef transcriptRef
-    pendingAgents <- atomicModifyIORef' agentsContext \pendingCtx -> (Nothing, pendingCtx)
-    planActive <- isPlanModeActive planMode
-    planPath <- planFilePath planMode
-    let planReminder =
-            if planActive
-                then Just (planModeReminder planPath)
-                else Nothing
-        baseInputs = case pendingAgents of
-            Just agents | null beforeItems && isNothing prev ->
-                UserMessage agents : inputs
-            _ -> inputs
-        turnInputs0 = case planReminder of
-            Just reminder -> UserMessage reminder : baseInputs
-            Nothing -> baseInputs
-    turnInputs <- stampTurnInputs turnInputs0
-    startedAt <- readIORef render.renderStartedAt
-    result <- runLoopInputs config prev turnInputs
-    clearThinking render
-    finishedAt <- getCurrentTime
-    let elapsedDetail extra = case startedAt of
-            Nothing -> extra
-            Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-    case result of
-        Left (LoopCancelled toolResults) -> do
-            unless (null toolResults) do
-                modifyIORef' transcriptRef
-                    (<> map toolResultToItem toolResults)
-            color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
-            model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
-            pure True
-        Left err -> do
-            color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color err)
-            model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
-            pure False
-        Right loopResult -> do
-            writeIORef previous (Just loopResult.finalResponseId)
-            modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
-            do
-                color <- resolveColor stderr
-                model <- readIORef render.renderModelRef
-                let turns = Text.pack (show loopResult.turnsUsed)
-                    unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
-                    usageDetail = formatTokenUsage loopResult.tokenUsage
-                    extra =
-                        if Text.null usageDetail
-                            then model <> " · " <> turns <> unit
-                            else model <> " · " <> turns <> unit <> " · " <> usageDetail
-                putTextLn stderr
-                    (formatTurnStatus color "ok" (elapsedDetail extra))
-            followUp <- handleProposedPlan planMode loopResult.finalText
-            printedText <- readIORef printed
-            let assistantText =
-                    fmap stripBracketedTimestamps loopResult.finalText
-            case (printedText, assistantText) of
-                (False, Just text) | not (Text.null (Text.strip text)) -> do
-                    useColor <- resolveColor stdout
-                    putTextLn stdout (renderAssistantText useColor text)
-                _ -> pure ()
-            afterItems <- readIORef transcriptRef
-            let newItems = drop (length beforeItems) afterItems
-            case persist of
-                Nothing -> pure ()
-                Just slotRef -> do
-                    now <- getCurrentTime
-                    handle <- ensureSession slotRef
-                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                    writeIORef storeRoot (Just handle.sessionDir)
-                    let turn = SessionTurn
-                            { turnAt = now
-                            , turnUserText = promptText
-                            , turnAssistantText = assistantText
-                            , turnResponseId = Just loopResult.finalResponseId
-                            , turnItems = newItems
-                            , turnUsage = Just loopResult.tokenUsage
-                            }
-                    handle' <- appendTurn handle turn
-                    writeIORef slotRef (Right handle')
-                    when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        tty <- hIsTerminalDevice stdout
-                        setCliWindowTitle tty stdout
-                            (cliWindowTitle handle'.sessionMeta.metaCwd
-                                (Just handle'.sessionMeta.metaTitle))
-            case followUp of
-                Nothing -> pure True
-                Just notes -> do
-                    writeIORef printed False
-                    _ <- runOneTurn env notes [UserMessage notes]
-                    pure True
-
-handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
-handleProposedPlan planMode = \case
-    Nothing -> pure Nothing
-    Just text -> do
-        active <- isPlanModeActive planMode
-        case (active, extractProposedPlan text) of
-            (True, Just planBody) -> do
-                _ <- writePlanMarkdown planMode planBody
-                let PlanModeHooks{ planDecideExit = decideExit } = planMode.planHooks
-                decision <- decideExit planBody
-                case decision of
-                    PlanApprove -> do
-                        deactivatePlanMode planMode
-                        pure Nothing
-                    PlanCancel -> do
-                        deactivatePlanMode planMode
-                        pure Nothing
-                    PlanRequestChanges notes ->
-                        pure $ Just $
-                            "The user requested changes to the plan. Stay in plan mode and revise.\n\
-                            \Feedback:\n"
-                                <> notes
-            _ -> pure Nothing
-
-
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
 -- whatever instructions were already in history.
 loadAgentsContext
@@ -1658,13 +1390,6 @@ clearNativeProgress handle = do
         inTmux <- isJust <$> lookupEnv "TMUX"
         Text.hPutStr handle (wrapOscForTmux inTmux osc9ProgressRemove)
         hFlush handle
-
--- | Color when the handle is a TTY and NO_COLOR is unset.
-resolveColor :: Handle -> IO Bool
-resolveColor handle = do
-    isTty <- hIsTerminalDevice handle
-    noColor <- lookupEnv "NO_COLOR"
-    pure (isTty && maybe True (\_ -> False) noColor)
 
 -- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
 -- (Kitty graphics or iTerm2 OSC 1337, matching Grok Build).
@@ -1755,104 +1480,6 @@ currentSessionId = \case
         pure $ case slot of
             Left _ -> Nothing
             Right handle -> Just handle.sessionMeta.metaId
-
-approveToolDecision
-    :: IORef ApprovalPolicy
-    -> IORef (Set Text)
-    -> [AppTool]
-    -> PlanModeEnv
-    -> ToolCall
-    -> FilePath
-    -> IO (Either Text Bool)
-approveToolDecision policyRef allowedToolsRef tools planMode call _projectRoot = do
-    policy <- readIORef policyRef
-    planActive <- isPlanModeActive planMode
-    planPath <- planFilePath planMode
-    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked call.name call.arguments of
-        Just msg -> do
-            color <- resolveColor stderr
-            putTextLn stderr (roleWarn color (glyphWarn <> msg))
-            pure (Left msg)
-        Nothing -> do
-            -- Plan mode: reject mutating file edits except plan.md (even under yolo).
-            -- Grok search_replace also enforces this in-tool; this covers apply_patch
-            -- and any other write tool before dispatch.
-            blocked <- planModeBlocksCall planMode planActive planPath call
-            if blocked
-                then do
-                    let msg = planModeBlockedEditMessage planPath
-                    color <- resolveColor stderr
-                    putTextLn stderr (roleWarn color msg)
-                    pure (Left msg)
-                else do
-                    readOnly <- case lookupAppTool call.name tools of
-                        Nothing -> pure False
-                        Just tool -> toolAllowsWithoutPrompt tool call
-                    -- plan.md edits are auto-approved while plan mode is active.
-                    planFileOk <- isPlanFileWrite planMode planActive planPath call
-                    if planFileOk
-                        then pure (Right True)
-                        else do
-                            allowed <- readIORef allowedToolsRef
-                            if Set.member call.name allowed
-                                then pure (Right True)
-                                else case policy of
-                                    ApproveAll -> pure (Right True)
-                                    DenyMutating -> pure (Right readOnly)
-                                    PromptMutating
-                                        | readOnly -> pure (Right True)
-                                        | otherwise -> do
-                                            color <- resolveColor stderr
-                                            promptPermission color call >>= \case
-                                                Nothing -> pure (Right False)
-                                                Just PermissionAllowOnce ->
-                                                    pure (Right True)
-                                                Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert call.name)
-                                                    putTextLn stderr
-                                                        (roleSuccess color
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session"))
-                                                    pure (Right True)
-                                                Just PermissionDeny ->
-                                                    pure (Right False)
-
-planModeBlocksCall :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
-planModeBlocksCall _planMode active planPath call
-    | not active = pure False
-    | call.name == "apply_patch" = pure True
-    | call.name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in pure $
-            Text.null target
-                || not (isPlanFileEditTarget planPath (Text.unpack target))
-    | otherwise = pure False
-
-isPlanFileWrite :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
-isPlanFileWrite _planMode active planPath call
-    | not active = pure False
-    | call.name == "search_replace" =
-        let target = jsonTextFieldDefault "file_path" call.arguments
-        in pure $
-            not (Text.null target)
-                && isPlanFileEditTarget planPath (Text.unpack target)
-    | otherwise = pure False
-
-toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
-toggleAlwaysApprove policyRef projectRoot = do
-    color <- resolveColor stderr
-    next <- atomicModifyIORef' policyRef \policy ->
-        if policy == ApproveAll
-            then (PromptMutating, PromptMutating)
-            else (ApproveAll, ApproveAll)
-    saveProjectAutoApprove projectRoot (next == ApproveAll)
-    putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
-        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
@@ -2158,25 +1785,6 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
             let session = SubagentSession { subSessionTranscript = transcript }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
             pure session
-
-childApprove :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO (Either Text Bool)
-childApprove policy tools call = case policy of
-    ApproveAll -> pure (Right True)
-    DenyMutating -> do
-        allowed <- case lookupAppTool call.name tools of
-            Just tool -> toolAllowsWithoutPrompt tool call
-            Nothing -> pure False
-        pure $ if allowed then Right True else Right False
-    PromptMutating -> do
-        allowed <- case lookupAppTool call.name tools of
-            Just tool -> toolAllowsWithoutPrompt tool call
-            Nothing -> pure False
-        if allowed
-            then pure (Right True)
-            else pure $ Left
-                "Subagent cannot prompt for approval on mutating tools. \
-                \Re-run the parent with auto-approve/--yolo, or have the \
-                \parent perform this edit."
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
