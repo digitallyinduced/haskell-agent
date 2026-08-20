@@ -55,12 +55,23 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
         it "pastes clipboard images with an optional caption" do
-            parseReplLine "/paste" `shouldBe` ReplPaste ""
-            parseReplLine "  /Paste  " `shouldBe` ReplPaste ""
+            parseReplLine "/paste"
+                `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }
+            parseReplLine "  /Paste  "
+                `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }
             parseReplLine "/paste what is this?"
-                `shouldBe` ReplPaste "what is this?"
+                `shouldBe` ReplPaste
+                    { pasteImmediate = False, pasteCaption = "what is this?" }
             parseReplLine "/paste   keep  spaces"
-                `shouldBe` ReplPaste "keep  spaces"
+                `shouldBe` ReplPaste
+                    { pasteImmediate = False, pasteCaption = "keep  spaces" }
+            parseReplLine "/paste --send"
+                `shouldBe` ReplPaste { pasteImmediate = True, pasteCaption = "" }
+            parseReplLine "/paste --send look"
+                `shouldBe` ReplPaste
+                    { pasteImmediate = True, pasteCaption = "look" }
+            parseReplLine "/attachments" `shouldBe` ReplShowAttachments
+            parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
 
         it "shows the current model with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel

@@ -28,7 +28,12 @@ data ReplAction
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplShowSession
     | ReplReloadAuth
-    | ReplPaste Text
+    | ReplPaste
+        { pasteImmediate :: !Bool
+        , pasteCaption :: !Text
+        }
+    | ReplClearAttachments
+    | ReplShowAttachments
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -69,7 +74,15 @@ parseSlash line = case Text.words line of
                 then ReplReloadAuth
                 else ReplCommandError "usage: /reload-auth"
         | Text.toLower command == "/paste" ->
-            ReplPaste (Text.strip (Text.drop (Text.length command) line))
+            parsePasteCommand (Text.strip (Text.drop (Text.length command) line))
+        | Text.toLower command == "/attachments" ->
+            if null args
+                then ReplShowAttachments
+                else ReplCommandError "usage: /attachments"
+        | Text.toLower command == "/clear-attachments" ->
+            if null args
+                then ReplClearAttachments
+                else ReplCommandError "usage: /clear-attachments"
         | isAlwaysApproveAlias (Text.drop 1 command) ->
             if null args
                 then ReplToggleAlwaysApprove
@@ -79,6 +92,19 @@ parseSlash line = case Text.words line of
 isAlwaysApproveAlias :: Text -> Bool
 isAlwaysApproveAlias name =
     Text.toLower name `elem` ["always-approve", "yolo"]
+
+-- | @/paste@ queues a clipboard image on the next prompt.
+-- @/paste --send [caption]@ sends immediately (old behavior).
+parsePasteCommand :: Text -> ReplAction
+parsePasteCommand rest =
+    let (immediate, caption) = case Text.words rest of
+            ("--send":xs) -> (True, Text.unwords xs)
+            ("-s":xs) -> (True, Text.unwords xs)
+            _ -> (False, rest)
+    in ReplPaste
+        { pasteImmediate = immediate
+        , pasteCaption = Text.strip caption
+        }
 
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case
