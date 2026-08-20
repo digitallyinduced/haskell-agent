@@ -219,5 +219,8 @@ usage = unlines
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model [NAME] shows or changes the model."
     , "/always-approve (or :yolo) toggles auto-approve."
-    , "/session prints the current session id. Ctrl-D or :q exits."
+    , "/session prints the current session id."
+    , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
+    , "auth failures also reload once and retry automatically."
+    , "Ctrl-D or :q exits."
     ]

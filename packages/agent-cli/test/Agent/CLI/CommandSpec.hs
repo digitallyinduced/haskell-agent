@@ -44,6 +44,12 @@ spec = do
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
+        it "reloads auth from disk/env" do
+            parseReplLine "/reload-auth" `shouldBe` ReplReloadAuth
+            parseReplLine "  /Reload-Auth  " `shouldBe` ReplReloadAuth
+            parseReplLine "/reload-auth now"
+                `shouldBe` ReplCommandError "usage: /reload-auth"
+
         it "shows the current model with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel
             parseReplLine "  /Model  " `shouldBe` ReplShowModel

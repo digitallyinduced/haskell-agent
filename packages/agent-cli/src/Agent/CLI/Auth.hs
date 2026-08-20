@@ -4,6 +4,7 @@ module Agent.CLI.Auth
     , grokCredentialFromAuthJson
     , loadAuth
     , openaiAuthStateFromJson
+    , reloadableFileCredentialProvider
     ) where
 
 import Agent.Broker (BrokerOptions(..), newBrokerTokenProvider)
@@ -12,7 +13,9 @@ import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.Provider
-    ( Credential(..)
+    ( AccountFailure(..)
+    , Credential(..)
+    , FailedCredential(..)
     , Provider(..)
     , TokenProvider(..)
     , getNextToken
@@ -26,11 +29,12 @@ import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
@@ -98,20 +102,26 @@ loadXai = do
     credential <- loadGrokCredential
     case credential of
         Nothing -> pure (Left noAuthHint)
-        Just loaded -> pure $ Right LoadedAuth
-            { loadedProvider = XAIProvider
-            , loadedTokenProvider = staticCredentialProvider loaded
-            }
+        Just loaded -> do
+            provider <- reloadableFileCredentialProvider XAIProvider loaded loadGrokCredential
+            pure $ Right LoadedAuth
+                { loadedProvider = XAIProvider
+                , loadedTokenProvider = provider
+                }
 
 loadOpenRouter :: IO (Either String LoadedAuth)
 loadOpenRouter = do
     key <- lookupNonEmpty "OPENROUTER_API_KEY"
     case key of
         Nothing -> pure (Left noAuthHint)
-        Just apiKey -> pure $ Right LoadedAuth
-            { loadedProvider = OpenRouterProvider
-            , loadedTokenProvider = staticCredentialProvider (credentialFromApiKey apiKey)
-            }
+        Just apiKey -> do
+            let initial = credentialFromApiKey apiKey
+            provider <- reloadableFileCredentialProvider OpenRouterProvider initial
+                (fmap (fmap credentialFromApiKey) (lookupNonEmpty "OPENROUTER_API_KEY"))
+            pure $ Right LoadedAuth
+                { loadedProvider = OpenRouterProvider
+                , loadedTokenProvider = provider
+                }
 
 loadOpenAi :: IO (Either String LoadedAuth)
 loadOpenAi = do
@@ -276,6 +286,54 @@ hasOpenAiAuth = do
 
 hasOpenRouterAuth :: IO Bool
 hasOpenRouterAuth = isJust <$> lookupNonEmpty "OPENROUTER_API_KEY"
+
+-- | Cache one credential and only re-read disk/env after the provider rejects
+-- it for authentication. Rate-limit failures stay exhausted rather than
+-- spinning on the same key.
+reloadableFileCredentialProvider
+    :: Provider
+    -> Credential
+    -> IO (Maybe Credential)
+    -> IO TokenProvider
+reloadableFileCredentialProvider expectedProvider initial reload = do
+    cache <- newIORef (Just initial)
+    let loadFresh rejectedToken =
+            reload >>= \case
+                Nothing ->
+                    pure $ Left $ ProviderError AuthenticationError
+                        "no credentials found while reloading auth"
+                        Nothing
+                Just credential
+                    | credential.provider /= expectedProvider ->
+                        pure $ Left $ ProviderError AuthenticationError
+                            ("reloaded auth resolved "
+                                <> Text.pack (show credential.provider)
+                                <> " but this session expects "
+                                <> Text.pack (show expectedProvider))
+                            Nothing
+                    | rejectedToken == Just credential.accessToken ->
+                        pure $ Left $ ProviderError AuthenticationError
+                            "reloaded credential is unchanged; refresh ~/.grok/auth.json or OPENROUTER_API_KEY and retry"
+                            Nothing
+                    | otherwise -> do
+                        writeIORef cache (Just credential)
+                        pure (Right credential)
+    pure $ TokenProvider \failed -> case failed of
+        Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
+            now <- getCurrentTime
+            let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
+            pure $ Left $ CredentialsExhausted
+                (addUTCTime (fromIntegral seconds) now)
+        Just FailedCredential
+            { credential = rejected
+            , failure = AccountAuthenticationRejected
+            } -> do
+            writeIORef cache Nothing
+            loadFresh (Just rejected.accessToken)
+        Nothing ->
+            readIORef cache >>= \case
+                Just credential -> pure (Right credential)
+                Nothing -> loadFresh Nothing
 
 staticCredentialProvider :: Credential -> TokenProvider
 staticCredentialProvider credential = TokenProvider \failed ->
