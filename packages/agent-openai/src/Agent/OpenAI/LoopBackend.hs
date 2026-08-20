@@ -4,7 +4,9 @@
 -- adapter can reuse the same function_call and custom_tool_call encoding.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
+    , openAiBackendReconnecting
     , openAiBackendWith
+    , openAiBackendWithConnectionRecovery
     , turnInputsToItems
     , responseToTurnOutput
     , streamEventToLoopEvent
@@ -13,7 +15,7 @@ module Agent.OpenAI.LoopBackend
     , withRequestInput
     ) where
 
-import Agent.Error (ApiError)
+import Agent.Error (ApiError(..))
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
@@ -28,7 +30,9 @@ import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
+    , withCodexWsRetrying
     )
+import Agent.Provider (TokenProvider)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -41,7 +45,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -61,6 +65,67 @@ openAiBackend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
+
+-- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
+openAiBackendReconnecting
+    :: TokenProvider
+    -> IORef Bool
+    -> CodexConn
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+openAiBackendReconnecting provider connectionHealthy conn =
+    openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh
+  where
+    sendCurrent request previousResponseId onEvent =
+        sendWsRequestWithEvents conn request previousResponseId onEvent
+    sendFresh request previousResponseId onEvent =
+        withCodexWsRetrying provider
+            (sendOnFresh request previousResponseId onEvent)
+    sendOnFresh request previousResponseId onEvent freshConn _credential =
+        sendWsRequestWithEvents freshConn request previousResponseId onEvent
+
+-- | Injectable connection recovery used by the reconnecting backend.
+openAiBackendWithConnectionRecovery
+    :: IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
+    openAiBackendWith sendWithRecovery
+  where
+    sendWithRecovery request previousResponseId onEvent = do
+        healthy <- readIORef connectionHealthy
+        if healthy
+            then tryCurrent request previousResponseId onEvent
+            else sendFresh request previousResponseId onEvent
+
+    tryCurrent request previousResponseId onEvent = do
+        emittedLoopEvent <- newIORef False
+        result <- sendCurrent request previousResponseId
+            (trackOutput emittedLoopEvent onEvent)
+        case result of
+            Left ConnectionError {} -> do
+                writeIORef connectionHealthy False
+                emitted <- readIORef emittedLoopEvent
+                if emitted
+                    then pure result
+                    else sendFresh request previousResponseId onEvent
+            _ -> pure result
+
+    trackOutput emittedLoopEvent onEvent event = do
+        if isJust (streamEventToLoopEvent event)
+            then writeIORef emittedLoopEvent True
+            else pure ()
+        onEvent event
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
 openAiBackendWith
