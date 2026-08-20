@@ -39,6 +39,8 @@ spec = do
     describe "formatCatalogListing" do
         it "lists the current model and catalog entries" do
             let listing =
-                    formatCatalogListing False OpenAIProvider "gpt-5.1-codex"
-            listing `shouldSatisfy` Text.isInfixOf "gpt-5.1-codex"
+                    formatCatalogListing False OpenAIProvider "gpt-5.6-luna"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
             listing `shouldSatisfy` Text.isInfixOf "openai"
