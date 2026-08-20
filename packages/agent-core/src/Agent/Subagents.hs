@@ -473,7 +473,13 @@ restoreSubagent
 restoreSubagent registry agentId parentId depth nickname previous = do
     existing <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case existing of
-        Just _ -> pure (Right agentId)
+        Just record -> do
+            -- Same-process resume after close: reopen without consuming a slot.
+            atomically do
+                writeTVar record.recordStatus (Completed Nothing)
+                writeTVar record.recordPreviousResponseId previous
+                writeTVar record.recordAsync Nothing
+            pure (Right agentId)
         Nothing -> do
             cancelFlag <- newCancelFlag
             mailbox <- newTQueueIO
