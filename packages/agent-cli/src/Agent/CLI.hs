@@ -3,6 +3,7 @@ module Agent.CLI
     ( DevResult(..)
     , afterDev
     , devMain
+    , formatReplStatusLine
     , run
     ) where
 
@@ -571,6 +572,22 @@ printResumeHint progName = \case
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
 
+-- | Idle prompt chrome: model, reasoning effort, approval mode.
+formatReplStatusLine :: Bool -> Text -> Text -> ApprovalPolicy -> Text
+formatReplStatusLine color model effort policy =
+    roleMuted color $
+        "  "
+            <> model
+            <> " · "
+            <> effort
+            <> " · "
+            <> approvalLabel policy
+  where
+    approvalLabel = \case
+        ApproveAll -> "yolo"
+        PromptMutating -> "ask"
+        DenyMutating -> "deny"
+
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
@@ -686,6 +703,15 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
+    params <- readIORef paramsRef
+    policy <- readIORef policyRef
+    -- Status sits on the line above λ so haskeline can keep the cursor on
+    -- the input. Haskeline cannot park a persistent footer under the draft.
+    Text.putStrLn $ formatReplStatusLine stdoutColor
+        (currentModel params)
+        (currentEffort params)
+        policy
+    hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let modeTag
