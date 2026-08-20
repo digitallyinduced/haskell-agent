@@ -72,8 +72,14 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
         , "name" .= tool.appToolName
         , "description" .= tool.appToolDescription
         , "strict" .= False
-        , "parameters" .= parametersObjectLoose tool.appToolParameters
+        , "parameters" .= namespaceParameters tool.appToolParameters
         ]
+
+    namespaceParameters parameters = case parametersObjectLoose parameters of
+        Aeson.Object schema
+            | Just (Aeson.Array required) <- KeyMap.lookup "required" schema
+            , null required -> Aeson.Object (KeyMap.delete "required" schema)
+        schema -> schema
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

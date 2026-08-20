@@ -42,7 +42,9 @@ applyPatchGrammar =
     \change: (change_context | change_line)+ eof_line?\n\
     \change_context: (\"@@\" | \"@@ \" /(.+)/) LF\n\
     \change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n\
-    \eof_line: \"*** End of File\" LF\n"
+    \eof_line: \"*** End of File\" LF\n\
+    \\n\
+    \%import common.LF\n"
 
 data Hunk
     = AddFile FilePath Text

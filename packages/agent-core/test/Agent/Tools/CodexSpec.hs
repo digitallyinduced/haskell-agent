@@ -11,6 +11,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.ApplyPatch (parsePatch)
 import Agent.Tools.Codex (codexTools)
@@ -18,6 +19,8 @@ import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -58,6 +61,27 @@ spec = describe "Agent.Tools.Codex" do
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools
             names `shouldContain` ["spawn_agent", "wait_agent", "send_message", "followup_task", "list_agents", "interrupt_agent"]
+            let parameters name =
+                    [ property
+                    | tool <- coding.codingAppTools
+                    , tool.appToolName == name
+                    , property <- tool.appToolParameters
+                    ]
+            map (.propertyName) (parameters "spawn_agent") `shouldBe`
+                [ "task_name"
+                , "message"
+                , "model"
+                , "reasoning_effort"
+                , "fork_turns"
+                ]
+            map (.propertyType) (parameters "wait_agent") `shouldBe`
+                [PropertyNumber]
+            case map (.propertyType) (parameters "spawn_agent") of
+                _ : PropertyRaw (Aeson.Object messageSchema) : _ ->
+                    KeyMap.lookup "encrypted" messageSchema
+                        `shouldBe` Just (Aeson.Bool True)
+                other -> expectationFailure
+                    ("expected encrypted spawn message schema, got " <> show other)
             coding.codingClose
             closeSubagentRegistry registry
 
