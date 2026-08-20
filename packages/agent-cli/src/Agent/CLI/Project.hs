@@ -13,8 +13,8 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
-import Data.List (dropWhileEnd, stripPrefix)
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.List (dropWhileEnd)
+import Data.Maybe (fromMaybe)
 import System.Directory
     ( canonicalizePath
     , createDirectoryIfMissing
@@ -61,19 +61,15 @@ instance FromJSON ProjectSettings where
             , settingsAutoApprove = autoApprove
             }
 
--- | Shared settings root for the repo that contains @cwd@.
--- Uses the primary git worktree when available so linked worktrees created with
--- @--worktree@ share @.haskell-agent/settings.json@ with the main checkout.
--- Falls back to the cwd toplevel, then @cwd@ itself. Paths are canonicalized
--- so macOS @/var@ vs @/private/var@ does not diverge.
+-- | Settings root for the checkout that contains @cwd@.
+-- Uses @git rev-parse --show-toplevel@ so a linked worktree stays in that
+-- worktree instead of jumping to the primary clone. Falls back to @cwd@.
+-- Paths are canonicalized so macOS @/var@ vs @/private/var@ does not diverge.
 resolveProjectRoot :: FilePath -> IO FilePath
 resolveProjectRoot cwd = do
-    root <- gitPrimaryWorktree cwd >>= \case
-        Just primary -> pure primary
-        Nothing ->
-            gitToplevel cwd >>= \case
-                Just toplevel -> pure toplevel
-                Nothing -> pure cwd
+    root <- gitToplevel cwd >>= \case
+        Just toplevel -> pure toplevel
+        Nothing -> pure cwd
     canonicalizePath root
 
 -- | Missing or unreadable settings files yield the defaults.
@@ -118,24 +114,6 @@ gitToplevel dir = do
             let trimmed = trim out
             in if null trimmed then Nothing else Just trimmed
         Right _ -> Nothing
-
--- | First worktree from @git worktree list --porcelain@ is the primary checkout.
-gitPrimaryWorktree :: FilePath -> IO (Maybe FilePath)
-gitPrimaryWorktree dir = do
-    result <- try @IOError $
-        readCreateProcessWithExitCode
-            (proc "git" ["worktree", "list", "--porcelain"]) { cwd = Just dir }
-            ""
-    pure $ case result of
-        Left _ -> Nothing
-        Right (ExitSuccess, out, _) ->
-            listToMaybe (mapMaybe parseWorktreeLine (lines out))
-        Right _ -> Nothing
-
-parseWorktreeLine :: String -> Maybe FilePath
-parseWorktreeLine line = case stripPrefix "worktree " line of
-    Just path | not (null (trim path)) -> Just (trim path)
-    _ -> Nothing
 
 renameOrReplace :: FilePath -> FilePath -> IO ()
 renameOrReplace tmp path = do
