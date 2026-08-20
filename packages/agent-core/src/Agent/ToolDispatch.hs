@@ -16,6 +16,7 @@ module Agent.ToolDispatch
     ) where
 
 import Agent.ToolArgs (stripAesonPrefix)
+import Control.Applicative ((<|>))
 import Control.Exception (SomeException)
 import qualified Control.Exception as Exception
 import Data.Aeson (FromJSON, Value(..))
@@ -114,7 +115,26 @@ decodeToolArguments value =
         Left err -> Left (stripAesonPrefix (Text.pack err))
 
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
-findHandler name = find ((== name) . handlerName)
+findHandler name handlers =
+    find ((== name) . handlerName) handlers
+        <|> find ((== stripNamespace name) . handlerName) handlers
+
+-- | Codex namespaced tools may arrive as @multi_agent_v1.spawn_agent@ or
+-- @multi_agent_v1spawn_agent@ (concatenated Display form). Match the bare
+-- function name either way.
+stripNamespace :: Text -> Text
+stripNamespace name
+    | Just rest <- Text.stripPrefix "multi_agent_v1." name = rest
+    | Just rest <- Text.stripPrefix "multi_agent_v1" name
+    , rest `elem`
+        [ "spawn_agent"
+        , "wait_agent"
+        , "send_input"
+        , "close_agent"
+        , "resume_agent"
+        ] =
+        rest
+    | otherwise = name
 
 handlerName :: ToolHandler -> Text
 handlerName = \case

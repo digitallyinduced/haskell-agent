@@ -37,6 +37,7 @@ library
                     , Agent.Broker
                     , Agent.Loop
                     , Agent.ProjectInstructions
+                    , Agent.Subagents
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -49,6 +50,7 @@ library
                     , Agent.Tools.Grok.Shell
                     , Agent.Tools.Ghci
                     , Agent.Tools.IO
+                    , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
@@ -79,6 +81,7 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.LoopSpec
                     , Agent.ProjectInstructionsSpec
+                    , Agent.SubagentsSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
@@ -92,10 +95,13 @@ test-suite agent-core-test
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , aeson
+                    , async
                     , directory
                     , filepath
+                    , containers
                     , hspec
                     , safe-exceptions
+                    , stm
                     , text
                     , time
                     , bytestring

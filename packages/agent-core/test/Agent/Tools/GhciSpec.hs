@@ -81,7 +81,7 @@ spec = describe "Agent.Tools.Ghci" do
 
     it "is registered for OpenAI via codingToolsFor" do
         withTempEnv \env -> do
-            coding <- codingToolsFor OpenAIProvider env Nothing
+            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             map (.appToolName) coding.codingAppTools `shouldContain` ["run_ghci"]
             coding.codingClose
 

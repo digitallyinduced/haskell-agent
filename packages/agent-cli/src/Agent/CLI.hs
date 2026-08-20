@@ -75,7 +75,11 @@ import Agent.ProjectInstructions
     )
 import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
-import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
+import Agent.OpenAI.WebSocketClient
+    ( CodexAuthFailed(..)
+    , CodexConn
+    , withCodexWsWithProvider
+    )
 import Agent.Provider
     ( AccountFailure(..)
     , Credential(..)
@@ -86,7 +90,22 @@ import Agent.Provider
     , providerSlug
     )
 import Agent.ToolDispatch (ToolCall(..))
+import Agent.Subagents
+    ( RunSubagent
+    , SubagentConfig(..)
+    , SubagentId(..)
+    , SubagentRegistry
+    , SubagentSpawnEnv(..)
+    , SubagentStatus(..)
+    , closeSubagentRegistry
+    , defaultSubagentConfig
+    , formatCompletionNotice
+    , newSubagentRegistry
+    , setSubagentOnComplete
+    , setSubagentRunner
+    )
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -107,7 +126,7 @@ import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
 import Control.Monad (unless, when)
@@ -116,6 +135,8 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -283,13 +304,38 @@ runAgent options = do
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
     let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
-    coding <- codingToolsFor loaded.loadedProvider toolEnv (Just planHooks)
+        provider = loaded.loadedProvider
+    multiCtx <- case provider of
+        OpenAIProvider -> do
+            registry <- newSubagentRegistry defaultSubagentConfig cwd
+                (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ -> pure ())
+            pure $ Just MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Nothing
+                , multiDepth = 0
+                }
+        _ -> pure Nothing
+    -- Per-subagent OpenAI transcripts / previous ids, shared across send_input.
+    subagentSessions <- newIORef Map.empty
+    pendingNotices <- newIORef ([] :: [Text])
+    case multiCtx of
+        Just ctx ->
+            setSubagentOnComplete ctx.multiRegistry \agentId status ->
+                atomicModifyIORef' pendingNotices \xs ->
+                    (xs <> [formatCompletionNotice agentId status], ())
+        Nothing -> pure ()
+    coding <- codingToolsFor provider toolEnv (Just planHooks) multiCtx
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
-    flip finally coding.codingClose do
+        closeAll = do
+            case multiCtx of
+                Just ctx -> closeSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+            coding.codingClose
+    flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let provider = loaded.loadedProvider
-            model = fromMaybe
+        let model = fromMaybe
                 (maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
                 options.optModel
             instructions = systemPrompt provider cwd today (isOneShot options)
@@ -326,10 +372,30 @@ runAgent options = do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
-                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
+                                wsLock <- newMVar ()
+                                case multiCtx of
+                                    Just ctx ->
+                                        setSubagentRunner ctx.multiRegistry $
+                                            runCodexSubagent
+                                                options
+                                                policy
+                                                planHooks
+                                                paramsRef
+                                                wsLock
+                                                conn
+                                                ctx.multiRegistry
+                                                subagentSessions
+                                    Nothing -> pure ()
+                                let lockedBackend =
+                                        lockedOpenAiBackend wsLock conn
+                                            (readIORef paramsRef)
+                                            transcriptRef
+                                    noticingBackend =
+                                        withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                     initialPrevious persist projectRoot Nothing agentsContext escPaused interrupt
-                                    (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                                    noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -1157,6 +1223,125 @@ toggleAlwaysApprove policyRef projectRoot = do
     putTextLn stderr (case next of
         ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
         _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
+
+data SubagentSession = SubagentSession
+    { subSessionTranscript :: !(IORef [ResponseItem])
+    }
+
+-- | Serialize OpenAI WebSocket turns: parent and children share one connection,
+-- and 'receiveWsResponse' is not multiplexed.
+lockedOpenAiBackend
+    :: MVar ()
+    -> CodexConn
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+lockedOpenAiBackend wsLock conn getParams transcript =
+    let Backend submit = openAiBackend conn getParams transcript
+    in Backend \previous inputs onEvent ->
+        withMVar wsLock \_ -> submit previous inputs onEvent
+
+-- | Prepend drained subagent completion notices to the next parent turn.
+withPendingNotices :: IORef [Text] -> Backend -> Backend
+withPendingNotices pending (Backend submit) = Backend \previous inputs onEvent -> do
+    notices <- atomicModifyIORef' pending \xs -> ([], xs)
+    let prefixed
+            | null notices = inputs
+            | otherwise = UserMessage (Text.intercalate "\n\n" notices) : inputs
+    submit previous prefixed onEvent
+
+-- | Child Codex agent: per-agent transcript (retained across send_input), same
+-- WS (locked), nested multi-agent tools.
+runCodexSubagent
+    :: CliOptions
+    -> ApprovalPolicy
+    -> PlanModeHooks
+    -> IORef ResponseCreateParams
+    -> MVar ()
+    -> CodexConn
+    -> SubagentRegistry
+    -> IORef (Map SubagentId SubagentSession)
+    -> RunSubagent
+runCodexSubagent options policy planHooks paramsRef wsLock conn registry sessionsRef =
+    \env previous prompt onEvent -> do
+        parentParams <- readIORef paramsRef
+        childEnv <- defaultToolEnv env.subCwd
+        -- Inherit soft-cancel from the registry-owned child flag.
+        let childToolEnv = childEnv { toolCancel = env.subCancel }
+            childCtx = MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Just env.subId
+                , multiDepth = env.subDepth
+                }
+        session <- lookupOrCreateSubagentSession sessionsRef env.subId
+        coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
+        flip finally coding.codingClose do
+            today <- utctDay <$> getCurrentTime
+            let model = fromMaybe (defaultModelFor OpenAIProvider) parentParams.model
+                effort = case parentParams.reasoning of
+                    Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
+                    Nothing -> defaultEffortFor OpenAIProvider
+                baseInstructions =
+                    fromMaybe
+                        (systemPrompt OpenAIProvider env.subCwd today True)
+                        parentParams.instructions
+                instructions =
+                    baseInstructions
+                        <> "\n\nYou are a Codex subagent. Complete the assigned task and "
+                        <> "report results clearly. Your agent id is "
+                        <> env.subId.unSubagentId
+                        <> "."
+                tools = coding.codingAppTools
+                childParams = requestParams OpenAIProvider model instructions
+                    (schemasFromAppTools OpenAIProvider tools) effort
+            childParamsRef <- newIORef childParams
+            let backend =
+                    lockedOpenAiBackend wsLock conn
+                        (readIORef childParamsRef)
+                        session.subSessionTranscript
+                config = LoopConfig
+                    { loopBackend = backend
+                    , loopHandlers = appToolHandlers tools
+                    , loopDispatch = defaultLoopDispatch
+                    , loopMaxTurns = options.optMaxTurns
+                    , loopOnEvent = onEvent
+                    , loopApprove = \call -> childApprove policy tools call
+                    , loopCancel = env.subCancel
+                    }
+            runLoop config previous prompt
+
+lookupOrCreateSubagentSession
+    :: IORef (Map SubagentId SubagentSession)
+    -> SubagentId
+    -> IO SubagentSession
+lookupOrCreateSubagentSession sessionsRef agentId = do
+    sessions <- readIORef sessionsRef
+    case Map.lookup agentId sessions of
+        Just session -> pure session
+        Nothing -> do
+            transcript <- newIORef ([] :: [ResponseItem])
+            let session = SubagentSession { subSessionTranscript = transcript }
+            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
+            pure session
+
+childApprove :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO (Either Text Bool)
+childApprove policy tools call = case policy of
+    ApproveAll -> pure (Right True)
+    DenyMutating -> do
+        allowed <- case lookupAppTool call.name tools of
+            Just tool -> toolAllowsWithoutPrompt tool call
+            Nothing -> pure False
+        pure $ if allowed then Right True else Right False
+    PromptMutating -> do
+        allowed <- case lookupAppTool call.name tools of
+            Just tool -> toolAllowsWithoutPrompt tool call
+            Nothing -> pure False
+        if allowed
+            then pure (Right True)
+            else pure $ Left
+                "Subagent cannot prompt for approval on mutating tools. \
+                \Re-run the parent with auto-approve/--yolo, or have the \
+                \parent perform this edit."
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

@@ -172,17 +172,28 @@ responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
     FunctionCallItem call -> Just ToolCall
         { callId = call.callId
-        , name = call.name
+        , name = namespacedToolName call.extraFields call.name
         , arguments = call.arguments
         , callKind = FunctionCallKind
         }
     CustomToolCallItem call -> Just ToolCall
         { callId = call.callId
-        , name = call.name
+        , name = namespacedToolName call.extraFields call.name
         , arguments = call.input
         , callKind = CustomCallKind
         }
     _ -> Nothing
+
+-- | Prefer an explicit @namespace@ field when the Responses API emits one for
+-- namespaced tools (Codex multi_agent_v1, …).
+namespacedToolName :: Aeson.Object -> Text -> Text
+namespacedToolName extras name = case KeyMap.lookup (Key.fromText "namespace") extras of
+    Just (Aeson.String namespace)
+        | not (Text.null namespace) ->
+            if Text.isSuffixOf "." namespace || Text.isSuffixOf "::" namespace
+                then namespace <> name
+                else namespace <> "." <> name
+    _ -> name
 
 -- | Concatenate assistant message text the same way the live functional tests do.
 assistantTextFromResponse :: Response -> Maybe Text
