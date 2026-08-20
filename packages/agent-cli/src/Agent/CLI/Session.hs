@@ -3,6 +3,7 @@ module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , SessionCreate(..)
     , createSession
     , appendTurn
     , loadSession
@@ -10,6 +11,7 @@ module Agent.CLI.Session
     , sessionsRoot
     , sessionTitleFromPrompt
     , writeSessionMeta
+    , ensureSession
     ) where
 
 import Agent.OpenAI.Responses.Types (ResponseItem)
@@ -19,6 +21,7 @@ import Control.Exception (try)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
 import Data.List (sortOn)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
@@ -31,7 +34,8 @@ import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Numeric (showHex)
 import System.Directory
-    ( createDirectoryIfMissing
+    ( createDirectory
+    , createDirectoryIfMissing
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
@@ -39,6 +43,7 @@ import System.Directory
     , renameFile
     )
 import System.FilePath ((</>))
+import System.Posix.Files (setFileMode)
 
 sessionSchemaVersion :: Int
 sessionSchemaVersion = 1
@@ -125,29 +130,33 @@ data SessionHandle = SessionHandle
     , sessionMeta :: !SessionMeta
     } deriving (Eq, Show)
 
-createSession
-    :: FilePath
-    -> Provider
-    -> Text
-    -> FilePath
-    -> Text
-    -> Maybe Text
-    -> IO SessionHandle
-createSession root provider model cwd effort titleHint = do
-    createDirectoryIfMissing True root
+-- | Parameters for creating a session on the first persisted turn.
+data SessionCreate = SessionCreate
+    { createRoot :: !FilePath
+    , createProvider :: !Provider
+    , createModel :: !Text
+    , createCwd :: !FilePath
+    , createEffort :: !Text
+    , createTitleHint :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+createSession :: SessionCreate -> IO SessionHandle
+createSession spec = do
+    ensurePrivateDir spec.createRoot
     now <- getCurrentTime
-    sessionId <- allocateSessionId root now
-    let dir = root </> Text.unpack sessionId
-        title = fromMaybe "untitled" titleHint
+    (sessionId, dir) <- allocateSessionDir spec.createRoot now
+    let title = case spec.createTitleHint of
+            Just hint | not (Text.null hint) -> hint
+            _ -> "untitled"
         meta = SessionMeta
             { metaVersion = sessionSchemaVersion
             , metaId = sessionId
             , metaCreatedAt = now
             , metaUpdatedAt = now
-            , metaProvider = provider
-            , metaModel = model
-            , metaCwd = cwd
-            , metaEffort = effort
+            , metaProvider = spec.createProvider
+            , metaModel = spec.createModel
+            , metaCwd = spec.createCwd
+            , metaEffort = spec.createEffort
             , metaTitle = title
             , metaLastResponseId = Nothing
             }
@@ -157,13 +166,26 @@ createSession root provider model cwd effort titleHint = do
             , sessionTranscriptPath = dir </> "transcript.jsonl"
             , sessionMeta = meta
             }
-    createDirectoryIfMissing True dir
     writeSessionMeta handle.sessionMetaPath meta
     pure handle
 
+-- | Create the session directory on first use when the slot is still pending.
+ensureSession :: IORef (Either SessionCreate SessionHandle) -> IO SessionHandle
+ensureSession slotRef = do
+    slot <- readIORef slotRef
+    case slot of
+        Right handle -> pure handle
+        Left spec -> do
+            handle <- createSession spec
+            writeIORef slotRef (Right handle)
+            pure handle
+
 appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurn handle turn = do
-    LBS.appendFile handle.sessionTranscriptPath (Aeson.encode turn <> "\n")
+    let path = handle.sessionTranscriptPath
+    existed <- doesFileExist path
+    LBS.appendFile path (Aeson.encode turn <> "\n")
+    if existed then pure () else setFileMode path 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -189,9 +211,17 @@ loadSession root sessionId = do
             metaResult <- decodeFileEither metaPath
             case metaResult of
                 Left err -> pure (Left err)
-                Right meta -> do
-                    turnsResult <- loadTranscript transcriptPath
-                    pure ((meta,) <$> turnsResult)
+                Right meta
+                    | meta.metaVersion /= sessionSchemaVersion ->
+                        pure $ Left $
+                            "unsupported session schema version "
+                                <> show meta.metaVersion
+                                <> " (expected "
+                                <> show sessionSchemaVersion
+                                <> ")"
+                    | otherwise -> do
+                        turnsResult <- loadTranscript transcriptPath
+                        pure ((meta,) <$> turnsResult)
 
 listSessions :: FilePath -> IO [SessionMeta]
 listSessions root = do
@@ -207,7 +237,9 @@ writeSessionMeta :: FilePath -> SessionMeta -> IO ()
 writeSessionMeta path meta = do
     let tmp = path <> ".tmp"
     LBS.writeFile tmp (Aeson.encode meta)
+    setFileMode tmp 0o600
     renameOrReplace tmp path
+    setFileMode path 0o600
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
@@ -216,8 +248,8 @@ sessionTitleFromPrompt prompt =
         then oneLine
         else Text.take 69 oneLine <> "..."
 
-allocateSessionId :: FilePath -> UTCTime -> IO Text
-allocateSessionId root now = go (0 :: Int)
+allocateSessionDir :: FilePath -> UTCTime -> IO (Text, FilePath)
+allocateSessionDir root now = go (0 :: Int)
   where
     day = formatTime defaultTimeLocale "%Y-%m-%d" now
     start = floor (nominalDiffTimeToSeconds (utcTimeToPOSIXSeconds now) * 1000000) :: Integer
@@ -227,13 +259,23 @@ allocateSessionId root now = go (0 :: Int)
             let hex = hex8 (start + fromIntegral attempt)
                 sessionId = Text.pack (day <> "-" <> hex)
                 dir = root </> Text.unpack sessionId
-            exists <- doesDirectoryExist dir
-            if exists then go (attempt + 1) else pure sessionId
+            result <- try @IOError (createDirectory dir)
+            case result of
+                Left _ -> go (attempt + 1)
+                Right () -> do
+                    setFileMode dir 0o700
+                    pure (sessionId, dir)
 
 hex8 :: Integer -> String
 hex8 n =
     let s = showHex (n `mod` 0x100000000) ""
     in replicate (8 - length s) '0' <> s
+
+ensurePrivateDir :: FilePath -> IO ()
+ensurePrivateDir path = do
+    createDirectoryIfMissing True path
+    _ <- try @IOError (setFileMode path 0o700)
+    pure ()
 
 loadTranscript :: FilePath -> IO (Either String [SessionTurn])
 loadTranscript path = do
@@ -269,7 +311,9 @@ readMetaQuiet root name = do
     pure $ case result of
         Left _ -> Nothing
         Right (Left _) -> Nothing
-        Right (Right meta) -> Just meta
+        Right (Right meta)
+            | meta.metaVersion == sessionSchemaVersion -> Just meta
+            | otherwise -> Nothing
 
 renameOrReplace :: FilePath -> FilePath -> IO ()
 renameOrReplace tmp path = do

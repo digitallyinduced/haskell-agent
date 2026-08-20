@@ -152,7 +152,7 @@ runAgent options = do
             effort = fromMaybe
                 (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
                 options.optEffort
-            params = requestParams model instructions
+            params = requestParams provider model instructions
                 (schemasFromAppTools provider tools) effort
             policy = resolveApprovalPolicy options isTty
             initialItems = maybe [] (concatMap (.turnItems) . snd) resumed
@@ -196,7 +196,7 @@ preparePersistence
     -> Text
     -> Maybe Text
     -> Maybe (SessionMeta, [SessionTurn])
-    -> IO (Maybe (IORef SessionHandle))
+    -> IO (Maybe (IORef (Either SessionCreate SessionHandle)))
 preparePersistence options root provider model cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -208,14 +208,25 @@ preparePersistence options root provider model cwd effort prompt resumed =
                     , sessionMeta = meta
                     }
             hPutStrLn stderr ("session: " <> Text.unpack meta.metaId <> " (resumed)")
-            Just <$> newIORef handle
+            Just <$> newIORef (Right handle)
         Nothing
-            | shouldPersist options -> do
-                handle <- createSession root provider model cwd effort
-                    (sessionTitleFromPrompt <$> prompt)
-                hPutStrLn stderr ("session: " <> Text.unpack handle.sessionMeta.metaId)
-                Just <$> newIORef handle
+            | shouldPersist options ->
+                -- Defer directory creation until the first successful turn so
+                -- an abandoned REPL does not leave empty session folders.
+                Just <$> newIORef (Left SessionCreate
+                    { createRoot = root
+                    , createProvider = provider
+                    , createModel = model
+                    , createCwd = cwd
+                    , createEffort = effort
+                    , createTitleHint = sessionTitleFromPrompt <$> prompt
+                    })
             | otherwise -> pure Nothing
+
+isLeftSlot :: Either a b -> Bool
+isLeftSlot = \case
+    Left _ -> True
+    Right _ -> False
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
@@ -234,7 +245,7 @@ runSession
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
     -> Maybe Text
-    -> Maybe (IORef SessionHandle)
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> Backend
     -> IO ()
 runSession options policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
@@ -283,7 +294,7 @@ repl
     -> IORef ResponseCreateParams
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
-    -> Maybe (IORef SessionHandle)
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> IO ()
 repl config render previous printed paramsRef policyRef transcriptRef persist = do
     putStr "agent> "
@@ -312,11 +323,17 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                         Text.putStrLn ("effort set to " <> level)
                         case persist of
                             Nothing -> pure ()
-                            Just handleRef -> do
-                                handle <- readIORef handleRef
-                                let meta = handle.sessionMeta { metaEffort = level }
-                                writeSessionMeta handle.sessionMetaPath meta
-                                writeIORef handleRef handle { sessionMeta = meta }
+                            Just slotRef -> do
+                                slot <- readIORef slotRef
+                                case slot of
+                                    Left pending ->
+                                        writeIORef slotRef
+                                            (Left pending { createEffort = level })
+                                    Right handle -> do
+                                        let meta = handle.sessionMeta { metaEffort = level }
+                                        writeSessionMeta handle.sessionMetaPath meta
+                                        writeIORef slotRef
+                                            (Right handle { sessionMeta = meta })
                         continue
                     ReplToggleAlwaysApprove -> do
                         toggleAlwaysApprove policyRef
@@ -324,9 +341,15 @@ repl config render previous printed paramsRef policyRef transcriptRef persist = 
                     ReplShowSession -> do
                         case persist of
                             Nothing -> Text.putStrLn "session: (not persisted)"
-                            Just handleRef -> do
-                                handle <- readIORef handleRef
-                                Text.putStrLn ("session: " <> handle.sessionMeta.metaId)
+                            Just slotRef -> do
+                                slot <- readIORef slotRef
+                                case slot of
+                                    Left _ ->
+                                        Text.putStrLn
+                                            "session: (pending until first turn)"
+                                    Right handle ->
+                                        Text.putStrLn
+                                            ("session: " <> handle.sessionMeta.metaId)
                         continue
                     ReplCommandError err -> do
                         Text.hPutStrLn stderr err
@@ -340,7 +363,7 @@ runOneTurn
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef [ResponseItem]
-    -> Maybe (IORef SessionHandle)
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> Text
     -> IO Bool
 runOneTurn config render previous printed transcriptRef persist prompt = do
@@ -366,9 +389,14 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
             let newItems = drop (length beforeItems) afterItems
             case persist of
                 Nothing -> pure ()
-                Just handleRef -> do
+                Just slotRef -> do
                     now <- getCurrentTime
-                    handle <- readIORef handleRef
+                    created <- isLeftSlot <$> readIORef slotRef
+                    handle <- ensureSession slotRef
+                    if created
+                        then hPutStrLn stderr
+                            ("session: " <> Text.unpack handle.sessionMeta.metaId)
+                        else pure ()
                     let turn = SessionTurn
                             { turnAt = now
                             , turnUserText = prompt
@@ -377,7 +405,7 @@ runOneTurn config render previous printed transcriptRef persist prompt = do
                             , turnItems = newItems
                             }
                     handle' <- appendTurn handle turn
-                    writeIORef handleRef handle'
+                    writeIORef slotRef (Right handle')
             pure True
 
 putTrailingNewline :: IORef Bool -> IO ()
@@ -432,13 +460,16 @@ toggleAlwaysApprove policyRef = do
         _ -> "auto-approve off")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
+-- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
+-- xAI/OpenRouter force @store = false@ and replay local transcripts instead.
 requestParams
-    :: Text
+    :: Provider
+    -> Text
     -> Text
     -> [ResponseTool]
     -> Text
     -> ResponseCreateParams
-requestParams modelName instructionText toolSchemas effort =
+requestParams provider modelName instructionText toolSchemas effort =
     case defaultResponseCreateParams of
         ResponseCreateParams{..} ->
             ResponseCreateParams
@@ -453,6 +484,6 @@ requestParams modelName instructionText toolSchemas effort =
                     , summary = Nothing
                     , extraFields = KeyMap.empty
                     }
-                , store = Just False
+                , store = Just (provider == OpenAIProvider)
                 , ..
                 }

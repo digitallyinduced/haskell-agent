@@ -1,6 +1,6 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.Responses.Types
@@ -133,6 +133,35 @@ spec = do
             _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
             map (reasoningEffort . fst) <$> readIORef seen
                 `shouldReturn` [Just "low", Just "high"]
+
+        it "replays the local transcript when previous_response_id is missing" do
+            seen <- newIORef []
+            let seed = turnInputsToItems [UserMessage "old"]
+            transcript <- newIORef seed
+            let send request previous onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    case previous of
+                        Just _ ->
+                            pure $ Left $ ProviderError PreviousResponseNotFound
+                                "previous_response_id was not found" Nothing
+                        Nothing -> do
+                            onEvent (deltaEvent EventOutputTextDelta "ok")
+                            pure $ Right (testResponse "resp-2" [assistantItem "ok"])
+                backend = openAiBackendWith send (pure baseParams) transcript
+            result <- backend.submitTurn (Just "resp-missing")
+                [UserMessage "new"]
+                (const (pure ()))
+            result `shouldBe` Right TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "ok"
+                }
+            requests <- readIORef seen
+            map snd requests `shouldBe` [Just "resp-missing", Nothing]
+            map (inputItems . fst) requests `shouldBe`
+                [ turnInputsToItems [UserMessage "new"]
+                , seed <> turnInputsToItems [UserMessage "new"]
+                ]
 
 --------------------------------------------------------------------------------
 -- Fixtures

@@ -13,6 +13,7 @@ module Agent.OpenAI.LoopBackend
     ) where
 
 import Agent.Error (ApiError)
+import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
     , LoopEvent(..)
@@ -65,14 +66,24 @@ openAiBackendWith
     -> Backend
 openAiBackendWith send getParams transcript = Backend \previousResponseId inputs onEvent -> do
     baseParams <- getParams
+    history <- readIORef transcript
     let newItems = turnInputsToItems inputs
-        request = withRequestInput baseParams newItems
-    result <- send request previousResponseId \event ->
-        mapM_ onEvent (streamEventToLoopEvent event)
-    case result of
+        deltaRequest = withRequestInput baseParams newItems
+        fullRequest = withRequestInput baseParams (history <> newItems)
+        emit event = mapM_ onEvent (streamEventToLoopEvent event)
+    result <- send deltaRequest previousResponseId emit
+    recovered <- case result of
+        Left err
+            | isPreviousResponseIdError err && not (null history) ->
+                -- Server forgot the chain; replay the local transcript as a
+                -- fresh turn so resumed sessions keep working.
+                send fullRequest Nothing emit
+            | otherwise -> pure (Left err)
+        Right response -> pure (Right response)
+    case recovered of
         Left err -> pure (Left err)
         Right response -> do
-            modifyIORef' transcript (<> newItems <> response.output)
+            writeIORef transcript (history <> newItems <> response.output)
             pure (Right (responseToTurnOutput response))
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is

@@ -58,6 +58,7 @@ library
                     , process
                     , text >= 2.0 && < 2.2
                     , time
+                    , unix
 
 executable agent-cli
     import:           common-options
