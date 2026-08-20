@@ -32,6 +32,17 @@ spec = describe "systemPrompt" do
         let grok = systemPrompt XAIProvider "/tmp/repo" (fromGregorian 2026 8 19) True
         grok `shouldSatisfy` Text.isInfixOf "no human operator"
 
+    it "tells grok and openai to prefer ghci for general-purpose scripting" do
+        let day = fromGregorian 2026 8 19
+            grok = systemPrompt XAIProvider "/tmp/repo" day False
+            openai = systemPrompt OpenAIProvider "/tmp/repo" day False
+        grok `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        openai `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        grok `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
+        openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
+        grok `shouldSatisfy` Text.isInfixOf "stdin or -e"
+        openai `shouldSatisfy` Text.isInfixOf "stdin or -e"
+
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.5"
         defaultModelFor OpenAIProvider `shouldBe` "gpt-5.1-codex"
