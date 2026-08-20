@@ -29,9 +29,11 @@ Prefer `cabal repl` over `cabal run` when iterating on the agent itself. Do not 
 
 Load every library you may edit so `:r` recompiles across package boundaries (`agent-cli`, `agent-core`, providers, …):
 
+`cabal.project` sets `multi-repl: True`, so multiple library targets share one GHCi session by default:
+
 ```
 nix develop
-cabal repl --enable-multi-repl \
+cabal repl \
   agent-cli:lib:agent-cli \
   agent-core:lib:agent-core \
   agent-openai:lib:agent-openai \
@@ -55,12 +57,6 @@ withArgs ["--worktree"] run
 ```
 
 Name **library** components explicitly (`pkg:lib:pkg`). Bare package names also pull in tests and executables and load far more modules than you need.
-
-Optional: put this in `cabal.project.local` so you can omit `--enable-multi-repl`:
-
-```
-multi-repl: True
-```
 
 ### lighter: `agent-cli` only
 
