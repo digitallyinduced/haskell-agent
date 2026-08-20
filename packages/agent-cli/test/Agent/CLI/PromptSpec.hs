@@ -45,6 +45,8 @@ spec = describe "systemPrompt" do
             grok = systemPrompt XAIProvider "/tmp/repo" day False
             openai = systemPrompt OpenAIProvider "/tmp/repo" day False
         grok `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        grok `shouldSatisfy` Text.isInfixOf "Time context:"
+        openai `shouldSatisfy` Text.isInfixOf "Time context:"
         openai `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
         grok `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
         openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"

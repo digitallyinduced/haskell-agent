@@ -4,6 +4,7 @@ module Agent.CLI.Prompt
     , systemPrompt
     ) where
 
+import Agent.CLI.Timestamp (timeContextGuidance)
 import Agent.Provider (Provider(..))
 import Agent.Tools.Grok.Prompt (codingGrokPromptTools, grokSystemPrompt)
 import Data.Text (Text)
@@ -20,7 +21,7 @@ defaultModelFor = \case
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Provider -> FilePath -> Day -> Bool -> Text
 systemPrompt provider cwd today isNonInteractive =
-    base <> "\n\n" <> ghciGuidance
+    base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
   where
     base = case provider of
         XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive

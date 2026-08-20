@@ -13,6 +13,7 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Timestamp (stripBracketedTimestamps)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -95,7 +96,8 @@ renderEventUnlocked config = \case
 -- Color mode also paints each line with 'agentBackground'.
 renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
-    paintBackgroundLines color agentBackground (renderMarkdown color text)
+    paintBackgroundLines color agentBackground
+        (renderMarkdown color (stripBracketedTimestamps text))
 
 -- | End-of-turn flush for color mode: prefer streamed deltas, else the
 -- completed 'assistantText' from non-streaming backends.
