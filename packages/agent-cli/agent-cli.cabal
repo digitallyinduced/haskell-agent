@@ -49,6 +49,7 @@ library
                     , Agent.CLI.Render
                     , Agent.CLI.Session
                     , Agent.CLI.Style
+                    , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
@@ -94,6 +95,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.StyleSpec
+                    , Agent.CLI.TimestampSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.WorktreeSpec

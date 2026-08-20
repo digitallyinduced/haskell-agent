@@ -14,6 +14,7 @@ import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
+import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
@@ -30,6 +31,7 @@ main = hspec do
     PromptSpec.spec
     RenderSpec.spec
     StyleSpec.spec
+    TimestampSpec.spec
     SessionSpec.spec
     ToolsSpec.spec
     WorktreeSpec.spec
