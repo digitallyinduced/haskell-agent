@@ -23,7 +23,8 @@ spec = do
                     [ functionCallItem "c1" "read_file" "{\"target_file\":\"README.md\"}" ]
                 , testResponse "resp-2" [assistantItem "done"]
                 ]
-            backend <- openRouterBackendWith (scriptedSend seen remaining) (pure baseParams)
+            transcript <- newIORef []
+            let backend = openRouterBackendWith (scriptedSend seen remaining) (pure baseParams) transcript
 
             first <- backend.submitTurn Nothing [UserMessage "read it"]
                 (modifyIORef' events . (:))
@@ -57,15 +58,17 @@ spec = do
             seen <- newIORef []
             remaining <- newIORef
                 [ testResponse "resp-1" [assistantItem "hi"] ]
-            backend <- openRouterBackendWith
-                (\request onEvent -> do
-                    n <- length <$> readIORef seen
-                    if n == 0
-                        then do
-                            modifyIORef' seen (++ [request])
-                            pure (Left (ConnectionError "boom"))
-                        else scriptedSend seen remaining request onEvent)
-                (pure baseParams)
+            transcript <- newIORef []
+            let backend = openRouterBackendWith
+                    (\request onEvent -> do
+                        n <- length <$> readIORef seen
+                        if n == 0
+                            then do
+                                modifyIORef' seen (++ [request])
+                                pure (Left (ConnectionError "boom"))
+                            else scriptedSend seen remaining request onEvent)
+                    (pure baseParams)
+                    transcript
 
             failed <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
             failed `shouldBe` Left (ConnectionError "boom")
@@ -88,7 +91,8 @@ spec = do
                 , testResponse "resp-2" [assistantItem "two"]
                 ]
             paramsRef <- newIORef (withEffort "low" baseParams)
-            backend <- openRouterBackendWith (scriptedSend seen remaining) (readIORef paramsRef)
+            transcript <- newIORef []
+            let backend = openRouterBackendWith (scriptedSend seen remaining) (readIORef paramsRef) transcript
             _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
             writeIORef paramsRef (withEffort "high" baseParams)
             _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))

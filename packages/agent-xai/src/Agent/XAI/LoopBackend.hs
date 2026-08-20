@@ -3,7 +3,8 @@
 -- The proxy does not store transcripts ('store = false', no
 -- @previous_response_id@). This backend keeps a local item list so tool
 -- follow-ups can resend the conversation the loop only supplies as
--- 'CompletedTool' items.
+-- 'CompletedTool' items. Callers own the 'IORef' so a resumed session can
+-- seed history and the CLI can persist it.
 module Agent.XAI.LoopBackend
     ( xaiBackend
     , xaiBackendWith
@@ -27,7 +28,12 @@ import Data.IORef
 -- not own (model, instructions, tools, reasoning). The params action is
 -- re-run each turn so the REPL can change reasoning effort without dropping
 -- the local transcript.
-xaiBackend :: ClientOptions -> Credential -> IO ResponseCreateParams -> IO Backend
+xaiBackend
+    :: ClientOptions
+    -> Credential
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
 xaiBackend options credential =
     xaiBackendWith (createResponseWithEvents options credential)
 
@@ -37,12 +43,11 @@ xaiBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IO Backend
-xaiBackendWith send getParams = do
-    transcript <- newIORef []
-    pure $ Backend \_previousResponseId inputs onEvent -> do
-        baseParams <- getParams
-        submitXaiTurn send baseParams transcript inputs onEvent
+    -> IORef [ResponseItem]
+    -> Backend
+xaiBackendWith send getParams transcript = Backend \_previousResponseId inputs onEvent -> do
+    baseParams <- getParams
+    submitXaiTurn send baseParams transcript inputs onEvent
 
 submitXaiTurn
     :: (ResponseCreateParams

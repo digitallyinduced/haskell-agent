@@ -1,0 +1,139 @@
+module Agent.CLI.SessionSpec (spec) where
+
+import Agent.CLI.Session
+import Agent.OpenAI.Responses.Types
+import Agent.Provider (Provider(..))
+import Control.Exception (bracket)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.IORef
+import qualified Data.Text as Text
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
+import System.Directory
+    ( doesDirectoryExist
+    , doesFileExist
+    , getTemporaryDirectory
+    , listDirectory
+    , removeDirectoryRecursive
+    )
+import System.FilePath ((</>))
+import System.Posix.Files (fileMode, getFileStatus)
+import System.Posix.Temp (mkdtemp)
+import Test.Hspec
+
+spec :: Spec
+spec = describe "Agent.CLI.Session" do
+    describe "sessionsRoot" do
+        it "is ~/.haskell-agent/sessions" do
+            sessionsRoot "/home/marc"
+                `shouldBe` "/home/marc" </> ".haskell-agent" </> "sessions"
+
+    describe "sessionTitleFromPrompt" do
+        it "collapses whitespace and truncates long prompts" do
+            sessionTitleFromPrompt "  hello   world  " `shouldBe` "hello world"
+            let long = Text.replicate 100 "a"
+            Text.length (sessionTitleFromPrompt long) `shouldBe` 72
+
+    describe "createSession/appendTurn/loadSession" do
+        it "round-trips meta and transcript items with private modes" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                doesDirectoryExist handle.sessionDir `shouldReturn` True
+                doesFileExist handle.sessionMetaPath `shouldReturn` True
+                handle.sessionMeta.metaTitle `shouldBe` "untitled"
+                modeOf handle.sessionDir `shouldReturn` 0o700
+                modeOf handle.sessionMetaPath `shouldReturn` 0o600
+
+                let item = MessageItem ResponseMessage
+                        { messageId = Nothing
+                        , content = MessageContentParts
+                            [InputTextPart "hi" Nothing KeyMap.empty]
+                        , role = RoleUser
+                        , status = Nothing
+                        , phase = Nothing
+                        , extraFields = KeyMap.empty
+                        }
+                    turn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "hi there"
+                        , turnAssistantText = Just "hello"
+                        , turnResponseId = Just "resp-1"
+                        , turnItems = [item]
+                        }
+                handle' <- appendTurn handle turn
+                handle'.sessionMeta.metaTitle `shouldBe` "hi there"
+                handle'.sessionMeta.metaLastResponseId `shouldBe` Just "resp-1"
+                modeOf handle.sessionTranscriptPath `shouldReturn` 0o600
+
+                loaded <- loadSession root handle.sessionMeta.metaId
+                case loaded of
+                    Left err -> expectationFailure err
+                    Right (meta, turns) -> do
+                        meta.metaId `shouldBe` handle.sessionMeta.metaId
+                        meta.metaProvider `shouldBe` XAIProvider
+                        meta.metaModel `shouldBe` "grok-4"
+                        meta.metaCwd `shouldBe` "/tmp/work"
+                        case turns of
+                            [loadedTurn] -> do
+                                loadedTurn.turnUserText `shouldBe` "hi there"
+                                loadedTurn.turnItems `shouldBe` [item]
+                            other ->
+                                expectationFailure
+                                    ("expected one turn, got " <> show (length other))
+
+                listed <- listSessions root
+                map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
+
+        it "rejects unsupported schema versions" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                let bad = handle.sessionMeta { metaVersion = 99 }
+                writeSessionMeta handle.sessionMetaPath bad
+                loadSession root handle.sessionMeta.metaId
+                    >>= \case
+                        Left err -> err `shouldContain` "unsupported session schema"
+                        Right _ -> expectationFailure "expected schema failure"
+
+        it "creates a pending session only when ensureSession runs" $
+            withTempDir "agent-sessions-" \root -> do
+                slot <- newIORef (Left (testCreate root))
+                listDirectory root `shouldReturn` []
+                handle <- ensureSession slot
+                doesDirectoryExist handle.sessionDir `shouldReturn` True
+                Right again <- readIORef slot
+                again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
+
+    describe "json codec" do
+        it "encodes and decodes SessionTurn" do
+            let turn = SessionTurn
+                    { turnAt = fixedTime
+                    , turnUserText = "q"
+                    , turnAssistantText = Nothing
+                    , turnResponseId = Nothing
+                    , turnItems = []
+                    }
+            Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
+
+testCreate :: FilePath -> SessionCreate
+testCreate root = SessionCreate
+    { createRoot = root
+    , createProvider = XAIProvider
+    , createModel = "grok-4"
+    , createCwd = "/tmp/work"
+    , createEffort = "low"
+    , createTitleHint = Nothing
+    }
+
+fixedTime :: UTCTime
+fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)
+
+modeOf :: FilePath -> IO Integer
+modeOf path = do
+    status <- getFileStatus path
+    pure (fromIntegral (fileMode status `mod` 0o1000))
+
+withTempDir :: String -> (FilePath -> IO a) -> IO a
+withTempDir prefix action = do
+    tmp <- getTemporaryDirectory
+    bracket (mkdtemp (tmp </> prefix)) removeDirectoryRecursive action

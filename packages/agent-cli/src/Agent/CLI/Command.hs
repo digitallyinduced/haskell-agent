@@ -19,6 +19,7 @@ data ReplAction
     | ReplShowEffort
     | ReplSetEffort Text
     | ReplToggleAlwaysApprove
+    | ReplShowSession
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -42,6 +43,10 @@ parseSlash line = case Text.words line of
     [] -> ReplCommandError "unknown command: /"
     command : args
         | Text.toLower command == "/effort" -> parseEffortCommand args
+        | Text.toLower command == "/session" ->
+            if null args
+                then ReplShowSession
+                else ReplCommandError "usage: /session"
         | isAlwaysApproveAlias (Text.drop 1 command) ->
             if null args
                 then ReplToggleAlwaysApprove

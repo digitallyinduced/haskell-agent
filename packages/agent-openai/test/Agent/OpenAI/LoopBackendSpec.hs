@@ -1,6 +1,6 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.Responses.Types
@@ -92,7 +92,8 @@ spec = do
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
             events <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
+            transcript <- newIORef []
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams) transcript
             result <- backend.submitTurn (Just "resp-prev")
                 [UserMessage "hello"]
                 (modifyIORef' events . (:))
@@ -109,7 +110,8 @@ spec = do
 
         it "does not accumulate prior turns on the OpenAI transport" do
             seen <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
+            transcript <- newIORef []
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams) transcript
             _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
             _ <- backend.submitTurn (Just "resp-1")
                 [CompletedTool (functionResult "c1" "out")]
@@ -119,16 +121,47 @@ spec = do
                 [ turnInputsToItems [UserMessage "one"]
                 , turnInputsToItems [CompletedTool (functionResult "c1" "out")]
                 ]
+            length <$> readIORef transcript `shouldReturn` 4
 
         it "re-reads request params on each turn so effort can change" do
             seen <- newIORef []
             paramsRef <- newIORef (withEffort "low" baseParams)
-            let backend = openAiBackendWith (recordingSend seen) (readIORef paramsRef)
+            transcript <- newIORef []
+            let backend = openAiBackendWith (recordingSend seen) (readIORef paramsRef) transcript
             _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
             writeIORef paramsRef (withEffort "high" baseParams)
             _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
             map (reasoningEffort . fst) <$> readIORef seen
                 `shouldReturn` [Just "low", Just "high"]
+
+        it "replays the local transcript when previous_response_id is missing" do
+            seen <- newIORef []
+            let seed = turnInputsToItems [UserMessage "old"]
+            transcript <- newIORef seed
+            let send request previous onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    case previous of
+                        Just _ ->
+                            pure $ Left $ ProviderError PreviousResponseNotFound
+                                "previous_response_id was not found" Nothing
+                        Nothing -> do
+                            onEvent (deltaEvent EventOutputTextDelta "ok")
+                            pure $ Right (testResponse "resp-2" [assistantItem "ok"])
+                backend = openAiBackendWith send (pure baseParams) transcript
+            result <- backend.submitTurn (Just "resp-missing")
+                [UserMessage "new"]
+                (const (pure ()))
+            result `shouldBe` Right TurnOutput
+                { responseId = "resp-2"
+                , toolCalls = []
+                , assistantText = Just "ok"
+                }
+            requests <- readIORef seen
+            map snd requests `shouldBe` [Just "resp-missing", Nothing]
+            map (inputItems . fst) requests `shouldBe`
+                [ turnInputsToItems [UserMessage "new"]
+                , seed <> turnInputsToItems [UserMessage "new"]
+                ]
 
 --------------------------------------------------------------------------------
 -- Fixtures

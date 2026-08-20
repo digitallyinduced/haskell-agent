@@ -13,6 +13,7 @@ module Agent.OpenAI.LoopBackend
     ) where
 
 import Agent.Error (ApiError)
+import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
     , LoopEvent(..)
@@ -33,6 +34,7 @@ import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.IORef
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -40,7 +42,15 @@ import qualified Data.Text as Text
 -- | Close over a live Codex WebSocket and the request fields the loop does
 -- not own (model, instructions, tools, reasoning). The params action is
 -- re-run each turn so the REPL can change reasoning effort in place.
-openAiBackend :: CodexConn -> IO ResponseCreateParams -> Backend
+--
+-- The wire protocol still sends only new items plus @previous_response_id@.
+-- The shared 'IORef' mirrors the full transcript locally so sessions can be
+-- persisted and resumed when the server-side chain is gone.
+openAiBackend
+    :: CodexConn
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
@@ -52,13 +62,29 @@ openAiBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
     -> Backend
-openAiBackendWith send getParams = Backend \previousResponseId inputs onEvent -> do
+openAiBackendWith send getParams transcript = Backend \previousResponseId inputs onEvent -> do
     baseParams <- getParams
-    let request = withRequestInput baseParams (turnInputsToItems inputs)
-    result <- send request previousResponseId \event ->
-        mapM_ onEvent (streamEventToLoopEvent event)
-    pure (responseToTurnOutput <$> result)
+    history <- readIORef transcript
+    let newItems = turnInputsToItems inputs
+        deltaRequest = withRequestInput baseParams newItems
+        fullRequest = withRequestInput baseParams (history <> newItems)
+        emit event = mapM_ onEvent (streamEventToLoopEvent event)
+    result <- send deltaRequest previousResponseId emit
+    recovered <- case result of
+        Left err
+            | isPreviousResponseIdError err && not (null history) ->
+                -- Server forgot the chain; replay the local transcript as a
+                -- fresh turn so resumed sessions keep working.
+                send fullRequest Nothing emit
+            | otherwise -> pure (Left err)
+        Right response -> pure (Right response)
+    case recovered of
+        Left err -> pure (Left err)
+        Right response -> do
+            writeIORef transcript (history <> newItems <> response.output)
+            pure (Right (responseToTurnOutput response))
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.
