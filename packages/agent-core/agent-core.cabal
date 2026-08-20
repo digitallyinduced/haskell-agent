@@ -35,6 +35,7 @@ library
                     , Agent.Provider
                     , Agent.Broker
                     , Agent.Loop
+                    , Agent.ProjectInstructions
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -72,6 +73,7 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.ErrorSpec
                     , Agent.LoopSpec
+                    , Agent.ProjectInstructionsSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
