@@ -88,6 +88,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
@@ -924,46 +925,53 @@ approveToolDecision policyRef tools planMode call projectRoot = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
-    -- Plan mode: reject mutating file edits except plan.md (even under yolo).
-    -- Grok search_replace also enforces this in-tool; this covers apply_patch
-    -- and any other write tool before dispatch.
-    blocked <- planModeBlocksCall planMode planActive planPath call
-    if blocked
-        then do
-            let msg = planModeBlockedEditMessage planPath
+    -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
+    case shellCommandBlocked call.name call.arguments of
+        Just msg -> do
             color <- resolveColor stderr
-            putTextLn stderr (roleWarn color msg)
+            putTextLn stderr (roleWarn color (glyphWarn <> msg))
             pure (Left msg)
-        else do
-            readOnly <- case lookupAppTool call.name tools of
-                Nothing -> pure False
-                Just tool -> toolAllowsWithoutPrompt tool call
-            -- plan.md edits are auto-approved while plan mode is active.
-            planFileOk <- isPlanFileWrite planMode planActive planPath call
-            if planFileOk
-                then pure (Right True)
-                else case policy of
-                    ApproveAll -> pure (Right True)
-                    DenyMutating -> pure (Right readOnly)
-                    PromptMutating
-                        | readOnly -> pure (Right True)
-                        | otherwise -> do
-                            color <- resolveColor stderr
-                            let question =
-                                    roleWarn color
-                                        (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
-                            readApprovalLine question >>= \case
-                                Nothing -> pure (Right False)
-                                Just raw -> case parseApprovalAnswer raw of
-                                    AllowOnce -> pure (Right True)
-                                    AllowAlways -> do
-                                        writeIORef policyRef ApproveAll
-                                        saveProjectAutoApprove projectRoot True
-                                        putTextLn stderr
-                                            (roleSuccess color
-                                                glyphOk <> "auto-approve on (saved for project)")
-                                        pure (Right True)
-                                    Deny -> pure (Right False)
+        Nothing -> do
+            -- Plan mode: reject mutating file edits except plan.md (even under yolo).
+            -- Grok search_replace also enforces this in-tool; this covers apply_patch
+            -- and any other write tool before dispatch.
+            blocked <- planModeBlocksCall planMode planActive planPath call
+            if blocked
+                then do
+                    let msg = planModeBlockedEditMessage planPath
+                    color <- resolveColor stderr
+                    putTextLn stderr (roleWarn color msg)
+                    pure (Left msg)
+                else do
+                    readOnly <- case lookupAppTool call.name tools of
+                        Nothing -> pure False
+                        Just tool -> toolAllowsWithoutPrompt tool call
+                    -- plan.md edits are auto-approved while plan mode is active.
+                    planFileOk <- isPlanFileWrite planMode planActive planPath call
+                    if planFileOk
+                        then pure (Right True)
+                        else case policy of
+                            ApproveAll -> pure (Right True)
+                            DenyMutating -> pure (Right readOnly)
+                            PromptMutating
+                                | readOnly -> pure (Right True)
+                                | otherwise -> do
+                                    color <- resolveColor stderr
+                                    let question =
+                                            roleWarn color
+                                                (glyphWarn <> "Allow " <> summarizeToolCall call <> "? [y/N/a] ")
+                                    readApprovalLine question >>= \case
+                                        Nothing -> pure (Right False)
+                                        Just raw -> case parseApprovalAnswer raw of
+                                            AllowOnce -> pure (Right True)
+                                            AllowAlways -> do
+                                                writeIORef policyRef ApproveAll
+                                                saveProjectAutoApprove projectRoot True
+                                                putTextLn stderr
+                                                    (roleSuccess color
+                                                        glyphOk <> "auto-approve on (saved for project)")
+                                                pure (Right True)
+                                            Deny -> pure (Right False)
 
 planModeBlocksCall :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
 planModeBlocksCall _planMode active planPath call
