@@ -81,16 +81,26 @@
                 haskellPackages = pkgs.haskellPackages.extend (
                     final: _previous: {
                         agent-core = pkgs.haskell.lib.addTestToolDepends
-                            (final.callCabal2nix "agent-core" agentCoreSource { })
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                                src = agentCoreSource;
+                            })
                             [
                                 pkgs.git
                                 pkgs.ripgrep
                             ];
-                        agent-openai = final.callCabal2nix "agent-openai" agentOpenaiSource { };
-                        agent-xai = final.callCabal2nix "agent-xai" agentXaiSource { };
-                        agent-openrouter = final.callCabal2nix "agent-openrouter" agentOpenrouterSource { };
+                        agent-openai = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
+                            src = agentOpenaiSource;
+                        };
+                        agent-xai = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-xai/package.nix { }) {
+                            src = agentXaiSource;
+                        };
+                        agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
+                            src = agentOpenrouterSource;
+                        };
                         agent-cli = pkgs.haskell.lib.addTestToolDepends
-                            (final.callCabal2nix "agent-cli" agentCliSource { })
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
+                                src = agentCliSource;
+                            })
                             [ pkgs.git ];
                     }
                 );
@@ -137,6 +147,7 @@
                             haskell-language-server
                         ])
                         ++ (with pkgs; [
+                            cabal2nix
                             ripgrep
                         ]);
                 };

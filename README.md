@@ -19,6 +19,17 @@ A universal coding-agent harness written in Haskell.
 
 All compiler and package dependencies come from the pinned Nix flake.
 
+Each package has a checked-in `package.nix` generated with `cabal2nix` (no IFD).
+After changing a `.cabal` file, regenerate that package's Nix expression:
+
+```console
+(cd packages/agent-core && cabal2nix . > package.nix)
+(cd packages/agent-openai && cabal2nix . > package.nix)
+(cd packages/agent-xai && cabal2nix . > package.nix)
+(cd packages/agent-openrouter && cabal2nix . > package.nix)
+(cd packages/agent-cli && cabal2nix . > package.nix)
+```
+
 ```console
 nix develop
 cabal build all
