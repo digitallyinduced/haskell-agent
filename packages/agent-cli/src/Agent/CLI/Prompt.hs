@@ -50,5 +50,6 @@ codexSystemPrompt cwd today =
         , "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- Track multi-step work with update_plan."
         , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
+        , "- Look up current public information with web_search."
         , "Be concise. Do not mention tools this session does not register."
         ]
