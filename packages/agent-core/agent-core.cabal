@@ -36,6 +36,8 @@ library
                     , Agent.Provider
                     , Agent.Broker
                     , Agent.Loop
+                    , Agent.JsonText
+                    , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.Subagents
                     , Agent.ToolArgs
@@ -81,6 +83,7 @@ test-suite agent-core-test
     other-modules:    Agent.CancelSpec
                     , Agent.ErrorSpec
                     , Agent.LoopSpec
+                    , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
                     , Agent.SubagentsSpec
                     , Agent.ToolArgsSpec

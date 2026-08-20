@@ -28,6 +28,7 @@ module Agent.XAI.Auth
     , accountIdFromAccessToken
     ) where
 
+import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
@@ -126,7 +127,7 @@ instance Show OAuthTokens where
 -- callers can fall back to credential import.
 requestDeviceAuthorization :: OAuthOptions -> IO (Either Text DeviceAuthorization)
 requestDeviceAuthorization options = safely do
-    request <- parseRequest ("POST " <> trimIssuer options.issuer <> "/oauth2/device/code")
+    request <- parseRequest ("POST " <> trimTrailingSlash options.issuer <> "/oauth2/device/code")
     response <- httpLBS
         $ setRequestHeader "Content-Type" ["application/x-www-form-urlencoded"]
         $ setRequestBodyURLEncoded
@@ -224,7 +225,7 @@ principalFields options = Maybe.catMaybes
 
 postTokenForm :: OAuthOptions -> [(BS.ByteString, BS.ByteString)] -> IO (Response LBS.ByteString)
 postTokenForm options formFields = do
-    request <- parseRequest ("POST " <> trimIssuer options.issuer <> "/oauth2/token")
+    request <- parseRequest ("POST " <> trimTrailingSlash options.issuer <> "/oauth2/token")
     httpLBS
         $ setRequestHeader "Content-Type" ["application/x-www-form-urlencoded"]
         $ setRequestBodyURLEncoded formFields request
@@ -306,5 +307,3 @@ decodeResponse label response = case Aeson.eitherDecode (getResponseBody respons
 lbsPreview :: LBS.ByteString -> String
 lbsPreview = Text.unpack . Text.take 300 . Text.decodeUtf8With (\_ _ -> Just '?') . LBS.toStrict
 
-trimIssuer :: String -> String
-trimIssuer = reverse . dropWhile (== '/') . reverse
