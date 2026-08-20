@@ -50,7 +50,7 @@ import Agent.Provider
     )
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools (appToolHandlers, codingToolsFor)
-import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Agent.Tools.Types (AppTool(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
@@ -640,7 +640,9 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
 approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
 approveTool policyRef tools call = do
     policy <- readIORef policyRef
-    let readOnly = maybe False (.appToolReadOnly) (lookupAppTool call.name tools)
+    readOnly <- case lookupAppTool call.name tools of
+        Nothing -> pure False
+        Just tool -> toolAllowsWithoutPrompt tool call
     case policy of
         ApproveAll -> pure True
         DenyMutating -> pure readOnly

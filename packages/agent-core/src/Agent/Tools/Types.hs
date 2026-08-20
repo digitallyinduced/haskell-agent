@@ -4,10 +4,11 @@ module Agent.Tools.Types
     , ToolEnv(..)
     , defaultToolEnv
     , appToolHandlers
+    , toolAllowsWithoutPrompt
     ) where
 
 import Agent.ToolDSL (PropertySchema)
-import Agent.ToolDispatch (ToolHandler)
+import Agent.ToolDispatch (ToolCall, ToolHandler)
 import Data.Text (Text)
 import System.FilePath (dropTrailingPathSeparator)
 
@@ -23,6 +24,9 @@ data AppTool = AppTool
     , appToolHandler :: !ToolHandler
     , appToolKind :: !AppToolKind
     , appToolReadOnly :: !Bool
+    -- | Optional per-call override. When present, it decides whether this
+    -- specific invocation is treated as read-only for approval.
+    , appToolIsReadOnlyCall :: !(Maybe (ToolCall -> IO Bool))
     }
 
 data ToolEnv = ToolEnv
@@ -38,3 +42,9 @@ defaultToolEnv cwd = ToolEnv
 
 appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)
+
+-- | Static read-only flag, or a dynamic per-call classifier when registered.
+toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
+toolAllowsWithoutPrompt tool call = case tool.appToolIsReadOnlyCall of
+    Just classify -> classify call
+    Nothing -> pure tool.appToolReadOnly

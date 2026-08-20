@@ -2,7 +2,8 @@
 --
 -- Provider-specific surfaces live in 'Agent.Tools.Grok' and
 -- 'Agent.Tools.Codex'. OpenRouter reuses the Grok JSON function tools.
--- Shared filesystem and process helpers are in 'Agent.Tools.IO'.
+-- Shared filesystem, process, and GHCi helpers are in 'Agent.Tools.IO' and
+-- 'Agent.Tools.Ghci'.
 module Agent.Tools
     ( AppTool(..)
     , AppToolKind(..)
@@ -14,20 +15,31 @@ module Agent.Tools
 
 import Agent.Provider (Provider(..))
 import Agent.Tools.Codex (codexTools)
+import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Types
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
--- Grok/OpenRouter share one persistent shell session for the process lifetime.
--- The second action deletes that session's env dump; run it in 'finally'.
+-- Every provider gets a persistent GHCi session for 'run_ghci'.
+-- Grok/OpenRouter also keep a persistent shell session. The second action
+-- closes owned sessions; run it in 'finally'.
 codingToolsFor :: Provider -> ToolEnv -> IO ([AppTool], IO ())
 codingToolsFor provider env = case provider of
     XAIProvider -> do
         session <- newGrokSession env
-        pure (grokTools session, closeGrokSession session)
+        ghci <- newGhciSession env
+        pure
+            ( grokTools session ghci
+            , closeGrokSession session >> closeGhciSession ghci
+            )
     OpenRouterProvider -> do
         session <- newGrokSession env
-        pure (grokTools session, closeGrokSession session)
+        ghci <- newGhciSession env
+        pure
+            ( grokTools session ghci
+            , closeGrokSession session >> closeGhciSession ghci
+            )
     OpenAIProvider -> do
-        tools <- codexTools env
-        pure (tools, pure ())
+        ghci <- newGhciSession env
+        tools <- codexTools env ghci
+        pure (tools, closeGhciSession ghci)
