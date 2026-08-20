@@ -76,6 +76,7 @@ import Agent.CLI.Render
     , renderEvent
     )
 import Agent.CLI.Session
+import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
     , loadSubagentState
@@ -796,69 +797,65 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
                             policyRef allowedToolsRef tools planMode call projectRoot
             , loopCancel = toolEnv.toolCancel
             }
+        env = SessionEnv
+            { sessionLoop = config
+            , sessionRender = render
+            , sessionProvider = provider
+            , sessionPrevious = previous
+            , sessionPrinted = printed
+            , sessionParams = paramsRef
+            , sessionPolicy = policyRef
+            , sessionTranscript = transcriptRef
+            , sessionPersist = persist
+            , sessionPlanMode = planMode
+            , sessionProjectRoot = projectRoot
+            , sessionHome = home
+            , sessionTokenProvider = tokenProvider
+            , sessionAgentsContext = agentsContext
+            , sessionEscPaused = escPaused
+            , sessionAttachments = attachmentsRef
+            , sessionPreviewId = previewIdRef
+            , sessionInterrupt = interrupt
+            , sessionStoreRoot = storeRoot
+            , sessionUsage = usageRef
+            , sessionReset = sessionReset
+            }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt storeRoot usageRef text [UserMessage text]
+            ok <- runOneTurn env text [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
-            repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext
-                escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset
+            repl env
 
-repl
-    :: LoopConfig
-    -> RenderConfig
-    -> Provider
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef ResponseCreateParams
-    -> IORef ApprovalPolicy
-    -> IORef [ResponseItem]
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> PlanModeEnv
-    -> FilePath
-    -> Maybe TokenProvider
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef [ImageAttachment]
-    -> IORef Int
-    -> InterruptState
-    -> SubagentStoreRoot
-    -> IORef TokenUsage
-    -> IO ()
-    -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset =
-    replWithDraft config render provider previous printed paramsRef policyRef
-        transcriptRef persist planMode projectRoot tokenProvider agentsContext
-        escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset ""
+repl :: SessionEnv -> IO DevResult
+repl env = replWithDraft env ""
 
-replWithDraft
-    :: LoopConfig
-    -> RenderConfig
-    -> Provider
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef ResponseCreateParams
-    -> IORef ApprovalPolicy
-    -> IORef [ResponseItem]
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> PlanModeEnv
-    -> FilePath
-    -> Maybe TokenProvider
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef [ImageAttachment]
-    -> IORef Int
-    -> InterruptState
-    -> SubagentStoreRoot
-    -> IORef TokenUsage
-    -> IO ()
-    -> Text
-    -> IO DevResult
-replWithDraft config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset draft = do
+replWithDraft :: SessionEnv -> Text -> IO DevResult
+replWithDraft env@SessionEnv
+    { sessionLoop = config
+    , sessionRender = render
+    , sessionProvider = provider
+    , sessionPrevious = previous
+    , sessionPrinted = printed
+    , sessionParams = paramsRef
+    , sessionPolicy = policyRef
+    , sessionTranscript = transcriptRef
+    , sessionPersist = persist
+    , sessionPlanMode = planMode
+    , sessionProjectRoot = projectRoot
+    , sessionHome = home
+    , sessionTokenProvider = tokenProvider
+    , sessionAgentsContext = agentsContext
+    , sessionEscPaused = escPaused
+    , sessionAttachments = attachmentsRef
+    , sessionPreviewId = previewIdRef
+    , sessionInterrupt = interrupt
+    , sessionStoreRoot = storeRoot
+    , sessionUsage = usageRef
+    , sessionReset = sessionReset
+    } draft = do
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -951,9 +948,7 @@ replWithDraft config render provider previous printed paramsRef policyRef transc
                                                     , userImages = pendingImages
                                                     }
                                                 ]
-                                _ <- runOneTurn config render previous printed
-                                    transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef text
-                                    turnInputs
+                                _ <- runOneTurn env text turnInputs
                                 putTrailingNewline printed
                                 continue
                     ReplPaste{pasteImmediate, pasteCaption} -> do
@@ -997,8 +992,7 @@ replWithDraft config render provider previous printed paramsRef policyRef transc
                                         Text.putStrLn
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
-                                        _ <- runOneTurn config render previous printed
-                                            transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef promptText
+                                        _ <- runOneTurn env promptText
                                             [ UserMultimodal
                                                 { userText = promptText
                                                 , userImages = images
@@ -1116,8 +1110,7 @@ replWithDraft config render provider previous printed paramsRef policyRef transc
                                                 }
                                 continue
                     ReplPlan maybeDescription -> do
-                        enterPlanFromSlash planMode persist maybeDescription
-                            config render previous printed transcriptRef agentsContext escPaused interrupt usageRef
+                        enterPlanFromSlash env maybeDescription
                         continue
                     ReplResume maybeId -> do
                         handleResume maybeId persist
@@ -1257,10 +1250,7 @@ replWithDraft config render provider previous printed paramsRef policyRef transc
                         continue
     continue = continueWith ""
     continueWith keptDraft =
-        replWithDraft config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext
-            escPaused attachmentsRef previewIdRef interrupt storeRoot usageRef sessionReset
-            keptDraft
+        replWithDraft env keptDraft
 
 applyModelChange
     :: Provider
@@ -1353,22 +1343,8 @@ requestReload persist = do
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
             pure DevReload
 
-enterPlanFromSlash
-    :: PlanModeEnv
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> Maybe Text
-    -> LoopConfig
-    -> RenderConfig
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef [ResponseItem]
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> InterruptState
-    -> IORef TokenUsage
-    -> IO ()
-enterPlanFromSlash planMode persist maybeDescription config render previous printed
-    transcriptRef agentsContext escPaused interrupt usageRef = do
+enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO ()
+enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = persist, sessionPrinted = printed} maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     case persist of
@@ -1392,27 +1368,25 @@ enterPlanFromSlash planMode persist maybeDescription config render previous prin
             putTextLn stderr
                 (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
             writeIORef printed False
-            _ <- runOneTurn config render previous printed transcriptRef persist
-                planMode agentsContext escPaused interrupt discardStore usageRef description [UserMessage description]
+            let planEnv = env { sessionStoreRoot = discardStore }
+            _ <- runOneTurn planEnv description [UserMessage description]
             putTrailingNewline printed
 
-runOneTurn
-    :: LoopConfig
-    -> RenderConfig
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> IORef [ResponseItem]
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> PlanModeEnv
-    -> IORef (Maybe Text)
-    -> IORef Bool
-    -> InterruptState
-    -> SubagentStoreRoot
-    -> IORef TokenUsage
-    -> Text
-    -> [TurnInput]
-    -> IO Bool
-runOneTurn config render previous printed transcriptRef persist planMode agentsContext escPaused interrupt storeRoot usageRef promptText inputs =
+runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO Bool
+runOneTurn env@SessionEnv
+    { sessionLoop = config
+    , sessionRender = render
+    , sessionPrevious = previous
+    , sessionPrinted = printed
+    , sessionTranscript = transcriptRef
+    , sessionPersist = persist
+    , sessionPlanMode = planMode
+    , sessionAgentsContext = agentsContext
+    , sessionEscPaused = escPaused
+    , sessionInterrupt = interrupt
+    , sessionStoreRoot = storeRoot
+    , sessionUsage = usageRef
+    } promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
     pending <- readIORef planMode.planStateRef
@@ -1523,8 +1497,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                 Nothing -> pure True
                 Just notes -> do
                     writeIORef printed False
-                    _ <- runOneTurn config render previous printed transcriptRef persist
-                        planMode agentsContext escPaused interrupt storeRoot usageRef notes [UserMessage notes]
+                    _ <- runOneTurn env notes [UserMessage notes]
                     pure True
 
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)

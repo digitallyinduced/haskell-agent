@@ -58,6 +58,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.SessionEnv
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Style
                     , Agent.CLI.Timestamp
