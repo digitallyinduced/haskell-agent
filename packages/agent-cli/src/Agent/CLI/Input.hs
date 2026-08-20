@@ -2,7 +2,8 @@
 -- arrow keys move the cursor / recall history instead of echoing escape
 -- sequences; non-TTY falls back to plain 'getLine'.
 module Agent.CLI.Input
-    ( readReplLine
+    ( ReplLine(..)
+    , readReplLine
     , readApprovalLine
     , readChoiceSelection
     , approvalKeyText
@@ -12,7 +13,11 @@ module Agent.CLI.Input
     , replHistoryPath
     ) where
 
-import Control.Exception (AsyncException(UserInterrupt))
+import Agent.CLI.Interrupt
+    ( IdleCtrlCResult(..)
+    , InterruptState
+    , noteIdleCtrlC
+    )
 import Control.Exception.Safe (bracket, catchIO, throwIO, tryIO)
 import Control.Monad (when)
 import Data.Char (ord)
@@ -69,6 +74,13 @@ import System.Posix.Terminal
     )
 import System.Posix.Types (FileMode)
 
+-- | Outcome of an interactive REPL read.
+data ReplLine
+    = ReplEof
+    | ReplText Text
+    | ReplQuitInterrupt
+    deriving (Eq, Show)
+
 -- | @~/.haskell-agent/history@ given the user's home directory.
 replHistoryPath :: FilePath -> FilePath
 replHistoryPath home = home </> ".haskell-agent" </> "history"
@@ -112,16 +124,20 @@ choiceMoveIndex len idx key
         _ -> idx
 
 -- | Read a REPL prompt line. Persists history under 'replHistoryPath' when
--- stdin is a TTY. 'Nothing' means EOF. The prompt is drawn on stdout.
-readReplLine :: Text -> IO (Maybe Text)
-readReplLine prompt = do
+-- stdin is a TTY. 'ReplEof' means EOF; 'ReplQuitInterrupt' means a confirmed
+-- double Ctrl-C. The prompt is drawn on stdout.
+--
+-- Haskeline installs its own SIGINT handler while reading, so idle Ctrl-C
+-- goes through 'noteIdleCtrlC' rather than the outer signal handler.
+readReplLine :: InterruptState -> Text -> IO ReplLine
+readReplLine interrupt prompt = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
             home <- getHomeDirectory
             let path = replHistoryPath home
             ensureHistoryParent path
-            readEditedLine
+            readEditedLine interrupt
                 defaultSettings
                     { historyFile = Just path
                     , autoAddHistory = True
@@ -130,8 +146,7 @@ readReplLine prompt = do
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            readAnswerOnly
-
+            fmap (maybe ReplEof ReplText) readAnswerOnly
 -- | Read a one-shot approval answer. The question is always written to
 -- stderr (matching the pre-haskeline behavior) so redirected stdout does
 -- not swallow the prompt. Does not touch REPL history.
@@ -343,15 +358,22 @@ withChoiceRawStdin action = do
             hSetBuffering stdin oldBuf
     bracket enter (const restore) \() -> action
 
-readEditedLine :: Settings IO -> Text -> IO (Maybe Text)
-readEditedLine settings prompt =
-    -- Haskeline turns Ctrl-C into 'Interrupt'; rethrow as 'UserInterrupt'
-    -- so the outer resume-hint handler still runs.
-    handleInterrupt (throwIO UserInterrupt) $
-        runInputT settings $
-            withInterrupt $
-                fmap (fmap Text.pack) (getInputLine (Text.unpack prompt))
-
+readEditedLine :: InterruptState -> Settings IO -> Text -> IO ReplLine
+readEditedLine interrupt settings prompt = go
+  where
+    go =
+        -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
+        -- handler for the duration of the prompt. Soft-warn / double-quit
+        -- are applied here via 'noteIdleCtrlC'.
+        handleInterrupt onInterrupt $
+            runInputT settings $
+                withInterrupt $
+                    fmap (maybe ReplEof (ReplText . Text.pack))
+                        (getInputLine (Text.unpack prompt))
+    onInterrupt = do
+        noteIdleCtrlC interrupt >>= \case
+            ContinuePrompt -> go
+            QuitProcess -> pure ReplQuitInterrupt
 readAnswerOnly :: IO (Maybe Text)
 readAnswerOnly = do
     done <- isEOF

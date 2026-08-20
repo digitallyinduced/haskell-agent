@@ -5,7 +5,8 @@ import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Text (Text)
@@ -309,6 +310,24 @@ spec = describe "runLoop" do
             Left (LoopCancelled results) ->
                 results `shouldNotBe` []
             other -> expectationFailure ("expected LoopCancelled, got " <> show other)
+
+    it "returns LoopCancelled when cancel arrives during submitTurn" do
+        started <- newEmptyMVar
+        config0 <- testConfig $ Backend \_prev _inputs _onEvent -> do
+            putMVar started ()
+            threadDelay 2000000
+            pure $ Right TurnOutput
+                { responseId = "resp-slow"
+                , toolCalls = []
+                , assistantText = Just "too late"
+                }
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+        _ <- forkIO do
+            takeMVar started
+            requestCancel cancel
+        result <- runLoop config0 Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
 
 --------------------------------------------------------------------------------
 -- Helpers
