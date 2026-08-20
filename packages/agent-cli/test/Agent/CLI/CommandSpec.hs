@@ -50,6 +50,14 @@ spec = do
             parseReplLine "/reload-auth now"
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
+        it "pastes clipboard images with an optional caption" do
+            parseReplLine "/paste" `shouldBe` ReplPaste ""
+            parseReplLine "  /Paste  " `shouldBe` ReplPaste ""
+            parseReplLine "/paste what is this?"
+                `shouldBe` ReplPaste "what is this?"
+            parseReplLine "/paste   keep  spaces"
+                `shouldBe` ReplPaste "keep  spaces"
+
         it "shows the current model with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel
             parseReplLine "  /Model  " `shouldBe` ReplShowModel
