@@ -458,7 +458,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let chromePrompt =
             beginBackground stdoutColor userBackground
-                <> rolePrompt stdoutColor "λ> "
+                <> rolePrompt stdoutColor "λ "
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty

@@ -11,10 +11,10 @@ spec = do
             style False [] "plain" `shouldBe` "plain"
 
         it "wraps text in SGR codes when color is on" do
-            let out = rolePrompt True "λ>"
-            out `shouldSatisfy` Text.isInfixOf "λ>"
+            let out = rolePrompt True "λ"
+            out `shouldSatisfy` Text.isInfixOf "λ"
             out `shouldSatisfy` Text.isInfixOf "\ESC["
-            out `shouldSatisfy` (not . Text.isPrefixOf "λ>")
+            out `shouldSatisfy` (not . Text.isPrefixOf "λ")
 
         it "restores a base wash after nested styling" do
             let out = styleBase True agentBackground [] "hi"
@@ -38,7 +38,7 @@ spec = do
             roleMuted False "session: 1" `shouldBe` "session: 1"
 
         it "keeps the user wash under the prompt glyph" do
-            let out = rolePrompt True "λ>"
+            let out = rolePrompt True "λ"
             -- Background may share an SGR sequence with bold/cyan attrs (truecolor).
             out `shouldSatisfy` Text.isInfixOf "48;2;7;54;66"
             out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;7;54;66m"
