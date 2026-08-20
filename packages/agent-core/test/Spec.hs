@@ -5,6 +5,7 @@ import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
+import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
@@ -24,6 +25,7 @@ main = hspec do
     LoopSpec.spec
     ProjectInstructionsSpec.spec
     SubagentsSpec.spec
+    TaskPathSpec.spec
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
     ToolDSLSpec.spec

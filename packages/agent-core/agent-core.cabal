@@ -38,6 +38,7 @@ library
                     , Agent.Loop
                     , Agent.ProjectInstructions
                     , Agent.Subagents
+                    , Agent.Subagents.TaskPath
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -83,6 +84,7 @@ test-suite agent-core-test
                     , Agent.LoopSpec
                     , Agent.ProjectInstructionsSpec
                     , Agent.SubagentsSpec
+                    , Agent.Subagents.TaskPathSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec

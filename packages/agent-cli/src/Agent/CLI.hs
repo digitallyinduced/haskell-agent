@@ -131,6 +131,7 @@ import Agent.Subagents
     , formatCompletionNotice
     , getPreviousResponseId
     , getStatus
+    , getTaskPath
     , newSubagentRegistry
     , restoreSubagent
     , setSubagentOnComplete
@@ -144,6 +145,7 @@ import Agent.Tools
     , filterChildGrokTools
     )
 import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType, recordAgentType)
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -359,6 +361,7 @@ runAgent options = do
             { multiRegistry = registry
             , multiSelfId = Nothing
             , multiDepth = 0
+            , multiTaskPath = taskPathRoot
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             }
@@ -1757,12 +1760,14 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
+        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
         -- Inherit soft-cancel from the registry-owned child flag.
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 }
         -- Child tools create their own PlanModeEnv; sync store root from parent
@@ -1826,11 +1831,13 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
+        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
                 { multiRegistry = registry
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
+                , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 }
         session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
