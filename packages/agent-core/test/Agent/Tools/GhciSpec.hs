@@ -1,10 +1,11 @@
-module Agent.Tools.Grok.GhciSpec (spec) where
+module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
-import Agent.Tools (appToolHandlers, defaultToolEnv)
+import Agent.Provider (Provider(..))
+import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
-import Agent.Tools.Grok.Ghci
+import Agent.Tools.Ghci
     ( GhciClass(..)
     , GhciResult(..)
     , GhciSession
@@ -15,7 +16,7 @@ import Agent.Tools.Grok.Ghci
     , newGhciSession
     , typeLooksEffectful
     )
-import Agent.Tools.Types (AppTool(..))
+import Agent.Tools.Types (AppTool(..), ToolEnv)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
@@ -24,7 +25,7 @@ import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Agent.Tools.Grok.Ghci" do
+spec = describe "Agent.Tools.Ghci" do
     describe "classifyGhciInput" do
         it "marks info commands pure and shell-outs effectful" do
             classifyGhciInput ":type id" `shouldBe` Just GhciPure
@@ -75,6 +76,22 @@ spec = describe "Agent.Tools.Grok.Ghci" do
             result.output `shouldSatisfy` Text.isInfixOf "7"
             let names = map (.appToolName) tools
             names `shouldContain` ["run_ghci"]
+
+
+    it "is registered for OpenAI via codingToolsFor" do
+        withTempEnv \env -> do
+            (tools, closeTools) <- codingToolsFor OpenAIProvider env
+            map (.appToolName) tools `shouldContain` ["run_ghci"]
+            closeTools
+
+withTempEnv :: (ToolEnv -> IO a) -> IO a
+withTempEnv action =
+    bracket acquire release \dir -> action (defaultToolEnv dir)
+  where
+    acquire = do
+        tmp <- getTemporaryDirectory
+        mkdtemp (tmp </> "agent-ghci-env-")
+    release dir = removeDirectoryRecursive dir
 
 withTempGhci :: (GhciSession -> IO a) -> IO a
 withTempGhci action =

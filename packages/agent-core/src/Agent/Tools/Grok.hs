@@ -21,15 +21,9 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool)
+import Agent.ToolDispatch (ToolHandler, typedTool)
 import Control.Applicative ((<|>))
-import Agent.Tools.Grok.Ghci
-    ( GhciClass(..)
-    , GhciResult(..)
-    , GhciSession
-    , classifyGhci
-    , evalGhci
-    )
+import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Grok.Shell
     ( GrokSession(..)
     , closeGrokSession
@@ -54,15 +48,12 @@ import Agent.Tools.Types
     )
 import Data.Aeson (FromJSON(..), Object)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Directory (doesDirectoryExist, doesFileExist, findExecutable)
 import System.Exit (ExitCode(..))
 import System.FilePath (takeExtension, (</>))
@@ -721,85 +712,6 @@ runTerminal session args
             else
                 let code = fromMaybe 1 result.commandExitCode
                 in pure $ Right $ "exit: " <> Text.pack (show code) <> "\n" <> body
-
---------------------------------------------------------------------------------
--- run_ghci
---------------------------------------------------------------------------------
-
-data GhciArgs = GhciArgs
-    { expression :: Text
-    , timeout :: Maybe Int
-    , description :: Text
-    }
-
-instance FromJSON GhciArgs where
-    parseJSON = objectArgs \object -> GhciArgs
-        <$> reqText object "expression"
-        <*> optionalTimeout object
-        <*> reqText object "description"
-
-runGhciTool :: GhciSession -> AppTool
-runGhciTool session = AppTool
-    { appToolName = "run_ghci"
-    , appToolDescription = ghciDescription
-    , appToolParameters =
-        [ PropertySchema "expression" PropertyString True $ Just
-            "Haskell expression, statement, or GHCi :command to evaluate."
-        , PropertySchema "timeout" PropertyInteger False $ Just
-            "Optional timeout in milliseconds (max 300000). Default: 30000."
-        , PropertySchema "description" PropertyString True $ Just
-            "One sentence explanation as to why this evaluation is needed."
-        ]
-    , appToolHandler = typedTool "run_ghci" (runGhci session)
-    , appToolKind = JsonFunction
-    , appToolReadOnly = False
-    , appToolIsReadOnlyCall = Just (isGhciReadOnlyCall session)
-    }
-
-ghciDescription :: Text
-ghciDescription =
-    "Evaluate Haskell in a persistent GHCi session for this agent.\n\
-    \Bindings and loaded modules persist across calls.\n\
-    \Pure expressions auto-approve; IO and side-effecting GHCi commands need approval.\n\
-    \Prefer this over run_terminal_cmd for calculations, type exploration, and small Haskell scripts."
-
-isGhciReadOnlyCall :: GhciSession -> ToolCall -> IO Bool
-isGhciReadOnlyCall session call =
-    case decodeExpression call.arguments of
-        Nothing -> pure False
-        Just expression -> do
-            classification <- classifyGhci session expression
-            pure (classification == GhciPure)
-
-decodeExpression :: Text -> Maybe Text
-decodeExpression arguments =
-    case Aeson.decodeStrict (Text.encodeUtf8 arguments) of
-        Just (Aeson.Object object) ->
-            case KeyMap.lookup (Key.fromText "expression") object of
-                Just (Aeson.String value) -> Just value
-                _ -> Nothing
-        _ -> Nothing
-
-runGhci :: GhciSession -> GhciArgs -> IO (Either Text Text)
-runGhci session args
-    | Text.null args.description =
-        pure (Left "Missing parameter: description")
-    | Text.null (Text.strip args.expression) =
-        pure (Left "Missing parameter: expression")
-    | otherwise = do
-        let timeoutMs = min 300000 (max 1 (fromMaybe 30000 args.timeout))
-        result <- evalGhci session args.expression timeoutMs
-        let classLabel = case result.ghciClass of
-                GhciPure -> "pure"
-                GhciEffectful -> "io"
-            body = stripAnsi result.ghciOutput
-        if result.ghciTimedOut
-            then pure $ Right $
-                "class: " <> classLabel <> "\nexit: killed (timeout)\n" <> body
-            else
-                let status = if result.ghciOk then "ok" else "error"
-                in pure $ Right $
-                    "class: " <> classLabel <> "\n" <> status <> "\n" <> body
 
 data TaskOutputArgs = TaskOutputArgs
     { taskId :: Text

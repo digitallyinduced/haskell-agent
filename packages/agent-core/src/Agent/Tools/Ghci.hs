@@ -1,8 +1,8 @@
--- | Persistent GHCi session for Grok/OpenRouter tools.
+-- | Persistent GHCi session shared by coding-tool providers.
 --
 -- Frames replies with a unique @putStrLn@ marker instead of relying on the
 -- GHCi prompt (which is suppressed when stdin is not a TTY).
-module Agent.Tools.Grok.Ghci
+module Agent.Tools.Ghci
     ( GhciSession(..)
     , GhciClass(..)
     , GhciResult(..)
@@ -12,9 +12,30 @@ module Agent.Tools.Grok.Ghci
     , classifyGhci
     , classifyGhciInput
     , typeLooksEffectful
+    , runGhciTool
     ) where
 
-import Agent.Tools.Types (ToolEnv(..))
+import Agent.ToolArgs
+    ( objectArgs
+    , optInt
+    , optText
+    , reqText
+    )
+import Agent.ToolDSL
+    ( PropertySchema(..)
+    , PropertyType(..)
+    )
+import Agent.ToolDispatch (ToolCall(..), typedTool)
+import Agent.Tools.Types (AppTool(..), AppToolKind(..), ToolEnv(..))
+import Control.Applicative ((<|>))
+import Data.Aeson (FromJSON(..), Object)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (Parser)
+import Data.Maybe (fromMaybe)
+import qualified Data.Text.Encoding as TextEncoding
+
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (concurrently, race)
 import Control.Concurrent.MVar
@@ -337,7 +358,7 @@ spawnProcess env = do
                 , ghciBuffer = buffer
                 , ghciDrainDone = drainDone
                 }
-        _ -> error "Agent.Tools.Grok.Ghci: failed to create ghci pipes"
+        _ -> error "Agent.Tools.Ghci: failed to create ghci pipes"
 
 prepareHandle :: Handle -> IO ()
 prepareHandle handle = do
@@ -391,3 +412,96 @@ drainHandle handle ref = go
             else do
                 atomicModifyIORef' ref \soFar -> (soFar <> chunk, ())
                 go
+
+
+--------------------------------------------------------------------------------
+-- run_ghci AppTool
+--------------------------------------------------------------------------------
+
+data GhciArgs = GhciArgs
+    { expression :: Text
+    , timeout :: Maybe Int
+    , description :: Text
+    }
+
+instance FromJSON GhciArgs where
+    parseJSON = objectArgs \object -> GhciArgs
+        <$> reqText object "expression"
+        <*> optionalTimeout object
+        <*> reqText object "description"
+
+optionalTimeout :: Object -> Parser (Maybe Int)
+optionalTimeout object = do
+    fromInt <- optInt object "timeout"
+    fromText <- optText object "timeout"
+    pure (fromInt <|> (fromText >>= readTimeout))
+
+readTimeout :: Text -> Maybe Int
+readTimeout text =
+    case reads (Text.unpack text) of
+        [(n, "")] -> Just n
+        _ -> Nothing
+
+-- | Provider-neutral persistent GHCi tool with per-call purity approval.
+runGhciTool :: GhciSession -> AppTool
+runGhciTool session = AppTool
+    { appToolName = "run_ghci"
+    , appToolDescription = ghciDescription
+    , appToolParameters =
+        [ PropertySchema "expression" PropertyString True $ Just
+            "Haskell expression, statement, or GHCi :command to evaluate."
+        , PropertySchema "timeout" PropertyInteger False $ Just
+            "Optional timeout in milliseconds (max 300000). Default: 30000."
+        , PropertySchema "description" PropertyString True $ Just
+            "One sentence explanation as to why this evaluation is needed."
+        ]
+    , appToolHandler = typedTool "run_ghci" (runGhci session)
+    , appToolKind = JsonFunction
+    , appToolReadOnly = False
+    , appToolIsReadOnlyCall = Just (isGhciReadOnlyCall session)
+    }
+
+ghciDescription :: Text
+ghciDescription =
+    "Evaluate Haskell in a persistent GHCi session for this agent.\n\
+    \Bindings and loaded modules persist across calls.\n\
+    \Pure expressions auto-approve; IO and side-effecting GHCi commands need approval.\n\
+    \Prefer this over shell tools for calculations, type exploration, and small Haskell scripts."
+
+isGhciReadOnlyCall :: GhciSession -> ToolCall -> IO Bool
+isGhciReadOnlyCall session call =
+    case decodeExpression call.arguments of
+        Nothing -> pure False
+        Just expression -> do
+            classification <- classifyGhci session expression
+            pure (classification == GhciPure)
+
+decodeExpression :: Text -> Maybe Text
+decodeExpression arguments =
+    case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
+        Just (Aeson.Object object) ->
+            case KeyMap.lookup (Key.fromText "expression") object of
+                Just (Aeson.String value) -> Just value
+                _ -> Nothing
+        _ -> Nothing
+
+runGhci :: GhciSession -> GhciArgs -> IO (Either Text Text)
+runGhci session args
+    | Text.null args.description =
+        pure (Left "Missing parameter: description")
+    | Text.null (Text.strip args.expression) =
+        pure (Left "Missing parameter: expression")
+    | otherwise = do
+        let timeoutMs = min 300000 (max 1 (fromMaybe 30000 args.timeout))
+        result <- evalGhci session args.expression timeoutMs
+        let classLabel = case result.ghciClass of
+                GhciPure -> "pure"
+                GhciEffectful -> "io"
+            body = result.ghciOutput
+        if result.ghciTimedOut
+            then pure $ Right $
+                "class: " <> classLabel <> "\nexit: killed (timeout)\n" <> body
+            else
+                let status = if result.ghciOk then "ok" else "error"
+                in pure $ Right $
+                    "class: " <> classLabel <> "\n" <> status <> "\n" <> body

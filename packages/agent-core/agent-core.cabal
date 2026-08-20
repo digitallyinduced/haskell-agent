@@ -44,7 +44,7 @@ library
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.Shell
-                    , Agent.Tools.Grok.Ghci
+                    , Agent.Tools.Ghci
                     , Agent.Tools.IO
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
@@ -77,7 +77,7 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
                     , Agent.Tools.GrokSpec
-                    , Agent.Tools.Grok.GhciSpec
+                    , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec

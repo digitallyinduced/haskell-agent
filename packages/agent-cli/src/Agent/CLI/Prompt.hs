@@ -32,10 +32,10 @@ ghciGuidance :: Text
 ghciGuidance =
     Text.unlines
         [ "Prefer ghci for scripting."
-        , "When you need a short program, calculation, or one-off script, use the run_ghci tool (Grok/OpenRouter) or ghci rather than Python, Node, bash, or compiling a binary."
+        , "When you need a short program, calculation, or one-off script, use the run_ghci tool rather than Python, Node, bash, or compiling a binary."
         , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
         , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
-        , "Prefer run_terminal_cmd for OS commands, package installs, servers, and anything that is not Haskell evaluation."
+        , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
@@ -45,9 +45,10 @@ codexSystemPrompt cwd today =
         [ "You are a coding agent working in " <> Text.pack cwd <> "."
         , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
         , ""
-        , "Use Codex tools only:"
+        , "Use these tools:"
         , "- Inspect the repo with shell_command (rg, cat, ls). Always set workdir."
         , "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- Track multi-step work with update_plan."
+        , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
         , "Be concise. Do not mention tools this session does not register."
         ]

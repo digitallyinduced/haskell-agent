@@ -28,7 +28,7 @@ spec = do
                 `shouldBe` "shell_command ls -l"
             summarizeToolCall (functionToolCall "c3" "run_terminal_cmd" "{\"command\":\"git status\"}")
                 `shouldBe` "run_terminal_cmd git status"
-            summarizeToolCall (functionToolCall "c3b" "run_ghci" "{"expression":"1 + 1"}")
+            summarizeToolCall (functionToolCall "c3b" "run_ghci" "{\"expression\":\"1 + 1\"}")
                 `shouldBe` "run_ghci 1 + 1"
 
         it "pulls the first path out of an apply_patch body" do
