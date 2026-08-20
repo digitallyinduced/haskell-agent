@@ -44,6 +44,7 @@ import Agent.CLI.Interrupt
     , withTurnCancel
     )
 import Agent.CLI.ModelPicker (pickModel)
+import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options
 import Agent.CLI.Permission
     ( PermissionChoice(..)
@@ -216,6 +217,13 @@ data DevResult
     | DevReload
     deriving (Eq, Show)
 
+data RunResult
+    = RunQuit
+    | RunReload
+    | RunSwitchProvider Text
+      -- ^ Persisted session id. Consumed after the current provider-specific
+      -- backend shuts down.
+
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
 afterDev :: DevResult -> IO String
 afterDev = \case
@@ -248,7 +256,7 @@ devMain = do
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
         Right (RunAgent options) -> do
-            result <- runAgent options
+            result <- runAgentWithProviderSwitches options
             case result of
                 DevQuit -> clearDevResumePointer home >> pure DevQuit
                 DevReload -> pure DevReload
@@ -263,13 +271,34 @@ run = do
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
         Right (RunAgent options) -> do
-            result <- runAgent options
+            result <- runAgentWithProviderSwitches options
             case result of
                 DevQuit -> pure ()
                 DevReload -> do
                     home <- getHomeDirectory
                     clearDevResumePointer home
                     die ":reload is only available under `repl` (nix develop)"
+
+-- | Tear down and rebuild the provider-specific backend when the picker moves
+-- between providers. The session metadata is updated before this result is
+-- produced, so resuming reconstructs auth, tools, prompt, and transport from
+-- the newly selected provider while keeping the local transcript.
+runAgentWithProviderSwitches :: CliOptions -> IO DevResult
+runAgentWithProviderSwitches options =
+    runAgent options >>= \case
+        RunSwitchProvider sessionId ->
+            runAgentWithProviderSwitches options
+                { optProvider = Nothing
+                , optModel = Nothing
+                , optCwd = Nothing
+                , optWorktree = False
+                , optEffort = Nothing
+                , optPrompt = Nothing
+                , optPromptFile = Nothing
+                , optResume = Just sessionId
+                }
+        RunQuit -> pure DevQuit
+        RunReload -> pure DevReload
 
 runListSessions :: IO ()
 runListSessions = do
@@ -310,7 +339,7 @@ printTurn turn = do
         _ -> pure ()
     putStrLn ""
 
-runAgent :: CliOptions -> IO DevResult
+runAgent :: CliOptions -> IO RunResult
 runAgent options = do
     home <- getHomeDirectory
     let root = sessionsRoot home
@@ -724,7 +753,7 @@ runSession
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> Backend
-    -> IO DevResult
+    -> IO RunResult
 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -824,15 +853,15 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
         Just text -> do
             ok <- runOneTurn env text [UserMessage text]
             if ok
-                then putTrailingNewline printed >> pure DevQuit
+                then putTrailingNewline printed >> pure RunQuit
                 else exitFailure
         Nothing ->
             repl env
 
-repl :: SessionEnv -> IO DevResult
+repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
 
-replWithDraft :: SessionEnv -> Text -> IO DevResult
+replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
@@ -895,7 +924,7 @@ replWithDraft env@SessionEnv
     case mline of
         ReplEof -> do
             putStrLn ""
-            pure DevQuit
+            pure RunQuit
         ReplQuitInterrupt ->
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
@@ -923,7 +952,7 @@ replWithDraft env@SessionEnv
                     when (chip /= stripped) do
                         Text.putStrLn (roleMuted color chip)
                 case parseReplLine stripped of
-                    ReplQuit -> pure DevQuit
+                    ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
                         -- Native Cmd+V of a Finder image often pastes a path
@@ -1052,16 +1081,27 @@ replWithDraft env@SessionEnv
                         let current = currentModel params
                         pickModel color provider current >>= \case
                             Nothing -> continue
-                            Just name
-                                | name == current -> do
+                            Just choice
+                                | choice.modelProvider == provider
+                                , choice.modelId == current -> do
                                     Text.putStrLn
                                         (roleMuted color
-                                            (glyphSession <> "model: " <> name))
+                                            (glyphSession
+                                                <> "model: "
+                                                <> providerSlug provider
+                                                <> "/"
+                                                <> choice.modelId))
                                     continue
-                                | otherwise -> do
+                                | choice.modelProvider == provider -> do
                                     applyModelChange
-                                        provider name paramsRef render previous persist
+                                        provider choice.modelId paramsRef render previous persist
                                     continue
+                                | otherwise ->
+                                    requestModelProviderSwitch choice persist >>= \case
+                                        Left err -> do
+                                            Text.hPutStrLn stderr (roleError color err)
+                                            continue
+                                        Right result -> pure result
                     ReplSetModel name -> do
                         applyModelChange
                             provider name paramsRef render previous persist
@@ -1290,6 +1330,58 @@ applyModelChange provider name paramsRef render previous persist = do
                     writeIORef slotRef
                         (Right handle { sessionMeta = meta })
 
+requestModelProviderSwitch
+    :: ModelOption
+    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO (Either Text RunResult)
+requestModelProviderSwitch choice persist = case persist of
+    Nothing -> pure $ Left
+        "switching providers requires a persisted interactive session"
+    Just slotRef ->
+        loadAuth (Just choice.modelProvider) >>= \case
+            Left err -> pure $ Left $
+                "cannot switch to "
+                    <> providerSlug choice.modelProvider
+                    <> ": "
+                    <> Text.pack err
+            Right loaded
+                | loaded.loadedProvider /= choice.modelProvider ->
+                    pure $ Left $
+                        "cannot switch to "
+                            <> providerSlug choice.modelProvider
+                            <> ": auth resolved "
+                            <> providerSlug loaded.loadedProvider
+                | otherwise -> do
+                    slot <- readIORef slotRef
+                    handle <- case slot of
+                        Left pending -> do
+                            writeIORef slotRef $ Left pending
+                                { createProvider = choice.modelProvider
+                                , createModel = choice.modelId
+                                }
+                            ensureSession slotRef
+                        Right currentHandle -> do
+                            now <- getCurrentTime
+                            let meta = currentHandle.sessionMeta
+                                    { metaProvider = choice.modelProvider
+                                    , metaModel = choice.modelId
+                                    , metaLastResponseId = Nothing
+                                    , metaUpdatedAt = now
+                                    }
+                                updated = currentHandle { sessionMeta = meta }
+                            writeSessionMeta currentHandle.sessionMetaPath meta
+                            writeIORef slotRef (Right updated)
+                            pure updated
+                    color <- resolveColor stdout
+                    Text.putStrLn $ roleMuted color $
+                        glyphOk
+                            <> "switching to "
+                            <> providerSlug choice.modelProvider
+                            <> "/"
+                            <> choice.modelId
+                            <> " (conversation continued locally)"
+                    pure $ Right (RunSwitchProvider handle.sessionMeta.metaId)
+
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
     Nothing -> do
@@ -1326,7 +1418,7 @@ reloadAuth provider = \case
 
 requestReload
     :: Maybe (IORef (Either SessionCreate SessionHandle))
-    -> IO DevResult
+    -> IO RunResult
 requestReload persist = do
     home <- getHomeDirectory
     color <- resolveColor stderr
@@ -1334,14 +1426,14 @@ requestReload persist = do
         Nothing -> do
             putTextLn stderr
                 (roleError color ":reload needs a persisted REPL session")
-            pure DevQuit
+            pure RunQuit
         Just slotRef -> do
             handle <- ensureSession slotRef
             writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
-            pure DevReload
+            pure RunReload
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO ()
 enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = persist, sessionPrinted = printed} maybeDescription = do
