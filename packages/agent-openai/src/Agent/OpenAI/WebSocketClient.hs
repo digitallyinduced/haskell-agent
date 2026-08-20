@@ -297,6 +297,7 @@ buildWsPayloadWithOptions options request previousResponseId =
         Aeson.Object object -> Aeson.Object
             $ addContextManagement
             $ addPreviousResponseId
+            $ KeyMap.insert "store" (Aeson.Bool False)
             $ KeyMap.insert "type" (Aeson.String "response.create") object
         other -> other
   where
