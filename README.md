@@ -42,6 +42,11 @@ cabal run agent-cli -- --help
 cabal run agent-cli -- -p "list the files here"
 ```
 
+From `nix develop`, `repl` opens `cabal repl lib:agent-cli` (via expect) and
+starts the agent with a GHCi `:cmd` loop. Inside the agent REPL, `:reload`
+writes `~/.haskell-agent/dev-resume`, returns to GHCi, reloads modules, and
+resumes the same session automatically. `:q` exits the agent back to `ghci>`.
+
 Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /
 `CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).

@@ -29,6 +29,17 @@ spec = describe "Agent.CLI.Session" do
             sessionsRoot "/home/marc"
                 `shouldBe` "/home/marc" </> ".haskell-agent" </> "sessions"
 
+    describe "dev resume pointer" do
+        it "round-trips and clears under ~/.haskell-agent/dev-resume" $
+            withTempDir "agent-home-" \home -> do
+                readDevResumePointer home `shouldReturn` Nothing
+                writeDevResumePointer home "2026-08-20-abcd1234"
+                modeOf (devResumePointerPath home) `shouldReturn` 0o600
+                readDevResumePointer home
+                    `shouldReturn` Just "2026-08-20-abcd1234"
+                clearDevResumePointer home
+                readDevResumePointer home `shouldReturn` Nothing
+
     describe "sessionTitleFromPrompt" do
         it "collapses whitespace and truncates long prompts" do
             sessionTitleFromPrompt "  hello   world  " `shouldBe` "hello world"

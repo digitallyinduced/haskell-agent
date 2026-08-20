@@ -13,6 +13,10 @@ spec = do
             parseReplLine ":quit" `shouldBe` ReplQuit
             parseReplLine "  :quit  " `shouldBe` ReplQuit
 
+        it "treats :reload as a GHCi reload request" do
+            parseReplLine ":reload" `shouldBe` ReplReload
+            parseReplLine "  :reload  " `shouldBe` ReplReload
+
         it "sends ordinary lines to the model" do
             parseReplLine "list the files" `shouldBe` ReplPrompt "list the files"
             parseReplLine ":status" `shouldBe` ReplPrompt ":status"

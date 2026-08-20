@@ -17,6 +17,7 @@ import qualified Data.Text as Text
 
 data ReplAction
     = ReplQuit
+    | ReplReload
     | ReplPrompt Text
     | ReplShowEffort
     | ReplSetEffort Text
@@ -34,10 +35,12 @@ parseReplLine raw =
     let line = Text.strip raw
     in if line == ":q" || line == ":quit"
         then ReplQuit
-        else case Text.uncons line of
-            Just ('/', _) -> parseSlash line
-            Just (':', _) -> parseColon line
-            _ -> ReplPrompt line
+        else if line == ":reload"
+            then ReplReload
+            else case Text.uncons line of
+                Just ('/', _) -> parseSlash line
+                Just (':', _) -> parseColon line
+                _ -> ReplPrompt line
 
 parseColon :: Text -> ReplAction
 parseColon line

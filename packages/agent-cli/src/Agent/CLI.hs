@@ -1,6 +1,9 @@
 -- | Command-line entry point: one-shot @-p@ or an interactive REPL.
 module Agent.CLI
-    ( run
+    ( DevResult(..)
+    , afterDev
+    , devMain
+    , run
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
@@ -86,6 +89,42 @@ import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, isEOF, stderr, stdin, stdout)
 
+-- | How the GHCi-driven agent REPL finished.
+data DevResult
+    = DevQuit
+    | DevReload
+    deriving (Eq, Show)
+
+-- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
+afterDev :: DevResult -> IO String
+afterDev = \case
+    DevQuit -> pure ""
+    DevReload -> pure $ unlines
+        [ ":reload"
+        , ":module +Agent.CLI"
+        , ":cmd afterDev =<< devMain"
+        ]
+
+-- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
+devMain :: IO DevResult
+devMain = do
+    home <- getHomeDirectory
+    resumeId <- readDevResumePointer home
+    let args = maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) resumeId
+    case parseArgs args of
+        Left err -> do
+            clearDevResumePointer home
+            die err
+        Right ShowHelp -> putStr usage >> pure DevQuit
+        Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
+        Right ListSessions -> runListSessions >> pure DevQuit
+        Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (RunAgent options) -> do
+            result <- runAgent options
+            case result of
+                DevQuit -> clearDevResumePointer home >> pure DevQuit
+                DevReload -> pure DevReload
+
 run :: IO ()
 run = do
     args <- getArgs
@@ -95,7 +134,14 @@ run = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
-        Right (RunAgent options) -> runAgent options
+        Right (RunAgent options) -> do
+            result <- runAgent options
+            case result of
+                DevQuit -> pure ()
+                DevReload -> do
+                    home <- getHomeDirectory
+                    clearDevResumePointer home
+                    die ":reload is only available under `repl` (nix develop)"
 
 runListSessions :: IO ()
 runListSessions = do
@@ -136,7 +182,7 @@ printTurn turn = do
         _ -> pure ()
     putStrLn ""
 
-runAgent :: CliOptions -> IO ()
+runAgent :: CliOptions -> IO DevResult
 runAgent options = do
     home <- getHomeDirectory
     let root = sessionsRoot home
@@ -217,7 +263,7 @@ runAgent options = do
                                 (openAiBackend conn (readIORef paramsRef) transcriptRef))
                         >>= \case
                             Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                            Right () -> pure ()
+                            Right result -> pure result
                 XAIProvider -> do
                     xaiOptions <- XAI.clientOptionsFromEnv
                     let backend =
@@ -332,7 +378,7 @@ runSession
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> Backend
-    -> IO ()
+    -> IO DevResult
 runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
@@ -366,7 +412,9 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist agentsContext text
                 [UserMessage text]
-            if ok then putTrailingNewline printed else exitFailure
+            if ok
+                then putTrailingNewline printed >> pure DevQuit
+                else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
                 transcriptRef persist projectRoot tokenProvider agentsContext
@@ -384,7 +432,7 @@ repl
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
-    -> IO ()
+    -> IO DevResult
 repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
     -- Prompt + typed input share a navy wash; clear-to-EOL paints the rest
@@ -402,6 +450,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
         then do
             Text.putStr (endBackground stdoutColor)
             putStrLn ""
+            pure DevQuit
         else do
             line <- Text.strip <$> Text.getLine
             Text.putStr (endBackground stdoutColor)
@@ -409,7 +458,8 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
             if Text.null line
                 then continue
                 else case parseReplLine line of
-                    ReplQuit -> pure ()
+                    ReplQuit -> pure DevQuit
+                    ReplReload -> requestReload persist
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
@@ -560,6 +610,26 @@ reloadAuth provider = \case
                         <> " account "
                         <> credential.accountId
                         <> ")"
+
+
+requestReload
+    :: Maybe (IORef (Either SessionCreate SessionHandle))
+    -> IO DevResult
+requestReload persist = do
+    home <- getHomeDirectory
+    color <- resolveColor stderr
+    case persist of
+        Nothing -> do
+            putTextLn stderr
+                (roleError color ":reload needs a persisted REPL session")
+            pure DevQuit
+        Just slotRef -> do
+            handle <- ensureSession slotRef
+            writeDevResumePointer home handle.sessionMeta.metaId
+            putTextLn stderr
+                (roleMuted color
+                    ("reloading; session " <> handle.sessionMeta.metaId))
+            pure DevReload
 
 runOneTurn
     :: LoopConfig

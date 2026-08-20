@@ -21,6 +21,9 @@ we follow the tool defintions that are used by the first party lab harnesses. e.
 
 use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
 
+From `nix develop`, run `repl` to open the agent under GHCi. Agent `:reload`
+returns to GHCi, reloads modules, and resumes the previous session.
+
 ## development feedback loop
 
 Prefer `cabal repl` over `cabal run` when iterating on the agent itself. Do not rebuild the binary between UI/logic tweaks; reload in GHCi instead.
@@ -75,6 +78,8 @@ Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as bu
 - `run` calls `setCurrentDirectory`, so later runs in the same GHCi process inherit that cwd.
 - `cabal repl agent-cli:exe:agent-cli` + `:main` looks convenient but only interprets `Main.hs` and does **not** reload library source changes.
 - Use `ghcid` for typecheck-on-save; keep `cabal repl` + `withArgs ... run` for running the live agent.
+- Prefer `repl` when you want automatic `:reload` + session resume instead of the manual `:q` / `:r` / `run` loop.
+
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception
