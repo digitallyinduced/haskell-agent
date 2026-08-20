@@ -27,6 +27,7 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
     , formatLoopErrorColored
+    , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -48,7 +49,6 @@ import Agent.CLI.Style
     , setCliWindowTitle
     , userBackground
     )
-import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
@@ -432,6 +432,8 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     escPaused <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
+    spinnerRef <- newIORef Nothing
+    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
     policyRef <- newIORef policy
@@ -440,12 +442,14 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     let render = RenderConfig
             { renderShowThinking = stderrTty
             , renderThinkingVisible = thinkingVisible
+            , renderThinkingSpinner = spinnerRef
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
+            , renderModelRef = modelRef
             }
         config = LoopConfig
             { loopBackend = backend
@@ -580,6 +584,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         continue
                     ReplSetModel name -> do
                         modifyIORef' paramsRef (setModel name)
+                        writeIORef render.renderModelRef name
                         clearedChain <- case provider of
                             OpenAIProvider ->
                                 atomicModifyIORef' previous \prev ->
@@ -771,10 +776,9 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
             Just agents | null beforeItems && isNothing prev ->
                 UserMessage agents : inputs
             _ -> inputs
-        turnInputs0 = case planReminder of
+        turnInputs = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
-    turnInputs <- stampTurnInputs turnInputs0
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
@@ -784,18 +788,27 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     (<> map toolResultToItem toolResults)
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "cancelled" model)
             pure True
         Left err -> do
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color err)
+            model <- readIORef render.renderModelRef
+            putTextLn stderr (formatTurnStatus color "error" model)
             pure False
         Right loopResult -> do
             writeIORef previous (Just loopResult.finalResponseId)
+            do
+                color <- resolveColor stderr
+                model <- readIORef render.renderModelRef
+                let turns = Text.pack (show loopResult.turnsUsed)
+                    unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
+                putTextLn stderr
+                    (formatTurnStatus color "ok" (model <> " · " <> turns <> unit))
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
-            let assistantText =
-                    fmap stripBracketedTimestamps loopResult.finalText
-            case (printedText, assistantText) of
+            case (printedText, loopResult.finalText) of
                 (False, Just text) | not (Text.null (Text.strip text)) -> do
                     useColor <- resolveColor stdout
                     putTextLn stdout (renderAssistantText useColor text)
@@ -819,7 +832,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     let turn = SessionTurn
                             { turnAt = now
                             , turnUserText = promptText
-                            , turnAssistantText = assistantText
+                            , turnAssistantText = loopResult.finalText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
                             }

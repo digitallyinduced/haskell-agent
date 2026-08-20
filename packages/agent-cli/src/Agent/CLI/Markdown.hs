@@ -5,6 +5,7 @@ module Agent.CLI.Markdown
 
 import Agent.CLI.Style
     ( agentBackground
+    , osc8Link
     , solarizedBase01
     , solarizedBlue
     , solarizedCyan
@@ -207,13 +208,21 @@ takeTable (header : sep : rest)
         let (body, after) = span isTableRow rest
             rows = map splitRow (header : body)
             widths = columnWidths rows
-            styled =
-                zipWith
-                    (\i row -> styleTableRow (i == 0) widths row)
-                    [0 :: Int ..]
-                    rows
+            top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
+            mid = md [fg solarizedBase01] (boxLine '├' '┼' '┤' '─' widths)
+            bot = md [fg solarizedBase01] (boxLine '└' '┴' '┘' '─' widths)
+            headerRow = styleTableRow True widths (head rows)
+            bodyRows = map (styleTableRow False widths) (drop 1 rows)
+            styled = [top, headerRow, mid] ++ bodyRows ++ [bot]
         in Just (styled, after)
 takeTable _ = Nothing
+
+boxLine :: Char -> Char -> Char -> Char -> [Int] -> Text
+boxLine left mid right fill widths =
+    Text.singleton left
+        <> Text.intercalate (Text.singleton mid)
+            [ Text.replicate (w + 2) (Text.singleton fill) | w <- widths ]
+        <> Text.singleton right
 
 isTableRow :: Text -> Bool
 isTableRow line =
@@ -243,15 +252,15 @@ columnWidths rows =
 
 styleTableRow :: Bool -> [Int] -> [Text] -> Text
 styleTableRow isHeader widths cells =
-    let padded =
-            zipWith
-                (\w c -> c <> Text.replicate (max 0 (w - Text.length c)) " ")
-                widths
-                (cells ++ repeat "")
-        line = Text.intercalate "  " (take (length widths) padded)
-    in if isHeader
-        then md [SetConsoleIntensity BoldIntensity] line
-        else styleInline line
+    let cellText w c =
+            let pad = max 0 (w - Text.length c)
+                body = " " <> c <> Text.replicate pad " " <> " "
+            in if isHeader
+                then md [SetConsoleIntensity BoldIntensity] body
+                else styleInline body
+        parts = zipWith cellText widths (cells ++ repeat "")
+        bar = md [fg solarizedBase01] "│"
+    in bar <> Text.intercalate bar (take (length widths) parts) <> bar
 
 styleInline :: Text -> Text
 styleInline = Text.concat . go Nothing
@@ -262,7 +271,8 @@ styleInline = Text.concat . go Nothing
         | Just (code, rest) <- takeInlineCode t =
             md codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
         | Just (linkText, url, rest) <- takeLink t =
-            md linkStyle (styleInline linkText)
+            let label = md linkStyle (styleInline linkText)
+            in osc8Link True url label
                 : md urlStyle (" (" <> url <> ")")
                 : go (Just ')') rest
         | Just (inner, rest) <- takeEmphasis prev "**" t =
