@@ -102,17 +102,22 @@ spec = do
 
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
-            resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False
+            resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False False
                 `shouldBe` ApproveAll
 
         it "denies mutating tools without a TTY when --no-yolo is set" do
-            resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False
+            resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
                 `shouldBe` DenyMutating
 
         it "prompts on a TTY unless --yolo is set" do
-            resolveApprovalPolicy defaultCliOptions True `shouldBe` PromptMutating
-            resolveApprovalPolicy defaultCliOptions { optYolo = True } True
+            resolveApprovalPolicy defaultCliOptions True False `shouldBe` PromptMutating
+            resolveApprovalPolicy defaultCliOptions { optYolo = True } True False
                 `shouldBe` ApproveAll
+
+        it "honors project auto-approve on a TTY unless --no-yolo is set" do
+            resolveApprovalPolicy defaultCliOptions True True `shouldBe` ApproveAll
+            resolveApprovalPolicy defaultCliOptions { optNoYolo = True } True True
+                `shouldBe` PromptMutating
 
     describe "parseApprovalAnswer" do
         it "allows once, always, or denies" do
