@@ -2,7 +2,9 @@
 module Agent.CLI.Command
     ( ReplAction(..)
     , currentEffort
+    , currentModel
     , parseReplLine
+    , setModel
     , setReasoningEffort
     ) where
 
@@ -18,6 +20,8 @@ data ReplAction
     | ReplPrompt Text
     | ReplShowEffort
     | ReplSetEffort Text
+    | ReplShowModel
+    | ReplSetModel Text
     | ReplToggleAlwaysApprove
     | ReplShowSession
     | ReplCommandError Text
@@ -43,6 +47,7 @@ parseSlash line = case Text.words line of
     [] -> ReplCommandError "unknown command: /"
     command : args
         | Text.toLower command == "/effort" -> parseEffortCommand args
+        | Text.toLower command == "/model" -> parseModelCommand args
         | Text.toLower command == "/session" ->
             if null args
                 then ReplShowSession
@@ -64,6 +69,15 @@ parseEffortCommand = \case
         Right effort -> ReplSetEffort effort
         Left err -> ReplCommandError (Text.pack err)
     _ -> ReplCommandError "usage: /effort [low|medium|high|xhigh]"
+
+parseModelCommand :: [Text] -> ReplAction
+parseModelCommand = \case
+    [] -> ReplShowModel
+    [name]
+        | Text.null (Text.strip name) ->
+            ReplCommandError "usage: /model [NAME]"
+        | otherwise -> ReplSetModel name
+    _ -> ReplCommandError "usage: /model [NAME]"
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 setReasoningEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
@@ -87,3 +101,15 @@ setReasoningEffort level ResponseCreateParams{..} =
 currentEffort :: ResponseCreateParams -> Text
 currentEffort params =
     fromMaybe "low" (params.reasoning >>= (.effort))
+
+-- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
+setModel :: Text -> ResponseCreateParams -> ResponseCreateParams
+setModel name ResponseCreateParams{..} =
+    ResponseCreateParams
+        { model = Just name
+        , ..
+        }
+
+currentModel :: ResponseCreateParams -> Text
+currentModel params =
+    fromMaybe "(unset)" params.model

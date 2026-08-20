@@ -44,14 +44,27 @@ spec = do
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
+        it "shows the current model with a bare /model" do
+            parseReplLine "/model" `shouldBe` ReplShowModel
+            parseReplLine "  /Model  " `shouldBe` ReplShowModel
+
+        it "sets a model name" do
+            parseReplLine "/model grok-4.5" `shouldBe` ReplSetModel "grok-4.5"
+            parseReplLine "/model openai/gpt-5.1"
+                `shouldBe` ReplSetModel "openai/gpt-5.1"
+
+        it "rejects extra args on /model" do
+            parseReplLine "/model grok-4.5 extra"
+                `shouldBe` ReplCommandError "usage: /model [NAME]"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
                     "effort must be low, medium, high, or xhigh (got bogus)"
             parseReplLine "/effort high extra"
                 `shouldBe` ReplCommandError "usage: /effort [low|medium|high|xhigh]"
-            parseReplLine "/model grok-4.5"
-                `shouldBe` ReplCommandError "unknown command: /model"
+            parseReplLine "/bogus"
+                `shouldBe` ReplCommandError "unknown command: /bogus"
             parseReplLine "/"
                 `shouldBe` ReplCommandError "unknown command: /"
 
@@ -86,3 +99,26 @@ spec = do
     describe "currentEffort" do
         it "defaults to low when reasoning is missing" do
             currentEffort defaultResponseCreateParams `shouldBe` "low"
+
+    describe "setModel" do
+        it "writes the model onto request params" do
+            let updated = setModel "grok-4.5" defaultResponseCreateParams
+            currentModel updated `shouldBe` "grok-4.5"
+            updated.model `shouldBe` Just "grok-4.5"
+
+        it "preserves other request fields" do
+            let original = case defaultResponseCreateParams of
+                    ResponseCreateParams{..} -> ResponseCreateParams
+                        { model = Just "old-model"
+                        , instructions = Just "keep me"
+                        , store = Just True
+                        , ..
+                        }
+                updated = setModel "new-model" original
+            currentModel updated `shouldBe` "new-model"
+            updated.instructions `shouldBe` Just "keep me"
+            updated.store `shouldBe` Just True
+
+    describe "currentModel" do
+        it "defaults to (unset) when model is missing" do
+            currentModel defaultResponseCreateParams `shouldBe` "(unset)"
