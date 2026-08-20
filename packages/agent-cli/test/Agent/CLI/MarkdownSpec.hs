@@ -1,8 +1,18 @@
 module Agent.CLI.MarkdownSpec (spec) where
 
 import Agent.CLI.Markdown (renderMarkdown)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+
+stripAnsi :: Text -> Text
+stripAnsi text = case Text.break (== '\ESC') text of
+    (before, rest)
+        | Text.null rest -> before
+        | otherwise ->
+            let afterEsc = Text.drop 1 rest
+                dropped = Text.drop 1 (Text.dropWhile (/= 'm') afterEsc)
+            in before <> stripAnsi dropped
 
 spec :: Spec
 spec = do
@@ -82,6 +92,25 @@ spec = do
             let out = renderMarkdown True "# see `Render.hs`"
             out `shouldSatisfy` Text.isInfixOf "Render.hs"
             out `shouldSatisfy` (not . Text.isInfixOf "`Render.hs`")
+
+        it "keeps box borders aligned when cells have inline markers" do
+            let mdTable = Text.unlines
+                    [ "| a | b |"
+                    , "| --- | --- |"
+                    , "| **x** | `y` |"
+                    ]
+                out = renderMarkdown True mdTable
+                cleaned =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip) (Text.lines out))
+                body =
+                    [ l
+                    | l <- cleaned
+                    , "│" `Text.isInfixOf` l
+                    , not ("─" `Text.isInfixOf` l)
+                    ]
+            length body `shouldBe` 2
+            Text.length (head body) `shouldBe` Text.length (body !! 1)
 
         it "renders a basic pipe table" do
             let sample = "| file | status |\n| --- | --- |\n| a.hs | ok |"

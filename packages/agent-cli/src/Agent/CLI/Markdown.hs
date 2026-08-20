@@ -248,16 +248,26 @@ splitRow line =
 columnWidths :: [[Text]] -> [Int]
 columnWidths rows =
     let cols = transpose rows
-    in map (maximum . (0 :) . map Text.length) cols
+    in map (maximum . (0 :) . map (Text.length . visibleCellText)) cols
+
+-- | Approximate rendered cell text width by stripping common inline markers
+-- before padding, so borders align when body cells contain ``code`` / emphasis.
+visibleCellText :: Text -> Text
+visibleCellText = Text.replace "`" "" . Text.replace "**" "" . Text.replace "__" ""
+    . Text.replace "*" "" . Text.replace "_" ""
 
 styleTableRow :: Bool -> [Int] -> [Text] -> Text
 styleTableRow isHeader widths cells =
     let cellText w c =
-            let pad = max 0 (w - Text.length c)
-                body = " " <> c <> Text.replicate pad " " <> " "
+            let visible = visibleCellText c
+                pad = max 0 (w - Text.length visible)
+                body = " " <> visible <> Text.replicate pad " " <> " "
             in if isHeader
                 then md [SetConsoleIntensity BoldIntensity] body
-                else styleInline body
+                else
+                    -- Markers were stripped for width; re-apply inline styling
+                    -- only for bare visible text (no markers left to parse).
+                    md [] body
         parts = zipWith cellText widths (cells ++ repeat "")
         bar = md [fg solarizedBase01] "│"
     in bar <> Text.intercalate bar (take (length widths) parts) <> bar

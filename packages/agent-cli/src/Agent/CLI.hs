@@ -49,6 +49,7 @@ import Agent.CLI.Style
     , setCliWindowTitle
     , userBackground
     )
+import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
@@ -776,9 +777,10 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
             Just agents | null beforeItems && isNothing prev ->
                 UserMessage agents : inputs
             _ -> inputs
-        turnInputs = case planReminder of
+        turnInputs0 = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
+    turnInputs <- stampTurnInputs turnInputs0
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
@@ -808,7 +810,9 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     (formatTurnStatus color "ok" (model <> " · " <> turns <> unit))
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
-            case (printedText, loopResult.finalText) of
+            let assistantText =
+                    fmap stripBracketedTimestamps loopResult.finalText
+            case (printedText, assistantText) of
                 (False, Just text) | not (Text.null (Text.strip text)) -> do
                     useColor <- resolveColor stdout
                     putTextLn stdout (renderAssistantText useColor text)
@@ -832,7 +836,7 @@ runOneTurn config render previous printed transcriptRef persist planMode agentsC
                     let turn = SessionTurn
                             { turnAt = now
                             , turnUserText = promptText
-                            , turnAssistantText = loopResult.finalText
+                            , turnAssistantText = assistantText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
                             }
