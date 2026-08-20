@@ -7,7 +7,6 @@ module Agent.CLI
     , run
     ) where
 
-import Agent.CLI.Accounts (runAccountsList, runAccountsRemove, runLogin)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -45,6 +44,10 @@ import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan
     ( cliPlanHooks
     , extractProposedPlan
+    )
+import Agent.CLI.Progress
+    ( osc9ProgressRemove
+    , wrapOscForTmux
     )
 import Agent.CLI.Project
     ( ProjectSettings(..)
@@ -234,9 +237,6 @@ devMain = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
-        Right (LoginAccount provider label) -> runLogin provider label >> pure DevQuit
-        Right ListAccounts -> runAccountsList >> pure DevQuit
-        Right (RemoveAccount accountId) -> runAccountsRemove accountId >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -252,9 +252,6 @@ run = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
-        Right (LoginAccount provider label) -> runLogin provider label
-        Right ListAccounts -> runAccountsList
-        Right (RemoveAccount accountId) -> runAccountsRemove accountId
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -350,7 +347,7 @@ runAgent options = do
     interrupt <- newInterruptState \msg -> do
         -- Drop an in-place "thinking…" status so the hint is its own line.
         Text.hPutStr stderr "\r\ESC[K"
-        hFlush stderr
+        clearNativeProgress stderr
         color <- resolveColor stderr
         putTextLn stderr (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
@@ -589,7 +586,7 @@ printResumeHint progName = \case
             Right handle -> do
                 -- Drop an in-place "thinking…" status so the hint is its own line.
                 Text.hPutStr stderr "\r\ESC[K"
-                hFlush stderr
+                clearNativeProgress stderr
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
@@ -697,6 +694,10 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             , renderModelRef = modelRef
             , renderActivityRef = activityRef
             , renderStartedAt = startedAtRef
+            -- OSC 9;4 is ignored by terminals that do not implement it.
+            -- Gate on the same TTY check as the in-pane spinner so pipes
+            -- and redirected stderr stay clean.
+            , renderNativeProgress = stderrTty
             }
         config = LoopConfig
             { loopBackend = backend
@@ -1437,6 +1438,16 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                             <> Text.pack (show (length files))
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
+
+-- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
+-- Safe when the bar was never shown; unknown terminals ignore the sequence.
+clearNativeProgress :: Handle -> IO ()
+clearNativeProgress handle = do
+    tty <- hIsTerminalDevice handle
+    when tty do
+        inTmux <- isJust <$> lookupEnv "TMUX"
+        Text.hPutStr handle (wrapOscForTmux inTmux osc9ProgressRemove)
+        hFlush handle
 
 -- | Color when the handle is a TTY and NO_COLOR is unset.
 resolveColor :: Handle -> IO Bool
