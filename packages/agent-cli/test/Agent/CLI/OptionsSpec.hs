@@ -16,7 +16,7 @@ spec = do
         it "parses one-shot flags" do
             parseArgs
                 [ "--provider", "xai"
-                , "--model", "grok-4.5"
+                , "--model", "grok-4.6"
                 , "--cwd", "/tmp/work"
                 , "--yolo"
                 , "--max-turns", "3"
@@ -25,7 +25,7 @@ spec = do
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optProvider = Just XAIProvider
-                    , optModel = Just "grok-4.5"
+                    , optModel = Just "grok-4.6"
                     , optCwd = Just "/tmp/work"
                     , optYolo = True
                     , optMaxTurns = 3

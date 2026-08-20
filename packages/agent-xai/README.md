@@ -25,7 +25,7 @@ import Agent.OpenAI.Responses.Types
 import Agent.XAI
 
 request = defaultResponseCreateParams
-    { model = Just "grok-4.5"
+    { model = Just "grok-4.6"
     , input = Just (ResponseInputText "Hello")
     }
 

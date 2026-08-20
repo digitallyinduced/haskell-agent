@@ -9,6 +9,8 @@ import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
+import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
@@ -29,6 +31,8 @@ main = hspec do
     InputSpec.spec
     InterruptSpec.spec
     MarkdownSpec.spec
+    ModelPickerSpec.spec
+    ModelsSpec.spec
     OptionsSpec.spec
     PlanSpec.spec
     ProjectSpec.spec

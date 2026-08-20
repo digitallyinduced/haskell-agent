@@ -116,6 +116,13 @@ spec = describe "Agent.Tools.Grok" do
             output `shouldNotSatisfy` Text.isInfixOf "hit.md"
             output `shouldNotSatisfy` Text.isInfixOf "No such file or directory"
 
+    it "rejects rm -rf via run_terminal_cmd even before execution" do
+        withTempSession \(session, ghci) -> do
+            output <- runTool session ghci "run_terminal_cmd"
+                "{\"command\":\"rm -rf /tmp/should-not-run\",\"description\":\"dangerous delete\"}"
+            output `shouldSatisfy` Text.isInfixOf "Blocked dangerous shell command"
+            output `shouldSatisfy` Text.isInfixOf "rm -rf"
+
     it "runs a foreground shell command" do
         withTempSession \(session, ghci) -> do
             output <- runTool session ghci "run_terminal_cmd"

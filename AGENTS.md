@@ -82,6 +82,16 @@ Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as bu
 - Use `ghcid` for typecheck-on-save; keep `cabal repl` + `withArgs ... run` for running the live agent.
 - Prefer `repl` when you want automatic `:reload` + session resume instead of the manual `:q` / `:r` / `run` loop.
 
+### memory / RTS heap cap
+
+`nix develop` and the `repl` wrapper default `GHCRTS` to `-M8G -A64m` so the agent/GHCi process dies at an 8 GiB heap instead of OOMing the whole machine. The `agent-cli` executable is built with the same `-M8G -A64m` RTS defaults (overridable via `+RTS` because `-rtsopts` is enabled). Override when needed:
+
+```
+GHCRTS='-M16G -A64m' repl
+GHCRTS='-M4G -A32m' cabal repl agent-cli
+cabal run agent-cli -- +RTS -M16G -RTS
+```
+
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception
