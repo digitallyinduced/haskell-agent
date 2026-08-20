@@ -101,7 +101,7 @@ data LoopError
     deriving (Eq, Show)
 
 defaultLoopMaxTurns :: Int
-defaultLoopMaxTurns = 50
+defaultLoopMaxTurns = 500
 
 -- | CLI-facing formatter: unknown tools, handler errors, and crashes stay
 -- in-band as tool output so the model can continue.
