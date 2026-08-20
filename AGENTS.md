@@ -21,8 +21,10 @@ we follow the tool defintions that are used by the first party lab harnesses. e.
 
 use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
 
-From `nix develop`, run `repl` to open the agent under GHCi. Agent `:reload`
-returns to GHCi, reloads modules, and resumes the previous session.
+From `nix develop`, run `repl` to open the agent under GHCi. On first open it
+passes `--worktree` when the cwd is not already under
+`~/.haskell-agent/worktrees`. Agent `:reload` returns to GHCi, reloads
+modules, and resumes the previous session.
 
 ## development feedback loop
 
@@ -74,7 +76,7 @@ Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as bu
 ### pitfalls
 
 - Exit the agent (`:q` or Ctrl-D) before `:r`; a live stdin/WebSocket session blocks GHCi.
-- `--worktree` creates a new worktree each start. To keep iterating in the same tree, use `--resume <id>` or `--cwd <existing-worktree>`.
+- `repl` / `devMain` creates a new worktree on first open when not already under `~/.haskell-agent/worktrees`. `:reload` resumes the same session (and cwd). Manual `run` still needs `withArgs ["--worktree"]` (or `--resume` / `--cwd`) if you want a worktree.
 - `run` calls `setCurrentDirectory`, so later runs in the same GHCi process inherit that cwd.
 - `cabal repl agent-cli:exe:agent-cli` + `:main` looks convenient but only interprets `Main.hs` and does **not** reload library source changes.
 - Use `ghcid` for typecheck-on-save; keep `cabal repl` + `withArgs ... run` for running the live agent.
