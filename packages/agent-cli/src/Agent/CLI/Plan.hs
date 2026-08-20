@@ -106,6 +106,8 @@ readChangeNotes interrupt color = do
     readReplLine interrupt chrome >>= \case
         ReplEof -> pure "(no notes)"
         ReplQuitInterrupt -> throwIO UserInterrupt
+        ReplPasted text ->
+            if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
@@ -127,6 +129,10 @@ askQuestion interrupt resolveColor question options = do
                 readReplLine interrupt chrome >>= \case
                     ReplEof -> pure Nothing
                     ReplQuitInterrupt -> throwIO UserInterrupt
+                    ReplPasted text ->
+                        if Text.null (Text.strip text)
+                            then pure Nothing
+                            else pure (Just (Text.strip text))
                     ReplText text
                         | Text.null (Text.strip text) -> pure Nothing
                         | otherwise -> pure (Just (Text.strip text))

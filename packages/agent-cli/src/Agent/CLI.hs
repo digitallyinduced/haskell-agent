@@ -7,6 +7,7 @@ module Agent.CLI
     , run
     ) where
 
+import Agent.CLI.Accounts (runAccountsList, runAccountsRemove, runLogin)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -27,7 +28,7 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), readReplLine)
+import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLine)
 import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
@@ -233,6 +234,9 @@ devMain = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (LoginAccount provider label) -> runLogin provider label >> pure DevQuit
+        Right ListAccounts -> runAccountsList >> pure DevQuit
+        Right (RemoveAccount accountId) -> runAccountsRemove accountId >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -248,6 +252,9 @@ run = do
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (LoginAccount provider label) -> runLogin provider label
+        Right ListAccounts -> runAccountsList
+        Right (RemoveAccount accountId) -> runAccountsRemove accountId
         Right (RunAgent options) -> do
             result <- runAgent options
             case result of
@@ -770,11 +777,21 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
+        ReplPasted pasted ->
+            submitLine continue stdoutColor True pasted
         ReplText line ->
-            let stripped = Text.strip line
-            in if Text.null stripped
-                then continue
-                else case parseReplLine stripped of
+            submitLine continue stdoutColor False line
+  where
+    submitLine continue color pasted line =
+        let stripped = Text.strip line
+        in if Text.null stripped
+            then continue
+            else do
+                when pasted do
+                    let chip = formatPasteChip stripped
+                    when (chip /= stripped) do
+                        Text.putStrLn (roleMuted color chip)
+                case parseReplLine stripped of
                     ReplQuit -> pure DevQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -786,7 +803,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         case pastedImages of
                             Just images@(_:_) -> do
                                 queueAttachedImages
-                                    attachmentsRef previewIdRef stdoutColor images
+                                    attachmentsRef previewIdRef color images
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
@@ -1098,7 +1115,6 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
                         continue
-  where
     continue =
         repl config render provider previous printed paramsRef policyRef
             transcriptRef persist planMode projectRoot tokenProvider agentsContext
