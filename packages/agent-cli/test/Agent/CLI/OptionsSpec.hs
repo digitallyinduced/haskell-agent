@@ -68,6 +68,26 @@ spec = do
         it "explains that login is not in this slice" do
             parseArgs ["login"] `shouldSatisfy` isLeft
 
+
+        it "parses sessions list and show" do
+            parseArgs ["sessions"] `shouldBe` Right ListSessions
+            parseArgs ["sessions", "list"] `shouldBe` Right ListSessions
+            parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
+                `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
+
+        it "parses --resume and --save-session" do
+            parseArgs ["--resume", "2026-08-19-abcd1234"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just "2026-08-19-abcd1234" })
+            parseArgs ["-p", "hi", "--save-session"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optSaveSession = True
+                    })
+
+        it "rejects --resume with --worktree" do
+            parseArgs ["--resume", "abc", "--worktree"] `shouldSatisfy` isLeft
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False

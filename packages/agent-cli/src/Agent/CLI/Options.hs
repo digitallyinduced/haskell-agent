@@ -22,6 +22,8 @@ import qualified Data.Text as Text
 data Command
     = ShowHelp
     | ShowVersion
+    | ListSessions
+    | ShowSession Text
     | RunAgent CliOptions
     deriving (Eq, Show)
 
@@ -60,6 +62,8 @@ data CliOptions = CliOptions
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe FilePath)
+    , optResume :: !(Maybe Text)
+    , optSaveSession :: !Bool
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -74,6 +78,8 @@ defaultCliOptions = CliOptions
     , optEffort = Nothing
     , optPrompt = Nothing
     , optPromptFile = Nothing
+    , optResume = Nothing
+    , optSaveSession = False
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -100,7 +106,18 @@ parseArgs args
     | any (`elem` ["--help", "-h"]) args = Right ShowHelp
     | "--version" `elem` args = Right ShowVersion
     | take 1 args == ["login"] = Left loginHint
+    | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
     | otherwise = RunAgent <$> parseOptions defaultCliOptions args
+
+parseSessionsCommand :: [String] -> Either String Command
+parseSessionsCommand = \case
+    [] -> Right ListSessions
+    ["list"] -> Right ListSessions
+    ["show", sessionId] -> Right (ShowSession (Text.pack sessionId))
+    ["show"] -> Left "usage: agent-cli sessions show <session-id>"
+    other ->
+        Left ("unknown sessions command: " <> unwords other
+            <> "\nusage: agent-cli sessions [list|show <id>]")
 
 parseOptions :: CliOptions -> [String] -> Either String CliOptions
 parseOptions options = \case
@@ -135,6 +152,10 @@ parseOptions options = \case
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt-file" : value : rest ->
         parseOptions options { optPromptFile = Just value } rest
+    "--resume" : value : rest ->
+        parseOptions options { optResume = Just (Text.pack value) } rest
+    "--save-session" : rest ->
+        parseOptions options { optSaveSession = True } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -149,6 +170,8 @@ validate options
         Left "use either -p/--prompt or --prompt-file, not both"
     | options.optMaxTurns < 1 =
         Left "--max-turns must be at least 1"
+    | isJust options.optResume && options.optWorktree =
+        Left "use either --resume or --worktree, not both"
     | otherwise = Right options
 
 parseInt :: String -> String -> Either String Int
@@ -173,6 +196,8 @@ loginHint =
 usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
+    , "       agent-cli sessions [list]"
+    , "       agent-cli sessions show <session-id>"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
@@ -180,6 +205,8 @@ usage = unlines
     , "      --model NAME        Override the provider default model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
+    , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
+    , "      --save-session      Persist a one-shot (-p) run as a session"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 50)"
@@ -188,7 +215,8 @@ usage = unlines
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""
-    , "Without -p/--prompt-file, start a REPL. /effort [LEVEL] changes"
+    , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
+    , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /always-approve (or :yolo) toggles auto-approve."
-    , "Ctrl-D or :q exits."
+    , "/session prints the current session id. Ctrl-D or :q exits."
     ]

@@ -42,6 +42,7 @@ library
                     , Agent.CLI.Options
                     , Agent.CLI.Prompt
                     , Agent.CLI.Render
+                    , Agent.CLI.Session
                     , Agent.CLI.Tools
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
@@ -77,6 +78,7 @@ test-suite agent-cli-test
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.RenderSpec
+                    , Agent.CLI.SessionSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli

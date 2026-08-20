@@ -3,7 +3,8 @@
 -- OpenRouter does not store transcripts ('store = false', no
 -- @previous_response_id@). This backend keeps a local item list so tool
 -- follow-ups can resend the conversation the loop only supplies as
--- 'CompletedTool' items.
+-- 'CompletedTool' items. Callers own the 'IORef' so a resumed session can
+-- seed history and the CLI can persist it.
 module Agent.OpenRouter.LoopBackend
     ( openRouterBackend
     , openRouterBackendWith
@@ -31,7 +32,8 @@ openRouterBackend
     :: ClientOptions
     -> Credential
     -> IO ResponseCreateParams
-    -> IO Backend
+    -> IORef [ResponseItem]
+    -> Backend
 openRouterBackend options credential =
     openRouterBackendWith (createResponseWithEvents options credential)
 
@@ -41,12 +43,11 @@ openRouterBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IO Backend
-openRouterBackendWith send getParams = do
-    transcript <- newIORef []
-    pure $ Backend \_previousResponseId inputs onEvent -> do
-        baseParams <- getParams
-        submitOpenRouterTurn send baseParams transcript inputs onEvent
+    -> IORef [ResponseItem]
+    -> Backend
+openRouterBackendWith send getParams transcript = Backend \_previousResponseId inputs onEvent -> do
+    baseParams <- getParams
+    submitOpenRouterTurn send baseParams transcript inputs onEvent
 
 submitOpenRouterTurn
     :: (ResponseCreateParams

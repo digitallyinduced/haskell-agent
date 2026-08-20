@@ -39,6 +39,11 @@ spec = do
             parseReplLine "/yolo on"
                 `shouldBe` ReplCommandError "usage: /always-approve"
 
+        it "prints the current session id" do
+            parseReplLine "/session" `shouldBe` ReplShowSession
+            parseReplLine "/session now"
+                `shouldBe` ReplCommandError "usage: /session"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
