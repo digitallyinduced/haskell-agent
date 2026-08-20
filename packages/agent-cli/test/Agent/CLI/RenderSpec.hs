@@ -98,11 +98,15 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
 
-        it "buffers colored TextDelta until TurnFinished" do
+        it "streams styled TextDelta live in color mode" do
             withRenderConfig False True \config handle path -> do
                 renderEvent config (TextDelta "see `file.txt`")
                 buffered <- readIORef config.renderTextBuffer
                 buffered `shouldBe` "see `file.txt`"
+                liveRows <- readIORef config.renderLiveRows
+                liveRows `shouldSatisfy` (> 0)
+                printed <- readIORef config.renderPrintedText
+                printed `shouldBe` True
                 renderEvent config (TurnFinished TurnOutput
                     { responseId = "r1"
                     , toolCalls = []
@@ -114,6 +118,19 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
                 body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                readIORef config.renderLiveRows `shouldReturn` 0
+
+        it "restyles growing markdown across deltas" do
+            withRenderConfig False True \config handle path -> do
+                renderEvent config (TextDelta "see `fi")
+                renderEvent config (TextDelta "le.txt`")
+                hClose handle
+                body <- Text.readFile path
+                -- Second delta should erase and redraw; final body styles the
+                -- closed code span (no raw backticks left).
+                body `shouldSatisfy` Text.isInfixOf "file.txt"
+                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
@@ -129,6 +146,19 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "src"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 readIORef config.renderTextBuffer `shouldReturn` ""
+
+        it "paints assistantText on TurnFinished when no deltas arrived" do
+            withRenderConfig False True \config handle path -> do
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Just "see `file.txt`"
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "file.txt"
+                body `shouldSatisfy` Text.isInfixOf "\ESC["
+                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
 
         it "styles tool chrome when color is on" do
             withRenderConfig False True \config handle path -> do
@@ -152,6 +182,15 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "thinking…")
 
+    describe "visibleDisplayRows" do
+        it "counts soft-wrapped rows without ANSI" do
+            visibleDisplayRows 5 "abcdefghij" `shouldBe` 2
+            visibleDisplayRows 10 "abcdefghij" `shouldBe` 1
+
+        it "ignores SGR when measuring width" do
+            let painted = "\ESC[1mabcdefghij\ESC[0m"
+            visibleDisplayRows 5 painted `shouldBe` 2
+
 withRenderConfig
     :: Bool
     -> Bool
@@ -163,6 +202,8 @@ withRenderConfig showThinking color action = do
     spinner <- newIORef Nothing
     modelRef <- newIORef "test-model"
     textBuffer <- newIORef ""
+    liveRows <- newIORef (0 :: Int)
+    liveEndsNL <- newIORef False
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
     (path, handle) <- openTempFile tmp "agent-render-spec"
@@ -175,6 +216,8 @@ withRenderConfig showThinking color action = do
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
+                , renderLiveRows = liveRows
+                , renderLiveEndsWithNewline = liveEndsNL
                 , renderLock = lock
                 , renderStdout = handle
                 , renderStderr = handle
