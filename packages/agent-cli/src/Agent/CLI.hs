@@ -41,6 +41,10 @@ import Agent.CLI.Permission
     , promptPermission
     )
 import Agent.CLI.Resume (pickResumeSession)
+import Agent.CLI.Usage
+    ( AccountUsageLine(..)
+    , formatUsageReport
+    )
 import Agent.CLI.Plan
     ( cliPlanHooks
     , extractProposedPlan
@@ -95,12 +99,14 @@ import Agent.ProjectInstructions
     , globalAgentsHomeDir
     , loadedInstructionFiles
     )
+import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
     , isTranscriptResetTurn
     , newSessionUserText
     )
+import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
@@ -449,7 +455,7 @@ runAgent options = do
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                                     multiCtx subagentSessions pendingNotices subagentStoreRoot noticingBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
@@ -478,7 +484,7 @@ runAgent options = do
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot backend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -504,7 +510,7 @@ runAgent options = do
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot backend
 
 preparePersistence
@@ -624,6 +630,7 @@ runSession
     -> FilePath
     -> FilePath
     -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
@@ -633,7 +640,7 @@ runSession
     -> SubagentStoreRoot
     -> Backend
     -> IO DevResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot backend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -705,7 +712,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist planMode projectRoot tokenProvider agentsContext
+                transcriptRef persist planMode projectRoot tokenProvider openAiPool agentsContext
                 escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
 
 repl
@@ -721,6 +728,7 @@ repl
     -> PlanModeEnv
     -> FilePath
     -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
     -> IORef Bool
     -> IORef [ImageAttachment]
@@ -729,7 +737,7 @@ repl
     -> SubagentStoreRoot
     -> IO ()
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist planMode projectRoot tokenProvider openAiPool agentsContext escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset = do
     stdoutColor <- resolveColor stdout
     planActive <- isPlanModeActive planMode
     planPending <- (== PlanPending) <$> readIORef planMode.planStateRef
@@ -1083,6 +1091,9 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color
                                                 (glyphSession <> "session: " <> handle.sessionMeta.metaId))
                         continue
+                    ReplUsage -> do
+                        showAccountUsage provider tokenProvider openAiPool
+                        continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
                         continue
@@ -1097,7 +1108,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist planMode projectRoot tokenProvider agentsContext
+            transcriptRef persist planMode projectRoot tokenProvider openAiPool agentsContext
             escPaused attachmentsRef previewIdRef interrupt storeRoot sessionReset
 
 applyModelChange
@@ -1474,6 +1485,59 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (Just text, _) -> pure (Just text)
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
+
+showAccountUsage
+    :: Provider
+    -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
+    -> IO ()
+showAccountUsage provider tokenProvider openAiPool = do
+    color <- resolveColor stdout
+    now <- getCurrentTime
+    case provider of
+        OpenAIProvider ->
+            case openAiPool of
+                Just pool -> do
+                    snapshots <- OpenAI.snapshotAccounts pool
+                    lines_ <- mapM fetchSnapshot snapshots
+                    Text.putStrLn (formatUsageReport color now lines_)
+                Nothing ->
+                    case tokenProvider of
+                        Just provider_ ->
+                            getNextToken provider_ Nothing >>= \case
+                                Left err ->
+                                    Text.putStrLn
+                                        (roleError color
+                                            ("usage: " <> Text.pack (show err)))
+                                Right credential -> do
+                                    result <- fetchUsage
+                                        credential.accessToken credential.accountId
+                                    Text.putStrLn $
+                                        formatUsageReport color now
+                                            [ AccountUsageLine
+                                                { usageAccountId = credential.accountId
+                                                , usageCooldownUntil = Nothing
+                                                , usageResult = result
+                                                }
+                                            ]
+                        Nothing ->
+                            Text.putStrLn
+                                (roleMuted color "usage: no OpenAI credentials loaded")
+        _ ->
+            Text.putStrLn $
+                roleMuted color
+                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
+
+fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
+fetchSnapshot snapshot = do
+    result <- fetchUsage
+        snapshot.snapshotAuth.accessToken
+        snapshot.snapshotAuth.accountId
+    pure AccountUsageLine
+        { usageAccountId = snapshot.snapshotAuth.accountId
+        , usageCooldownUntil = snapshot.snapshotCooldownUntil
+        , usageResult = result
+        }
 
 handleResume
     :: Maybe Text

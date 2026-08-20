@@ -31,6 +31,8 @@ spec = do
             parseReplLine "/effort high" `shouldBe` ReplSetEffort "high"
             parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
+            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
+            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort "max"
 
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
@@ -68,6 +70,11 @@ spec = do
             parseReplLine "/compact" `shouldBe` ReplCompact Nothing
             parseReplLine "/compact focus auth"
                 `shouldBe` ReplCompact (Just "focus auth")
+
+        it "prints account usage" do
+            parseReplLine "/usage" `shouldBe` ReplUsage
+            parseReplLine "/usage extra"
+                `shouldBe` ReplCommandError "usage: /usage"
 
         it "pastes clipboard images with an optional caption" do
             parseReplLine "/paste"
@@ -128,9 +135,9 @@ spec = do
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
-                    "effort must be low, medium, high, or xhigh (got bogus)"
+                    "effort must be none, low, medium, high, xhigh, or max (got bogus)"
             parseReplLine "/effort high extra"
-                `shouldBe` ReplCommandError "usage: /effort [low|medium|high|xhigh]"
+                `shouldBe` ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
             parseReplLine "/bogus"
                 `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
             parseReplLine "/"
@@ -150,6 +157,7 @@ spec = do
                     , "compact"
                     , "clear"
                     , "new"
+                    , "usage"
                     , "reload-auth"
                     , "paste"
                     , "attachments"
@@ -187,7 +195,7 @@ spec = do
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
-                `shouldSatisfy` ("/effort [low|medium|high|xhigh]" `isInfixOf`)
+                `shouldSatisfy` ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

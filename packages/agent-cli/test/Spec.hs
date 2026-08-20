@@ -25,6 +25,7 @@ import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
+import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
 main :: IO ()
@@ -52,4 +53,5 @@ main = hspec do
     SessionSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
+    UsageSpec.spec
     WorktreeSpec.spec

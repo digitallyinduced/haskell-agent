@@ -54,6 +54,7 @@ data ReplAction
       -- ^ Soft-reset live transcript; keep the same session id.
     | ReplNew
       -- ^ Start a fresh persisted session id with empty history.
+    | ReplUsage
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -71,13 +72,14 @@ slashCommands :: [SlashCommand]
 slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one"
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
-    , cmd "effort" [] "/effort [low|medium|high|xhigh]" "Show or set reasoning effort"
+    , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort"
     , cmd "plan" [] "/plan [description]" "Enter plan mode"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
     , cmd "new" [] "/new" "Start a fresh persisted session id"
+    , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts"
     , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
@@ -148,6 +150,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplNew
                     else ReplCommandError "usage: /new"
+            "usage" ->
+                if null args
+                    then ReplUsage
+                    else ReplCommandError "usage: /usage"
             "reload-auth" ->
                 if null args
                     then ReplReloadAuth
@@ -212,7 +218,7 @@ parseEffortCommand = \case
     [level] -> case parseEffort level of
         Right effort -> ReplSetEffort effort
         Left err -> ReplCommandError (Text.pack err)
-    _ -> ReplCommandError "usage: /effort [low|medium|high|xhigh]"
+    _ -> ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
 
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
@@ -323,7 +329,7 @@ completeSlashArgs cmd word =
 
 argCompletions :: SlashCommand -> [Text]
 argCompletions spec = case spec.slashName of
-    "effort" -> ["low", "medium", "high", "xhigh"]
+    "effort" -> ["none", "low", "medium", "high", "xhigh", "max"]
     "model" -> catalogModelIds
     "help" -> map (.slashName) slashCommands
     "paste" -> ["--send"]

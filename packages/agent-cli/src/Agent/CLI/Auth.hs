@@ -42,6 +42,9 @@ import System.FilePath ((</>))
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
+    -- | OpenAI OAuth pool when the process loaded ~/.codex/auth.json.
+    -- Static CODEX_ACCESS_TOKEN / xAI / OpenRouter leave this empty.
+    , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
 
 loadAuth :: Maybe Provider -> IO (Either String LoadedAuth)
@@ -95,6 +98,7 @@ loadBroker url requested = do
                             pure $ Right LoadedAuth
                                 { loadedProvider = actual
                                 , loadedTokenProvider = seeded
+                                , loadedOpenAiPool = Nothing
                                 }
 
 loadXai :: IO (Either String LoadedAuth)
@@ -107,6 +111,7 @@ loadXai = do
             pure $ Right LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadOpenRouter :: IO (Either String LoadedAuth)
@@ -121,6 +126,7 @@ loadOpenRouter = do
             pure $ Right LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadOpenAi :: IO (Either String LoadedAuth)
@@ -143,6 +149,7 @@ loadOpenAi = do
                     , leaseId = Nothing
                     , provider = OpenAIProvider
                     }
+                , loadedOpenAiPool = Nothing
                 }
         Nothing -> case envOrFileState now fromEnvJson fileBytes of
             Nothing -> pure (Left noAuthHint)
@@ -166,6 +173,7 @@ loadOpenAi = do
                 pure $ Right LoadedAuth
                     { loadedProvider = OpenAIProvider
                     , loadedTokenProvider = tokenProvider
+                    , loadedOpenAiPool = Just pool
                     }
 
 envOrFileState
