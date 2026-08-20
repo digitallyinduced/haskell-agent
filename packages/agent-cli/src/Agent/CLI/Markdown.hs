@@ -43,33 +43,68 @@ renderBlocks = go
                 header =
                     if Text.null info
                         then []
-                        else [style True [SetConsoleIntensity FaintIntensity] info]
-            in header ++ body ++ go after
+                        else
+                            [ style True
+                                [ SetConsoleIntensity FaintIntensity
+                                , SetColor Foreground Dull Cyan
+                                ]
+                                info
+                            ]
+                styledBody = map (style True [SetConsoleIntensity FaintIntensity]) body
+            in header ++ styledBody ++ go after
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
             let marker = Text.replicate level "#"
-                prefix =
-                    style True
-                        [ SetConsoleIntensity BoldIntensity
-                        , SetUnderlining SingleUnderline
-                        ]
-                        (marker <> " ")
+                prefix = style True (headingPrefixStyle level) (marker <> " ")
             in (prefix <> styleInline title) : go rest
         | Just item <- unorderedItem line =
-            styleInline ("• " <> item) : go rest
-        | Just item <- orderedItem line =
-            styleInline item : go rest
-        | Just quote <- blockQuote line =
-            ( style True [SetConsoleIntensity FaintIntensity] "│ "
-                <> styleInline quote
+            ( style True listMarkerStyle "• "
+                <> styleInline item
             )
+                : go rest
+        | Just (digits, item) <- orderedItemParts line =
+            ( style True listMarkerStyle (digits <> ". ")
+                <> styleInline item
+            )
+                : go rest
+        | Just quote <- blockQuote line =
+            let body
+                    | Text.any (`elem` ['`', '*', '_', '[']) quote = styleInline quote
+                    | otherwise = style True quoteStyle quote
+            in (style True [SetConsoleIntensity FaintIntensity] "│ " <> body)
                 : go rest
         | isThematicBreak line =
             style True [SetConsoleIntensity FaintIntensity] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
+
+-- | Heading marker style: bold + underline + level color.
+headingPrefixStyle :: Int -> [SGR]
+headingPrefixStyle level =
+    SetConsoleIntensity BoldIntensity
+        : SetUnderlining SingleUnderline
+        : headingColor level
+
+headingColor :: Int -> [SGR]
+headingColor = \case
+    1 -> [SetColor Foreground Dull Magenta]
+    2 -> [SetColor Foreground Dull Cyan]
+    3 -> [SetColor Foreground Dull Blue]
+    4 -> [SetColor Foreground Dull Yellow]
+    5 -> [SetColor Foreground Dull Green]
+    _ -> []
+
+listMarkerStyle :: [SGR]
+listMarkerStyle =
+    [ SetConsoleIntensity BoldIntensity
+    , SetColor Foreground Dull Cyan
+    ]
+
+-- | Blockquote body: faint so it sits behind surrounding prose.
+quoteStyle :: [SGR]
+quoteStyle = [SetConsoleIntensity FaintIntensity]
 
 data FenceMarker = BacktickFence !Int | TildeFence !Int
 
@@ -128,13 +163,15 @@ unorderedItem line =
                 Just (Text.strip after)
         _ -> Nothing
 
-orderedItem :: Text -> Maybe Text
-orderedItem line =
+-- | Ordered list: number marker and item body separately so the marker can
+-- be colored without restyling the whole line twice.
+orderedItemParts :: Text -> Maybe (Text, Text)
+orderedItemParts line =
     let stripped = Text.stripStart line
         (digits, after) = Text.span isDigit stripped
     in if not (Text.null digits)
         then case Text.stripPrefix ". " after of
-            Just item -> Just (digits <> ". " <> Text.strip item)
+            Just item -> Just (digits, Text.strip item)
             Nothing -> Nothing
         else Nothing
 
