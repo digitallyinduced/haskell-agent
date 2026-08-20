@@ -2,9 +2,12 @@ module Agent.CLI.ClipboardSpec (spec) where
 
 import Agent.CLI.Clipboard
 import Agent.Loop (ImageAttachment(..))
+import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
+import System.Directory (getTemporaryDirectory, removeFile)
 import System.Info (os)
+import System.IO (hClose, openBinaryTempFile)
 import Test.Hspec
 
 spec :: Spec
@@ -34,3 +37,31 @@ spec = do
                             BS.length imageBytes `shouldSatisfy` (> 0)
                     else result `shouldBe`
                         Left "clipboard images are not supported on this platform yet"
+
+    describe "loadImagesFromPastedText" do
+        it "returns Nothing for ordinary prompt text" do
+            result <- loadImagesFromPastedText "fix the bug in Main.hs"
+            result `shouldBe` Nothing
+
+        it "loads a pasted image path as an attachment" do
+            tmp <- getTemporaryDirectory
+            bracket
+                (do
+                    (path, handle) <- openBinaryTempFile tmp "agent-paste-.png"
+                    BS.hPut handle "png-bytes"
+                    hClose handle
+                    pure path)
+                removeFile
+                \path -> do
+                    result <- loadImagesFromPastedText (Text.pack path)
+                    quoted <- loadImagesFromPastedText ("\"" <> Text.pack path <> "\"")
+                    filed <- loadImagesFromPastedText ("file://" <> Text.pack path)
+                    let check label got = case got of
+                            Just [ImageAttachment{imageMime, imageBytes}] -> do
+                                imageMime `shouldBe` "image/png"
+                                imageBytes `shouldBe` "png-bytes"
+                            other ->
+                                expectationFailure (label <> " unexpected: " <> show other)
+                    check "path" result
+                    check "quoted" quoted
+                    check "file-url" filed

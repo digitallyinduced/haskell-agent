@@ -6,6 +6,7 @@ import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
@@ -32,6 +33,7 @@ main = hspec do
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec
     MarkdownSpec.spec
