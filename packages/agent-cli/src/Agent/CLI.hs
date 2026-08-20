@@ -7,6 +7,12 @@ import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Options
+import Agent.CLI.Project
+    ( ProjectSettings(..)
+    , loadProjectSettings
+    , resolveProjectRoot
+    , saveProjectAutoApprove
+    )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
     ( RenderConfig(..)
@@ -148,6 +154,8 @@ runAgent options = do
             | otherwise -> pure source
     setCurrentDirectory cwd
 
+    projectRoot <- resolveProjectRoot cwd
+    projectSettings <- loadProjectSettings projectRoot
     isTty <- hIsTerminalDevice stdin
     let requestedProvider = case resumed of
             Just (meta, _) -> Just meta.metaProvider
@@ -177,6 +185,7 @@ runAgent options = do
             params = requestParams provider model instructions
                 (schemasFromAppTools provider tools) effort
             policy = resolveApprovalPolicy options isTty
+                projectSettings.settingsAutoApprove
             initialItems = maybe [] (concatMap (.turnItems) . snd) resumed
             initialPrevious = resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
@@ -192,7 +201,7 @@ runAgent options = do
                     try @_ @CodexAuthFailed
                         (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                             runSession options provider policy tools prompt paramsRef transcriptRef
-                                initialPrevious persist Nothing agentsContext
+                                initialPrevious persist projectRoot Nothing agentsContext
                                 (openAiBackend conn (readIORef paramsRef) transcriptRef))
                         >>= \case
                             Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
@@ -203,14 +212,14 @@ runAgent options = do
                             xaiBackend xaiOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
                     runSession options provider policy tools prompt paramsRef transcriptRef
-                        initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
+                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
                 OpenRouterProvider -> do
                     openRouterOptions <- OpenRouter.clientOptionsFromEnv
                     let backend =
                             openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
                     runSession options provider policy tools prompt paramsRef transcriptRef
-                        initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
+                        initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
     :: CliOptions
@@ -307,11 +316,12 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> Backend
     -> IO ()
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist tokenProvider agentsContext backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -338,7 +348,7 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    approveTool policyRef tools call
+                    approveTool policyRef tools call projectRoot
             }
     case prompt of
         Just text -> do
@@ -347,7 +357,7 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist tokenProvider agentsContext
+                transcriptRef persist projectRoot tokenProvider agentsContext
 
 repl
     :: LoopConfig
@@ -359,10 +369,11 @@ repl
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IO ()
-repl config render provider previous printed paramsRef policyRef transcriptRef persist tokenProvider agentsContext = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -462,7 +473,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (Right handle { sessionMeta = meta })
                         continue
                     ReplToggleAlwaysApprove -> do
-                        toggleAlwaysApprove policyRef
+                        toggleAlwaysApprove policyRef projectRoot
                         continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -491,7 +502,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist tokenProvider agentsContext
+            transcriptRef persist projectRoot tokenProvider agentsContext
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -637,8 +648,8 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
 
-approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
-approveTool policyRef tools call = do
+approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> FilePath -> IO Bool
+approveTool policyRef tools call projectRoot = do
     policy <- readIORef policyRef
     readOnly <- case lookupAppTool call.name tools of
         Nothing -> pure False
@@ -661,20 +672,23 @@ approveTool policyRef tools call = do
                             AllowOnce -> pure True
                             AllowAlways -> do
                                 writeIORef policyRef ApproveAll
-                                putTextLn stderr (roleSuccess color "auto-approve on")
+                                saveProjectAutoApprove projectRoot True
+                                putTextLn stderr
+                                    (roleSuccess color "auto-approve on (saved for project)")
                                 pure True
                             Deny -> pure False
 
-toggleAlwaysApprove :: IORef ApprovalPolicy -> IO ()
-toggleAlwaysApprove policyRef = do
+toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
+toggleAlwaysApprove policyRef projectRoot = do
     color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->
         if policy == ApproveAll
             then (PromptMutating, PromptMutating)
             else (ApproveAll, ApproveAll)
+    saveProjectAutoApprove projectRoot (next == ApproveAll)
     putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color "auto-approve on"
-        _ -> roleMuted color "auto-approve off")
+        ApproveAll -> roleSuccess color "auto-approve on (saved for project)"
+        _ -> roleMuted color "auto-approve off (saved for project)")
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;

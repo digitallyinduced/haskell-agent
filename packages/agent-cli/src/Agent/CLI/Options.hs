@@ -96,12 +96,15 @@ isOneShot :: CliOptions -> Bool
 isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
--- @--no-yolo@ is set. Interactive sessions prompt on mutating tools.
-resolveApprovalPolicy :: CliOptions -> Bool -> ApprovalPolicy
-resolveApprovalPolicy options isTty
+-- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
+-- project settings already enabled auto-approve (and @--no-yolo@ was not set).
+resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
+resolveApprovalPolicy options isTty projectAutoApprove
     | options.optYolo && not options.optNoYolo = ApproveAll
     | options.optNoYolo && not isTty = DenyMutating
     | not isTty = ApproveAll
+    | options.optNoYolo = PromptMutating
+    | projectAutoApprove = ApproveAll
     | otherwise = PromptMutating
 
 parseArgs :: [String] -> Either String Command
@@ -227,9 +230,10 @@ usage = unlines
     , "Without -p/--prompt-file, start a REPL. Interactive REPL sessions are"
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model [NAME] shows or changes the model."
-    , "/always-approve (or :yolo) toggles auto-approve."
-    , "/paste [TEXT] sends the clipboard image (macOS) with an optional caption."
-    , "/session prints the current session id."
+    , "/always-approve (or :yolo) toggles auto-approve and saves it under"
+    , "<project>/.haskell-agent/settings.json (answering a at a permission"
+    , "prompt does the same). /paste [TEXT] sends the clipboard image (macOS)"
+    , "with an optional caption. /session prints the current session id."
     , "/reload-auth forces a re-read of xAI/OpenRouter credentials;"
     , "auth failures also reload once and retry automatically."
     , "Ctrl-D or :q exits."
