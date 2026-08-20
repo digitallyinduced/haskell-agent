@@ -4,6 +4,7 @@ module Agent.CLI
     , afterDev
     , applyReplMode
     , cycleReplInteraction
+    , devArgs
     , devMain
     , formatReplStatusLine
     , formatTokenUsage
@@ -234,19 +235,38 @@ afterDev = \case
         , ":cmd afterDev =<< devMain"
         ]
 
+-- | Arguments used by the development @repl@ launcher.
+--
+-- Fresh sessions use OpenAI's frontier model in yolo mode. Reloaded sessions
+-- keep their persisted provider and model while reapplying the yolo default.
+devArgs :: Maybe Text -> Bool -> [String]
+devArgs resumeId underWorktree = case resumeId of
+    Just sessionId ->
+        [ "--yolo"
+        , "--resume", Text.unpack sessionId
+        ]
+    Nothing ->
+        [ "--provider", "openai"
+        , "--model", "gpt-5.6-sol"
+        , "--yolo"
+        ]
+            <> ["--worktree" | not underWorktree]
+
 -- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
--- On first open (no resume pointer), passes @--worktree@ unless the cwd is
--- already under @~/.haskell-agent/worktrees@.
+-- On first open (no resume pointer), selects OpenAI/gpt-5.6-sol with yolo
+-- enabled and passes @--worktree@ unless the cwd is already under
+-- @~/.haskell-agent/worktrees@.
 devMain :: IO DevResult
 devMain = do
     home <- getHomeDirectory
     resumeId <- readDevResumePointer home
-    args <- case resumeId of
-        Just sessionId -> pure ["--resume", Text.unpack sessionId]
+    underWorktree <- case resumeId of
+        Just _ -> pure True
         Nothing -> do
             cwd <- makeAbsolute =<< getCurrentDirectory
             root <- makeAbsolute (worktreeRoot home)
-            pure $ if isUnderWorktreeRoot root cwd then [] else ["--worktree"]
+            pure (isUnderWorktreeRoot root cwd)
+    let args = devArgs resumeId underWorktree
     case parseArgs args of
         Left err -> do
             clearDevResumePointer home

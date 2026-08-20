@@ -1,6 +1,12 @@
 module Agent.CLI.ReplStatusSpec (spec) where
 
-import Agent.CLI (applyReplMode, cycleReplInteraction, formatReplStatusLine, formatTokenUsage)
+import Agent.CLI
+    ( applyReplMode
+    , cycleReplInteraction
+    , devArgs
+    , formatReplStatusLine
+    , formatTokenUsage
+    )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -18,6 +24,29 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "devArgs" do
+        it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do
+            devArgs Nothing False
+                `shouldBe`
+                    [ "--provider", "openai"
+                    , "--model", "gpt-5.6-sol"
+                    , "--yolo"
+                    , "--worktree"
+                    ]
+            devArgs Nothing True
+                `shouldBe`
+                    [ "--provider", "openai"
+                    , "--model", "gpt-5.6-sol"
+                    , "--yolo"
+                    ]
+
+        it "keeps the session model and reapplies yolo when reloading" do
+            devArgs (Just "2026-08-20-abcd1234") True
+                `shouldBe`
+                    [ "--yolo"
+                    , "--resume", "2026-08-20-abcd1234"
+                    ]
+
     describe "formatReplStatusLine" do
         it "shows model, effort, and interaction mode" do
             formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal emptyTokenUsage
