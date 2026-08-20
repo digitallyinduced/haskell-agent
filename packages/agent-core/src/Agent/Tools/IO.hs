@@ -14,8 +14,10 @@ module Agent.Tools.IO
     , truncateText
     ) where
 
+import Agent.Cancel (isCancelled, waitCancel)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (void)
 import Control.Concurrent.Async (async, concurrently, race, wait)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
 import Control.Exception (evaluate)
@@ -160,6 +162,7 @@ data CommandResult = CommandResult
     , commandStdout :: !Text
     , commandStderr :: !Text
     , commandTimedOut :: !Bool
+    , commandCancelled :: !Bool
     } deriving (Eq, Show)
 
 data RunningCommand = RunningCommand
@@ -201,6 +204,7 @@ runShellCommand env workdir command timeoutMs = do
             , commandStdout = ""
             , commandStderr = "Failed to start command: " <> Text.pack (show err)
             , commandTimedOut = False
+            , commandCancelled = False
             }
         Right (Just hin, Just hout, Just herr, processHandle) -> do
             hClose hin
@@ -212,32 +216,67 @@ runShellCommand env workdir command timeoutMs = do
                         (strictGetContents herr)
                     code <- waitForProcess processHandle
                     pure (outBytes, errBytes, code)
-            raced <- race (threadDelay (max 1 timeoutMs * 1000)) collect
-            case raced of
-                Left () -> do
-                    _ <- try @_ @SomeException (interruptProcessGroupOf processHandle)
-                    pure CommandResult
-                        { commandExitCode = Nothing
-                        , commandStdout = ""
-                        , commandStderr = ""
-                        , commandTimedOut = True
-                        }
-                Right (outBytes, errBytes, code) ->
-                    pure CommandResult
-                        { commandExitCode = Just (exitCodeInt code)
-                        , commandStdout = truncateText env.toolStdoutCap
-                            (decodeUtf8With lenientDecode outBytes)
-                        , commandStderr = truncateText env.toolStdoutCap
-                            (decodeUtf8With lenientDecode errBytes)
-                        , commandTimedOut = False
-                        }
+                killGroup = void $ try @_ @SomeException
+                    (interruptProcessGroupOf processHandle)
+                -- Prefer cancel over timeout when both fire: race cancel
+                -- against (timeout `race` collect).
+                waitStop = do
+                    timed <- race (threadDelay (max 1 timeoutMs * 1000)) collect
+                    pure $ case timed of
+                        Left () -> StopTimeout
+                        Right triple -> StopDone triple
+            already <- isCancelled env.toolCancel
+            if already
+                then do
+                    killGroup
+                    pure cancelledResult
+                else do
+                    stopped <- race (waitCancel env.toolCancel) waitStop
+                    case stopped of
+                        Left () -> do
+                            killGroup
+                            pure cancelledResult
+                        Right StopTimeout -> do
+                            killGroup
+                            pure CommandResult
+                                { commandExitCode = Nothing
+                                , commandStdout = ""
+                                , commandStderr = ""
+                                , commandTimedOut = True
+                                , commandCancelled = False
+                                }
+                        Right (StopDone (outBytes, errBytes, code)) ->
+                            pure CommandResult
+                                { commandExitCode = Just (exitCodeInt code)
+                                , commandStdout = truncateText env.toolStdoutCap
+                                    (decodeUtf8With lenientDecode outBytes)
+                                , commandStderr = truncateText env.toolStdoutCap
+                                    (decodeUtf8With lenientDecode errBytes)
+                                , commandTimedOut = False
+                                , commandCancelled = False
+                                }
         Right _ ->
             pure CommandResult
                 { commandExitCode = Just 127
                 , commandStdout = ""
                 , commandStderr = "Failed to capture command output"
                 , commandTimedOut = False
+                , commandCancelled = False
                 }
+
+-- | Outcomes of racing timeout against completion (cancel is the other race arm).
+data ShellStop
+    = StopTimeout
+    | StopDone (BS.ByteString, BS.ByteString, ExitCode)
+
+cancelledResult :: CommandResult
+cancelledResult = CommandResult
+    { commandExitCode = Nothing
+    , commandStdout = ""
+    , commandStderr = ""
+    , commandTimedOut = False
+    , commandCancelled = True
+    }
 
 -- | Start a command without waiting. The result is written to 'runningResult'
 -- when the process exits. Use 'interruptProcessGroupOf' on 'runningHandle' to kill it.
@@ -275,6 +314,7 @@ startShellCommand env workdir command = do
                         , commandStdout = ""
                         , commandStderr = Text.pack (show exception)
                         , commandTimedOut = False
+                        , commandCancelled = False
                         }
                     Right (outBytes, errBytes, code) -> CommandResult
                         { commandExitCode = Just (exitCodeInt code)
@@ -283,6 +323,7 @@ startShellCommand env workdir command = do
                         , commandStderr = truncateText env.toolStdoutCap
                             (decodeUtf8With lenientDecode errBytes)
                         , commandTimedOut = False
+                        , commandCancelled = False
                         }
             pure $ Right RunningCommand
                 { runningHandle = processHandle

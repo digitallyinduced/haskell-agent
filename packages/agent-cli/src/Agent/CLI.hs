@@ -7,6 +7,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Input (readApprovalLine, readReplLine)
@@ -65,7 +66,7 @@ import Agent.Provider
     )
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools (appToolHandlers, codingToolsFor)
-import Agent.Tools.Types (AppTool(..), defaultToolEnv, toolAllowsWithoutPrompt)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, toolAllowsWithoutPrompt)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
@@ -226,7 +227,8 @@ runAgent options = do
             | otherwise -> pure ()
         Nothing -> pure ()
 
-    (tools, closeTools) <- codingToolsFor loaded.loadedProvider (defaultToolEnv cwd)
+    toolEnv <- defaultToolEnv cwd
+    (tools, closeTools) <- codingToolsFor loaded.loadedProvider toolEnv
     flip finally closeTools do
         today <- utctDay <$> getCurrentTime
         let provider = loaded.loadedProvider
@@ -259,7 +261,7 @@ runAgent options = do
                 OpenAIProvider ->
                     try @_ @CodexAuthFailed
                         (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                            runSession options provider policy tools prompt paramsRef transcriptRef
+                            runSession options provider policy tools toolEnv prompt paramsRef transcriptRef
                                 initialPrevious persist projectRoot Nothing agentsContext
                                 (openAiBackend conn (readIORef paramsRef) transcriptRef))
                         >>= \case
@@ -270,14 +272,14 @@ runAgent options = do
                     let backend =
                             xaiBackend xaiOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools prompt paramsRef transcriptRef
+                    runSession options provider policy tools toolEnv prompt paramsRef transcriptRef
                         initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
                 OpenRouterProvider -> do
                     openRouterOptions <- OpenRouter.clientOptionsFromEnv
                     let backend =
                             openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                 (readIORef paramsRef) transcriptRef
-                    runSession options provider policy tools prompt paramsRef transcriptRef
+                    runSession options provider policy tools toolEnv prompt paramsRef transcriptRef
                         initialPrevious persist projectRoot (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
@@ -370,6 +372,7 @@ runSession
     -> Provider
     -> ApprovalPolicy
     -> [AppTool]
+    -> ToolEnv
     -> Maybe Text
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
@@ -380,7 +383,7 @@ runSession
     -> IORef (Maybe Text)
     -> Backend
     -> IO DevResult
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
+runSession options provider policy tools toolEnv prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -408,6 +411,7 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
                     approveTool policyRef tools call projectRoot
+            , loopCancel = toolEnv.toolCancel
             }
     case prompt of
         Just text -> do
@@ -640,7 +644,8 @@ runOneTurn
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist agentsContext promptText inputs = do
+runOneTurn config render previous printed transcriptRef persist agentsContext promptText inputs =
+  withEscCancel config.loopCancel do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
     pendingAgents <- atomicModifyIORef' agentsContext \pending -> (Nothing, pending)
@@ -651,6 +656,10 @@ runOneTurn config render previous printed transcriptRef persist agentsContext pr
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
+        Left LoopCancelled -> do
+            color <- resolveColor stderr
+            putTextLn stderr (formatLoopErrorColored color LoopCancelled)
+            pure True
         Left err -> do
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color err)

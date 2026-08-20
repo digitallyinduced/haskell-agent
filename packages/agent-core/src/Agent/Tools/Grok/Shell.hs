@@ -99,7 +99,7 @@ runForeground session command timeoutMs =
     modifyMVar session.grokShell \shell -> do
         let wrapped = bashWrap (wrapScript shell True command)
         result <- runShellCommand session.grokEnv session.grokEnv.toolCwd wrapped timeoutMs
-        next <- if result.commandTimedOut
+        next <- if result.commandTimedOut || result.commandCancelled
             then pure shell
             else refreshCwd session.grokEnv shell
         pure (next, result)
@@ -219,6 +219,7 @@ quote path = "'" <> concatMap escape path <> "'"
 
 formatExit :: CommandResult -> Text
 formatExit result
+    | result.commandCancelled = "exit: cancelled\n" <> body
     | result.commandTimedOut = "exit: killed (timeout)\n" <> body
     | otherwise = "exit: " <> Text.pack (show (fromMaybe 1 result.commandExitCode)) <> "\n" <> body
   where

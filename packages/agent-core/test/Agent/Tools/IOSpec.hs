@@ -1,6 +1,13 @@
 module Agent.Tools.IOSpec (spec) where
 
-import Agent.Tools.IO (readTextFile, writeTextFile)
+import Agent.Cancel (requestCancel)
+import Agent.Tools.IO
+    ( CommandResult(..)
+    , readTextFile
+    , runShellCommand
+    , writeTextFile
+    )
+import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
@@ -55,6 +62,19 @@ spec = describe "Agent.Tools.IO" do
             mapM_ (\var -> forkIO $ readTextFile path >>= putMVar var) vars
             results <- mapM takeMVar vars
             results `shouldBe` replicate 32 (Right body)
+
+    it "cancels a long-running shell command via toolCancel" do
+        withTempDir \dir -> do
+            env@ToolEnv{toolCancel} <- defaultToolEnv dir
+            done <- newEmptyMVar
+            _ <- forkIO do
+                result <- runShellCommand env dir "sleep 30" 60000
+                putMVar done result
+            threadDelay 100000
+            requestCancel toolCancel
+            CommandResult{commandCancelled, commandTimedOut} <- takeMVar done
+            commandCancelled `shouldBe` True
+            commandTimedOut `shouldBe` False
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

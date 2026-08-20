@@ -17,6 +17,7 @@ import Agent.CLI.Style
     ( agentBackground
     , paintBackgroundLines
     , roleError
+    , roleMuted
     , roleThinking
     , roleToolArrow
     , roleToolDetail
@@ -219,3 +220,5 @@ formatLoopErrorColored color = \case
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
     LoopNoResponseId ->
         roleError color "transport error: response had no id"
+    LoopCancelled ->
+        roleMuted color "cancelled"

@@ -37,6 +37,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
                     , Agent.CLI.Auth
+                    , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Command
                     , Agent.CLI.Input
@@ -81,6 +82,7 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AuthSpec
+                    , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.InputSpec
