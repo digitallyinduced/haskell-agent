@@ -58,6 +58,7 @@ library
                     , directory
                     , filepath
                     , process
+                    , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
                     , unix

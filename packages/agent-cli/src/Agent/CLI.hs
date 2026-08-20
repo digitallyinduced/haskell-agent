@@ -45,13 +45,8 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception
-    ( AsyncException(UserInterrupt)
-    , catch
-    , finally
-    , throwIO
-    , try
-    )
+import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (catchAsync, finally, throwIO, try)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust)
@@ -182,7 +177,7 @@ runAgent options = do
         withInterruptResume progName persist do
             case provider of
                 OpenAIProvider ->
-                    try @CodexAuthFailed
+                    try @_ @CodexAuthFailed
                         (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                             runSession options provider policy tools prompt paramsRef transcriptRef
                                 initialPrevious persist
@@ -256,7 +251,7 @@ withInterruptResume
     -> IO a
     -> IO a
 withInterruptResume progName persist action =
-    action `catch` \(e :: AsyncException) ->
+    action `catchAsync` \(e :: AsyncException) ->
         case e of
             UserInterrupt -> do
                 printResumeHint progName persist
