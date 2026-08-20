@@ -99,6 +99,16 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
+    it "grep accepts glob before the path terminator" do
+        withTempSession \session -> do
+            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile (session.grokEnv.toolCwd </> "hit.md") "needle in markdown\n"
+            output <- runTool session "grep"
+                "{\"pattern\":\"needle\",\"glob\":\"*.txt\"}"
+            output `shouldSatisfy` Text.isInfixOf "hit.txt"
+            output `shouldNotSatisfy` Text.isInfixOf "hit.md"
+            output `shouldNotSatisfy` Text.isInfixOf "No such file or directory"
+
     it "runs a foreground shell command" do
         withTempSession \session -> do
             output <- runTool session "run_terminal_cmd"
