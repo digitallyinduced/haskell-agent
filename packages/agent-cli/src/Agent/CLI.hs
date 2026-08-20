@@ -346,7 +346,7 @@ runAgent options = do
 
     toolEnv <- defaultToolEnv cwd
     interrupt <- newInterruptState \msg -> do
-        -- Drop an in-place "thinking…" status so the hint is its own line.
+        -- Drop an in-place "Thinking…" status so the hint is its own line.
         Text.hPutStr stderr "\r\ESC[K"
         clearNativeProgress stderr
         color <- resolveColor stderr
@@ -588,7 +588,7 @@ printResumeHint progName = \case
         case slot of
             Left _ -> pure ()
             Right handle -> do
-                -- Drop an in-place "thinking…" status so the hint is its own line.
+                -- Drop an in-place "Thinking…" status so the hint is its own line.
                 Text.hPutStr stderr "\r\ESC[K"
                 clearNativeProgress stderr
                 color <- resolveColor stderr
@@ -704,7 +704,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
     spinnerRef <- newIORef Nothing
     reasoningBuffer <- newIORef ""
     reasoningLive <- newIORef False
-    activityRef <- newIORef "thinking…"
+    activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
     allowedToolsRef <- newIORef Set.empty
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)

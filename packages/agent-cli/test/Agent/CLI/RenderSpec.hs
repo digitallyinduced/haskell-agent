@@ -21,20 +21,24 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "summarizeToolCall" do
-        it "includes JSON argument highlights" do
+        it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
-                `shouldBe` "read_file src/A.hs"
+                `shouldBe` "Read src/A.hs"
             summarizeToolCall (functionToolCall "c2" "shell_command" "{\"command\":\"ls -l\"}")
-                `shouldBe` "shell_command ls -l"
+                `shouldBe` "$ ls -l"
             summarizeToolCall (functionToolCall "c3" "run_terminal_cmd" "{\"command\":\"git status\"}")
-                `shouldBe` "run_terminal_cmd git status"
+                `shouldBe` "$ git status"
             summarizeToolCall (functionToolCall "c3b" "run_ghci" "{\"expression\":\"1 + 1\"}")
-                `shouldBe` "run_ghci 1 + 1"
+                `shouldBe` "$ 1 + 1"
+            summarizeToolCall (functionToolCall "c3c" "list_dir" "{\"target_directory\":\"packages\"}")
+                `shouldBe` "Listed packages"
+            summarizeToolCall (functionToolCall "c3d" "grep" "{\"pattern\":\"foo\"}")
+                `shouldBe` "Searched foo"
 
         it "pulls the first path out of an apply_patch body" do
             let patch = "*** Begin Patch\n*** Update File: src/Foo.hs\n@@\n-a\n+b\n*** End Patch"
             summarizeToolCall (customToolCall "c4" "apply_patch" patch)
-                `shouldBe` "apply_patch src/Foo.hs"
+                `shouldBe` "Edited src/Foo.hs"
 
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do
@@ -55,8 +59,21 @@ spec = do
 
     describe "formatActivityLine" do
         it "joins spinner, activity, and elapsed" do
-            formatActivityLine False "⠋" "thinking…" 1.2
-                `shouldBe` "⠋ thinking…  1.2s"
+            formatActivityLine False "⠋" "Thinking…" 1.2
+                `shouldBe` "⠋ Thinking…  1.2s"
+
+    describe "formatToolStarted" do
+        it "renders English verbs for known tools" do
+            formatToolStarted False (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
+                `shouldBe` "◆ Read src/A.hs"
+            formatToolStarted False (functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"git status\"}")
+                `shouldBe` "◆ $ git status"
+            formatToolStarted False (functionToolCall "c3" "search_replace" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Edited src/A.hs"
+
+        it "keeps unknown tool names" do
+            formatToolStarted False (functionToolCall "c4" "custom_tool" "{\"x\":1}")
+                `shouldBe` "◆ custom_tool"
 
     describe "formatSearchReplaceDiff" do
         it "renders a compact unified diff" do
@@ -103,7 +120,7 @@ spec = do
                 let lines_ = filter (not . Text.null) (Text.lines body)
                 length lines_ `shouldBe` 80
                 lines_ `shouldMatchList`
-                    [ "◆ list_dir packages/agent-" <> Text.pack (show i)
+                    [ "◆ Listed packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
 
@@ -116,11 +133,11 @@ spec = do
                 visibleAfter <- readIORef config.renderThinkingVisible
                 visibleAfter `shouldBe` True
                 activity <- readIORef config.renderActivityRef
-                activity `shouldBe` "list_dir ."
+                activity `shouldBe` "Listed ."
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
-                body `shouldSatisfy` ("◆ list_dir ." `Text.isInfixOf`)
+                body `shouldSatisfy` (Text.isInfixOf "Thinking…")
+                body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
 
         it "streams reasoning summaries as a thinking block" do
             withRenderConfig True False \config handle path -> do
@@ -149,7 +166,7 @@ spec = do
                 hClose handle
                 body <- Text.readFile path
                 let thoughtIdx = Text.length (fst (Text.breakOn "Thought for" body))
-                    toolIdx = Text.length (fst (Text.breakOn "list_dir" body))
+                    toolIdx = Text.length (fst (Text.breakOn "Listed" body))
                 thoughtIdx `shouldSatisfy` (< toolIdx)
                 body `shouldSatisfy` (Text.isInfixOf "look at src")
 
@@ -246,7 +263,7 @@ spec = do
                     })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "list_dir"
+                body `shouldSatisfy` Text.isInfixOf "Listed"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
 
@@ -255,7 +272,7 @@ spec = do
                 renderEvent config TurnStarted
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
+                body `shouldSatisfy` (Text.isInfixOf "Thinking…")
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC]9;4;")
 
         it "emits Ghostty OSC 9;4 while thinking and clears it after" do
@@ -327,7 +344,7 @@ withRenderConfigNative showThinking color native action = do
     reasoningBuffer <- newIORef ""
     reasoningLive <- newIORef False
     modelRef <- newIORef "test-model"
-    activityRef <- newIORef "thinking…"
+    activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
     liveActive <- newIORef False

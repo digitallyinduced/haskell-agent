@@ -65,9 +65,8 @@ renderBlocks = go
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
-            let marker = Text.replicate level "#"
-                prefix = md (headingPrefixStyle level) (marker <> " ")
-            in (prefix <> styleInline title) : go rest
+            -- Hide the markdown `#` markers (grok pretty mode); color the title.
+            md (headingPrefixStyle level) (styleInline title) : go rest
         | Just item <- unorderedItem line =
             ( md listMarkerStyle "• "
                 <> styleInline item
@@ -90,12 +89,10 @@ renderBlocks = go
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
 
--- | Heading marker style: bold + underline + level color.
+-- | Heading title style: bold + level color. Markdown `#` markers are hidden.
 headingPrefixStyle :: Int -> [SGR]
 headingPrefixStyle level =
-    SetConsoleIntensity BoldIntensity
-        : SetUnderlining SingleUnderline
-        : headingColor level
+    SetConsoleIntensity BoldIntensity : headingColor level
 
 headingColor :: Int -> [SGR]
 headingColor = \case
