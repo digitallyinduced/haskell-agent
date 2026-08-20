@@ -19,10 +19,22 @@ defaultModelFor = \case
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Provider -> FilePath -> Day -> Bool -> Text
-systemPrompt provider cwd today isNonInteractive = case provider of
-    XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
-    OpenRouterProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
-    OpenAIProvider -> codexSystemPrompt cwd today
+systemPrompt provider cwd today isNonInteractive =
+    base <> "\n\n" <> ghciGuidance
+  where
+    base = case provider of
+        XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
+        OpenRouterProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
+        OpenAIProvider -> codexSystemPrompt cwd today
+
+-- | Prefer GHCI as the general-purpose scripting environment.
+ghciGuidance :: Text
+ghciGuidance =
+    Text.unlines
+        [ "Prefer ghci for scripting."
+        , "When you need a short program, calculation, or one-off script, use ghci rather than Python, Node, bash, or compiling a binary."
+        , "Drive ghci with stdin or -e so it does not wait for interactive input."
+        ]
 
 codexSystemPrompt :: FilePath -> Day -> Text
 codexSystemPrompt cwd today =
