@@ -498,7 +498,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
         chromePrompt =
             beginBackground stdoutColor userBackground
                 <> modeTag
-                <> rolePrompt stdoutColor "λ> "
+                <> rolePrompt stdoutColor "λ "
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
