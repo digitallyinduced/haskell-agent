@@ -4,9 +4,12 @@ import Agent.CLI.Input
     ( ChoiceKey(..)
     , approvalKeyText
     , choiceMoveIndex
+    , classifyPastedText
+    , formatPasteChip
     , parseChoiceKey
     , replHistoryPath
     )
+import qualified Data.Text as Text
 import System.FilePath ((</>))
 import Test.Hspec
 
@@ -49,3 +52,20 @@ spec = do
             choiceMoveIndex 3 1 ChoiceUp `shouldBe` 0
             choiceMoveIndex 3 1 ChoiceDown `shouldBe` 2
             choiceMoveIndex 3 1 ChoiceEnter `shouldBe` 1
+
+    describe "classifyPastedText" do
+        it "detects bracketed-paste CSI wrappers" do
+            let payload = "hello from clipboard"
+                wrapped = "\ESC[200~" <> payload <> "\ESC[201~"
+            classifyPastedText wrapped `shouldBe` (payload, True)
+            classifyPastedText payload `shouldBe` (payload, False)
+
+        it "treats a 4-line burst as a paste" do
+            let burst = Text.unlines ["one", "two", "three", "four"]
+            classifyPastedText burst `shouldBe` (burst, True)
+
+    describe "formatPasteChip" do
+        it "keeps short pastes inline and chips long ones" do
+            formatPasteChip "one line" `shouldBe` "one line"
+            formatPasteChip (Text.unlines ["a", "b", "c", "d"])
+                `shouldBe` "[Pasted: 4 lines]"
