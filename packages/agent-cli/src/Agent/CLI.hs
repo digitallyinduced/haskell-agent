@@ -86,6 +86,7 @@ import Agent.CLI.Style
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.CLI.Tools (lookupAppTool, schemasFromAppTools)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
+import Agent.JsonText (jsonTextFieldDefault)
 import Agent.Loop
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -1581,7 +1582,7 @@ planModeBlocksCall _planMode active planPath call
     | not active = pure False
     | call.name == "apply_patch" = pure True
     | call.name == "search_replace" =
-        let target = jsonArg "file_path" call.arguments
+        let target = jsonTextFieldDefault "file_path" call.arguments
         in pure $
             Text.null target
                 || not (isPlanFileEditTarget planPath (Text.unpack target))
@@ -1591,18 +1592,11 @@ isPlanFileWrite :: PlanModeEnv -> Bool -> FilePath -> ToolCall -> IO Bool
 isPlanFileWrite _planMode active planPath call
     | not active = pure False
     | call.name == "search_replace" =
-        let target = jsonArg "file_path" call.arguments
+        let target = jsonTextFieldDefault "file_path" call.arguments
         in pure $
             not (Text.null target)
                 && isPlanFileEditTarget planPath (Text.unpack target)
     | otherwise = pure False
-
-jsonArg :: Text -> Text -> Text
-jsonArg key arguments = case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
 toggleAlwaysApprove policyRef projectRoot = do

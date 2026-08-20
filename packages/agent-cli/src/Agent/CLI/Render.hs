@@ -40,6 +40,7 @@ import Agent.CLI.Style
     , spinnerFrames
     , style
     )
+import Agent.JsonText (jsonTextFieldDefault)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
@@ -376,9 +377,9 @@ formatToolBody color call = case call.name of
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
 formatSearchReplaceDiff color arguments =
-    let path = jsonField "file_path" arguments
-        oldText = jsonField "old_string" arguments
-        newText = jsonField "new_string" arguments
+    let path = jsonTextFieldDefault "file_path" arguments
+        oldText = jsonTextFieldDefault "old_string" arguments
+        newText = jsonTextFieldDefault "new_string" arguments
         header = case (Text.null oldText, Text.null newText) of
             (True, False) -> roleMuted color ("  create " <> path)
             (False, True) -> roleMuted color ("  delete " <> path)
@@ -400,25 +401,18 @@ formatSearchReplaceDiff color arguments =
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case call.name of
-    "read_file" -> jsonField "target_file" call.arguments
-    "list_dir" -> jsonField "target_directory" call.arguments
-    "search_replace" -> jsonField "file_path" call.arguments
-    "grep" -> jsonField "pattern" call.arguments
-    "run_terminal_cmd" -> firstLine (jsonField "command" call.arguments)
-    "run_ghci" -> firstLine (jsonField "expression" call.arguments)
-    "shell_command" -> firstLine (jsonField "command" call.arguments)
+    "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+    "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
+    "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
+    "grep" -> jsonTextFieldDefault "pattern" call.arguments
+    "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
+    "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
-    "ask_user_question" -> firstLine (jsonField "question" call.arguments)
-    _ -> ""
-
-jsonField :: Text -> Text -> Text
-jsonField key arguments = case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
+    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
     _ -> ""
 
 firstPatchPath :: Text -> Maybe Text
