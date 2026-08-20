@@ -147,6 +147,7 @@
                             haskell-language-server
                         ])
                         ++ (with pkgs; [
+                            cabal2nix
                             ripgrep
                         ]);
                 };
