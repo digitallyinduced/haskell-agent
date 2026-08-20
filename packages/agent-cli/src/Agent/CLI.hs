@@ -281,6 +281,9 @@ printResumeHint progName = \case
         case slot of
             Left _ -> pure ()
             Right handle -> do
+                -- Drop an in-place "thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                hFlush stderr
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
