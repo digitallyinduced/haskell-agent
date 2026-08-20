@@ -148,6 +148,8 @@ spec = do
                     , "session"
                     , "resume"
                     , "compact"
+                    , "clear"
+                    , "new"
                     , "reload-auth"
                     , "paste"
                     , "attachments"
