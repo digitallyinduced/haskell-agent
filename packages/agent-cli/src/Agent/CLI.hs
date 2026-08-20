@@ -333,18 +333,19 @@ isLeftSlot = \case
     Left _ -> True
     Right _ -> False
 
--- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
+-- | On Ctrl-C, print a copy-pasteable --resume line when a session exists,
+-- then quit without dumping a 'UserInterrupt' exception trace.
 withInterruptResume
     :: String
     -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> IO a
-    -> IO a
+    -> IO DevResult
+    -> IO DevResult
 withInterruptResume progName persist action =
     action `catchAsync` \(e :: AsyncException) ->
         case e of
             UserInterrupt -> do
                 printResumeHint progName persist
-                throwIO e
+                pure DevQuit
             _ -> throwIO e
 
 printResumeHint
