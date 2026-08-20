@@ -220,5 +220,5 @@ formatLoopErrorColored color = \case
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
     LoopNoResponseId ->
         roleError color "transport error: response had no id"
-    LoopCancelled ->
+    LoopCancelled _ ->
         roleMuted color "cancelled"

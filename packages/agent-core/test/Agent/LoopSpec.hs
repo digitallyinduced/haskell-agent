@@ -305,7 +305,10 @@ spec = describe "runLoop" do
                 ]
             config = config0 { loopHandlers = handlers }
         result <- runLoop config Nothing "go"
-        result `shouldBe` Left LoopCancelled
+        case result of
+            Left (LoopCancelled results) ->
+                results `shouldNotBe` []
+            other -> expectationFailure ("expected LoopCancelled, got " <> show other)
 
 --------------------------------------------------------------------------------
 -- Helpers

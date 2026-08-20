@@ -94,7 +94,10 @@ data LoopError
     = LoopTransport ApiError
     | LoopMaxTurns TurnOutput
     | LoopNoResponseId
-    | LoopCancelled
+    -- | Soft-cancel after tools ran. Carries the tool results that must be
+    -- committed to the local transcript so function_call items are not left
+    -- without matching outputs.
+    | LoopCancelled [ToolCallResult]
     deriving (Eq, Show)
 
 defaultLoopMaxTurns :: Int
@@ -144,7 +147,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
             | otherwise = do
                 cancelled <- isCancelled config.loopCancel
                 if cancelled
-                    then pure (Left LoopCancelled)
+                    then pure (Left (LoopCancelled []))
                     else do
                         config.loopOnEvent TurnStarted
                         result <- config.loopBackend.submitTurn prev inputs config.loopOnEvent
@@ -166,7 +169,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                             results <- mapConcurrently (runOne config) turn.toolCalls
                                             cancelledAfter <- isCancelled config.loopCancel
                                             if cancelledAfter
-                                                then pure (Left LoopCancelled)
+                                                then pure (Left (LoopCancelled results))
                                                 else go (Just turn.responseId) nextTurnsUsed
                                                     (map CompletedTool results) (Just turn)
     go previousResponseId 0 firstInputs Nothing

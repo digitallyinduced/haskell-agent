@@ -7,7 +7,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
-import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Input (readApprovalLine, readReplLine)
@@ -52,7 +52,7 @@ import Agent.ProjectInstructions
     , globalAgentsHomeDir
     , loadedInstructionFiles
     )
-import Agent.OpenAI.LoopBackend (openAiBackend)
+import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
 import Agent.Provider
@@ -74,7 +74,7 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -385,6 +385,7 @@ runSession
     -> IO DevResult
 runSession options provider policy tools toolEnv prompt paramsRef transcriptRef initialPrevious persist projectRoot tokenProvider agentsContext backend = do
     printed <- newIORef False
+    escPaused <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
     ioLock <- newMVar ()
@@ -410,19 +411,20 @@ runSession options provider policy tools toolEnv prompt paramsRef transcriptRef 
             , loopOnEvent = renderEvent render
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    approveTool policyRef tools call projectRoot
+                    withStdinPaused escPaused $
+                        approveTool policyRef tools call projectRoot
             , loopCancel = toolEnv.toolCancel
             }
     case prompt of
         Just text -> do
-            ok <- runOneTurn config render previous printed transcriptRef persist agentsContext text
+            ok <- runOneTurn config render previous printed transcriptRef persist agentsContext escPaused text
                 [UserMessage text]
             if ok
                 then putTrailingNewline printed >> pure DevQuit
                 else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist projectRoot tokenProvider agentsContext
+                transcriptRef persist projectRoot tokenProvider agentsContext escPaused
 
 repl
     :: LoopConfig
@@ -437,8 +439,9 @@ repl
     -> FilePath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> IO DevResult
-repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist projectRoot tokenProvider agentsContext escPaused = do
     stdoutColor <- resolveColor stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
@@ -465,7 +468,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist agentsContext text [UserMessage text]
+                            transcriptRef persist agentsContext escPaused text [UserMessage text]
                         putTrailingNewline printed
                         continue
                     ReplPaste caption -> do
@@ -487,7 +490,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                         ("pasted " <> image.imageMime <> " (" <> size <> ")"))
                                 writeIORef printed False
                                 _ <- runOneTurn config render previous printed
-                                    transcriptRef persist agentsContext promptText
+                                    transcriptRef persist agentsContext escPaused promptText
                                     [ UserMultimodal
                                         { userText = promptText
                                         , userImages = [image]
@@ -578,7 +581,7 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist projectRoot tokenProvider agentsContext
+            transcriptRef persist projectRoot tokenProvider agentsContext escPaused
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
 reloadAuth provider = \case
@@ -641,11 +644,12 @@ runOneTurn
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> IORef (Maybe Text)
+    -> IORef Bool
     -> Text
     -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist agentsContext promptText inputs =
-  withEscCancel config.loopCancel do
+runOneTurn config render previous printed transcriptRef persist agentsContext escPaused promptText inputs =
+  withEscCancel config.loopCancel escPaused do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
     pendingAgents <- atomicModifyIORef' agentsContext \pending -> (Nothing, pending)
@@ -656,9 +660,14 @@ runOneTurn config render previous printed transcriptRef persist agentsContext pr
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
-        Left LoopCancelled -> do
+        Left (LoopCancelled toolResults) -> do
+            -- Commit tool outputs so function_call items are not left dangling
+            -- in the local transcript (xAI / OpenRouter / OpenAI mirror).
+            unless (null toolResults) do
+                modifyIORef' transcriptRef
+                    (<> map toolResultToItem toolResults)
             color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color LoopCancelled)
+            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
             pure True
         Left err -> do
             color <- resolveColor stderr
