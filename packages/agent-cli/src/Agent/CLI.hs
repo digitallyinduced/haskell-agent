@@ -32,8 +32,11 @@ import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
 import Agent.Provider
-    ( Credential(..)
+    ( AccountFailure(..)
+    , Credential(..)
+    , FailedCredential(..)
     , Provider(..)
+    , TokenProvider
     , getNextToken
     , providerSlug
     )
@@ -177,25 +180,25 @@ runAgent options = do
                 try @CodexAuthFailed
                     (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                         runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist
+                            initialPrevious persist Nothing
                             (openAiBackend conn (readIORef paramsRef) transcriptRef))
                     >>= \case
                         Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                         Right () -> pure ()
             XAIProvider -> do
                 xaiOptions <- XAI.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
-            OpenRouterProvider -> do
-                openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                credential <- firstCredential loaded
                 let backend =
-                        openRouterBackend openRouterOptions credential
+                        xaiBackend xaiOptions loaded.loadedTokenProvider
                             (readIORef paramsRef) transcriptRef
                 runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist backend
+                    initialPrevious persist (Just loaded.loadedTokenProvider) backend
+            OpenRouterProvider -> do
+                openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                let backend =
+                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                            (readIORef paramsRef) transcriptRef
+                runSession options provider policy tools prompt paramsRef transcriptRef
+                    initialPrevious persist (Just loaded.loadedTokenProvider) backend
 
 preparePersistence
     :: CliOptions
@@ -260,9 +263,10 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Maybe TokenProvider
     -> Backend
     -> IO ()
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist tokenProvider backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -297,7 +301,8 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
                 [UserMessage text]
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
-            repl config render provider previous printed paramsRef policyRef transcriptRef persist
+            repl config render provider previous printed paramsRef policyRef
+                transcriptRef persist tokenProvider
 
 repl
     :: LoopConfig
@@ -309,8 +314,9 @@ repl
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Maybe TokenProvider
     -> IO ()
-repl config render provider previous printed paramsRef policyRef transcriptRef persist = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist tokenProvider = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -429,13 +435,50 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color
                                                 ("session: " <> handle.sessionMeta.metaId))
                         continue
+                    ReplReloadAuth -> do
+                        reloadAuth provider tokenProvider
+                        continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
                         continue
   where
     continue =
-        repl config render provider previous printed paramsRef policyRef transcriptRef persist
+        repl config render provider previous printed paramsRef policyRef
+            transcriptRef persist tokenProvider
+
+reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
+reloadAuth provider = \case
+    Nothing -> do
+        color <- resolveColor stderr
+        putTextLn stderr $ roleMuted color $
+            "reload-auth: OpenAI WebSocket auth is fixed for this process; "
+                <> "restart after refreshing ~/.codex/auth.json "
+                <> "(OAuth pools already rotate on handshake failure)"
+    Just tokenProvider ->
+        -- Force a disk/env re-read by pretending the cached credential was
+        -- rejected for authentication; the reloadable provider clears its cache.
+        getNextToken tokenProvider (Just FailedCredential
+            { credential = Credential
+                { accessToken = ""
+                , accountId = ""
+                , leaseId = Nothing
+                , provider
+                }
+            , failure = AccountAuthenticationRejected
+            }) >>= \case
+            Left err -> do
+                color <- resolveColor stderr
+                putTextLn stderr $ roleError color $
+                    "reload-auth failed: " <> Text.pack (show err)
+            Right credential -> do
+                color <- resolveColor stdout
+                Text.putStrLn $ roleSuccess color $
+                    "auth reloaded ("
+                        <> providerSlug provider
+                        <> " account "
+                        <> credential.accountId
+                        <> ")"
 
 runOneTurn
     :: LoopConfig
@@ -509,12 +552,6 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (Just text, _) -> pure (Just text)
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
-
-firstCredential :: LoadedAuth -> IO Credential
-firstCredential loaded =
-    getNextToken loaded.loadedTokenProvider Nothing >>= \case
-        Left err -> die ("credential: " <> show err)
-        Right credential -> pure credential
 
 approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
 approveTool policyRef tools call = do
