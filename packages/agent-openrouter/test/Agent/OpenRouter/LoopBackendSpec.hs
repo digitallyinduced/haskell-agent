@@ -28,21 +28,14 @@ spec = do
 
             first <- backend.submitTurn Nothing [UserMessage "read it"]
                 (modifyIORef' events . (:))
-            first `shouldBe` Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls =
-                    [ functionToolCall "c1" "read_file" "{\"target_file\":\"README.md\"}" ]
-                , assistantText = Nothing
-                }
+            first `shouldBe` Right (emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "read_file" "{\"target_file\":\"README.md\"}" ]
+                Nothing)
 
             second <- backend.submitTurn (Just "resp-1")
                 [CompletedTool (functionResult "c1" "file contents")]
                 (const (pure ()))
-            second `shouldBe` Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "done"
-                }
+            second `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "done"))
 
             requests <- readIORef seen
             map inputItems requests `shouldBe`
@@ -74,11 +67,7 @@ spec = do
             failed `shouldBe` Left (ConnectionError "boom")
 
             recovered <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
-            recovered `shouldBe` Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = []
-                , assistantText = Just "hi"
-                }
+            recovered `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "hi"))
             map inputItems <$> readIORef seen `shouldReturn`
                 [ [userItem "hi"]
                 , [userItem "hi"]

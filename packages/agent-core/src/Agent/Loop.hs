@@ -10,10 +10,14 @@ module Agent.Loop
     , LoopEvent(..)
     , LoopError(..)
     , LoopResult(..)
+    , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , addTokenUsage
     , defaultLoopMaxTurns
     , defaultLoopDispatch
+    , emptyTokenUsage
+    , emptyTurnOutput
     , runLoop
     , runLoopInputs
     ) where
@@ -30,6 +34,7 @@ import Agent.ToolDispatch
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
+import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -49,11 +54,57 @@ data TurnInput
     | CompletedTool ToolCallResult
     deriving (Eq, Show)
 
+-- | Provider-reported token counts for one model response. @inputTokens@
+-- typically includes any cached prefix; @cachedTokens@ is that subset when
+-- the provider reports it.
+data TokenUsage = TokenUsage
+    { inputTokens :: !Int
+    , outputTokens :: !Int
+    , cachedTokens :: !Int
+    } deriving (Eq, Show)
+
+emptyTokenUsage :: TokenUsage
+emptyTokenUsage = TokenUsage
+    { inputTokens = 0
+    , outputTokens = 0
+    , cachedTokens = 0
+    }
+
+instance ToJSON TokenUsage where
+    toJSON usage = object
+        [ "input" .= usage.inputTokens
+        , "output" .= usage.outputTokens
+        , "cached" .= usage.cachedTokens
+        ]
+
+instance FromJSON TokenUsage where
+    parseJSON = withObject "TokenUsage" \o ->
+        TokenUsage
+            <$> o .: "input"
+            <*> o .: "output"
+            <*> (o .:? "cached" .!= 0)
+
+addTokenUsage :: TokenUsage -> TokenUsage -> TokenUsage
+addTokenUsage a b = TokenUsage
+    { inputTokens = a.inputTokens + b.inputTokens
+    , outputTokens = a.outputTokens + b.outputTokens
+    , cachedTokens = a.cachedTokens + b.cachedTokens
+    }
+
 data TurnOutput = TurnOutput
     { responseId :: !Text
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
+    , tokenUsage :: !TokenUsage
     } deriving (Eq, Show)
+
+emptyTurnOutput :: Text -> [ToolCall] -> Maybe Text -> TurnOutput
+emptyTurnOutput responseId toolCalls assistantText = TurnOutput
+    { responseId
+    , toolCalls
+    , assistantText
+    , tokenUsage = emptyTokenUsage
+    }
 
 newtype Backend = Backend
     { submitTurn
@@ -90,6 +141,7 @@ data LoopResult = LoopResult
     { finalResponseId :: !Text
     , finalText :: !(Maybe Text)
     , turnsUsed :: !Int
+    , tokenUsage :: !TokenUsage
     } deriving (Eq, Show)
 
 data LoopError
@@ -141,7 +193,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event
             }
-        go prev turnsUsed inputs lastOutput
+        go prev turnsUsed inputs lastOutput usageAcc
             | turnsUsed >= config.loopMaxTurns =
                 pure $ case lastOutput of
                     Just turn -> Left (LoopMaxTurns turn)
@@ -169,6 +221,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                     -- A cancel that landed during submitTurn
                                     -- after the race chose Right still counts.
                                     cancelledMid <- isCancelled config.loopCancel
+                                    let usageAcc' = addTokenUsage usageAcc turn.tokenUsage
                                     if cancelledMid
                                         then pure (Left (LoopCancelled []))
                                         else do
@@ -179,6 +232,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                                     { finalResponseId = turn.responseId
                                                     , finalText = turn.assistantText
                                                     , turnsUsed = nextTurnsUsed
+                                                    , tokenUsage = usageAcc'
                                                     }
                                                 else do
                                                     results <- mapConcurrently (runOne config) turn.toolCalls
@@ -186,8 +240,8 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                                     if cancelledAfter
                                                         then pure (Left (LoopCancelled results))
                                                         else go (Just turn.responseId) nextTurnsUsed
-                                                            (map CompletedTool results) (Just turn)
-    go previousResponseId 0 firstInputs Nothing
+                                                            (map CompletedTool results) (Just turn) usageAcc'
+    go previousResponseId 0 firstInputs Nothing emptyTokenUsage
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do

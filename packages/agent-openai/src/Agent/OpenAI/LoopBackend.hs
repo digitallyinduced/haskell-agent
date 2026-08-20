@@ -19,8 +19,10 @@ import Agent.Loop
     ( Backend(..)
     , ImageAttachment(..)
     , LoopEvent(..)
+    , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , emptyTokenUsage
     )
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
@@ -39,7 +41,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -172,7 +174,16 @@ responseToTurnOutput response = TurnOutput
     { responseId = response.responseId
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
+    , tokenUsage = tokenUsageFromResponse response.usage
     }
+
+tokenUsageFromResponse :: Maybe ResponseUsage -> TokenUsage
+tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
+    TokenUsage
+        { inputTokens = usage.inputTokens
+        , outputTokens = usage.outputTokens
+        , cachedTokens = fromMaybe 0 (usage.inputTokensDetails >>= (.cachedTokens))
+        }
 
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
