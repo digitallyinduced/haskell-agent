@@ -10,14 +10,16 @@ module Agent.Tools.IO
     , listDirectoryEntries
     , runShellCommand
     , startShellCommand
+    , runningLiveOutput
     , truncateText
     ) where
 
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent.Async (async, concurrently, race, wait)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
 import Control.Exception (SomeException, evaluate, try)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,7 +46,7 @@ import System.FilePath
     , takeFileName
     , (</>)
     )
-import System.IO (hClose)
+import System.IO (Handle, hClose)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -146,7 +148,20 @@ data CommandResult = CommandResult
 data RunningCommand = RunningCommand
     { runningHandle :: !ProcessHandle
     , runningResult :: !(MVar CommandResult)
+    , runningStdout :: !(IORef BS.ByteString)
+    , runningStderr :: !(IORef BS.ByteString)
+    , runningCap :: !Int
     }
+
+-- | Bytes already drained from a still-running command, decoded and capped.
+runningLiveOutput :: RunningCommand -> IO (Text, Text)
+runningLiveOutput running = do
+    outBytes <- readIORef running.runningStdout
+    errBytes <- readIORef running.runningStderr
+    pure
+        ( truncateText running.runningCap (decodeUtf8With lenientDecode outBytes)
+        , truncateText running.runningCap (decodeUtf8With lenientDecode errBytes)
+        )
 
 -- | Run a shell command in @workdir@, killing the process group on timeout.
 runShellCommand
@@ -173,11 +188,11 @@ runShellCommand env workdir command timeoutMs = do
         Right (Just hin, Just hout, Just herr, processHandle) -> do
             hClose hin
             let collect = do
-                    outBytes <- BS.hGetContents hout
-                    errBytes <- BS.hGetContents herr
-                    -- Force both pipes before waitForProcess so a full pipe
-                    -- cannot deadlock against the child.
-                    _ <- evaluate (BS.length outBytes + BS.length errBytes)
+                    -- Drain stdout and stderr concurrently so a child that
+                    -- fills one pipe cannot deadlock the other.
+                    (outBytes, errBytes) <- concurrently
+                        (strictGetContents hout)
+                        (strictGetContents herr)
                     code <- waitForProcess processHandle
                     pure (outBytes, errBytes, code)
             raced <- race (threadDelay (max 1 timeoutMs * 1000)) collect
@@ -227,12 +242,15 @@ startShellCommand env workdir command = do
         Right (Just hin, Just hout, Just herr, processHandle) -> do
             hClose hin
             resultVar <- newEmptyMVar
+            stdoutRef <- newIORef BS.empty
+            stderrRef <- newIORef BS.empty
+            outA <- async (drainHandle hout stdoutRef)
+            errA <- async (drainHandle herr stderrRef)
             _ <- forkIO do
                 result <- try @SomeException do
-                    outBytes <- BS.hGetContents hout
-                    errBytes <- BS.hGetContents herr
-                    _ <- evaluate (BS.length outBytes + BS.length errBytes)
                     code <- waitForProcess processHandle
+                    outBytes <- wait outA
+                    errBytes <- wait errA
                     pure (outBytes, errBytes, code)
                 putMVar resultVar $ case result of
                     Left exception -> CommandResult
@@ -252,9 +270,30 @@ startShellCommand env workdir command = do
             pure $ Right RunningCommand
                 { runningHandle = processHandle
                 , runningResult = resultVar
+                , runningStdout = stdoutRef
+                , runningStderr = stderrRef
+                , runningCap = env.toolStdoutCap
                 }
         Right _ ->
             pure $ Left "Failed to capture command output"
+
+strictGetContents :: Handle -> IO BS.ByteString
+strictGetContents handle = do
+    bytes <- BS.hGetContents handle
+    _ <- evaluate (BS.length bytes)
+    pure bytes
+
+-- | Read the handle in chunks so a live snapshot can see output before EOF.
+drainHandle :: Handle -> IORef BS.ByteString -> IO BS.ByteString
+drainHandle handle ref = go
+  where
+    go = do
+        chunk <- BS.hGetSome handle 8192
+        if BS.null chunk
+            then readIORef ref
+            else do
+                atomicModifyIORef' ref \soFar -> (soFar <> chunk, ())
+                go
 
 exitCodeInt :: ExitCode -> Int
 exitCodeInt = \case

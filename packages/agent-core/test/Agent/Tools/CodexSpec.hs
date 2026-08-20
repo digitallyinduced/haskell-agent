@@ -35,8 +35,9 @@ spec = describe "Agent.Tools.Codex" do
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
-            openai <- codingToolsFor OpenAIProvider env
+            (openai, closeOpenai) <- codingToolsFor OpenAIProvider env
             map (.appToolName) openai `shouldBe` names
+            closeOpenai
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do

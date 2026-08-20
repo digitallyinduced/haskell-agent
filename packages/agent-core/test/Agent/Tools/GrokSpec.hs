@@ -4,10 +4,12 @@ import Agent.Loop (defaultLoopDispatch)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (appToolHandlers, codingToolsFor, defaultToolEnv)
-import Agent.Tools.Grok (grokTools, newGrokSession)
-import Agent.Tools.Grok.Shell (GrokSession(..), hasUnwaitedBackgroundOp)
+import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
-import Control.Exception (bracket)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (readMVar)
+import Control.Exception (bracket, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -37,10 +39,12 @@ spec = describe "Agent.Tools.Grok" do
                 ]
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
-            xai <- codingToolsFor XAIProvider session.grokEnv
-            map (.appToolName) xai `shouldBe` names
-            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv
-            map (.appToolName) openrouter `shouldBe` names
+            (xai, closeXai) <- codingToolsFor XAIProvider session.grokEnv
+            (openrouter, closeOr) <- codingToolsFor OpenRouterProvider session.grokEnv
+            (do
+                map (.appToolName) xai `shouldBe` names
+                map (.appToolName) openrouter `shouldBe` names)
+                `finally` (closeXai >> closeOr)
 
     it "reads a file with grok line-number anchors" do
         withTempSession \session -> do
@@ -182,6 +186,46 @@ spec = describe "Agent.Tools.Grok" do
                 ("{\"task_id\":\"" <> killId <> "\"}")
             killed `shouldSatisfy` Text.isInfixOf killId
 
+    it "does not let a background command overwrite later foreground env" do
+        withTempSession \session -> do
+            started <- runTool session "run_terminal_cmd"
+                "{\"command\":\"sleep 0.4\",\"description\":\"bg sleeper\",\"background\":true}"
+            let taskId = taskIdFrom started
+            _ <- runTool session "run_terminal_cmd"
+                "{\"command\":\"export GROK_SESSION_VAR=fromfg\",\"description\":\"fg export\"}"
+            _ <- runTool session "get_task_output"
+                ("{\"task_id\":\"" <> taskId <> "\",\"timeout\":2000}")
+            envOut <- runTool session "run_terminal_cmd"
+                "{\"command\":\"echo $GROK_SESSION_VAR\",\"description\":\"show env\"}"
+            envOut `shouldSatisfy` Text.isInfixOf "fromfg"
+
+    it "returns output already emitted by a still-running background task" do
+        withTempSession \session -> do
+            started <- runTool session "run_terminal_cmd"
+                "{\"command\":\"echo liveout; touch flag; sleep 30\",\"description\":\"live snapshot\",\"background\":true}"
+            let taskId = taskIdFrom started
+            waitForFile (session.grokEnv.toolCwd </> "flag")
+            snap <- runTool session "get_task_output"
+                ("{\"task_id\":\"" <> taskId <> "\"}")
+            snap `shouldSatisfy` Text.isInfixOf "liveout"
+            _ <- runTool session "kill_task"
+                ("{\"task_id\":\"" <> taskId <> "\"}")
+            pure ()
+
+    it "drains a large stderr pipe without hanging the foreground command" do
+        withTempSession \session -> do
+            output <- runTool session "run_terminal_cmd"
+                "{\"command\":\"yes x | head -c 262144 >&2; echo drained\",\"timeout\":10000,\"description\":\"fill stderr\"}"
+            output `shouldSatisfy` Text.isInfixOf "drained"
+            output `shouldSatisfy` Text.isPrefixOf "exit: 0"
+
+    it "deletes the env dump when the session closes" do
+        withTempSession \session -> do
+            shell <- readMVar session.grokShell
+            doesFileExist shell.shellEnvFile `shouldReturn` True
+            closeGrokSession session
+            doesFileExist shell.shellEnvFile `shouldReturn` False
+
     describe "hasUnwaitedBackgroundOp" do
         it "detects a trailing bare ampersand" do
             hasUnwaitedBackgroundOp "sleep 1 &" `shouldBe` True
@@ -204,6 +248,15 @@ runTool session name arguments = do
         (functionToolCall "call-1" name arguments)
     pure result.output
 
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (20 :: Int)
+  where
+    go n
+        | n <= 0 = expectationFailure ("timed out waiting for " <> path)
+        | otherwise = doesFileExist path >>= \case
+            True -> pure ()
+            False -> threadDelay 50000 >> go (n - 1)
+
 taskIdFrom :: Text -> Text
 taskIdFrom output =
     case [tid | line <- Text.lines output, Just tid <- [Text.stripPrefix "task_id: " line]] of
@@ -218,4 +271,4 @@ withTempSession action = do
         (\dir -> removeDirectoryRecursive dir)
         \dir -> do
             session <- newGrokSession (defaultToolEnv dir)
-            action session
+            action session `finally` closeGrokSession session

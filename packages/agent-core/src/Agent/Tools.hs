@@ -14,13 +14,20 @@ module Agent.Tools
 
 import Agent.Provider (Provider(..))
 import Agent.Tools.Codex (codexTools)
-import Agent.Tools.Grok (grokTools, newGrokSession)
+import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Types
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
 -- Grok/OpenRouter share one persistent shell session for the process lifetime.
-codingToolsFor :: Provider -> ToolEnv -> IO [AppTool]
+-- The second action deletes that session's env dump; run it in 'finally'.
+codingToolsFor :: Provider -> ToolEnv -> IO ([AppTool], IO ())
 codingToolsFor provider env = case provider of
-    XAIProvider -> grokTools <$> newGrokSession env
-    OpenRouterProvider -> grokTools <$> newGrokSession env
-    OpenAIProvider -> codexTools env
+    XAIProvider -> do
+        session <- newGrokSession env
+        pure (grokTools session, closeGrokSession session)
+    OpenRouterProvider -> do
+        session <- newGrokSession env
+        pure (grokTools session, closeGrokSession session)
+    OpenAIProvider -> do
+        tools <- codexTools env
+        pure (tools, pure ())

@@ -5,7 +5,9 @@
 -- those files again. No PTY.
 module Agent.Tools.Grok.Shell
     ( GrokSession(..)
+    , PersistentShell(..)
     , newGrokSession
+    , closeGrokSession
     , runForeground
     , startBackground
     , readTaskOutput
@@ -18,6 +20,7 @@ import Agent.Tools.IO
     , RunningCommand(..)
     , resolveUnderCwd
     , runShellCommand
+    , runningLiveOutput
     , startShellCommand
     )
 import Agent.Tools.Types (ToolEnv(..))
@@ -25,6 +28,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
 import Control.Exception (SomeException, try)
+import Control.Monad (forM_, void)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -32,9 +36,10 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Directory (doesDirectoryExist, getTemporaryDirectory)
+import System.Directory (doesDirectoryExist, getTemporaryDirectory, removeFile)
 import System.IO (hClose)
 import System.FilePath ((</>))
+import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
 import System.Posix.Temp (mkstemp)
 import System.Process (interruptProcessGroupOf)
 
@@ -60,6 +65,7 @@ newGrokSession env = do
     tmp <- getTemporaryDirectory
     (envFile, handle) <- mkstemp (tmp </> "agent-grok-env")
     hClose handle
+    setFileMode envFile (unionFileModes ownerReadMode ownerWriteMode)
     Text.writeFile envFile ""
     shell <- newMVar PersistentShell
         { shellCwd = env.toolCwd
@@ -74,10 +80,24 @@ newGrokSession env = do
         , grokNextId = nextId
         }
 
+-- | Delete the env/cwd dump and interrupt leftover background tasks.
+-- Call this when the CLI/session ends, including after exceptions.
+closeGrokSession :: GrokSession -> IO ()
+closeGrokSession session = do
+    tasks <- modifyMVar session.grokTasks \current ->
+        pure (Map.empty, current)
+    forM_ (Map.elems tasks) \task ->
+        void $ try @SomeException
+            (interruptProcessGroupOf task.backgroundRunning.runningHandle)
+    shell <- readMVar session.grokShell
+    _ <- try @SomeException (removeFile shell.shellEnvFile)
+    _ <- try @SomeException (removeFile (cwdFile shell))
+    pure ()
+
 runForeground :: GrokSession -> String -> Int -> IO CommandResult
 runForeground session command timeoutMs =
     modifyMVar session.grokShell \shell -> do
-        let wrapped = bashWrap (wrapScript shell command)
+        let wrapped = bashWrap (wrapScript shell True command)
         result <- runShellCommand session.grokEnv session.grokEnv.toolCwd wrapped timeoutMs
         next <- if result.commandTimedOut
             then pure shell
@@ -87,7 +107,9 @@ runForeground session command timeoutMs =
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
 startBackground session command = do
     shell <- readMVar session.grokShell
-    let wrapped = bashWrap (wrapScript shell (Text.unpack command))
+    -- Background wrappers source cwd/env but must not write them back;
+    -- a later foreground command owns the persistent session.
+    let wrapped = bashWrap (wrapScript shell False (Text.unpack command))
     startShellCommand session.grokEnv session.grokEnv.toolCwd wrapped >>= \case
         Left err -> pure (Left err)
         Right running -> do
@@ -108,16 +130,25 @@ readTaskOutput session taskId timeoutMs = do
     case Map.lookup taskId tasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
         Just task -> case timeoutMs of
-            Nothing -> tryReadMVar task.backgroundRunning.runningResult >>= \case
-                Nothing -> pure "still running"
-                Just result -> pure (formatExit result)
+            Nothing -> snapshotTask task
             Just ms -> do
                 raced <- race
                     (threadDelay (max 1 ms * 1000))
                     (readMVar task.backgroundRunning.runningResult)
                 case raced of
-                    Left () -> pure "still running"
+                    Left () -> snapshotTask task
                     Right result -> pure (formatExit result)
+
+snapshotTask :: BackgroundTask -> IO Text
+snapshotTask task =
+    tryReadMVar task.backgroundRunning.runningResult >>= \case
+        Just result -> pure (formatExit result)
+        Nothing -> do
+            (out, err) <- runningLiveOutput task.backgroundRunning
+            let body = combinePipes out err
+            pure $ if Text.null body
+                then "still running"
+                else "still running\n" <> body
 
 killTask :: GrokSession -> Text -> IO Text
 killTask session taskId = do
@@ -145,19 +176,23 @@ nextTaskId session = atomicModifyIORef' session.grokNextId \n ->
 bashWrap :: String -> String
 bashWrap script = "bash -c " ++ quote script
 
-wrapScript :: PersistentShell -> String -> String
-wrapScript shell command = unlines
-    [ "set +e"
-    , "set -a"
-    , "[ -s " <> quote shell.shellEnvFile <> " ] && . " <> quote shell.shellEnvFile
-    , "set +a"
-    , "cd " <> quote shell.shellCwd <> " || exit 1"
-    , command
-    , "STATUS=$?"
-    , "pwd > " <> quote (cwdFile shell)
-    , "export -p > " <> quote shell.shellEnvFile
-    , "exit $STATUS"
-    ]
+wrapScript :: PersistentShell -> Bool -> String -> String
+wrapScript shell persist command =
+    unlines $ prefix ++ [command] ++ if persist then persistTail else []
+  where
+    prefix =
+        [ "set +e"
+        , "set -a"
+        , "[ -s " <> quote shell.shellEnvFile <> " ] && . " <> quote shell.shellEnvFile
+        , "set +a"
+        , "cd " <> quote shell.shellCwd <> " || exit 1"
+        ]
+    persistTail =
+        [ "STATUS=$?"
+        , "pwd > " <> quote (cwdFile shell)
+        , "export -p > " <> quote shell.shellEnvFile
+        , "exit $STATUS"
+        ]
 
 cwdFile :: PersistentShell -> FilePath
 cwdFile shell = shell.shellEnvFile <> ".cwd"
@@ -187,10 +222,13 @@ formatExit result
     | result.commandTimedOut = "exit: killed (timeout)\n" <> body
     | otherwise = "exit: " <> Text.pack (show (fromMaybe 1 result.commandExitCode)) <> "\n" <> body
   where
-    body
-        | Text.null result.commandStderr = result.commandStdout
-        | Text.null result.commandStdout = result.commandStderr
-        | otherwise = result.commandStdout <> "\n" <> result.commandStderr
+    body = combinePipes result.commandStdout result.commandStderr
+
+combinePipes :: Text -> Text -> Text
+combinePipes out err
+    | Text.null err = out
+    | Text.null out = err
+    | otherwise = out <> "\n" <> err
 
 -- | True when a foreground command would background itself with @&@.
 hasUnwaitedBackgroundOp :: Text -> Bool

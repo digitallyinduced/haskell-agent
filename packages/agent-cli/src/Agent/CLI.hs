@@ -34,7 +34,7 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception (try)
+import Control.Exception (finally, try)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -69,36 +69,37 @@ runAgent options = do
     setCurrentDirectory cwd
     isTty <- hIsTerminalDevice stdin
     loaded <- loadAuth options.optProvider >>= either die pure
-    tools <- codingToolsFor loaded.loadedProvider (defaultToolEnv cwd)
-    today <- utctDay <$> getCurrentTime
-    let provider = loaded.loadedProvider
-        model = fromMaybe (defaultModelFor provider) options.optModel
-        instructions = systemPrompt provider cwd today (isOneShot options)
-        effort = fromMaybe (defaultEffortFor provider) options.optEffort
-        params = requestParams model instructions
-            (schemasFromAppTools provider tools) effort
-        policy = resolveApprovalPolicy options isTty
-    paramsRef <- newIORef params
-    prompt <- loadPrompt options
-    case provider of
-        OpenAIProvider ->
-            try @CodexAuthFailed
-                (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
-                    runSession options policy tools prompt paramsRef
-                        (openAiBackend conn (readIORef paramsRef)))
-                >>= \case
-                    Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
-                    Right () -> pure ()
-        XAIProvider -> do
-            xaiOptions <- XAI.clientOptionsFromEnv
-            credential <- firstCredential loaded
-            backend <- xaiBackend xaiOptions credential (readIORef paramsRef)
-            runSession options policy tools prompt paramsRef backend
-        OpenRouterProvider -> do
-            openRouterOptions <- OpenRouter.clientOptionsFromEnv
-            credential <- firstCredential loaded
-            backend <- openRouterBackend openRouterOptions credential (readIORef paramsRef)
-            runSession options policy tools prompt paramsRef backend
+    (tools, closeTools) <- codingToolsFor loaded.loadedProvider (defaultToolEnv cwd)
+    flip finally closeTools do
+        today <- utctDay <$> getCurrentTime
+        let provider = loaded.loadedProvider
+            model = fromMaybe (defaultModelFor provider) options.optModel
+            instructions = systemPrompt provider cwd today (isOneShot options)
+            effort = fromMaybe (defaultEffortFor provider) options.optEffort
+            params = requestParams model instructions
+                (schemasFromAppTools provider tools) effort
+            policy = resolveApprovalPolicy options isTty
+        paramsRef <- newIORef params
+        prompt <- loadPrompt options
+        case provider of
+            OpenAIProvider ->
+                try @CodexAuthFailed
+                    (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                        runSession options policy tools prompt paramsRef
+                            (openAiBackend conn (readIORef paramsRef)))
+                    >>= \case
+                        Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
+                        Right () -> pure ()
+            XAIProvider -> do
+                xaiOptions <- XAI.clientOptionsFromEnv
+                credential <- firstCredential loaded
+                backend <- xaiBackend xaiOptions credential (readIORef paramsRef)
+                runSession options policy tools prompt paramsRef backend
+            OpenRouterProvider -> do
+                openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                credential <- firstCredential loaded
+                backend <- openRouterBackend openRouterOptions credential (readIORef paramsRef)
+                runSession options policy tools prompt paramsRef backend
 
 runSession
     :: CliOptions

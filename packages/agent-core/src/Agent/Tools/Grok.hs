@@ -6,6 +6,7 @@
 module Agent.Tools.Grok
     ( grokTools
     , newGrokSession
+    , closeGrokSession
     , GrokSession
     ) where
 
@@ -24,6 +25,7 @@ import Agent.ToolDispatch (ToolHandler, typedTool)
 import Control.Applicative ((<|>))
 import Agent.Tools.Grok.Shell
     ( GrokSession(..)
+    , closeGrokSession
     , hasUnwaitedBackgroundOp
     , killTask
     , newGrokSession
