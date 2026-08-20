@@ -5,6 +5,7 @@
 -- only sees 'ToolCall' / 'ToolCallResult' and a 'Backend' callback.
 module Agent.Loop
     ( Backend(..)
+    , ImageAttachment(..)
     , LoopConfig(..)
     , LoopEvent(..)
     , LoopError(..)
@@ -14,7 +15,7 @@ module Agent.Loop
     , defaultLoopMaxTurns
     , defaultLoopDispatch
     , runLoop
-    , runLoopWith
+    , runLoopInputs
     ) where
 
 import Agent.Error (ApiError)
@@ -28,11 +29,22 @@ import Agent.ToolDispatch
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+-- | Image bytes attached to a user turn (PNG/JPEG/…).
+data ImageAttachment = ImageAttachment
+    { imageMime :: !Text
+    , imageBytes :: !ByteString
+    } deriving (Eq, Show)
+
 data TurnInput
     = UserMessage Text
+    | UserMultimodal
+        { userText :: !Text
+        , userImages :: ![ImageAttachment]
+        }
     | CompletedTool ToolCallResult
     deriving (Eq, Show)
 
@@ -102,16 +114,15 @@ runLoop
     -> Text
     -> IO (Either LoopError LoopResult)
 runLoop config previousResponseId prompt =
-    runLoopWith config previousResponseId [UserMessage prompt]
+    runLoopInputs config previousResponseId [UserMessage prompt]
 
--- | Like 'runLoop', but the first turn may include leading context items
--- (for example AGENTS.md) before the user message.
-runLoopWith
+-- | Same as 'runLoop', but the first turn may be multimodal.
+runLoopInputs
     :: LoopConfig
     -> Maybe Text
     -> [TurnInput]
     -> IO (Either LoopError LoopResult)
-runLoopWith config0 previousResponseId initialInputs = do
+runLoopInputs config0 previousResponseId firstInputs = do
     -- Tools run with mapConcurrently. Serialize onEvent so a printer
     -- (hPutStrLn on String is not atomic) cannot interleave characters.
     eventLock <- newMVar ()
@@ -145,7 +156,7 @@ runLoopWith config0 previousResponseId initialInputs = do
                                     results <- mapConcurrently (runOne config) turn.toolCalls
                                     go (Just turn.responseId) nextTurnsUsed
                                         (map CompletedTool results) (Just turn)
-    go previousResponseId 0 initialInputs Nothing
+    go previousResponseId 0 firstInputs Nothing
 
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call = do

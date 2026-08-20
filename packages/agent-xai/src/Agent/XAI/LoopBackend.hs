@@ -19,23 +19,29 @@ import Agent.OpenAI.LoopBackend
     , withRequestInput
     )
 import Agent.OpenAI.Responses.Types
-import Agent.Provider (Credential)
+import Agent.Provider
+    ( TokenProvider
+    , runWithTokenProvider
+    )
 import Agent.XAI.Client (createResponseWithEvents)
 import Agent.XAI.Options (ClientOptions)
 import Data.IORef
 
--- | Close over xAI options, credential, and the request fields the loop does
--- not own (model, instructions, tools, reasoning). The params action is
--- re-run each turn so the REPL can change reasoning effort without dropping
--- the local transcript.
+-- | Close over xAI options, a token provider, and the request fields the loop
+-- does not own (model, instructions, tools, reasoning). Credentials stay
+-- cached; an auth rejection from the proxy triggers one provider reload and
+-- retry. Params are re-read each turn so the REPL can change reasoning effort
+-- without dropping the local transcript.
 xaiBackend
     :: ClientOptions
-    -> Credential
+    -> TokenProvider
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-xaiBackend options credential =
-    xaiBackendWith (createResponseWithEvents options credential)
+xaiBackend options provider =
+    xaiBackendWith \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            createResponseWithEvents options credential params onEvent
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests.
 xaiBackendWith

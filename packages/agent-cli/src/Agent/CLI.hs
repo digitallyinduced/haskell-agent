@@ -4,6 +4,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Clipboard (formatImageSize, readClipboardImage)
 import Agent.CLI.Command
 import Agent.CLI.Options
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
@@ -39,8 +40,11 @@ import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
 import Agent.Provider
-    ( Credential(..)
+    ( AccountFailure(..)
+    , Credential(..)
+    , FailedCredential(..)
     , Provider(..)
+    , TokenProvider
     , getNextToken
     , providerSlug
     )
@@ -53,6 +57,7 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (finally, try)
+import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
@@ -184,25 +189,25 @@ runAgent options = do
                 try @CodexAuthFailed
                     (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
                         runSession options provider policy tools prompt paramsRef transcriptRef
-                            initialPrevious persist agentsContext
+                            initialPrevious persist Nothing agentsContext
                             (openAiBackend conn (readIORef paramsRef) transcriptRef))
                     >>= \case
                         Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                         Right () -> pure ()
             XAIProvider -> do
                 xaiOptions <- XAI.clientOptionsFromEnv
-                credential <- firstCredential loaded
-                let backend = xaiBackend xaiOptions credential (readIORef paramsRef) transcriptRef
-                runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist agentsContext backend
-            OpenRouterProvider -> do
-                openRouterOptions <- OpenRouter.clientOptionsFromEnv
-                credential <- firstCredential loaded
                 let backend =
-                        openRouterBackend openRouterOptions credential
+                        xaiBackend xaiOptions loaded.loadedTokenProvider
                             (readIORef paramsRef) transcriptRef
                 runSession options provider policy tools prompt paramsRef transcriptRef
-                    initialPrevious persist agentsContext backend
+                    initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
+            OpenRouterProvider -> do
+                openRouterOptions <- OpenRouter.clientOptionsFromEnv
+                let backend =
+                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                            (readIORef paramsRef) transcriptRef
+                runSession options provider policy tools prompt paramsRef transcriptRef
+                    initialPrevious persist (Just loaded.loadedTokenProvider) agentsContext backend
 
 preparePersistence
     :: CliOptions
@@ -267,10 +272,11 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> Backend
     -> IO ()
-runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist agentsContext backend = do
+runSession options provider policy tools prompt paramsRef transcriptRef initialPrevious persist tokenProvider agentsContext backend = do
     printed <- newIORef False
     textBuffer <- newIORef ""
     thinkingVisible <- newIORef False
@@ -302,10 +308,11 @@ runSession options provider policy tools prompt paramsRef transcriptRef initialP
     case prompt of
         Just text -> do
             ok <- runOneTurn config render previous printed transcriptRef persist agentsContext text
+                [UserMessage text]
             if ok then putTrailingNewline printed else exitFailure
         Nothing ->
             repl config render provider previous printed paramsRef policyRef
-                transcriptRef persist agentsContext
+                transcriptRef persist tokenProvider agentsContext
 
 repl
     :: LoopConfig
@@ -317,9 +324,10 @@ repl
     -> IORef ApprovalPolicy
     -> IORef [ResponseItem]
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IO ()
-repl config render provider previous printed paramsRef policyRef transcriptRef persist agentsContext = do
+repl config render provider previous printed paramsRef policyRef transcriptRef persist tokenProvider agentsContext = do
     stdoutColor <- resolveColor stdout
     Text.putStr (rolePrompt stdoutColor "λ> ")
     hFlush stdout
@@ -335,9 +343,36 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                     ReplPrompt text -> do
                         writeIORef printed False
                         _ <- runOneTurn config render previous printed
-                            transcriptRef persist agentsContext text
+                            transcriptRef persist agentsContext text [UserMessage text]
                         putTrailingNewline printed
                         continue
+                    ReplPaste caption -> do
+                        clipboard <- readClipboardImage
+                        case clipboard of
+                            Left err -> do
+                                color <- resolveColor stderr
+                                Text.hPutStrLn stderr (roleError color err)
+                                continue
+                            Right image -> do
+                                let promptText =
+                                        if Text.null caption
+                                            then "See attached image."
+                                            else caption
+                                    size = formatImageSize (BS.length image.imageBytes)
+                                color <- resolveColor stdout
+                                Text.putStrLn
+                                    (roleMuted color
+                                        ("pasted " <> image.imageMime <> " (" <> size <> ")"))
+                                writeIORef printed False
+                                _ <- runOneTurn config render previous printed
+                                    transcriptRef persist agentsContext promptText
+                                    [ UserMultimodal
+                                        { userText = promptText
+                                        , userImages = [image]
+                                        }
+                                    ]
+                                putTrailingNewline printed
+                                continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -411,6 +446,9 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
                                             (roleMuted color
                                                 ("session: " <> handle.sessionMeta.metaId))
                         continue
+                    ReplReloadAuth -> do
+                        reloadAuth provider tokenProvider
+                        continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
                         Text.hPutStrLn stderr (roleError color err)
@@ -418,7 +456,40 @@ repl config render provider previous printed paramsRef policyRef transcriptRef p
   where
     continue =
         repl config render provider previous printed paramsRef policyRef
-            transcriptRef persist agentsContext
+            transcriptRef persist tokenProvider agentsContext
+
+reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
+reloadAuth provider = \case
+    Nothing -> do
+        color <- resolveColor stderr
+        putTextLn stderr $ roleMuted color $
+            "reload-auth: OpenAI WebSocket auth is fixed for this process; "
+                <> "restart after refreshing ~/.codex/auth.json "
+                <> "(OAuth pools already rotate on handshake failure)"
+    Just tokenProvider ->
+        -- Force a disk/env re-read by pretending the cached credential was
+        -- rejected for authentication; the reloadable provider clears its cache.
+        getNextToken tokenProvider (Just FailedCredential
+            { credential = Credential
+                { accessToken = ""
+                , accountId = ""
+                , leaseId = Nothing
+                , provider
+                }
+            , failure = AccountAuthenticationRejected
+            }) >>= \case
+            Left err -> do
+                color <- resolveColor stderr
+                putTextLn stderr $ roleError color $
+                    "reload-auth failed: " <> Text.pack (show err)
+            Right credential -> do
+                color <- resolveColor stdout
+                Text.putStrLn $ roleSuccess color $
+                    "auth reloaded ("
+                        <> providerSlug provider
+                        <> " account "
+                        <> credential.accountId
+                        <> ")"
 
 runOneTurn
     :: LoopConfig
@@ -429,16 +500,17 @@ runOneTurn
     -> Maybe (IORef (Either SessionCreate SessionHandle))
     -> IORef (Maybe Text)
     -> Text
+    -> [TurnInput]
     -> IO Bool
-runOneTurn config render previous printed transcriptRef persist agentsContext prompt = do
+runOneTurn config render previous printed transcriptRef persist agentsContext promptText inputs = do
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
     pendingAgents <- atomicModifyIORef' agentsContext \pending -> (Nothing, pending)
-    let inputs = case pendingAgents of
+    let turnInputs = case pendingAgents of
             Just agents | null beforeItems && isNothing prev ->
-                [UserMessage agents, UserMessage prompt]
-            _ -> [UserMessage prompt]
-    result <- runLoopWith config prev inputs
+                UserMessage agents : inputs
+            _ -> inputs
+    result <- runLoopInputs config prev turnInputs
     clearThinking render
     case result of
         Left err -> do
@@ -470,7 +542,7 @@ runOneTurn config render previous printed transcriptRef persist agentsContext pr
                         else pure ()
                     let turn = SessionTurn
                             { turnAt = now
-                            , turnUserText = prompt
+                            , turnUserText = promptText
                             , turnAssistantText = loopResult.finalText
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
@@ -478,6 +550,7 @@ runOneTurn config render previous printed transcriptRef persist agentsContext pr
                     handle' <- appendTurn handle turn
                     writeIORef slotRef (Right handle')
             pure True
+
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
 -- whatever instructions were already in history.
@@ -528,12 +601,6 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (Just text, _) -> pure (Just text)
     (_, Just path) -> Just . Text.strip <$> Text.readFile path
     _ -> pure Nothing
-
-firstCredential :: LoadedAuth -> IO Credential
-firstCredential loaded =
-    getNextToken loaded.loadedTokenProvider Nothing >>= \case
-        Left err -> die ("credential: " <> show err)
-        Right credential -> pure credential
 
 approveTool :: IORef ApprovalPolicy -> [AppTool] -> ToolCall -> IO Bool
 approveTool policyRef tools call = do
