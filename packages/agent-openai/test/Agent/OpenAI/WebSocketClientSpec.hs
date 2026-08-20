@@ -6,6 +6,7 @@ import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Text (Text)
@@ -13,6 +14,11 @@ import Data.Text (Text)
 spec :: Spec
 spec = do
   describe "buildWsPayloadWithOptions" do
+    it "forces store=false for the Codex WebSocket contract" do
+        let request = sampleRequest { store = Just True }
+        field "store" (buildWsPayloadWithOptions defaultCodexWsOptions request Nothing)
+            `shouldBe` Just (Aeson.Bool False)
+
     it "omits context_management by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
@@ -59,9 +65,13 @@ spec = do
 
 contextManagement :: CodexWsOptions -> Maybe Aeson.Value
 contextManagement options =
-    case buildWsPayloadWithOptions options sampleRequest (Just "previous-1") of
-        Aeson.Object object -> KeyMap.lookup "context_management" object
-        _ -> Nothing
+    field "context_management" $
+        buildWsPayloadWithOptions options sampleRequest (Just "previous-1")
+
+field :: Key.Key -> Aeson.Value -> Maybe Aeson.Value
+field name = \case
+    Aeson.Object object -> KeyMap.lookup name object
+    _ -> Nothing
 
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams

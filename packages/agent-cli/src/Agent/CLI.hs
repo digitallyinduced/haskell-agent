@@ -442,7 +442,7 @@ runAgent options = do
             effort = fromMaybe
                 (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
                 options.optEffort
-            params = requestParams provider model instructions
+            params = requestParams model instructions
                 (schemasFromAppTools provider tools) effort
             policy = resolveApprovalPolicy options isTty
                 projectSettings.settingsAutoApprove
@@ -2028,7 +2028,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock conn registry session
                         <> env.subId.unSubagentId
                         <> "."
                 tools = coding.codingAppTools
-                childParams = requestParams OpenAIProvider model instructions
+                childParams = requestParams model instructions
                     (schemasFromAppTools OpenAIProvider tools) effort
             childParamsRef <- newIORef childParams
             let backend =
@@ -2093,7 +2093,7 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                         <> "\n\n"
                         <> grokSubagentSuffix agentType env.subId
                 tools = filterChildGrokTools agentType coding.codingAppTools
-                childParams = requestParams provider model instructions
+                childParams = requestParams model instructions
                     (schemasFromAppTools provider tools) effort
             childParamsRef <- newIORef childParams
             let backend = mkBackend childParamsRef session.subSessionTranscript
@@ -2178,11 +2178,6 @@ childApprove policy tools call = case policy of
                 \Re-run the parent with auto-approve/--yolo, or have the \
                 \parent perform this edit."
 
--- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
--- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
--- xAI/OpenRouter force @store = false@ and replay local transcripts instead.
-
-
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
     :: IORef (Maybe Text)
@@ -2208,14 +2203,15 @@ foldSessionItems = go []
             go turn.turnItems rest
         | otherwise = go (acc <> turn.turnItems) rest
 
+-- | Codex requires @store = false@. Continuation still uses
+-- @previous_response_id@, with the local transcript available for recovery.
 requestParams
-    :: Provider
-    -> Text
+    :: Text
     -> Text
     -> [ResponseTool]
     -> Text
     -> ResponseCreateParams
-requestParams provider modelName instructionText toolSchemas effort =
+requestParams modelName instructionText toolSchemas effort =
     case defaultResponseCreateParams of
         ResponseCreateParams{..} ->
             ResponseCreateParams
@@ -2230,6 +2226,6 @@ requestParams provider modelName instructionText toolSchemas effort =
                     , summary = Nothing
                     , extraFields = KeyMap.empty
                     }
-                , store = Just (provider == OpenAIProvider)
+                , store = Just False
                 , ..
                 }
