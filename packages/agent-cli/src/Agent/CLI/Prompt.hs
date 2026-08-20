@@ -35,6 +35,7 @@ ghciGuidance =
         [ "Prefer ghci for scripting."
         , "When you need a short program, calculation, or one-off script, use the run_ghci tool rather than Python, Node, bash, or compiling a binary."
         , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
+        , "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
         , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
         , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
         , "Drive GHCi with complete expressions; do not expect interactive human input."
