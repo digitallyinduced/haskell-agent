@@ -1,8 +1,9 @@
 -- | OpenAI Codex coding tools.
 --
 -- Wire names and schemas are copied from openai/codex
--- @ codex-rs/core/src/tools/handlers for the Codex-native tools.
+-- @codex-rs/core/src/tools/handlers for the Codex-native tools.
 -- run_ghci is a local extension shared with Grok/OpenRouter.
+-- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Tools.Codex
     ( codexTools
     ) where
@@ -21,6 +22,7 @@ import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
+import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , isPlanModeActive
@@ -39,15 +41,21 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-codexTools :: ToolEnv -> GhciSession -> PlanModeEnv -> IO [AppTool]
-codexTools env ghci planMode = do
+codexTools
+    :: ToolEnv
+    -> GhciSession
+    -> PlanModeEnv
+    -> Maybe MultiAgentContext
+    -> IO [AppTool]
+codexTools env ghci planMode multi = do
     planRef <- newIORef []
-    pure
+    pure $
         [ shellCommandTool env
         , applyPatchTool env
         , updatePlanTool planMode planRef
         , runGhciTool ghci
         ]
+        ++ maybe [] multiAgentTools multi
 
 jsonTool
     :: Text

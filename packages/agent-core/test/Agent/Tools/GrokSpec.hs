@@ -46,8 +46,8 @@ spec = describe "Agent.Tools.Grok" do
                 ]
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
-            xai <- codingToolsFor XAIProvider session.grokEnv Nothing
-            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing
+            xai <- codingToolsFor XAIProvider session.grokEnv Nothing Nothing
+            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing Nothing
             (do
                 map (.appToolName) xai.codingAppTools `shouldBe` names
                 map (.appToolName) openrouter.codingAppTools `shouldBe` names)

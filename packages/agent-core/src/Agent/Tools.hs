@@ -18,6 +18,7 @@ import Agent.Provider (Provider(..))
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
 
@@ -36,8 +37,9 @@ codingToolsFor
     :: Provider
     -> ToolEnv
     -> Maybe PlanModeHooks
+    -> Maybe MultiAgentContext
     -> IO CodingTools
-codingToolsFor provider env hooks = do
+codingToolsFor provider env hooks multi = do
     plan <- newPlanModeEnv env.toolCwd hooks
     case provider of
         XAIProvider -> do
@@ -58,7 +60,7 @@ codingToolsFor provider env hooks = do
                 }
         OpenAIProvider -> do
             ghci <- newGhciSession env
-            tools <- codexTools env ghci plan
+            tools <- codexTools env ghci plan multi
             pure CodingTools
                 { codingAppTools = tools
                 , codingPlanMode = plan

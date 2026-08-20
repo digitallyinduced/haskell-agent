@@ -1,6 +1,8 @@
 module Agent.Tools.CodexSpec (spec) where
 
-import Agent.Loop (defaultLoopDispatch)
+import Agent.Loop (LoopError(..), defaultLoopDispatch)
+import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -32,13 +34,29 @@ spec = describe "Agent.Tools.Codex" do
     it "advertises Codex wire names and not Grok names" do
         withTempEnv \env -> do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
-            coding <- codingToolsFor OpenAIProvider env Nothing
+            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
             names `shouldBe` ["shell_command", "apply_patch", "update_plan", "run_ghci"]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
             coding.codingClose
+
+    it "registers multi-agent tools when a registry is provided" do
+        withTempEnv \env -> do
+            registry <- newSubagentRegistry defaultSubagentConfig env.toolCwd
+                (\_ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ -> pure ())
+            let ctx = MultiAgentContext
+                    { multiRegistry = registry
+                    , multiSelfId = Nothing
+                    , multiDepth = 0
+                    }
+            coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
+            let names = map (.appToolName) coding.codingAppTools
+            names `shouldContain` ["spawn_agent", "wait_agent", "send_input", "close_agent", "resume_agent"]
+            coding.codingClose
+            closeSubagentRegistry registry
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do
@@ -153,7 +171,7 @@ withCodexTools :: ToolEnv -> ([AppTool] -> IO a) -> IO a
 withCodexTools env action = do
     ghci <- newGhciSession env
     plan <- newPlanModeEnv env.toolCwd Nothing
-    tools <- codexTools env ghci plan
+    tools <- codexTools env ghci plan Nothing
     action tools `finally` closeGhciSession ghci
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a

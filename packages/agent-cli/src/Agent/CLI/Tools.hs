@@ -8,13 +8,15 @@ module Agent.CLI.Tools
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.Provider (Provider(..))
+import Agent.ToolDSL (parametersObjectLoose)
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types (AppTool(..), AppToolKind(..))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.List (find)
+import Data.List (find, partition)
 import Data.Text (Text)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
@@ -29,8 +31,18 @@ webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
     }
 
 schemasFromAppTools :: Provider -> [AppTool] -> [ResponseTool]
-schemasFromAppTools provider tools =
-    webSearchTool : map (schemaFromAppTool provider) tools
+schemasFromAppTools provider tools = case provider of
+    OpenAIProvider ->
+        let (multi, rest) = partition isMultiAgentTool tools
+            base = webSearchTool : map (schemaFromAppTool provider) rest
+        in if null multi
+            then base
+            else base ++ [multiAgentNamespaceTool multi]
+    _ ->
+        webSearchTool : map (schemaFromAppTool provider) tools
+
+isMultiAgentTool :: AppTool -> Bool
+isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Provider -> AppTool -> ResponseTool
 schemaFromAppTool provider tool = case tool.appToolKind of
@@ -42,6 +54,26 @@ schemaFromAppTool provider tool = case tool.appToolKind of
         in build tool.appToolName tool.appToolDescription tool.appToolParameters
     FreeformApplyPatch ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
+
+-- | Codex multi_agent_v1 namespace: nested non-strict function tools.
+multiAgentNamespaceTool :: [AppTool] -> ResponseTool
+multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
+    { tag = "namespace"
+    , fields = KeyMap.fromList
+        [ (Key.fromText "name", Aeson.String multiAgentNamespace)
+        , (Key.fromText "description", Aeson.String
+            "Tools for spawning and managing sub-agents.")
+        , (Key.fromText "tools", Aeson.toJSON (map nestedFunction tools))
+        ]
+    }
+  where
+    nestedFunction tool = Aeson.object
+        [ "type" .= ("function" :: Text)
+        , "name" .= tool.appToolName
+        , "description" .= tool.appToolDescription
+        , "strict" .= False
+        , "parameters" .= parametersObjectLoose tool.appToolParameters
+        ]
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

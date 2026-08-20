@@ -63,7 +63,11 @@ import Agent.ProjectInstructions
     )
 import Agent.OpenAI.LoopBackend (openAiBackend, toolResultToItem)
 import Agent.OpenAI.Responses.Types
-import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..), withCodexWsWithProvider)
+import Agent.OpenAI.WebSocketClient
+    ( CodexAuthFailed(..)
+    , CodexConn
+    , withCodexWsWithProvider
+    )
 import Agent.Provider
     ( AccountFailure(..)
     , Credential(..)
@@ -74,7 +78,19 @@ import Agent.Provider
     , providerSlug
     )
 import Agent.ToolDispatch (ToolCall(..))
+import Agent.Subagents
+    ( RunSubagent
+    , SubagentConfig(..)
+    , SubagentId(..)
+    , SubagentRegistry
+    , SubagentSpawnEnv(..)
+    , closeSubagentRegistry
+    , defaultSubagentConfig
+    , newSubagentRegistry
+    , setSubagentRunner
+    )
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -94,7 +110,7 @@ import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (catchAsync, finally, throwIO, try)
 import Control.Monad (unless, when)
@@ -262,13 +278,29 @@ runAgent options = do
 
     toolEnv <- defaultToolEnv cwd
     let planHooks = cliPlanHooks (resolveColor stderr)
-    coding <- codingToolsFor loaded.loadedProvider toolEnv (Just planHooks)
+        provider = loaded.loadedProvider
+    multiCtx <- case provider of
+        OpenAIProvider -> do
+            registry <- newSubagentRegistry defaultSubagentConfig cwd
+                (\_ _ _ -> pure $ Left LoopNoResponseId)
+                (\_ _ -> pure ())
+            pure $ Just MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Nothing
+                , multiDepth = 0
+                }
+        _ -> pure Nothing
+    coding <- codingToolsFor provider toolEnv (Just planHooks) multiCtx
     let tools = coding.codingAppTools
         planMode = coding.codingPlanMode
-    flip finally coding.codingClose do
+        closeAll = do
+            case multiCtx of
+                Just ctx -> closeSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+            coding.codingClose
+    flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let provider = loaded.loadedProvider
-            model = fromMaybe
+        let model = fromMaybe
                 (maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
                 options.optModel
             instructions = systemPrompt provider cwd today (isOneShot options)
@@ -304,10 +336,27 @@ runAgent options = do
             case provider of
                 OpenAIProvider ->
                     try @_ @CodexAuthFailed
-                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential ->
+                        (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
+                            wsLock <- newMVar ()
+                            case multiCtx of
+                                Just ctx ->
+                                    setSubagentRunner ctx.multiRegistry $
+                                        runCodexSubagent
+                                            options
+                                            policy
+                                            planHooks
+                                            paramsRef
+                                            wsLock
+                                            conn
+                                            ctx.multiRegistry
+                                Nothing -> pure ()
+                            let lockedBackend =
+                                    lockedOpenAiBackend wsLock conn
+                                        (readIORef paramsRef)
+                                        transcriptRef
                             runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                 initialPrevious persist projectRoot Nothing agentsContext
-                                (openAiBackend conn (readIORef paramsRef) transcriptRef))
+                                lockedBackend)
                         >>= \case
                             Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                             Right result -> pure result
@@ -1021,6 +1070,94 @@ toggleAlwaysApprove policyRef projectRoot = do
     putTextLn stderr (case next of
         ApproveAll -> roleSuccess color glyphOk <> "auto-approve on (saved for project)"
         _ -> roleMuted color glyphSession <> "auto-approve off (saved for project)")
+
+-- | Serialize OpenAI WebSocket turns: parent and children share one connection,
+-- and 'receiveWsResponse' is not multiplexed.
+lockedOpenAiBackend
+    :: MVar ()
+    -> CodexConn
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+lockedOpenAiBackend wsLock conn getParams transcript =
+    let Backend submit = openAiBackend conn getParams transcript
+    in Backend \previous inputs onEvent ->
+        withMVar wsLock \_ -> submit previous inputs onEvent
+
+-- | Child Codex agent: fresh transcript, same WS (locked), nested multi-agent tools.
+runCodexSubagent
+    :: CliOptions
+    -> ApprovalPolicy
+    -> PlanModeHooks
+    -> IORef ResponseCreateParams
+    -> MVar ()
+    -> CodexConn
+    -> SubagentRegistry
+    -> RunSubagent
+runCodexSubagent options policy planHooks paramsRef wsLock conn registry =
+    \env prompt onEvent -> do
+        parentParams <- readIORef paramsRef
+        childEnv <- defaultToolEnv env.subCwd
+        -- Inherit soft-cancel from the registry-owned child flag.
+        let childToolEnv = childEnv { toolCancel = env.subCancel }
+            childCtx = MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Just env.subId
+                , multiDepth = env.subDepth
+                }
+        coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
+        flip finally coding.codingClose do
+            today <- utctDay <$> getCurrentTime
+            let model = fromMaybe (defaultModelFor OpenAIProvider) parentParams.model
+                effort = case parentParams.reasoning of
+                    Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
+                    Nothing -> defaultEffortFor OpenAIProvider
+                baseInstructions =
+                    fromMaybe
+                        (systemPrompt OpenAIProvider env.subCwd today True)
+                        parentParams.instructions
+                instructions =
+                    baseInstructions
+                        <> "\n\nYou are a Codex subagent. Complete the assigned task and "
+                        <> "report results clearly. Your agent id is "
+                        <> env.subId.unSubagentId
+                        <> "."
+                tools = coding.codingAppTools
+                childParams = requestParams OpenAIProvider model instructions
+                    (schemasFromAppTools OpenAIProvider tools) effort
+            childParamsRef <- newIORef childParams
+            childTranscript <- newIORef ([] :: [ResponseItem])
+            let backend =
+                    lockedOpenAiBackend wsLock conn (readIORef childParamsRef) childTranscript
+                config = LoopConfig
+                    { loopBackend = backend
+                    , loopHandlers = appToolHandlers tools
+                    , loopDispatch = defaultLoopDispatch
+                    , loopMaxTurns = options.optMaxTurns
+                    , loopOnEvent = onEvent
+                    , loopApprove = \call -> childApprove policy tools call
+                    , loopCancel = env.subCancel
+                    }
+            runLoop config Nothing prompt
+
+childApprove :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO (Either Text Bool)
+childApprove policy tools call = case policy of
+    ApproveAll -> pure (Right True)
+    DenyMutating -> do
+        allowed <- case lookupAppTool call.name tools of
+            Just tool -> toolAllowsWithoutPrompt tool call
+            Nothing -> pure False
+        pure $ if allowed then Right True else Right False
+    PromptMutating -> do
+        allowed <- case lookupAppTool call.name tools of
+            Just tool -> toolAllowsWithoutPrompt tool call
+            Nothing -> pure False
+        if allowed
+            then pure (Right True)
+            else pure $ Left
+                "Subagent cannot prompt for approval on mutating tools. \
+                \Re-run the parent with auto-approve/--yolo, or have the \
+                \parent perform this edit."
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 -- OpenAI keeps @store = true@ so @previous_response_id@ can continue a chain;
