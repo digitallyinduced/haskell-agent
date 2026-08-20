@@ -27,7 +27,7 @@ defaultClientOptions :: ClientOptions
 defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
     , modelOverrides = []
-    , defaultModel = "grok-4.5"
+    , defaultModel = "grok-4.6"
     , requestTimeoutSeconds = 600
     , clientVersion = "0.2.118"
     }
