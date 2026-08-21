@@ -5,7 +5,7 @@ A universal coding-agent harness written in Haskell.
 ## Packages
 
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
-- `agent-core` provides provider-neutral credentials, broker failover, common
+- `agent-core` provides provider-neutral credentials, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
 - `agent-responses` provides the canonical Responses wire model, codecs, error
   normalization, response merging, and provider-neutral loop adapters.
