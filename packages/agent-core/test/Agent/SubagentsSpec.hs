@@ -399,6 +399,84 @@ spec = describe "Agent.Subagents" do
             Left _ -> False
         closeSubagentRegistry registry
 
+    it "aborts only descendants owned by the failed root turn" do
+        ownedStarted <- newEmptyTMVarIO
+        unrelatedStarted <- newEmptyTMVarIO
+        unrelatedGate <- newEmptyTMVarIO
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxConcurrent = 2 })
+            (fromFilePath "/tmp")
+            (\env _ prompt _ -> case messagePayload prompt of
+                "owned" -> do
+                    atomically $ putTMVar ownedStarted env.subRootTurnId
+                    atomically retry
+                _ -> do
+                    atomically $ putTMVar unrelatedStarted env.subRootTurnId
+                    atomically $ takeTMVar unrelatedGate
+                    pure $ Right LoopResult
+                        { finalResponseId = "unrelated"
+                        , finalText = Just "unrelated"
+                        , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
+                        })
+            (\_ _ -> pure ())
+        ownedTurn <- beginRootTurn registry
+        unrelatedTurn <- beginRootTurn registry
+        Right owned <- spawnSubagentWithCwdForTurn registry (Just ownedTurn)
+            (fromFilePath "/tmp") Nothing 0 "owned" Nothing
+        Right unrelated <- spawnSubagentWithCwdForTurn registry (Just unrelatedTurn)
+            (fromFilePath "/tmp") Nothing 0 "unrelated" Nothing
+        atomically (takeTMVar ownedStarted) `shouldReturn` Just ownedTurn
+        atomically (takeTMVar unrelatedStarted) `shouldReturn` Just unrelatedTurn
+
+        abortRootTurn registry ownedTurn
+
+        getStatus registry owned `shouldReturn` Interrupted
+        getStatus registry unrelated `shouldReturn` Running
+        atomically $ putTMVar unrelatedGate ()
+        (statuses, timedOut) <- waitSubagents registry [unrelated] 15000
+        timedOut `shouldBe` False
+        Map.lookup unrelated statuses
+            `shouldBe` Just (Completed (Just "unrelated"))
+        rejected <- spawnSubagentWithCwdForTurn registry (Just ownedTurn)
+            (fromFilePath "/tmp") Nothing 0 "too-late" Nothing
+        rejected `shouldBe` Left "Root turn was aborted."
+        closeSubagentRegistry registry
+
+    it "removes failed-turn follow-ups queued behind unrelated work" do
+        started <- newEmptyTMVarIO
+        gate <- newEmptyTMVarIO
+        seen <- newIORef ([] :: [Text])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> do
+                atomicModifyIORef' seen \messages ->
+                    (messages <> [messagePayload prompt], ())
+                atomically $ putTMVar started ()
+                atomically $ takeTMVar gate
+                pure $ Right LoopResult
+                    { finalResponseId = messagePayload prompt
+                    , finalText = Just (messagePayload prompt)
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        originalTurn <- beginRootTurn registry
+        failedTurn <- beginRootTurn registry
+        Right agentId <- spawnSubagentWithCwdForTurn registry (Just originalTurn)
+            (fromFilePath "/tmp") Nothing 0 "original" Nothing
+        atomically $ takeTMVar started
+        Right _ <- sendInputMessageForTurn registry (Just failedTurn)
+            taskPathRoot agentId (plainInterAgentContent "failed-follow-up") False
+
+        abortRootTurn registry failedTurn
+        atomically $ putTMVar gate ()
+        _ <- waitSubagents registry [agentId] 15000
+
+        readIORef seen `shouldReturn` ["original"]
+        getStatus registry agentId
+            `shouldReturn` Completed (Just "original")
+        closeSubagentRegistry registry
+
 shutdownRaceRegistry :: IORef Bool -> IO SubagentRegistry
 shutdownRaceRegistry ran =
     newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

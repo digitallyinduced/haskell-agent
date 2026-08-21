@@ -18,14 +18,15 @@ module Agent.Tools.Grok.Task
     , lookupAgentModel
     ) where
 
+import Agent.InterAgentMessage (plainInterAgentContent)
 import Agent.OsPath (OsPath, fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , getStatus
-    , sendInput
-    , spawnSubagentWithCwdPrepared
+    , sendInputMessageForTurn
+    , spawnSubagentWithCwdPreparedForTurn
     , waitSubagents
     )
 import Agent.ToolArgs
@@ -195,14 +196,16 @@ spawnFresh
     -> TaskArgs
     -> IO (Either Text Text)
 spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
+    rootTurnId <- ctx.multiRootTurnId
     let spec = GrokSubagentSpec
             { agentType = args.subagentType
             , modelOverride = args.model
             }
         worktreePath = (.subagentWorktreePath) <$> worktree
     result <- restore
-        (spawnSubagentWithCwdPrepared
+        (spawnSubagentWithCwdPreparedForTurn
             ctx.multiRegistry
+            rootTurnId
             childCwd
             (\agentId -> recordAgentSpec typesRef agentId spec)
             ctx.multiSelfId
@@ -307,7 +310,10 @@ resumeTask ctx typesRef args resumeId = do
                                 <> args.subagentType
                 _ -> do
                     recordAgentType typesRef agentId args.subagentType
-                    sent <- sendInput ctx.multiRegistry agentId args.prompt False
+                    rootTurnId <- ctx.multiRootTurnId
+                    sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
+                        ctx.multiTaskPath agentId
+                        (plainInterAgentContent args.prompt) False
                     case sent of
                         Left err -> pure (Left err)
                         Right _ ->

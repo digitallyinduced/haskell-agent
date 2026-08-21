@@ -79,7 +79,7 @@ spec = describe "Agent.Tools.Grok" do
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
             let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                    Nothing Nothing Nothing
+                    (pure Nothing) Nothing Nothing Nothing
                 names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
             names `shouldContain` ["task"]
             closeSubagentRegistry registry

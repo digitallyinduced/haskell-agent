@@ -34,7 +34,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -52,7 +52,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (observeSpec typesRef observed)
             (\_ _ -> pure ())
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
@@ -86,8 +86,8 @@ spec = describe "Agent.Tools.Grok.Task" do
                 { subagentWorktreePath = fromFilePath "/tmp"
                 , subagentWorktreeCleanup = pure (Right ())
                 }
-            ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-                (Just createIsolated) Nothing
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
+                Nothing (Just createIsolated) Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -99,8 +99,8 @@ spec = describe "Agent.Tools.Grok.Task" do
         cleaned <- newIORef False
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-                (Just (cleanupLease cleaned)) Nothing
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
