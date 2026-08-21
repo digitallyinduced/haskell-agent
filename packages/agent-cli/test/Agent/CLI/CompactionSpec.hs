@@ -50,6 +50,9 @@ spec = do
                 (ProviderError AuthenticationError "expired" Nothing)
                 `shouldBe` False
             shouldFallbackFromRemoteCompact
+                (ProviderError InvalidRequestError "bio_policy" Nothing)
+                `shouldBe` False
+            shouldFallbackFromRemoteCompact
                 (ProviderError UsageLimitReached "limit" Nothing)
                 `shouldBe` False
             shouldFallbackFromRemoteCompact

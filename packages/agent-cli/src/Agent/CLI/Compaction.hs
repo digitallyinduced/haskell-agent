@@ -304,8 +304,7 @@ shouldFallbackFromRemoteCompact = \case
             || (status >= 500 && status < 600)
     ProviderError errorType _ _ ->
         errorType `elem`
-            [ InvalidRequestError
-            , NotFoundError
+            [ NotFoundError
             , PreviousResponseNotFound
             , ApiErrorType
             , OverloadedError
