@@ -5,9 +5,13 @@ import Agent.CLI.Input
     , approvalKeyText
     , choiceMoveIndex
     , classifyPastedText
+    , displayEditorText
     , formatPasteChip
     , parseChoiceKey
     , replHistoryPath
+    , terminalTextWidth
+    , truncateDisplayText
+    , visibleEditorText
     )
 import qualified Data.Text as Text
 import System.FilePath ((</>))
@@ -75,3 +79,17 @@ spec = do
             formatPasteChip "one line" `shouldBe` "one line"
             formatPasteChip (Text.unlines ["a", "b", "c", "d"])
                 `shouldBe` "[Pasted: 4 lines]"
+
+    describe "safe editor rendering" do
+        it "renders pasted terminal controls as visible characters" do
+            displayEditorText "\ESC]0;owned\BEL"
+                `shouldBe` "␛]0;owned␇"
+
+        it "measures wide and combining Unicode in terminal columns" do
+            terminalTextWidth "a界🙂e\x0301" `shouldBe` 6
+            visibleEditorText 3 "a界b" 2 `shouldBe` ("界b", 2)
+
+        it "truncates the complete row without exceeding its column budget" do
+            let truncated = truncateDisplayText 5 "/always-approve"
+            truncated `shouldBe` "/alw…"
+            terminalTextWidth truncated `shouldBe` 5

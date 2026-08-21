@@ -12,8 +12,12 @@ module Agent.CLI.Input
     , parseChoiceKey
     , choiceMoveIndex
     , classifyPastedText
+    , displayEditorText
     , formatPasteChip
     , replHistoryPath
+    , terminalTextWidth
+    , truncateDisplayText
+    , visibleEditorText
     ) where
 
 import Agent.CLI.Command
@@ -28,7 +32,13 @@ import Agent.CLI.Interrupt
     )
 import Control.Exception.Safe (bracket, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
-import Data.Char (isSpace, ord)
+import Data.Char
+    ( GeneralCategory(..)
+    , chr
+    , generalCategory
+    , isSpace
+    , ord
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -216,6 +226,85 @@ data EditorState = EditorState
     , editorPasted :: !Bool
     , editorSlashDismissed :: !Bool
     }
+
+data DisplayCell = DisplayCell
+    { displayCellText :: !Text
+    , displayCellWidth :: !Int
+    }
+
+terminalTextWidth :: Text -> Int
+terminalTextWidth = cellsWidth . displayCells
+
+displayCells :: Text -> [DisplayCell]
+displayCells = map displayCell . Text.unpack
+
+displayCell :: Char -> DisplayCell
+displayCell char =
+    let shown = safeDisplayChar char
+    in DisplayCell
+        { displayCellText = shown
+        , displayCellWidth = textColumns shown
+        }
+
+safeDisplayChar :: Char -> Text
+safeDisplayChar char
+    | char == '\n' || char == '\r' = "↵"
+    | char == '\t' = "⇥"
+    | code >= 0 && code <= 0x1f =
+        Text.singleton (chr (0x2400 + code))
+    | code == 0x7f = "␡"
+    | code >= 0x80 && code <= 0x9f = "�"
+    | generalCategory char == Format = "�"
+    | otherwise = Text.singleton char
+  where
+    code = ord char
+
+textColumns :: Text -> Int
+textColumns = sum . map charColumns . Text.unpack
+
+charColumns :: Char -> Int
+charColumns char
+    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
+    | category `elem` [Control, Surrogate, NotAssigned] = 0
+    | isWideCharacter char = 2
+    | otherwise = 1
+  where
+    category = generalCategory char
+
+isWideCharacter :: Char -> Bool
+isWideCharacter char =
+    let code = ord char
+    in code >= 0x1100
+        && ( code <= 0x115f
+            || code == 0x2329
+            || code == 0x232a
+            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
+            || (code >= 0xac00 && code <= 0xd7a3)
+            || (code >= 0xf900 && code <= 0xfaff)
+            || (code >= 0xfe10 && code <= 0xfe19)
+            || (code >= 0xfe30 && code <= 0xfe6f)
+            || (code >= 0xff00 && code <= 0xff60)
+            || (code >= 0xffe0 && code <= 0xffe6)
+            || (code >= 0x1f300 && code <= 0x1faff)
+            || (code >= 0x20000 && code <= 0x3fffd)
+           )
+
+cellsWidth :: [DisplayCell] -> Int
+cellsWidth = sum . map (.displayCellWidth)
+
+renderCells :: [DisplayCell] -> Text
+renderCells = Text.concat . map (.displayCellText)
+
+takeColumns :: Int -> [DisplayCell] -> [DisplayCell]
+takeColumns width = go 0
+  where
+    go _ [] = []
+    go used (cell:rest)
+        | used + cell.displayCellWidth > width = []
+        | otherwise = cell : go (used + cell.displayCellWidth) rest
+
+takeSuffixColumns :: Int -> [DisplayCell] -> [DisplayCell]
+takeSuffixColumns width = reverse . takeColumns width . reverse
 
 data EditorKey
     = EditorChar !Char
@@ -733,43 +822,43 @@ renderMenuRow width selected start localIndex suggestion =
     let absoluteIndex = start + localIndex
         marker = if absoluteIndex == selected then "❯ " else "  "
         label = suggestion.slashSuggestionDisplay
-        available = max 0 (width - Text.length marker - Text.length label - 2)
-        summary = truncateText available suggestion.slashSuggestionSummary
+        available =
+            max 0
+                (width - terminalTextWidth marker - terminalTextWidth label - 2)
+        summary = truncateDisplayText available suggestion.slashSuggestionSummary
         gap = if Text.null summary then "" else "  "
-        row = marker <> label <> gap <> summary
+        row = truncateDisplayText width (marker <> label <> gap <> summary)
     in if absoluteIndex == selected
         then "\ESC[1;36m" <> row <> "\ESC[0m"
         else "\ESC[2m" <> row <> "\ESC[0m"
 
 visibleEditorText :: Int -> Text -> Int -> (Text, Int)
 visibleEditorText available raw cursor =
-    let display = displayEditorText raw
-        before = Text.take cursor display
-    in if Text.length display <= available
-        then (display, Text.length before)
+    let cells = displayCells raw
+        before = take cursor cells
+    in if cellsWidth cells <= available
+        then (renderCells cells, cellsWidth before)
         else
             let leftRoom = max 1 (available * 2 `div` 3)
-                start = max 0 (Text.length before - leftRoom)
-                shown = Text.take available (Text.drop start display)
-            in (shown, Text.length before - start)
+                visibleBefore = takeSuffixColumns leftRoom before
+                start = length before - length visibleBefore
+                shownCells = takeColumns available (drop start cells)
+            in (renderCells shownCells, cellsWidth visibleBefore)
 
 displayEditorText :: Text -> Text
-displayEditorText =
-    Text.map \case
-        '\n' -> '↵'
-        '\r' -> '↵'
-        '\t' -> '⇥'
-        char -> char
+displayEditorText = renderCells . displayCells
 
-truncateText :: Int -> Text -> Text
-truncateText width text
+truncateDisplayText :: Int -> Text -> Text
+truncateDisplayText width text
     | width <= 0 = ""
-    | Text.length text <= width = text
+    | cellsWidth cells <= width = renderCells cells
     | width == 1 = "…"
-    | otherwise = Text.take (width - 1) text <> "…"
+    | otherwise = renderCells (takeColumns (width - 1) cells) <> "…"
+  where
+    cells = displayCells text
 
 visibleWidth :: Text -> Int
-visibleWidth = Text.length . stripAnsi
+visibleWidth = terminalTextWidth . stripAnsi
 
 stripAnsi :: Text -> Text
 stripAnsi = Text.pack . goNormal . Text.unpack

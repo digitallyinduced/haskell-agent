@@ -23,6 +23,7 @@ import qualified Data.Text as Text
 data Command
     = ShowHelp
     | ShowVersion
+    | Login
     | ListSessions
     | ShowSession Text
     | RunAgent CliOptions
@@ -112,7 +113,10 @@ parseArgs :: [String] -> Either String Command
 parseArgs args
     | any (`elem` ["--help", "-h"]) args = Right ShowHelp
     | "--version" `elem` args = Right ShowVersion
-    | take 1 args == ["login"] = Left loginHint
+    | take 1 args == ["login"] =
+        if length args == 1
+            then Right Login
+            else Left "usage: agent-cli login"
     | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
     | otherwise = RunAgent <$> parseOptions defaultCliOptions args
 
@@ -204,14 +208,10 @@ parseEffort raw =
                 <> ")"
             )
 
-loginHint :: String
-loginHint =
-    "login is not in this slice. Place credentials in ~/.codex/auth.json \
-    \or ~/.grok/auth.json, or set CODEX_ACCESS_TOKEN / GROK_ACCESS_TOKEN."
-
 usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
+    , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
     , ""
@@ -242,10 +242,12 @@ usage = unlines
     , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
+    , "/btw <QUESTION> asks a one-shot side question without changing or"
+    , "persisting the main conversation."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
-    , "/resume [ID] prints a --resume hint (TTY: session picker)."
+    , "/resume [ID] resumes a persisted session (TTY: two-pane picker)."
     , "/paste [TEXT] attaches a clipboard image to the next"
     , "message and draws an in-terminal preview (Kitty/Ghostty/WezTerm/iTerm2);"
     , "/paste --send [TEXT] sends immediately. Cmd+V of a Finder image path also"

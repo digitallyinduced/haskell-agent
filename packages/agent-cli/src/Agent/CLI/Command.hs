@@ -40,7 +40,10 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplBtw Text
+    -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
+    | ReplLogin
     | ReplReloadAuth
     | ReplPaste
         { pasteImmediate :: !Bool
@@ -78,8 +81,10 @@ slashCommands =
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "session" [] "/session" "Print the current session id" False
-    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint" True
+    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
+    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
@@ -136,10 +141,20 @@ parseSlash line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplPlan
                     (if Text.null description then Nothing else Just description)
+            "btw" ->
+                let question =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null question
+                    then ReplCommandError "usage: /btw <QUESTION>"
+                    else ReplBtw question
             "session" ->
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "login" ->
+                if null args
+                    then ReplLogin
+                    else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
             "compact" ->
                 let focus =

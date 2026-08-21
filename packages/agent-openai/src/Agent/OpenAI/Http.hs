@@ -3,7 +3,7 @@ module Agent.OpenAI.Http
     , rejectFailedCodexResponse
     ) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
 import qualified Agent.OpenAI.Responses.Types as OpenAI
@@ -59,7 +59,7 @@ failedResponseError Nothing =
     ProviderError ApiErrorType "Codex response failed without error details" Nothing
 failedResponseError (Just responseError) =
     mkOpenAIError
-        ApiErrorType
+        (errorTypeFromText responseError.code)
         responseError.message
         (Just responseError.code)
         Nothing

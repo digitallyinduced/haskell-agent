@@ -69,8 +69,9 @@ spec = do
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
 
-        it "explains that login is not in this slice" do
-            parseArgs ["login"] `shouldSatisfy` isLeft
+        it "opens the credential manager without starting an agent" do
+            parseArgs ["login"] `shouldBe` Right Login
+            parseArgs ["login", "openai"] `shouldSatisfy` isLeft
 
 
         it "parses sessions list and show" do

@@ -64,6 +64,11 @@ spec = do
             ol `shouldSatisfy` Text.isInfixOf "item"
             ol `shouldSatisfy` Text.isInfixOf "\ESC["
 
+        it "preserves indentation for nested lists" do
+            let out = renderMarkdown True "- parent\n  - child\n    1. grandchild"
+                cleaned = Text.lines (stripAnsi out)
+            cleaned `shouldBe` ["• parent", "  • child", "    1. grandchild"]
+
         it "mutes plain blockquotes" do
             let out = renderMarkdown True "> note"
             out `shouldSatisfy` Text.isInfixOf "note"

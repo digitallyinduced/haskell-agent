@@ -65,6 +65,8 @@ data MultiAgentContext = MultiAgentContext
       -- | Optional host hook to rehydrate a closed/missing agent from disk
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
+      -- | Optional host hook for Grok-style isolated worktree children.
+    , multiCreateWorktree :: !(Maybe (FilePath -> IO (Either Text FilePath)))
     }
 
 multiAgentNamespace :: Text
