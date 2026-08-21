@@ -43,7 +43,7 @@ data CtrlCDecision
     | ForceExit
     deriving (Eq, Show)
 
--- | Result of Ctrl-C at the idle REPL prompt (haskeline path).
+-- | Result of Ctrl-C at the idle REPL prompt.
 data IdleCtrlCResult
     = ContinuePrompt
     | QuitProcess
@@ -79,8 +79,8 @@ newInterruptState onMessage = do
 -- Restores the previous handler afterward. Force-exit rethrows
 -- 'UserInterrupt' on the thread that entered this wrapper.
 --
--- Haskeline's 'withInterrupt' temporarily replaces this handler while a
--- prompt is active; use 'noteIdleCtrlC' from that path instead.
+-- The inline editor reads Ctrl-C directly while a prompt is active; use
+-- 'noteIdleCtrlC' from that path instead.
 withCtrlCHandler :: InterruptState -> IO a -> IO a
 withCtrlCHandler state action = do
     mainTid <- myThreadId
@@ -97,7 +97,7 @@ withTurnCancel state cancel =
         (writeIORef state.interruptActiveCancel (Just cancel))
         (writeIORef state.interruptActiveCancel Nothing)
 
--- | Apply idle Ctrl-C policy from haskeline's 'Interrupt' catcher.
+-- | Apply idle Ctrl-C policy from the inline editor.
 noteIdleCtrlC :: InterruptState -> IO IdleCtrlCResult
 noteIdleCtrlC state = do
     now <- getCurrentTime

@@ -965,8 +965,8 @@ replWithDraft env@SessionEnv
     params <- readIORef paramsRef
     policy <- readIORef policyRef
     let idleMode = replModeFromState planState policy
-    -- Status sits on the line above λ so haskeline can keep the cursor on
-    -- the input. Haskeline cannot park a persistent footer under the draft.
+    -- Status sits on the line above λ; the inline editor owns the prompt and
+    -- any live completion rows below it.
     -- Token totals sit on the right of that line when the TTY width is known.
     termCols <- fmap snd <$> getTerminalSize
     usage <- readIORef usageRef
@@ -976,8 +976,8 @@ replWithDraft env@SessionEnv
         idleMode
         usage
     hFlush stdout
-    -- Solarized user wash under the prompt; haskeline redraws it on edit.
-    -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
+    -- Solarized user wash under the prompt; the inline editor redraws it.
+    -- Ctrl+U keeps the familiar kill-to-start behavior.
     let modeTag
             | planActive = roleWarn stdoutColor "[plan] "
             | planPending = roleMuted stdoutColor "[plan…] "
@@ -1005,8 +1005,8 @@ replWithDraft env@SessionEnv
         ReplCycleMode keptDraft -> do
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
-            -- Haskeline already advanced a line; walk back over the
-            -- previous status + prompt so the next chrome replaces them.
+            -- The editor advanced a line; walk back over the previous status
+            -- + prompt so the next chrome replaces them.
             putStr "\ESC[2A\r\ESC[J"
             hFlush stdout
             continueWith keptDraft
