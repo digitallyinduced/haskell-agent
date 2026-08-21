@@ -388,7 +388,7 @@ pickConnectProvider color =
                             <> roleMuted color (providerSlug provider))
                     [0 ..]
                     providers
-                <> [roleMuted color "↑↓/jk · enter · esc/q"]
+                <> [roleMuted color "↑↓/jk or scroll · click/enter · esc/q"]
     step key index = case key of
         PickerKeyCancel -> Left Nothing
         PickerKeyConfirm -> Left (accountAt index providers)
@@ -797,7 +797,7 @@ renderLoginFrame color state =
         ]
             <> body
             <> [ roleMuted color
-                    "↑↓/jk · r refresh · a add · i import · e enable/disable · d disconnect · esc/q"
+                    "↑↓/jk or scroll · click/enter refresh · a add · i import · e enable/disable · d disconnect · esc/q"
                ]
   where
     body
