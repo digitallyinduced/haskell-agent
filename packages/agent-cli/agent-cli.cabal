@@ -82,6 +82,7 @@ library
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
+                    , Agent.CLI.TUI.Scroll
                     , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
@@ -169,6 +170,7 @@ test-suite agent-cli-test
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIBridgeSpec
+                    , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli

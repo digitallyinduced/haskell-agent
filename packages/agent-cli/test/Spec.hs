@@ -44,6 +44,7 @@ import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
+import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
@@ -91,5 +92,6 @@ main = hspec do
     SubagentStoreSpec.spec
     ToolsSpec.spec
     TUIBridgeSpec.spec
+    TUIScrollSpec.spec
     UsageSpec.spec
     WorktreeSpec.spec

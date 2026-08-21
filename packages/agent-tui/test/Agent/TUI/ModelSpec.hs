@@ -347,7 +347,7 @@ spec = describe "fullscreen UI reducer" do
         state.uiNotice
             `shouldBe`
                 Just
-                    (progressNotice
+                    (warningNotice
                         "Cancelling the current turn; sending this prompt next…")
 
     it "clears only the draft that was submitted immediately" do
