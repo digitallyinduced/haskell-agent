@@ -11,6 +11,7 @@ import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
+import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
@@ -50,6 +51,7 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
+    , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())

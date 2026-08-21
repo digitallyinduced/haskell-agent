@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
+    , ScreenMode(..)
     , defaultCliOptions
     , defaultEffortFor
     , isOneShot
@@ -28,6 +29,12 @@ data Command
     | ListSessions
     | ShowSession Text
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data ScreenMode
+    = ScreenAuto
+    | ScreenFullscreen
+    | ScreenMinimal
     deriving (Eq, Show)
 
 data ApprovalPolicy
@@ -69,6 +76,7 @@ data CliOptions = CliOptions
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
       -- ^ Discover and inject AGENTS.md at session start (default: True).
+    , optScreenMode :: !ScreenMode
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -86,6 +94,7 @@ defaultCliOptions = CliOptions
     , optResume = Nothing
     , optSaveSession = False
     , optAgentsMd = True
+    , optScreenMode = ScreenAuto
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -173,6 +182,10 @@ parseOptions options = \case
         parseOptions options { optAgentsMd = True } rest
     "--no-agents-md" : rest ->
         parseOptions options { optAgentsMd = False } rest
+    "--fullscreen" : rest ->
+        parseOptions options { optScreenMode = ScreenFullscreen } rest
+    "--minimal" : rest ->
+        parseOptions options { optScreenMode = ScreenMinimal } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -227,6 +240,8 @@ usage = unlines
     , "      --save-session      Persist a one-shot (-p) run as a session"
     , "      --agents-md         Discover and inject AGENTS.md (default)"
     , "      --no-agents-md      Skip AGENTS.md discovery"
+    , "      --fullscreen        Use the retained full-screen TUI"
+    , "      --minimal           Use terminal-native append-only rendering"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"

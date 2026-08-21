@@ -40,6 +40,7 @@ import Agent.CLI.AgentSessions
     )
 import Agent.CLI.Approval
     ( approveToolDecision
+    , approveToolDecisionWith
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -58,6 +59,7 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , autoCompactOpenAiBackend
     , runProviderCompact
     )
 import Agent.CLI.ImagePreview
@@ -75,12 +77,17 @@ import Agent.CLI.Interrupt
     ( InterruptState
     , isWrappedUserInterrupt
     , newInterruptState
+    , noteFullscreenCtrlC
     , withCtrlCHandler
     , withTurnCancel
     )
 import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models
+    ( ModelOption(..)
+    , PickerState(..)
+    , initialPickerState
+    )
 import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
@@ -167,6 +174,23 @@ import Agent.CLI.Terminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.TUI.App
+    ( FullscreenRuntime
+    , emitUiEvent
+    , newFullscreenRuntime
+    , readFullscreenLine
+    , requestFullscreenPermission
+    , requestFullscreenChoice
+    , runFullscreen
+    , withFullscreenSuspended
+    )
+import Agent.CLI.UI.Model
+    ( PromptState(..)
+    , UiEvent(..)
+    , UiState
+    , initialUiState
+    , reduceUi
+    )
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
@@ -179,7 +203,7 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (resetCancel, waitCancel)
+import Agent.Cancel (requestCancel, resetCancel, waitCancel)
 import Agent.Loop
 import Agent.Error (ApiError(..))
 import Agent.ProjectInstructions
@@ -193,6 +217,7 @@ import Agent.ProjectInstructions
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
+    , hasCompactionCheckpoint
     , isTranscriptResetTurn
     , newSessionUserText
     )
@@ -237,6 +262,7 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
+    , PlanModeHooks(..)
     , PlanModeState(..)
     , activatePlanMode
     , deactivatePlanMode
@@ -286,11 +312,12 @@ import System.Directory.OsPath
     , setCurrentDirectory
     )
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.OsPath ((</>), takeDirectory)
+import System.OsPath ((</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.Exit (die, exitFailure)
+import System.Exit (ExitCode(..), die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
 -- | How the GHCi-driven agent REPL finished.
@@ -532,7 +559,10 @@ runAgent options transition = do
         putTextLn stderr (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
-    let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
+    uiRuntimeRef <- newIORef Nothing
+    let basePlanHooks =
+            cliPlanHooks interrupt escPaused (resolveColor stderr)
+        planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         provider = loaded.loadedProvider
         model = fromMaybe
             (case transitionTarget of
@@ -652,6 +682,7 @@ runAgent options transition = do
             params = requestParams model instructions
                 (schemasFromAppTools provider tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
+            initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
                 Just _ -> Nothing
                 Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
@@ -667,6 +698,7 @@ runAgent options transition = do
                 , subagentTypes = agentTypesRef
                 }
         transcriptRef <- newIORef initialItems
+        contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just transcriptRef)
         prompt <- loadPrompt options
         let titleHint = case resumed of
@@ -714,6 +746,7 @@ runAgent options transition = do
                                             conn
                                             (readIORef paramsRef)
                                             transcriptRef
+                                            contextTokensRef
                                     noticingBackend =
                                         withPendingInputs pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
@@ -723,7 +756,7 @@ runAgent options transition = do
                                             privateTranscript
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
-                                runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
+                                runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
@@ -755,7 +788,7 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
+                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -779,7 +812,7 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
+                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
@@ -886,11 +919,13 @@ runSession
     -> [AppTool]
     -> ToolEnv
     -> PlanModeEnv
+    -> IORef (Maybe FullscreenRuntime)
     -> Maybe Text
     -> Maybe PendingTurn
     -> [Provider]
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
+    -> [SessionTurn]
     -> Maybe Text
     -> Persistence
     -> OsPath
@@ -911,7 +946,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
   withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -979,9 +1014,33 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             writeIORef agentsContext fresh
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
+    stdinTty <- hIsTerminalDevice stdin
+    stdoutTty <- hIsTerminalDevice stdout
     terminal <- detectTerminalCapabilities stdout
     reportTerminalCwd terminal stdout (toFilePath cwd)
     useColor <- resolveColor stdout
+    branch <- detectGitBranch cwd
+    let fullscreenEnabled =
+            stdinTty
+                && stdoutTty
+                && not (isOneShot options)
+                && options.optScreenMode /= ScreenMinimal
+        initialFullscreenState =
+            reduceUi
+                (UiSetRepository
+                    branch
+                    (toText (takeFileName (takeDirectory cwd))
+                        <> "/"
+                        <> toText (takeFileName cwd)))
+                (hydrateUiHistory initialTurns)
+    fullscreen <- if fullscreenEnabled
+        then Just <$> newFullscreenRuntime
+            (requestCancel toolEnv.toolCancel)
+            (noteFullscreenCtrlC interrupt)
+            (copyTerminalClipboard terminal stdout)
+            initialFullscreenState
+        else pure Nothing
+    writeIORef uiRuntimeRef fullscreen
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
             sessionDir <- readIORef planMode.planSessionDir
@@ -1011,17 +1070,40 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderNativeProgress =
                 stderrTty && terminal.terminalNativeProgress
             }
+        emitLoop event = case fullscreen of
+            Nothing -> renderEvent render event
+            Just runtime -> do
+                case event of
+                    TurnStarted -> do
+                        now <- getCurrentTime
+                        writeIORef startedAtRef (Just now)
+                        writeIORef activityRef "Thinking…"
+                    TextDelta _ -> writeIORef printed True
+                    ToolStarted _ ->
+                        writeIORef activityRef "Running tool…"
+                    _ -> pure ()
+                emitUiEvent runtime (UiLoop event)
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
-            , loopOnEvent = renderEvent render
+            , loopOnEvent = emitLoop
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    withStdinPaused escPaused $
-                        approveToolDecision
-                            policyRef allowedToolsRef toolRegistry planMode call
+                    case fullscreen of
+                        Nothing ->
+                            withStdinPaused escPaused $
+                                approveToolDecision
+                                    policyRef allowedToolsRef toolRegistry planMode call
+                        Just runtime ->
+                            approveToolDecisionWith
+                                (requestFullscreenPermission runtime)
+                                policyRef
+                                allowedToolsRef
+                                toolRegistry
+                                planMode
+                                call
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -1070,6 +1152,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionUsage = usageRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
+            , sessionFullscreen = fullscreen
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -1077,15 +1160,20 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    result <- case pendingTurn of
-        Just pending ->
-            runPendingTurn env pending
-        Nothing -> case prompt of
-            Just text -> do
-                result <- runOneTurn env text [UserMessage text]
-                finishTurn env True result
-            Nothing ->
-                repl env
+    let sessionAction = case pendingTurn of
+            Just pending ->
+                runPendingTurn env pending
+            Nothing -> case prompt of
+                Just text -> do
+                    result <- runOneTurn env text [UserMessage text]
+                    finishTurn env True result
+                Nothing ->
+                    repl env
+    result <-
+        (case fullscreen of
+            Nothing -> sessionAction
+            Just runtime -> runFullscreen runtime sessionAction)
+            `finally` writeIORef uiRuntimeRef Nothing
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
@@ -1100,6 +1188,10 @@ runPendingTurnWithCooldownRetry
     -> IO RunResult
 runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    case env.sessionFullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime (UiUserSubmitted pending.pendingPromptText)
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
@@ -1120,7 +1212,9 @@ finishTurnWithCooldownRetry
 finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         writeIORef env.sessionUnavailableProviders []
-        putTrailingNewline env.sessionPrinted
+        case env.sessionFullscreen of
+            Nothing -> putTrailingNewline env.sessionPrinted
+            Just _ -> pure ()
         if exitAfter
             then pure RunQuit
             else do
@@ -1130,7 +1224,9 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         if exitAfter
             then exitFailure
             else do
-                putTrailingNewline env.sessionPrinted
+                case env.sessionFullscreen of
+                    Nothing -> putTrailingNewline env.sessionPrinted
+                    Just _ -> pure ()
                 notifyAttention stderr InputRequested
                 repl env
     TurnProviderUnavailable apiError pending ->
@@ -1157,30 +1253,53 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    color <- resolveColor stderr
-    putTextLn stderr $ roleWarn color $
-        glyphWarn
-            <> "provider credentials temporarily unavailable; retrying this turn in "
-            <> formatDuration delay
-            <> " (Esc to cancel)"
+    let waitMessage =
+            "provider credentials temporarily unavailable; retrying this turn in "
+                <> formatDuration delay
+                <> " (Esc to cancel)"
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice (Just waitMessage))
+        Nothing -> do
+            color <- resolveColor stderr
+            putTextLn stderr $
+                roleWarn color (glyphWarn <> waitMessage)
     let cancel = env.sessionLoop.loopCancel
         -- Give the provider reset boundary a small margin so the automatic
         -- retry does not race a rounded server timestamp.
         waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
+        waitForCancel =
+            isJust <$> timeout waitMicros (waitCancel cancel)
+        waitAction = case env.sessionFullscreen of
+            Just _ -> waitForCancel
+            Nothing ->
+                withEscCancel cancel env.sessionEscPaused waitForCancel
     resetCancel cancel
     cancelled <-
-        ( withTurnCancel env.sessionInterrupt cancel $
-            withEscCancel cancel env.sessionEscPaused $
-                isJust <$> timeout waitMicros (waitCancel cancel)
-        ) `finally` resetCancel cancel
+        (withTurnCancel env.sessionInterrupt cancel waitAction)
+            `finally` resetCancel cancel
     if cancelled
         then do
-            putTextLn stderr (roleMuted color "automatic retry cancelled")
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "automatic retry cancelled"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color "automatic retry cancelled")
             if pending.pendingExitAfter
                 then pure RunQuit
                 else replWithDraft env pending.pendingPromptText
         else do
-            putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "retrying turn"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color (glyphOk <> "retrying turn"))
             runPendingTurnWithCooldownRetry False env pending
 
 reportProviderUnavailable :: ApiError -> IO ()
@@ -1226,11 +1345,10 @@ replWithDraft env@SessionEnv
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
+    , sessionFullscreen = fullscreen
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
-    when terminal.terminalSemanticPrompts $
-        emitTerminalSequence terminal stdout osc133PromptStart
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -1239,54 +1357,65 @@ replWithDraft env@SessionEnv
     policy <- readIORef policyRef
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
-    termCols <- fmap snd <$> getTerminalSize
-    case agentViewport of
-        Nothing -> pure ()
-        Just viewport -> do
-            entries <- viewport.viewportEntries
-            selected <- readIORef viewport.viewportSelected
-            let panel =
-                    renderAgentViewportPanelFor
-                        stdoutColor
-                        (fromMaybe 100 termCols)
-                        selected
-                        entries
-            when (not (Text.null panel)) (Text.putStrLn panel)
-    -- Status sits on the line above λ; the inline editor owns the prompt and
-    -- any live completion rows below it.
-    -- Token totals sit on the right of that line when the TTY width is known.
     usage <- readIORef usageRef
-    withSynchronizedOutput terminal stdout do
-        Text.putStrLn $ formatReplStatusLine stdoutColor termCols
-            (currentModel params)
-            (currentEffort params)
-            idleMode
-            usage
-        hFlush stdout
-    -- Solarized user wash under the prompt; the inline editor redraws it.
-    -- Ctrl+U keeps the familiar kill-to-start behavior.
-    let modeTag
-            | planActive = roleWarn stdoutColor "[plan] "
-            | planPending = roleMuted stdoutColor "[plan…] "
-            | idleMode == ReplModeAlwaysApprove =
-                roleSuccess stdoutColor "[yolo] "
-            | otherwise = ""
-        chromePrompt =
-            beginBackground stdoutColor userBackground
-                <> modeTag
-                <> if null pendingAttachments
-                    then ""
-                    else roleMuted stdoutColor
-                        ("[📎 " <> Text.pack (show (length pendingAttachments)) <> "] ")
-                <> rolePrompt stdoutColor "λ "
-                <> if stdoutColor
-                    then Text.pack clearFromCursorToLineEndCode
-                    else mempty
-    mline <- readReplLineWithInitial interrupt chromePrompt draft
-    when terminal.terminalSemanticPrompts $
-        emitTerminalSequence terminal stdout osc133PromptEnd
-    Text.putStr (endBackground stdoutColor)
-    hFlush stdout
+    mline <- case fullscreen of
+        Just runtime ->
+            readFullscreenLine runtime
+                PromptState
+                    { promptModel = currentModel params
+                    , promptEffort = currentEffort params
+                    , promptMode = idleMode
+                    , promptUsage = usage
+                    , promptAttachments = length pendingAttachments
+                    }
+                draft
+        Nothing -> do
+            when terminal.terminalSemanticPrompts $
+                emitTerminalSequence terminal stdout osc133PromptStart
+            termCols <- fmap snd <$> getTerminalSize
+            case agentViewport of
+                Nothing -> pure ()
+                Just viewport -> do
+                    entries <- viewport.viewportEntries
+                    selected <- readIORef viewport.viewportSelected
+                    let panel =
+                            renderAgentViewportPanelFor
+                                stdoutColor
+                                (fromMaybe 100 termCols)
+                                selected
+                                entries
+                    when (not (Text.null panel)) (Text.putStrLn panel)
+            -- Status sits on the line above λ in minimal mode.
+            withSynchronizedOutput terminal stdout do
+                Text.putStrLn $ formatReplStatusLine stdoutColor termCols
+                    (currentModel params)
+                    (currentEffort params)
+                    idleMode
+                    usage
+                hFlush stdout
+            let modeTag
+                    | planActive = roleWarn stdoutColor "[plan] "
+                    | planPending = roleMuted stdoutColor "[plan…] "
+                    | idleMode == ReplModeAlwaysApprove =
+                        roleSuccess stdoutColor "[yolo] "
+                    | otherwise = ""
+                chromePrompt =
+                    beginBackground stdoutColor userBackground
+                        <> modeTag
+                        <> if null pendingAttachments
+                            then ""
+                            else roleMuted stdoutColor
+                                ("[📎 " <> Text.pack (show (length pendingAttachments)) <> "] ")
+                        <> rolePrompt stdoutColor "λ "
+                        <> if stdoutColor
+                            then Text.pack clearFromCursorToLineEndCode
+                            else mempty
+            result <- readReplLineWithInitial interrupt chromePrompt draft
+            when terminal.terminalSemanticPrompts $
+                emitTerminalSequence terminal stdout osc133PromptEnd
+            Text.putStr (endBackground stdoutColor)
+            hFlush stdout
+            pure result
     case mline of
         ReplEof -> do
             putStrLn ""
@@ -1298,10 +1427,12 @@ replWithDraft env@SessionEnv
         ReplCycleMode keptDraft -> do
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
-            -- The editor advanced a line; walk back over the previous status
-            -- + prompt so the next chrome replaces them.
-            putStr "\ESC[2A\r\ESC[J"
-            hFlush stdout
+            case fullscreen of
+                Just _ -> pure ()
+                Nothing -> do
+                    -- Minimal editor advanced a line; replace its old chrome.
+                    putStr "\ESC[2A\r\ESC[J"
+                    hFlush stdout
             continueWith keptDraft
         ReplClipboardPaste keptDraft -> do
             errColor <- resolveColor stderr
@@ -1391,6 +1522,8 @@ replWithDraft env@SessionEnv
                                         Text.putStrLn
                                             (roleMuted color (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
+                                        fullscreenEvent
+                                            (UiUserSubmitted promptText)
                                         let turnInputs =
                                                 [ UserMultimodal
                                                     { userText = promptText
@@ -1406,20 +1539,29 @@ replWithDraft env@SessionEnv
                     ReplShowAttachments -> do
                         pending <- readIORef attachmentsRef
                         color <- resolveColor stdout
-                        if null pending
-                            then Text.putStrLn (roleMuted color (glyphSession <> "attachments: (none)"))
-                            else Text.putStrLn $ roleMuted color $
-                                glyphSession
-                                    <> "attachments: "
-                                    <> Text.intercalate ", "
-                                        [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                                        | img <- pending
-                                        ]
+                        let message =
+                                if null pending
+                                    then "attachments: (none)"
+                                    else "attachments: "
+                                        <> Text.intercalate ", "
+                                            [ img.imageMime
+                                                <> " ("
+                                                <> formatImageSize
+                                                    (BS.length img.imageBytes)
+                                                <> ")"
+                                            | img <- pending
+                                            ]
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
                         continue
                     ReplClearAttachments -> do
                         writeIORef attachmentsRef []
                         color <- resolveColor stdout
-                        Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
+                        displayInfo "attachments cleared" $
+                            Text.putStrLn
+                                (roleMuted color
+                                    (glyphOk <> "attachments cleared"))
                         continue
                     ReplAgents -> do
                         case agentViewport of
@@ -1428,7 +1570,8 @@ replWithDraft env@SessionEnv
                                 entries <- viewport.viewportEntries
                                 selected <- readIORef viewport.viewportSelected
                                 color <- resolveColor stderr
-                                pickAgentViewport color selected entries >>= \case
+                                legacy
+                                    (pickAgentViewport color selected entries) >>= \case
                                     Nothing -> pure ()
                                     Just target ->
                                         writeIORef viewport.viewportSelected target
@@ -1464,19 +1607,25 @@ replWithDraft env@SessionEnv
                             sessionId
                         continue
                     ReplShowTerminal -> do
-                        Text.putStrLn
-                            (roleMuted color
-                                (formatTerminalCapabilities terminal))
+                        let message = formatTerminalCapabilities terminal
+                        displayInfo message $
+                            Text.putStrLn (roleMuted color message)
                         continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
-                        Text.putStrLn (roleMuted color (glyphSession <> "effort: " <> currentEffort params))
+                        let message = "effort: " <> currentEffort params
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
                         continue
                     ReplSetEffort level -> do
                         color <- resolveColor stdout
                         modifyIORef' paramsRef (setReasoningEffort level)
-                        Text.putStrLn (roleMuted color (glyphOk <> "effort set to " <> level))
+                        displayInfo ("effort set to " <> level) $
+                            Text.putStrLn
+                                (roleMuted color
+                                    (glyphOk <> "effort set to " <> level))
                         case persist of
                             PersistenceDisabled -> pure ()
                             PersistenceEnabled slotRef -> do
@@ -1495,7 +1644,7 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         params <- readIORef paramsRef
                         let current = currentModel params
-                        pickModel color provider current >>= \case
+                        modelChoice fullscreen color provider current >>= \case
                             Nothing -> continue
                             Just choice
                                 | choice.modelProvider == provider
@@ -1535,6 +1684,9 @@ replWithDraft env@SessionEnv
                             Right outcome -> do
                                 writeIORef transcriptRef outcome.compactHistory
                                 writeIORef previous Nothing
+                                fullscreenEvent UiConversationCleared
+                                fullscreenEvent
+                                    (UiSystemMessage outcome.compactSummary)
                                 Text.hPutStrLn stderr $ roleMuted color $
                                     glyphSession
                                         <> "compacted "
@@ -1576,14 +1728,15 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stdout
                         putTextLn stdout
                             (roleMuted color (glyphSession <> "btw · asking…"))
-                        result <- runBtwWithCancel
-                            (\cancel action ->
-                                withTurnCancel interrupt cancel $
-                                    withEscCancel cancel escPaused action)
-                            btwBackend
-                            paramsRef
-                            transcriptRef
-                            question
+                        result <- legacy $
+                            runBtwWithCancel
+                                (\cancel action ->
+                                    withTurnCancel interrupt cancel $
+                                        withEscCancel cancel escPaused action)
+                                btwBackend
+                                paramsRef
+                                transcriptRef
+                                question
                         case result of
                             Left err -> do
                                 errorColor <- resolveColor stderr
@@ -1593,11 +1746,12 @@ replWithDraft env@SessionEnv
                                 putTextLn stdout (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
-                        handleResume maybeId persist >>= \case
+                        legacy (handleResume maybeId persist) >>= \case
                             Nothing -> continue
                             Just result -> pure result
                     ReplClear -> do
                         sessionReset
+                        fullscreenEvent UiConversationCleared
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled ->
@@ -1641,6 +1795,7 @@ replWithDraft env@SessionEnv
                         continue
                     ReplNew -> do
                         sessionReset
+                        fullscreenEvent UiConversationCleared
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled -> do
@@ -1710,18 +1865,27 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stdout
                         case persist of
                             PersistenceDisabled ->
-                                Text.putStrLn (roleMuted color "session: (not persisted)")
+                                displayInfo "session: (not persisted)" $
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            "session: (not persisted)")
                             PersistenceEnabled slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
                                     PersistencePending _ ->
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                "session: (pending until first turn)")
+                                        displayInfo
+                                            "session: (pending until first turn)" $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    "session: (pending until first turn)")
                                     PersistenceActive handle ->
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+                                        let message =
+                                                "session: "
+                                                    <> handle.sessionMeta.metaId
+                                        in displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphSession <> message))
                         continue
                     ReplRename title -> do
                         color <- resolveColor stderr
@@ -1797,25 +1961,99 @@ replWithDraft env@SessionEnv
                         continue
                     ReplLogin -> do
                         color <- resolveColor stderr
-                        runLoginManager color
+                        legacy (runLoginManager color)
                         continue
                     ReplUsage -> do
-                        showAccountUsage provider tokenProvider openAiPool
+                        legacy
+                            (showAccountUsage
+                                provider tokenProvider openAiPool)
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
                         continue
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
-                        Text.putStrLn (formatSlashHelp color maybeName)
+                        displayInfo (formatSlashHelp False maybeName) $
+                            Text.putStrLn
+                                (formatSlashHelp color maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
-                        Text.hPutStrLn stderr (roleError color err)
+                        displayError err $
+                            Text.hPutStrLn stderr (roleError color err)
                         continue
     continue = continueWith ""
     continueWith keptDraft =
         replWithDraft env keptDraft
+    legacy action = case fullscreen of
+        Nothing -> action
+        Just runtime -> withFullscreenSuspended runtime action
+    fullscreenEvent event = case fullscreen of
+        Nothing -> pure ()
+        Just runtime -> emitUiEvent runtime event
+    displayInfo message minimalAction = case fullscreen of
+        Nothing -> minimalAction
+        Just runtime -> emitUiEvent runtime (UiSystemMessage message)
+    displayError message minimalAction = case fullscreen of
+        Nothing -> minimalAction
+        Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+
+modelChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> Provider
+    -> Text
+    -> IO (Maybe ModelOption)
+modelChoice fullscreen color provider current = case fullscreen of
+    Nothing -> pickModel color provider current
+    Just runtime -> do
+        let picker = initialPickerState provider current
+            options = picker.pickerAll
+            rows =
+                [ ( providerSlug option.modelProvider
+                        <> " · "
+                        <> option.modelId
+                  , fromMaybe "" option.modelLabel
+                  )
+                | option <- options
+                ]
+        requestFullscreenChoice
+            runtime
+            "Model"
+            picker.pickerIndex
+            rows
+            >>= \case
+                Just index
+                    | index >= 0
+                    , index < length options ->
+                        pure (Just (options !! index))
+                _ -> pure Nothing
+
+fullscreenAwarePlanHooks
+    :: IORef (Maybe FullscreenRuntime)
+    -> PlanModeHooks
+    -> PlanModeHooks
+fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
+    { planConfirmEnter = \reason ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planConfirmEnter reason)
+    , planDecideExit = \planBody ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planDecideExit planBody)
+    , planAskQuestion = \question options ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planAskQuestion question options)
+    }
+
+withCurrentFullscreen
+    :: IORef (Maybe FullscreenRuntime)
+    -> IO a
+    -> IO a
+withCurrentFullscreen runtimeRef action = do
+    runtime <- readIORef runtimeRef
+    case runtime of
+        Nothing -> action
+        Just active -> withFullscreenSuspended active action
 
 showAccountUsage
     :: Provider
@@ -2181,7 +2419,12 @@ requestReload persist = do
             pure RunReload
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
-enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = persist, sessionPrinted = printed} maybeDescription = do
+enterPlanFromSlash env@SessionEnv
+    { sessionPlanMode = planMode
+    , sessionPersist = persist
+    , sessionPrinted = printed
+    , sessionFullscreen = fullscreen
+    } maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     case persist of
@@ -2206,6 +2449,10 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
             putTextLn stderr
                 (roleMuted color (glyphSession <> "plan mode on (" <> toText path <> ")"))
             writeIORef printed False
+            case fullscreen of
+                Nothing -> pure ()
+                Just runtime ->
+                    emitUiEvent runtime (UiUserSubmitted description)
             let planEnv = env { sessionStoreRoot = discardStore }
                 inputs = [UserMessage description]
             result <- runOneTurn planEnv description inputs
@@ -2391,8 +2638,8 @@ currentSessionId = \case
             PersistencePending _ -> Nothing
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
--- | Serialize OpenAI WebSocket turns: parent and children share one connection,
--- and 'receiveWsResponse' is not multiplexed.
+-- | Serialize turns on the root OpenAI WebSocket connection because
+-- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
     :: MVar ()
     -> TokenProvider
@@ -2400,12 +2647,16 @@ lockedOpenAiBackend
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript =
+lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
+        contextTokens =
     let Backend submit =
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
-    in Backend \previous inputs onEvent ->
-        withMVar wsLock \_ -> submit previous inputs onEvent
+        serialized = Backend \previous inputs onEvent ->
+            withMVar wsLock \_ -> submit previous inputs onEvent
+    in autoCompactOpenAiBackend provider
+        getParams transcript contextTokens serialized
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
@@ -2420,6 +2671,23 @@ resetLiveConversation previous transcriptRef attachmentsRef planMode = do
     writeIORef attachmentsRef []
     deactivatePlanMode planMode
 
+detectGitBranch :: OsPath -> IO Text
+detectGitBranch cwd = do
+    result <-
+        (try $
+            readProcessWithExitCode
+                "git"
+                ["-C", toFilePath cwd, "rev-parse", "--abbrev-ref", "HEAD"]
+                "")
+            :: IO (Either SomeException (ExitCode, String, String))
+    pure $ case result of
+        Right (ExitSuccess, output, _) ->
+            let branch = Text.strip (Text.pack output)
+            in if Text.null branch
+                then toText (takeFileName cwd)
+                else branch
+        _ -> toText (takeFileName cwd)
+
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
 foldSessionItems = go []
@@ -2430,4 +2698,36 @@ foldSessionItems = go []
             -- /clear and /new store an empty snapshot; /compact stores the
             -- rebuilt history. Either way, turnItems replaces prior history.
             go turn.turnItems rest
+        | hasCompactionCheckpoint turn.turnItems =
+            go turn.turnItems rest
         | otherwise = go (acc <> turn.turnItems) rest
+
+hydrateUiHistory :: [SessionTurn] -> UiState
+hydrateUiHistory = foldl addTurn initialUiState
+  where
+    addTurn state turn
+        | isTranscriptResetTurn turn.turnUserText =
+            addResetTurn state turn
+        | otherwise =
+            addRegularTurn state turn
+
+    addResetTurn state turn =
+        let cleared = reduceUi UiConversationCleared state
+        in case turn.turnAssistantText of
+            Nothing -> cleared
+            Just text -> reduceUi (UiSystemMessage text) cleared
+
+    addRegularTurn state turn =
+        let withUser =
+                if Text.null (Text.strip turn.turnUserText)
+                    then state
+                    else reduceUi
+                        (UiUserSubmitted turn.turnUserText)
+                        state
+            withAssistant = case turn.turnAssistantText of
+                Nothing -> withUser
+                Just text ->
+                    reduceUi (UiAssistantHistory text) withUser
+        in case turn.turnError of
+            Nothing -> withAssistant
+            Just err -> reduceUi (UiErrorMessage err) withAssistant

@@ -106,6 +106,14 @@ spec = do
                     , optAgentsMd = True
                     })
 
+        it "parses fullscreen and minimal rendering modes" do
+            parseArgs ["--fullscreen"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optScreenMode = ScreenFullscreen })
+            parseArgs ["--fullscreen", "--minimal"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optScreenMode = ScreenMinimal })
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False False

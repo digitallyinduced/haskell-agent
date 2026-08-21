@@ -14,6 +14,7 @@ module Agent.CLI.Subagents.Runtime
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
+import Agent.CLI.Compaction (autoCompactOpenAiBackend)
 import Agent.CLI.Options
     ( ApprovalPolicy
     , CliOptions(..)
@@ -101,6 +102,7 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
+    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
@@ -248,9 +250,11 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                             }
                                     Nothing -> pure ()
                                 transcript <- newIORef items
+                                contextTokens <- newIORef Nothing
                                 let session =
                                         SubagentSession
                                             { subSessionTranscript = transcript
+                                            , subSessionContextTokens = contextTokens
                                             }
                                 atomicModifyIORef' sessionsRef \m ->
                                     (Map.insert agentId session m, ())
@@ -371,9 +375,15 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     (schemasFromAppTools OpenAIProvider tools) effort
             toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
-            let backend =
+            let baseBackend =
                     freshOpenAiBackend tokenProvider
                         (readIORef childParamsRef) session.subSessionTranscript
+                backend =
+                    autoCompactOpenAiBackend tokenProvider
+                        (readIORef childParamsRef)
+                        session.subSessionTranscript
+                        session.subSessionContextTokens
+                        baseBackend
                 config = LoopConfig
                     { loopBackend = backend
                     , loopTools = toolRegistry
@@ -543,6 +553,7 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
                     Right (Just (xs, m)) -> (xs, Just m)
                     _ -> ([], Nothing)
             transcript <- newIORef items
+            contextTokens <- newIORef Nothing
             case meta >>= (.diskAgentType) of
                 Just agentType ->
                     recordAgentSpec typesRef agentId GrokSubagentSpec
@@ -552,6 +563,9 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
                             meta >>= (.diskReasoningEffort)
                         }
                 Nothing -> pure ()
-            let session = SubagentSession { subSessionTranscript = transcript }
+            let session = SubagentSession
+                    { subSessionTranscript = transcript
+                    , subSessionContextTokens = contextTokens
+                    }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
             pure session
