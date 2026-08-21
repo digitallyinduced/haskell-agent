@@ -21,6 +21,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardImages
     , readClipboardImages
     )
+import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
@@ -45,7 +46,10 @@ import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
-import Agent.TUI.Markdown (markdownWidget)
+import Agent.TUI.Markdown
+    ( markdownWidget
+    , markdownWidgetWithCodeControls
+    )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..))
@@ -106,7 +110,12 @@ data Name
     | ConversationReserve
     | OverlayViewport
     | ConversationBlock !BlockId
-    | ConversationBlockCache !BlockId !Bool !Bool
+    | ConversationBlockCache
+        !BlockId
+        !Bool
+        !Bool
+        !(Maybe (Int, Bool))
+    | CodeCopy !BlockId !Int
     | ComposerArea
     | ComposerCursor
     | ComposerModel
@@ -756,6 +765,8 @@ activateControl = \case
         handlePromptControlClick ReplCycleMode
     ChoiceRow index ->
         confirmChoiceAt index
+    CodeCopy blockId codeIndex ->
+        copyCodeBlock blockId codeIndex
     _ ->
         pure ()
 
@@ -765,7 +776,42 @@ isInteractiveControl = \case
     ComposerEffort -> True
     ComposerMode -> True
     ChoiceRow _ -> True
+    CodeCopy _ _ -> True
     _ -> False
+
+copyCodeBlock :: BlockId -> Int -> EventM Name AppState ()
+copyCodeBlock blockId codeIndex = do
+    state <- get
+    let code =
+            selectedBlock state.appUi blockId
+                >>= fencedCodeBlock codeIndex . (.blockBody)
+    case code of
+        Nothing ->
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetNotice
+                                (Just
+                                    (warningNotice
+                                        "Code block is no longer available.")))
+                            current.appUi
+                    }
+        Just payload -> do
+            copied <- liftIO (state.appRuntime.runtimeCopy payload)
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetNotice
+                                (Just
+                                    (if copied
+                                        then successNotice
+                                            "Copied code block."
+                                        else warningNotice
+                                            "Terminal clipboard is unavailable.")))
+                            current.appUi
+                    }
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -919,10 +965,7 @@ drawWorkspace state =
         hBox $
             [ withVScrollBars OnRight $
                 viewport ConversationViewport Vertical $
-                    padLeftRight 2
-                        (drawTranscript
-                            state.appUi
-                            state.appConversationAnchor)
+                    padLeftRight 2 (drawTranscript state)
             ]
                 <> if length state.appAgentEntries <= 1
                     then []
@@ -1049,11 +1092,8 @@ spinnerFrame frame =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         !! (frame `mod` 10)
 
-drawTranscript
-    :: UiState
-    -> Maybe Scroll.ConversationAnchor
-    -> Widget Name
-drawTranscript state anchor
+drawTranscript :: AppState -> Widget Name
+drawTranscript state
     | null blocks =
         withAttr Theme.mutedAttr $
             padTop (Pad 2) $
@@ -1063,7 +1103,8 @@ drawTranscript state anchor
             [vBox (map (drawBlock state) blocks)]
                 <> conversationReserveWidgets anchor
   where
-    blocks = toList state.uiBlocks
+    blocks = toList state.appUi.uiBlocks
+    anchor = state.appConversationAnchor
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
@@ -1103,10 +1144,11 @@ conversationReserveWidgets = \case
             ]
     _ -> []
 
-drawBlock :: UiState -> UiBlock -> Widget Name
+drawBlock :: AppState -> UiBlock -> Widget Name
 drawBlock state block =
-    let selected = state.uiSelectedBlock == Just block.blockId
-        highlighted = selected && state.uiFocus == FocusScrollback
+    let ui = state.appUi
+        selected = ui.uiSelectedBlock == Just block.blockId
+        highlighted = selected && ui.uiFocus == FocusScrollback
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
@@ -1114,22 +1156,24 @@ drawBlock state block =
             BlockAssistant ->
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
-                        (markdownWidget block.blockBody)
+                        (markdownWidgetWithCodeControls
+                            (codeBlockHeader state block.blockId)
+                            block.blockBody)
             BlockThinking ->
                 accentBlock Theme.thinkingAttr
-                    (blockStateGlyph state block <> block.blockTitle)
+                    (blockStateGlyph ui block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
                 accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockShell ->
                 accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleShellBody block)
             BlockEdit ->
                 accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
                 withAttr Theme.mutedAttr (txtWrap block.blockBody)
@@ -1155,9 +1199,37 @@ drawBlock state block =
             (ConversationBlockCache
                 block.blockId
                 highlighted
-                block.blockExpanded)
+                block.blockExpanded
+                (codeCopyCacheState state block.blockId))
             rendered
         else rendered
+
+codeBlockHeader :: AppState -> BlockId -> Int -> Text -> Widget Name
+codeBlockHeader state blockId codeIndex language =
+    hBox
+        [ if Text.null language
+            then emptyWidget
+            else withAttr Theme.mutedAttr (txt language)
+        , vLimit 1 (fill ' ')
+        , clickable name $
+            withAttr
+                (controlAttr state name Theme.controlLinkAttr)
+                (txt " Copy ")
+        ]
+  where
+    name = CodeCopy blockId codeIndex
+
+codeCopyCacheState :: AppState -> BlockId -> Maybe (Int, Bool)
+codeCopyCacheState state blockId =
+    case state.appHoveredControl of
+        Just (CodeCopy hoveredBlock codeIndex)
+            | hoveredBlock == blockId ->
+                Just
+                    ( codeIndex
+                    , state.appPressedControl
+                        == Just (CodeCopy blockId codeIndex)
+                    )
+        _ -> Nothing
 
 cacheableBlock :: UiBlock -> Bool
 cacheableBlock block =
@@ -1775,6 +1847,8 @@ handleEvent event = case event of
                         handleControlMouseDown ComposerEffort
                     (ComposerMode, V.BLeft) ->
                         handleControlMouseDown ComposerMode
+                    (CodeCopy blockId codeIndex, V.BLeft) ->
+                        handleControlMouseDown (CodeCopy blockId codeIndex)
                     (SlashRow index, V.BLeft) ->
                         activateSlashAt index
                     (SlashRow _, V.BScrollUp) ->

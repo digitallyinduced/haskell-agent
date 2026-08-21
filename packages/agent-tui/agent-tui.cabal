@@ -54,5 +54,6 @@ test-suite agent-tui-test
     build-depends:    agent-tui
                     , agent-core
                     , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
                     , hspec >= 2.11 && < 2.12
                     , text

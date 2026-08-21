@@ -16,8 +16,8 @@ fencedBlocks = go . Text.lines
     go (line:rest) =
         case fenceStart line of
             Nothing -> go rest
-            Just language ->
-                let (body, remaining) = break isFenceEnd rest
+            Just (marker, language) ->
+                let (body, remaining) = break (isFenceEnd marker) rest
                     after = case remaining of
                         [] -> []
                         (_:xs) -> xs
@@ -25,11 +25,20 @@ fencedBlocks = go . Text.lines
 
     fenceStart line =
         let stripped = Text.stripStart line
+            opening marker =
+                Just
+                    ( marker
+                    , Text.toLower (Text.strip (Text.drop 3 stripped))
+                    )
         in if "```" `Text.isPrefixOf` stripped
-            then Just (Text.toLower (Text.strip (Text.drop 3 stripped)))
-            else Nothing
+            then opening '`'
+            else if "~~~" `Text.isPrefixOf` stripped
+                then opening '~'
+                else Nothing
 
-    isFenceEnd line = "```" `Text.isPrefixOf` Text.stripStart line
+    isFenceEnd marker line =
+        Text.replicate 3 (Text.singleton marker)
+            `Text.isPrefixOf` Text.stripStart line
 
 fencedCodeBlock :: Int -> Text -> Maybe Text
 fencedCodeBlock index text
