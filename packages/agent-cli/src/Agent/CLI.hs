@@ -26,7 +26,8 @@ import Agent.CLI.AgentViewport
     , responseItemPreviewLines
     )
 import Agent.CLI.SessionTitle
-    ( invalidateSessionTitles
+    ( SessionTitleResult(..)
+    , invalidateSessionTitles
     , requestSessionTitle
     , waitForSessionTitleResults
     , withSessionTitleManager
@@ -1217,17 +1218,31 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
-  withSessionTitleManager btwBackend paramsRef \titleManager -> do
-    let fullscreen = startup.startupFullscreen
-        terminal = startup.startupTerminal
-        useColor = startup.startupUseColor
-        stderrTty = startup.startupStderrTty
-        stdoutTty = startup.startupStdoutTty
-        setWindowTitle title =
-            case fullscreen of
-                Just runtime -> setFullscreenWindowTitle runtime title
-                Nothing -> setCliWindowTitle stdoutTty stdout title
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+  ioLock <- newMVar ()
+  let fullscreen = startup.startupFullscreen
+      terminal = startup.startupTerminal
+      useColor = startup.startupUseColor
+      stderrTty = startup.startupStderrTty
+      stdoutTty = startup.startupStdoutTty
+      setWindowTitle title =
+          case fullscreen of
+              Just runtime -> setFullscreenWindowTitle runtime title
+              Nothing -> setCliWindowTitle stdoutTty stdout title
+      showGeneratedTitle SessionTitleResult{..} =
+          case persist of
+              PersistenceDisabled -> pure ()
+              PersistenceEnabled slotRef ->
+                  readIORef slotRef >>= \case
+                      PersistenceActive handle
+                          | handle.sessionMeta.metaId == resultSessionId
+                          , not handle.sessionMeta.metaTitleIsManual ->
+                              withMVar ioLock \_ ->
+                                  setWindowTitle
+                                      (cliWindowTitle handle.sessionMeta.metaCwd
+                                          (Just resultTitle))
+                      _ -> pure ()
+  withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -1246,7 +1261,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     restartEffortRef <- newIORef Nothing
-    ioLock <- newMVar ()
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
