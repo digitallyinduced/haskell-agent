@@ -1371,20 +1371,20 @@ drawComposer appState =
                 else hBox
                     (txt " " : intersperse (txt " · ") labelWidgets <> [txt " "])
         editor =
-            padLeftRight 1 $
-                hBox
-                    [ withAttr
-                        (if focused then Theme.borderActiveAttr else Theme.mutedAttr)
-                        (txt "❯ ")
-                    , withAttr Theme.assistantAttr (renderDraft focused state)
-                    , vLimit 1 (fill ' ')
-                    ]
+            clickable ComposerArea $
+                padLeftRight 1 $
+                    hBox
+                        [ withAttr
+                            (if focused then Theme.borderActiveAttr else Theme.mutedAttr)
+                            (txt "❯ ")
+                        , withAttr Theme.assistantAttr (renderDraft focused state)
+                        , vLimit 1 (fill ' ')
+                        ]
         composer =
             withBorderStyle unicodeRounded $
                 borderWithLabel (withAttr Theme.footerAttr label) $
                     editor
-    in clickable ComposerArea $
-        overrideAttr Border.borderAttr attr composer
+    in overrideAttr Border.borderAttr attr composer
   where
     state = appState.appUi
 
@@ -1815,6 +1815,11 @@ handleEvent event = case event of
         | isInteractiveControl name
         , button == Just V.BLeft || button == Nothing ->
             handleControlMouseUp name (activateControl name)
+    MouseUp _ Nothing _ ->
+        modify' \state ->
+            state
+                { appHoveredControl = Nothing
+                }
     VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
         modify' \state ->
             state
