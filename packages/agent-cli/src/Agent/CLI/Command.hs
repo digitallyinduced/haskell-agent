@@ -68,6 +68,7 @@ data ReplAction
       -- ^ Soft-reset live transcript; keep the same session id.
     | ReplNew
       -- ^ Start a fresh persisted session id with empty history.
+    | ReplUsage
     | ReplCommandError Text
     deriving (Eq, Show)
 
@@ -95,6 +96,7 @@ slashCommands =
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
+    , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
     , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials" False
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
     , cmd "attachments" [] "/attachments" "List queued clipboard images" False
@@ -183,6 +185,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplNew
                     else ReplCommandError "usage: /new"
+            "usage" ->
+                if null args
+                    then ReplUsage
+                    else ReplCommandError "usage: /usage"
             "reload-auth" ->
                 if null args
                     then ReplReloadAuth

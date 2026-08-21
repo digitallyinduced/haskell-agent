@@ -141,6 +141,10 @@ import Agent.CLI.Terminal
     )
 import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Usage
+    ( AccountUsageLine(..)
+    , formatUsageReport
+    )
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
 import Agent.Error (ApiError)
@@ -159,8 +163,10 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
+import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
 import Agent.OpenAI.Responses.Types
+import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
@@ -639,7 +645,7 @@ runAgent options transition = do
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                                     multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -678,7 +684,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -709,7 +715,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
                             multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
 
 preparePersistence
@@ -811,6 +817,7 @@ runSession
     -> OsPath
     -> OsPath
     -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
@@ -822,7 +829,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -947,6 +954,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionCwd = cwd
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
+            , sessionOpenAiPool = openAiPool
             , sessionAgentsContext = agentsContext
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
@@ -1029,6 +1037,7 @@ replWithDraft env@SessionEnv
     , sessionProjectRoot = projectRoot
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
+    , sessionOpenAiPool = openAiPool
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -1533,6 +1542,9 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         runLoginManager color
                         continue
+                    ReplUsage -> do
+                        showAccountUsage provider tokenProvider openAiPool
+                        continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
                         continue
@@ -1548,6 +1560,58 @@ replWithDraft env@SessionEnv
     continueWith keptDraft =
         replWithDraft env keptDraft
 
+showAccountUsage
+    :: Provider
+    -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
+    -> IO ()
+showAccountUsage provider tokenProvider openAiPool = do
+    color <- resolveColor stdout
+    now <- getCurrentTime
+    case provider of
+        OpenAIProvider ->
+            case openAiPool of
+                Just pool -> do
+                    snapshots <- OpenAI.snapshotAccounts pool
+                    lines_ <- mapM fetchSnapshot snapshots
+                    Text.putStrLn (formatUsageReport color now lines_)
+                Nothing ->
+                    case tokenProvider of
+                        Just provider_ ->
+                            getNextToken provider_ Nothing >>= \case
+                                Left err ->
+                                    Text.putStrLn
+                                        (roleError color
+                                            ("usage: " <> Text.pack (show err)))
+                                Right credential -> do
+                                    result <- fetchUsage
+                                        credential.accessToken credential.accountId
+                                    Text.putStrLn $
+                                        formatUsageReport color now
+                                            [ AccountUsageLine
+                                                { usageAccountId = credential.accountId
+                                                , usageCooldownUntil = Nothing
+                                                , usageResult = result
+                                                }
+                                            ]
+                        Nothing ->
+                            Text.putStrLn
+                                (roleMuted color "usage: no OpenAI credentials loaded")
+        _ ->
+            Text.putStrLn $
+                roleMuted color
+                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
+
+fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
+fetchSnapshot snapshot = do
+    result <- fetchUsage
+        snapshot.snapshotAuth.accessToken
+        snapshot.snapshotAuth.accountId
+    pure AccountUsageLine
+        { usageAccountId = snapshot.snapshotAuth.accountId
+        , usageCooldownUntil = snapshot.snapshotCooldownUntil
+        , usageResult = result
+        }
 copyMissing :: Text -> IO ()
 copyMissing message = do
     color <- resolveColor stderr
@@ -1561,7 +1625,6 @@ copyValue terminal label payload = do
         if copied
             then roleSuccess color (glyphOk <> "copied " <> label)
             else roleError color "terminal clipboard is unavailable"
-
 applyModelChange
     :: Provider
     -> Text

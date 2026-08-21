@@ -11,6 +11,7 @@ import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (SessionCreate, SessionHandle)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.OsPath (OsPath)
 import Agent.Provider (Provider, TokenProvider)
@@ -35,6 +36,7 @@ data SessionEnv = SessionEnv
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
     , sessionTokenProvider :: !(Maybe TokenProvider)
+    , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
     , sessionAgentsContext :: !(IORef (Maybe Text))
     , sessionEscPaused :: !(IORef Bool)
     , sessionAttachments :: !(IORef [ImageAttachment])

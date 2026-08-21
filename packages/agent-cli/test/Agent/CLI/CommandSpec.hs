@@ -85,6 +85,11 @@ spec = do
             parseReplLine "/compact focus auth"
                 `shouldBe` ReplCompact (Just "focus auth")
 
+        it "shows account usage without arguments" do
+            parseReplLine "/usage" `shouldBe` ReplUsage
+            parseReplLine "/usage extra"
+                `shouldBe` ReplCommandError "usage: /usage"
+
         it "pastes clipboard images with an optional caption" do
             parseReplLine "/paste"
                 `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }
@@ -196,6 +201,7 @@ spec = do
                     , "compact"
                     , "clear"
                     , "new"
+                    , "usage"
                     , "reload-auth"
                     , "paste"
                     , "attachments"
@@ -280,6 +286,7 @@ spec = do
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
+            listing `shouldSatisfy` ("/usage" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)

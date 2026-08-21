@@ -55,6 +55,8 @@ openAIOAuthClientId =
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
+    -- | Live OpenAI OAuth pool, when authentication uses one.
+    , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
 
 loadAuth :: Maybe Provider -> IO (Either String LoadedAuth)
@@ -113,6 +115,7 @@ loadBroker url requested = do
                             pure $ Right LoadedAuth
                                 { loadedProvider = actual
                                 , loadedTokenProvider = seeded
+                                , loadedOpenAiPool = Nothing
                                 }
 
 loadXai :: IO (Either String LoadedAuth)
@@ -126,6 +129,7 @@ loadXai = do
             pure $ Right LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadXaiCredential :: IO (Maybe Credential)
@@ -155,6 +159,7 @@ loadOpenRouter = do
             pure $ Right LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadOpenAi :: IO (Either String LoadedAuth)
@@ -185,6 +190,7 @@ loadOpenAi = do
                             , leaseId = Nothing
                             , provider = OpenAIProvider
                             }
+                        , loadedOpenAiPool = Nothing
                         }
                 Nothing -> case envOrFileState now fromEnvJson fileBytes of
                     Nothing -> pure (Left noAuthHint)
@@ -228,6 +234,7 @@ loadManagedOpenAI now metadata secret =
                     pure $ Right LoadedAuth
                         { loadedProvider = OpenAIProvider
                         , loadedTokenProvider = tokenProvider
+                        , loadedOpenAiPool = Just pool
                         }
         _ ->
             pure $ Right LoadedAuth
@@ -239,6 +246,7 @@ loadManagedOpenAI now metadata secret =
                         , leaseId = Nothing
                         , provider = OpenAIProvider
                         }
+                , loadedOpenAiPool = Nothing
                 }
 
 openAiPoolAuth
@@ -263,6 +271,7 @@ openAiPoolAuth persistRefresh filePath state = do
     pure $ Right LoadedAuth
         { loadedProvider = OpenAIProvider
         , loadedTokenProvider = tokenProvider
+        , loadedOpenAiPool = Just pool
         }
 
 loadManagedCredential
