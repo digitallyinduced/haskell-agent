@@ -1,6 +1,7 @@
 -- | Convert registered AppTools into Responses tool schemas.
 module Agent.CLI.Tools
-    ( lookupAppTool
+    ( requireToolRegistry
+    , lookupAppTool
     , schemasFromAppTools
     , webSearchTool
     ) where
@@ -15,6 +16,8 @@ import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
+    , ToolRegistry
+    , mkToolRegistry
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -22,6 +25,11 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (find, partition)
 import Data.Text (Text)
+import qualified Data.Text as Text
+
+requireToolRegistry :: [AppTool] -> IO ToolRegistry
+requireToolRegistry tools =
+    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name =
