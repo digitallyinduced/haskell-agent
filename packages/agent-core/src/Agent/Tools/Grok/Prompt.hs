@@ -9,11 +9,12 @@ module Agent.Tools.Grok.Prompt
     , grokSystemPrompt
     ) where
 
+import Agent.OsPath (OsPath, toText)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.FilePath (dropTrailingPathSeparator)
+import System.OsPath (dropTrailingPathSeparator)
 
 -- | Model-facing names for the grok-build tool kinds we currently advertise.
 data GrokPromptTools = GrokPromptTools
@@ -43,7 +44,7 @@ codingGrokPromptTools = GrokPromptTools
     , grokAskUser = "ask_user_question"
     }
 
-grokSystemPrompt :: GrokPromptTools -> FilePath -> Day -> Bool -> Text
+grokSystemPrompt :: GrokPromptTools -> OsPath -> Day -> Bool -> Text
 grokSystemPrompt tools cwd today isNonInteractive =
     Text.intercalate "\n\n"
         [ identity tools isNonInteractive
@@ -68,10 +69,10 @@ identity _ isNonInteractive =
         | otherwise =
             "an interactive CLI tool that helps users with software engineering tasks."
 
-environment :: FilePath -> Day -> Text
+environment :: OsPath -> Day -> Text
 environment cwd today =
     "<environment>\n\
-    \Working directory: " <> Text.pack (dropTrailingPathSeparator cwd) <> "\n\
+    \Working directory: " <> toText (dropTrailingPathSeparator cwd) <> "\n\
     \Today's date: " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "\n\
     \</environment>"
 

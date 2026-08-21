@@ -19,6 +19,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider
     ( AccountFailure(..)
     , Credential(..)
@@ -42,9 +43,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import System.Directory (doesFileExist, getHomeDirectory)
+import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
@@ -157,9 +158,12 @@ loadOpenAi = do
     fromEnvToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     fromEnvJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     home <- getHomeDirectory
-    let filePath = home </> ".codex" </> "auth.json"
+    let filePath =
+            home </> fromFilePath ".codex" </> fromFilePath "auth.json"
     fileExists <- doesFileExist filePath
-    fileBytes <- if fileExists then Just <$> LBS.readFile filePath else pure Nothing
+    fileBytes <- if fileExists
+        then Just <$> LBS.readFile (toFilePath filePath)
+        else pure Nothing
     now <- getCurrentTime
     case managed of
         Just (metadata, secret) ->
@@ -237,7 +241,7 @@ loadManagedOpenAI now metadata secret =
 
 openAiPoolAuth
     :: Bool
-    -> FilePath
+    -> OsPath
     -> OpenAI.AuthState
     -> IO (Either String LoadedAuth)
 openAiPoolAuth persistRefresh filePath state = do
@@ -347,10 +351,12 @@ loadGrokCredential = do
     fromJson <- lookupNonEmpty "GROK_AUTH_JSON"
     fromToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
-    let filePath = home </> ".grok" </> "auth.json"
+    let filePath =
+            home </> fromFilePath ".grok" </> fromFilePath "auth.json"
     fileExists <- doesFileExist filePath
     fileJson <- if fileExists
-        then Just . TextEncoding.decodeUtf8 . LBS.toStrict <$> LBS.readFile filePath
+        then Just . TextEncoding.decodeUtf8 . LBS.toStrict
+            <$> LBS.readFile (toFilePath filePath)
         else pure Nothing
     let token =
             (fromJson >>= grokCredentialFromAuthJson)
@@ -397,7 +403,8 @@ hasGrokAuth = do
     envJson <- lookupNonEmpty "GROK_AUTH_JSON"
     envToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
-    file <- doesFileExist (home </> ".grok" </> "auth.json")
+    file <- doesFileExist
+        (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
     managed <- hasManagedProvider XAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 
@@ -406,7 +413,8 @@ hasOpenAiAuth = do
     envJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     envToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     home <- getHomeDirectory
-    file <- doesFileExist (home </> ".codex" </> "auth.json")
+    file <- doesFileExist
+        (home </> fromFilePath ".codex" </> fromFilePath "auth.json")
     managed <- hasManagedProvider OpenAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 

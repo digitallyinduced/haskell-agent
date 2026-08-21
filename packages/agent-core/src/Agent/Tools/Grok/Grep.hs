@@ -1,5 +1,6 @@
 module Agent.Tools.Grok.Grep (grepTool) where
 
+import Agent.OsPath (OsPath, fromText, toFilePath, toText)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -93,7 +94,7 @@ grepDescription =
 
 runGrep :: ToolEnv -> GrepArgs -> IO (Either Text Text)
 runGrep env args = do
-    let searchRoot = maybe env.toolCwd Text.unpack args.path
+    let searchRoot = maybe env.toolCwd fromText args.path
     resolveUnderCwd env searchRoot >>= \case
         Left err -> pure (Left err)
         Right path -> findExecutable "rg" >>= \case
@@ -110,7 +111,7 @@ effectiveHeadLimit args = case args.outputMode of
     GrepContent -> min 2000 (fromMaybe 200 args.headLimit)
     _ -> min 10000 (fromMaybe 500 args.headLimit)
 
-runRipgrep :: FilePath -> FilePath -> GrepArgs -> IO (Either Text Text)
+runRipgrep :: FilePath -> OsPath -> GrepArgs -> IO (Either Text Text)
 runRipgrep rgPath path args = do
     let modeFlags = case args.outputMode of
             GrepContent -> ["--heading", "--with-filename", "--line-number"]
@@ -126,7 +127,7 @@ runRipgrep rgPath path args = do
             , ["-i" | args.caseInsensitive]
             , maybe [] (\t -> ["--type", Text.unpack t]) args.fileType
             , if args.multiline then ["-U", "--multiline-dotall"] else []
-            , ["--regexp", Text.unpack args.pattern, "--", path]
+            , ["--regexp", Text.unpack args.pattern, "--", toFilePath path]
             ]
     (code, stdout, stderr) <- readProcessWithExitCode rgPath rgArgs ""
     let raw = Text.pack stdout
@@ -139,7 +140,7 @@ runRipgrep rgPath path args = do
         ExitFailure _ ->
             pure $ Left $ Text.pack (if null stderr then stdout else stderr)
 
-formatGrepCard :: FilePath -> Text -> Int -> Text
+formatGrepCard :: OsPath -> Text -> Int -> Text
 formatGrepCard cwd raw limit
     | Text.null (Text.strip raw) = "No matches found."
     | otherwise =
@@ -153,7 +154,7 @@ formatGrepCard cwd raw limit
                         <> " lines; output truncated]"
                 | otherwise = ""
         in "<workspace_result workspace_path=\""
-            <> Text.pack cwd
+            <> toText cwd
             <> "\">\n"
             <> body
             <> footer

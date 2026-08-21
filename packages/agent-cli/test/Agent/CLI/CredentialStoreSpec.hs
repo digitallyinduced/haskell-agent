@@ -1,6 +1,7 @@
 module Agent.CLI.CredentialStoreSpec (spec) where
 
 import Agent.CLI.CredentialStore
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -25,16 +26,16 @@ spec =
                 upsertManagedCredential account secret `shouldReturn` Right ()
                 loadManagedCredentials `shouldReturn` Right [(account, secret)]
 
-                metadata <- LBS.readFile (managedCredentialsPath home)
-                secrets <- LBS.readFile (managedSecretsPath home)
+                metadata <- LBS.readFile (toFilePath (managedCredentialsPath home))
+                secrets <- LBS.readFile (toFilePath (managedSecretsPath home))
                 LBS.unpack metadata `shouldNotSatisfy` isInfixOf "super-secret"
                 LBS.unpack secrets `shouldSatisfy` isInfixOf "super-secret"
 
         it "writes private directories and files" $
             withTempHome \home -> do
                 upsertManagedCredential account secret `shouldReturn` Right ()
-                metadataStatus <- getFileStatus (managedCredentialsPath home)
-                secretStatus <- getFileStatus (managedSecretsPath home)
+                metadataStatus <- getFileStatus (toFilePath (managedCredentialsPath home))
+                secretStatus <- getFileStatus (toFilePath (managedSecretsPath home))
                 fileMode metadataStatus .&. 0o777 `shouldBe` 0o600
                 fileMode secretStatus .&. 0o777 `shouldBe` 0o600
 
@@ -67,7 +68,7 @@ secret = ManagedSecret
     , secretPayload = "super-secret"
     }
 
-withTempHome :: (FilePath -> IO a) -> IO a
+withTempHome :: (OsPath -> IO a) -> IO a
 withTempHome action =
     bracket create removePathForcibly \home ->
         bracket
@@ -78,7 +79,7 @@ withTempHome action =
             (\case
                 Just old -> setEnv "HOME" old
                 Nothing -> unsetEnv "HOME")
-            (\_ -> action home)
+            (\_ -> action (fromFilePath home))
   where
     create = do
         temporary <- getTemporaryDirectory

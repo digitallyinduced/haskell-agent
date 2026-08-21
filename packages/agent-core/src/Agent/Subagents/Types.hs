@@ -15,6 +15,7 @@ module Agent.Subagents.Types
 import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopError, LoopEvent, LoopResult)
+import Agent.OsPath (OsPath)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
 
@@ -65,7 +66,7 @@ data SubagentSpawnEnv = SubagentSpawnEnv
     { subId :: !SubagentId
     , subDepth :: !Int
     , subParentId :: !(Maybe SubagentId)
-    , subCwd :: !FilePath
+    , subCwd :: !OsPath
     , subCancel :: !CancelFlag
     }
 

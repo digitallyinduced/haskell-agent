@@ -2,6 +2,7 @@ module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Cancel (requestCancel, resetCancel)
 import Agent.Loop (defaultLoopDispatch)
+import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
@@ -151,7 +152,7 @@ spec = describe "Agent.Tools.Ghci" do
 
     it "ignores repository .ghci files" do
         withTempEnv \env -> do
-            writeFile (env.toolCwd </> ".ghci")
+            writeFile (toFilePath env.toolCwd </> ".ghci")
                 "let injectedByDotGhci = (99 :: Int)\n"
             bracket (newGhciSession env) closeGhciSession \ghci -> do
                 result <- evalGhci ghci "injectedByDotGhci" 10000
@@ -203,7 +204,7 @@ spec = describe "Agent.Tools.Ghci" do
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =
-    bracket acquire release \dir -> defaultToolEnv dir >>= action
+    bracket acquire release \dir -> defaultToolEnv (fromFilePath dir) >>= action
   where
     acquire = do
         tmp <- getTemporaryDirectory
@@ -217,7 +218,7 @@ withTempGhci action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-")
-        env <- defaultToolEnv dir
+        env <- defaultToolEnv (fromFilePath dir)
         ghci <- newGhciSession env
         pure (dir, ghci)
     release (dir, ghci) = do
@@ -231,7 +232,7 @@ withTempTools action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-tools-")
-        env <- defaultToolEnv dir
+        env <- defaultToolEnv (fromFilePath dir)
         session <- newGrokSession env
         ghci <- newGhciSession env
         plan <- newPlanModeEnv env.toolCwd Nothing

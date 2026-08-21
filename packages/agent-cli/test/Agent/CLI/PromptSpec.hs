@@ -1,6 +1,7 @@
 module Agent.CLI.PromptSpec (spec) where
 
 import Agent.CLI.Prompt
+import Agent.OsPath (fromFilePath)
 import Agent.Provider (Provider(..))
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
@@ -10,8 +11,8 @@ spec :: Spec
 spec = describe "systemPrompt" do
     it "names grok-build tools for xAI and Codex tools for OpenAI" do
         let day = fromGregorian 2026 8 19
-            grok = systemPrompt XAIProvider "/tmp/repo" day False
-            openai = systemPrompt OpenAIProvider "/tmp/repo" day False
+            grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") day False
+            openai = systemPrompt OpenAIProvider (fromFilePath "/tmp/repo") day False
         grok `shouldSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "search_replace"
         grok `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
@@ -32,24 +33,28 @@ spec = describe "systemPrompt" do
         openai `shouldNotSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "2026-08-19"
         grok `shouldSatisfy` Text.isInfixOf "/tmp/repo"
-        let openrouter = systemPrompt OpenRouterProvider "/tmp/repo" day False
+        let openrouter = systemPrompt OpenRouterProvider (fromFilePath "/tmp/repo") day False
         openrouter `shouldSatisfy` Text.isInfixOf "read_file"
         openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
 
     it "uses the autonomous identity for one-shot Grok sessions" do
-        let grok = systemPrompt XAIProvider "/tmp/repo" (fromGregorian 2026 8 19) True
+        let grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") (fromGregorian 2026 8 19) True
         grok `shouldSatisfy` Text.isInfixOf "no human operator"
 
     it "keeps OpenAI web-search references internal" do
-        let openai = systemPrompt OpenAIProvider "/tmp/repo" (fromGregorian 2026 8 19) False
+        let openai =
+                systemPrompt OpenAIProvider
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    False
         openai `shouldSatisfy` Text.isInfixOf "turn2search5"
         openai `shouldSatisfy` Text.isInfixOf "never expose internal reference IDs"
         openai `shouldSatisfy` Text.isInfixOf "descriptive Markdown links"
 
     it "tells grok and openai to prefer ghci for general-purpose scripting" do
         let day = fromGregorian 2026 8 19
-            grok = systemPrompt XAIProvider "/tmp/repo" day False
-            openai = systemPrompt OpenAIProvider "/tmp/repo" day False
+            grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") day False
+            openai = systemPrompt OpenAIProvider (fromFilePath "/tmp/repo") day False
         grok `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
         grok `shouldSatisfy` Text.isInfixOf "Time context:"
         openai `shouldSatisfy` Text.isInfixOf "Time context:"

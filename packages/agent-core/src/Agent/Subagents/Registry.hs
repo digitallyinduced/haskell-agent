@@ -42,6 +42,7 @@ import Agent.InterAgentMessage
     , plainInterAgentContent
     )
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
+import Agent.OsPath (OsPath)
 import Agent.Subagents.Format (isFinalStatus)
 import Agent.Subagents.Types
     ( RunSubagent
@@ -88,7 +89,7 @@ data SubagentRecord = SubagentRecord
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordTaskPath :: !TaskPath
-    , recordCwd :: !FilePath
+    , recordCwd :: !OsPath
     }
 
 data SubagentRegistry = SubagentRegistry
@@ -99,13 +100,13 @@ data SubagentRegistry = SubagentRegistry
     , registryRunRef :: !(IORef RunSubagent)
     , registryOnEvent :: !(SubagentId -> LoopEvent -> IO ())
     , registryOnCompleteRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
-    , registryCwd :: !FilePath
+    , registryCwd :: !OsPath
     , registryClosed :: !(TVar Bool)
     }
 
 newSubagentRegistry
     :: SubagentConfig
-    -> FilePath
+    -> OsPath
     -> RunSubagent
     -> (SubagentId -> LoopEvent -> IO ())
     -> IO SubagentRegistry
@@ -170,7 +171,7 @@ spawnSubagent registry =
 
 spawnSubagentWithCwd
     :: SubagentRegistry
-    -> FilePath
+    -> OsPath
     -> Maybe SubagentId
     -> Int
     -> Text
@@ -208,7 +209,7 @@ spawnSubagentAt registry =
 
 spawnSubagentAtWithCwd
     :: SubagentRegistry
-    -> FilePath
+    -> OsPath
     -> Maybe SubagentId
     -> TaskPath
     -> Int
@@ -526,7 +527,7 @@ restoreSubagent registry =
 
 restoreSubagentWithCwd
     :: SubagentRegistry
-    -> FilePath
+    -> OsPath
     -> SubagentId
     -> Maybe SubagentId
     -> Int
@@ -600,7 +601,7 @@ getPreviousResponseId registry agentId = atomically do
         Nothing -> pure Nothing
         Just record -> readTVar record.recordPreviousResponseId
 
-getSubagentCwd :: SubagentRegistry -> SubagentId -> IO (Maybe FilePath)
+getSubagentCwd :: SubagentRegistry -> SubagentId -> IO (Maybe OsPath)
 getSubagentCwd registry agentId = atomically do
     agents <- readTVar registry.registryAgents
     pure ((.recordCwd) <$> Map.lookup agentId agents)

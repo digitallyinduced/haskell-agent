@@ -8,6 +8,7 @@ module Agent.Tools.Codex
     ( codexTools
     ) where
 
+import Agent.OsPath (fromText)
 import Agent.ToolArgs
     ( objectArgs
     , optInt
@@ -126,7 +127,7 @@ runShell env args
         let timeoutMs = min 300000 (max 1 (fromMaybe 10000 args.timeoutMs))
         workdir <- case args.workdir of
             Nothing -> pure (Right env.toolCwd)
-            Just dir -> resolveUnderCwd env (Text.unpack dir)
+            Just dir -> resolveUnderCwd env (fromText dir)
         case workdir of
             Left err -> pure (Left err)
             Right dir -> do

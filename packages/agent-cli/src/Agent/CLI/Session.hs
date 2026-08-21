@@ -22,6 +22,7 @@ module Agent.CLI.Session
     ) where
 
 import Agent.Loop (TokenUsage(..))
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
@@ -41,7 +42,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Numeric (showHex)
-import System.Directory
+import System.Directory.OsPath
     ( createDirectory
     , createDirectoryIfMissing
     , doesDirectoryExist
@@ -50,39 +51,41 @@ import System.Directory
     , removeFile
     , renameFile
     )
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 import System.Posix.Files (setFileMode)
 
 sessionSchemaVersion :: Int
 sessionSchemaVersion = 1
 
 -- | @~/.haskell-agent/sessions@ given the user's home directory.
-sessionsRoot :: FilePath -> FilePath
-sessionsRoot home = home </> ".haskell-agent" </> "sessions"
+sessionsRoot :: OsPath -> OsPath
+sessionsRoot home =
+    home </> fromFilePath ".haskell-agent" </> fromFilePath "sessions"
 
 -- | Pointer written before a GHCi @:reload@ so @devMain@ can resume.
-devResumePointerPath :: FilePath -> FilePath
-devResumePointerPath home = home </> ".haskell-agent" </> "dev-resume"
+devResumePointerPath :: OsPath -> OsPath
+devResumePointerPath home =
+    home </> fromFilePath ".haskell-agent" </> fromFilePath "dev-resume"
 
-writeDevResumePointer :: FilePath -> Text -> IO ()
+writeDevResumePointer :: OsPath -> Text -> IO ()
 writeDevResumePointer home sessionId = do
-    let root = home </> ".haskell-agent"
+    let root = home </> fromFilePath ".haskell-agent"
         path = devResumePointerPath home
     ensurePrivateDir root
-    Text.writeFile path (sessionId <> "\n")
-    setFileMode path 0o600
+    Text.writeFile (toFilePath path) (sessionId <> "\n")
+    setFileMode (toFilePath path) 0o600
 
-readDevResumePointer :: FilePath -> IO (Maybe Text)
+readDevResumePointer :: OsPath -> IO (Maybe Text)
 readDevResumePointer home = do
     let path = devResumePointerPath home
     exists <- doesFileExist path
     if not exists
         then pure Nothing
         else do
-            raw <- Text.strip <$> Text.readFile path
+            raw <- Text.strip <$> Text.readFile (toFilePath path)
             pure (if Text.null raw then Nothing else Just raw)
 
-clearDevResumePointer :: FilePath -> IO ()
+clearDevResumePointer :: OsPath -> IO ()
 clearDevResumePointer home = do
     let path = devResumePointerPath home
     _ <- try @IOError (removeFile path)
@@ -95,7 +98,7 @@ data SessionMeta = SessionMeta
     , metaUpdatedAt :: !UTCTime
     , metaProvider :: !Provider
     , metaModel :: !Text
-    , metaCwd :: !FilePath
+    , metaCwd :: !OsPath
     , metaEffort :: !Text
     , metaTitle :: !Text
     , metaLastResponseId :: !(Maybe Text)
@@ -112,7 +115,7 @@ instance ToJSON SessionMeta where
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
         , "model" .= meta.metaModel
-        , "cwd" .= meta.metaCwd
+        , "cwd" .= toFilePath meta.metaCwd
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
         , "lastResponseId" .= meta.metaLastResponseId
@@ -134,7 +137,7 @@ instance FromJSON SessionMeta where
             <*> o .: "updatedAt"
             <*> pure provider
             <*> o .: "model"
-            <*> o .: "cwd"
+            <*> (fromFilePath <$> o .: "cwd")
             <*> o .: "effort"
             <*> o .: "title"
             <*> o .:? "lastResponseId"
@@ -175,18 +178,18 @@ instance FromJSON SessionTurn where
             <*> o .:? "usage"
 
 data SessionHandle = SessionHandle
-    { sessionDir :: !FilePath
-    , sessionMetaPath :: !FilePath
-    , sessionTranscriptPath :: !FilePath
+    { sessionDir :: !OsPath
+    , sessionMetaPath :: !OsPath
+    , sessionTranscriptPath :: !OsPath
     , sessionMeta :: !SessionMeta
     } deriving (Eq, Show)
 
 -- | Parameters for creating a session on the first persisted turn.
 data SessionCreate = SessionCreate
-    { createRoot :: !FilePath
+    { createRoot :: !OsPath
     , createProvider :: !Provider
     , createModel :: !Text
-    , createCwd :: !FilePath
+    , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
     } deriving (Eq, Show)
@@ -216,8 +219,8 @@ createSession spec = do
             }
         handle = SessionHandle
             { sessionDir = dir
-            , sessionMetaPath = dir </> "meta.json"
-            , sessionTranscriptPath = dir </> "transcript.jsonl"
+            , sessionMetaPath = dir </> fromFilePath "meta.json"
+            , sessionTranscriptPath = dir </> fromFilePath "transcript.jsonl"
             , sessionMeta = meta
             }
     writeSessionMeta handle.sessionMetaPath meta
@@ -238,8 +241,8 @@ appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurn handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
-    LBS.appendFile path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode path 0o600
+    LBS.appendFile (toFilePath path) (Aeson.encode turn <> "\n")
+    if existed then pure () else setFileMode (toFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -265,8 +268,8 @@ appendTurnKeepTitle :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurnKeepTitle handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
-    LBS.appendFile path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode path 0o600
+    LBS.appendFile (toFilePath path) (Aeson.encode turn <> "\n")
+    if existed then pure () else setFileMode (toFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -277,11 +280,11 @@ appendTurnKeepTitle handle turn = do
     pure handle { sessionMeta = meta }
 
 
-loadSession :: FilePath -> Text -> IO (Either String (SessionMeta, [SessionTurn]))
+loadSession :: OsPath -> Text -> IO (Either String (SessionMeta, [SessionTurn]))
 loadSession root sessionId = do
-    let dir = root </> Text.unpack sessionId
-        metaPath = dir </> "meta.json"
-        transcriptPath = dir </> "transcript.jsonl"
+    let dir = root </> fromFilePath (Text.unpack sessionId)
+        metaPath = dir </> fromFilePath "meta.json"
+        transcriptPath = dir </> fromFilePath "transcript.jsonl"
     exists <- doesDirectoryExist dir
     if not exists
         then pure (Left ("session not found: " <> Text.unpack sessionId))
@@ -301,7 +304,7 @@ loadSession root sessionId = do
                         turnsResult <- loadTranscript transcriptPath
                         pure ((meta,) <$> turnsResult)
 
-listSessions :: FilePath -> IO [SessionMeta]
+listSessions :: OsPath -> IO [SessionMeta]
 listSessions root = do
     exists <- doesDirectoryExist root
     if not exists
@@ -311,13 +314,13 @@ listSessions root = do
             metas <- mapM (readMetaQuiet root) names
             pure (sortOn (Down . (.metaUpdatedAt)) (catMaybes metas))
 
-writeSessionMeta :: FilePath -> SessionMeta -> IO ()
+writeSessionMeta :: OsPath -> SessionMeta -> IO ()
 writeSessionMeta path meta = do
-    let tmp = path <> ".tmp"
-    LBS.writeFile tmp (Aeson.encode meta)
-    setFileMode tmp 0o600
+    let tmp = path <> fromFilePath ".tmp"
+    LBS.writeFile (toFilePath tmp) (Aeson.encode meta)
+    setFileMode (toFilePath tmp) 0o600
     renameOrReplace tmp path
-    setFileMode path 0o600
+    setFileMode (toFilePath path) 0o600
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
@@ -351,7 +354,7 @@ shellSingleQuote :: String -> Text
 shellSingleQuote s =
     "'" <> Text.replace "'" "'\\''" (Text.pack s) <> "'"
 
-allocateSessionDir :: FilePath -> UTCTime -> IO (Text, FilePath)
+allocateSessionDir :: OsPath -> UTCTime -> IO (Text, OsPath)
 allocateSessionDir root now = go (0 :: Int)
   where
     day = formatTime defaultTimeLocale "%Y-%m-%d" now
@@ -361,12 +364,12 @@ allocateSessionDir root now = go (0 :: Int)
         | otherwise = do
             let hex = hex8 (start + fromIntegral attempt)
                 sessionId = Text.pack (day <> "-" <> hex)
-                dir = root </> Text.unpack sessionId
+                dir = root </> fromFilePath (Text.unpack sessionId)
             result <- try @IOError (createDirectory dir)
             case result of
                 Left _ -> go (attempt + 1)
                 Right () -> do
-                    setFileMode dir 0o700
+                    setFileMode (toFilePath dir) 0o700
                     pure (sessionId, dir)
 
 hex8 :: Integer -> String
@@ -374,19 +377,19 @@ hex8 n =
     let s = showHex (n `mod` 0x100000000) ""
     in replicate (8 - length s) '0' <> s
 
-ensurePrivateDir :: FilePath -> IO ()
+ensurePrivateDir :: OsPath -> IO ()
 ensurePrivateDir path = do
     createDirectoryIfMissing True path
-    _ <- try @IOError (setFileMode path 0o700)
+    _ <- try @IOError (setFileMode (toFilePath path) 0o700)
     pure ()
 
-loadTranscript :: FilePath -> IO (Either String [SessionTurn])
+loadTranscript :: OsPath -> IO (Either String [SessionTurn])
 loadTranscript path = do
     exists <- doesFileExist path
     if not exists
         then pure (Right [])
         else do
-            raw <- Text.readFile path
+            raw <- Text.readFile (toFilePath path)
             let linesOf = filter (not . Text.null) (Text.lines raw)
             pure (mapM decodeTurnLine linesOf)
 
@@ -396,20 +399,20 @@ decodeTurnLine line =
         Left err -> Left ("invalid transcript line: " <> err)
         Right turn -> Right turn
 
-decodeFileEither :: FromJSON a => FilePath -> IO (Either String a)
+decodeFileEither :: FromJSON a => OsPath -> IO (Either String a)
 decodeFileEither path = do
     exists <- doesFileExist path
     if not exists
-        then pure (Left ("missing file: " <> path))
+        then pure (Left ("missing file: " <> toFilePath path))
         else do
-            bytes <- LBS.readFile path
+            bytes <- LBS.readFile (toFilePath path)
             pure (case Aeson.eitherDecode' bytes of
-                Left err -> Left (path <> ": " <> err)
+                Left err -> Left (toFilePath path <> ": " <> err)
                 Right value -> Right value)
 
-readMetaQuiet :: FilePath -> FilePath -> IO (Maybe SessionMeta)
+readMetaQuiet :: OsPath -> OsPath -> IO (Maybe SessionMeta)
 readMetaQuiet root name = do
-    let path = root </> name </> "meta.json"
+    let path = root </> name </> fromFilePath "meta.json"
     result <- try @IOError (decodeFileEither path)
     pure $ case result of
         Left _ -> Nothing
@@ -418,13 +421,13 @@ readMetaQuiet root name = do
             | meta.metaVersion == sessionSchemaVersion -> Just meta
             | otherwise -> Nothing
 
-renameOrReplace :: FilePath -> FilePath -> IO ()
+renameOrReplace :: OsPath -> OsPath -> IO ()
 renameOrReplace tmp path = do
     result <- try @IOError (renameFile tmp path)
     case result of
         Right () -> pure ()
         Left _ -> do
-            bytes <- LBS.readFile tmp
-            LBS.writeFile path bytes
+            bytes <- LBS.readFile (toFilePath tmp)
+            LBS.writeFile (toFilePath path) bytes
             _ <- try @IOError (removeFile tmp)
             pure ()
