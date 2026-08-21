@@ -1,13 +1,14 @@
 -- | Map the provider-neutral loop onto the OpenAI Responses WebSocket transport.
 --
--- Shared helpers convert 'TurnInput' / 'Response' / stream events so the xAI
--- adapter can reuse the same function_call and custom_tool_call encoding.
+-- Shared helpers convert 'TurnInput' / 'Response' / stream events and adapt
+-- stateless Responses transports used by xAI and OpenRouter.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
     , openAiBackendReconnecting
     , openAiBackendWith
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
+    , statelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
     , streamEventToLoopEvent
@@ -214,6 +215,29 @@ openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =
     exponentialBackoff 5_000_000 <> limitRetries 3
+
+-- | Adapt a stateless Responses transport to the provider-neutral loop.
+statelessResponsesBackend
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+statelessResponsesBackend send getParams transcript =
+    Backend \_previousResponseId inputs onEvent -> do
+        baseParams <- getParams
+        history <- readIORef transcript
+        let newItems = turnInputsToItems inputs
+            requestItems = history <> newItems
+            request = withRequestInput baseParams requestItems
+        result <- send request \event ->
+            mapM_ onEvent (streamEventToLoopEvent event)
+        case result of
+            Left err -> pure (Left err)
+            Right response -> do
+                writeIORef transcript (requestItems <> response.output)
+                pure (Right (responseToTurnOutput response))
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.
