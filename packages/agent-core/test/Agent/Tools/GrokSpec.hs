@@ -306,7 +306,7 @@ spec = describe "Agent.Tools.Grok" do
             output `shouldSatisfy` Text.isPrefixOf "exit: 0"
 
     it "deletes the env dump when the session closes" do
-        withTempSession \(session, ghci) -> do
+        withTempSession \(session, _ghci) -> do
             shell <- readMVar session.grokShell
             doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` True
             closeGrokSession session
