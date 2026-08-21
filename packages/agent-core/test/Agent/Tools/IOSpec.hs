@@ -11,6 +11,7 @@ import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
     , readTextFile
+    , resolveUnderCwd
     , runShellCommand
     , startShellCommand
     , writeTextFile
@@ -25,7 +26,13 @@ import Data.Either (isLeft, isRight)
 import Data.IORef
 import Data.List (sort)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( createDirectory
+    , createDirectoryLink
+    , getTemporaryDirectory
+    , listDirectory
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>))
 import System.IO (IOMode(..), hClose, openFile)
 import System.IO.Error (alreadyInUseErrorType, mkIOError)
@@ -101,6 +108,18 @@ spec = describe "Agent.Tools.IO" do
             mapM_ (\var -> forkIO $ readTextFile (fromFilePath path) >>= putMVar var) vars
             results <- mapM takeMVar vars
             results `shouldBe` replicate 32 (Right body)
+
+    it "rejects missing descendants below a symlink that escapes cwd" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                outside = dir </> "outside"
+            createDirectory workspace
+            createDirectory outside
+            createDirectoryLink outside (workspace </> "link")
+            env <- defaultToolEnv (fromFilePath workspace)
+            result <- resolveUnderCwd env
+                (fromFilePath ("link" </> "missing" </> "file.txt"))
+            result `shouldSatisfy` isLeft
 
     it "cancels a long-running shell command via toolCancel" do
         withTempDir \dir -> do

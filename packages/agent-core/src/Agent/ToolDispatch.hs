@@ -19,8 +19,7 @@ module Agent.ToolDispatch
 
 import Agent.ToolArgs (stripAesonPrefix)
 import Control.Applicative ((<|>))
-import Control.Exception (SomeException)
-import qualified Control.Exception as Exception
+import Control.Exception.Safe (SomeException, tryAny)
 import Data.Aeson (FromJSON, Value(..))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseEither)
@@ -98,7 +97,7 @@ dispatchToolCall config handlers call = do
         runTool = case findHandler callName handlers of
             Just handler -> runHandler call input handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
-    result <- Exception.try @SomeException runTool
+    result <- tryAny runTool
     resultOutput <- case result of
         Right toolResult ->
             pure (config.toolDispatchFormatResult toolResult)

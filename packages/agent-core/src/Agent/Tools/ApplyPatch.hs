@@ -71,7 +71,7 @@ data UpdateChunk = UpdateChunk
 parsePatch :: Text -> Either Text [Hunk]
 parsePatch raw = do
     let trimmed = Text.strip raw
-        ls = map Text.stripEnd (Text.lines trimmed)
+        ls = Text.lines trimmed
     case ls of
         [] -> Left "Invalid patch: empty"
         first : rest

@@ -1,7 +1,10 @@
 module Agent.OpenAI.CompactionSpec (spec) where
 
 import Agent.OpenAI.Compaction
+import Agent.OpenAI.CompactClient
 import Agent.OpenAI.Responses.Types
+import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Provider
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import Test.Hspec
@@ -44,6 +47,26 @@ spec = do
             isTranscriptResetTurn "/new" `shouldBe` True
             isTranscriptResetTurn "/compact" `shouldBe` True
             isTranscriptResetTurn "hello" `shouldBe` False
+
+    describe "compactConversationAt" do
+        it "rejects non-OpenAI credentials before making a request" do
+            let provider = TokenProvider \_ -> pure $ Right Credential
+                    { accessToken = "xai-secret"
+                    , accountId = "account"
+                    , leaseId = Nothing
+                    , provider = XAIProvider
+                    }
+                request = CompactRequest
+                    { compactModel = "gpt-test"
+                    , compactInput = []
+                    , compactInstructions = Nothing
+                    , compactTools = Nothing
+                    , compactParallelToolCalls = False
+                    , compactReasoning = Nothing
+                    }
+            compactConversationAt "http://127.0.0.1:1" provider request
+                `shouldReturn` Left (ProviderError ApiErrorType
+                    "Codex compaction requires an OpenAI credential" Nothing)
 
   where
     user text = MessageItem ResponseMessage

@@ -166,6 +166,17 @@ spec = describe "Agent.Tools.Codex" do
                 ]
             output `shouldSatisfy` Text.isInfixOf "Failed to find expected lines"
 
+    it "preserves trailing whitespace in added lines" do
+        withTempEnv \env -> do
+            _ <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: spaces.txt"
+                , "+hello  "
+                , "*** End Patch"
+                ]
+            Text.readFile (toFilePath env.toolCwd </> "spaces.txt")
+                `shouldReturn` "hello  \n"
+
     it "stops applying hunks after the first failure" do
         withTempEnv \env -> do
             let beginPatch = "*** Begin " <> "Patch"

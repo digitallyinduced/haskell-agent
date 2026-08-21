@@ -115,6 +115,10 @@ spec = do
             resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
                 `shouldBe` DenyMutating
 
+        it "does not auto-approve a piped interactive REPL" do
+            resolveApprovalPolicy defaultCliOptions False False
+                `shouldBe` DenyMutating
+
         it "prompts on a TTY unless --yolo is set" do
             resolveApprovalPolicy defaultCliOptions True False `shouldBe` PromptMutating
             resolveApprovalPolicy defaultCliOptions { optYolo = True } True False

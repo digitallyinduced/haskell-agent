@@ -97,6 +97,13 @@ spec = do
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"created_at\":0,\"model\":\"openai/gpt-5.1\",\"status\":\"completed\"}}\n\n"
             map responseStreamEventType events `shouldBe` [EventResponseCompleted]
 
+        it "returns a terminal incomplete response" do
+            events <- expectRight $ parseSseEvents $ sseBlock "response.incomplete"
+                "{\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-i\",\"created_at\":0,\"model\":\"openai/gpt-5.1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}"
+            response <- expectRight (buildResponse events)
+            response.responseId `shouldBe` "resp-i"
+            response.status `shouldBe` ResponseIncomplete
+
         it "accepts a final event without a trailing blank line" do
             events <- expectRight $ parseSseEvents finalEventWithoutBlankLine
             map responseStreamEventType events `shouldBe` [EventResponseCompleted]
@@ -114,7 +121,7 @@ spec = do
 
             case buildResponse [] of
                 Left (JsonDecodeError message _) ->
-                    message `shouldSatisfy` Text.isInfixOf "response.completed"
+                    message `shouldSatisfy` Text.isInfixOf "terminal response"
                 other -> expectationFailure ("expected JsonDecodeError, got " <> show other)
 
 sseBlock :: Text -> Text -> Text

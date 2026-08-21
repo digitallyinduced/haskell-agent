@@ -47,7 +47,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
-import System.OsPath (equalFilePath, takeDirectory, takeFileName, (</>))
+import System.OsPath (equalFilePath, takeDirectory, (</>))
 
 data PlanModeState
     = PlanInactive
@@ -164,7 +164,6 @@ isPlanFileEditTarget :: OsPath -> OsPath -> Bool
 isPlanFileEditTarget planPath target =
     equalFilePath planPath target
         || equalFilePath planFileName target
-        || equalFilePath planFileName (takeFileName target)
 
 --------------------------------------------------------------------------------
 -- Grok-build tools

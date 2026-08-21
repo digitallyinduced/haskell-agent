@@ -159,6 +159,7 @@ createResponseWithEventsPolicy policy options credential request onEvent
     retainForResponse = \case
         ResponseOutputItemDoneEvent {} -> True
         ResponseCompletedEvent {} -> True
+        ResponseIncompleteEvent {} -> True
         ResponseErrorEvent {} -> True
         ResponseNestedErrorEvent {} -> True
         ResponseFailedEvent {} -> True

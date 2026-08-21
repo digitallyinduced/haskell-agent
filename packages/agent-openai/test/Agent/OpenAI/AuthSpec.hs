@@ -116,6 +116,14 @@ spec = do
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 4 :: Int]
             ids `shouldSatisfy` all (== "acc-2")
 
+        it "does not shorten an existing longer cooldown" $ do
+            pool <- newPool [mkFreshAuth "only-acc"] neverRefresh
+            reportRateLimit pool "only-acc" (Just 3600)
+            [before] <- snapshotAccounts pool
+            reportRateLimit pool "only-acc" (Just 60)
+            [after] <- snapshotAccounts pool
+            after.snapshotCooldownUntil `shouldBe` before.snapshotCooldownUntil
+
         it "returns CredentialsExhausted when every account is cooling down" $ do
             pool <- newPool [mkFreshAuth "only-acc"] neverRefresh
             reportRateLimit pool "only-acc" (Just 60)

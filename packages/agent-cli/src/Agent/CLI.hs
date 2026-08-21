@@ -597,14 +597,18 @@ runAgent options transition = do
         Nothing -> pure ()
     let claimCurrentSession handle
             | managedAgentSession = pure ()
-            | otherwise =
+            | otherwise = do
+                let desired =
+                        toFilePath
+                            (handle.sessionDir </> fromFilePath ".agent-running")
                 readIORef activeSessionLock >>= \case
-                    Just _ -> pure ()
-                    Nothing ->
+                    Just current | current == desired -> pure ()
+                    previous ->
                         acquireSessionLock handle >>= \case
                             Left err -> throwIO (userError (Text.unpack err))
-                            Right lockPath ->
+                            Right lockPath -> do
                                 writeIORef activeSessionLock (Just lockPath)
+                                mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root
             , toolsProvider = provider
@@ -1482,12 +1486,13 @@ replWithDraft env@SessionEnv
                                                 , turnUsage = Nothing
                                                 }
                                         handle' <- appendTurn handle turn
-                                        writeIORef slotRef (Right handle')
-                                        writeSessionMeta handle'.sessionMetaPath $
-                                            handle'.sessionMeta
+                                        let meta = handle'.sessionMeta
                                                 { metaLastResponseId = Nothing
                                                 , metaUpdatedAt = now
                                                 }
+                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        writeIORef slotRef
+                                            (Right handle'{sessionMeta = meta})
                                 continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
@@ -1611,6 +1616,7 @@ replWithDraft env@SessionEnv
                                         , metaUpdatedAt = now
                                         }
                                 writeSessionMeta handle'.sessionMetaPath meta
+                                env.sessionOnPersisted handle'
                                 writeIORef slotRef
                                     (Right handle'{sessionMeta = meta})
                                 writeIORef planMode.planSessionDir

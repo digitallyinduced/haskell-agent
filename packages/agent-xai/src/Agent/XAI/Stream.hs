@@ -62,14 +62,11 @@ parseSseEvents sseText = Maybe.catMaybes <$> traverse parseBlock blocks
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse events = case lastMaybe completedResponses of
-    Just completed -> decodeMerged completed
+buildResponse events = case lastMaybe terminalResponses of
+    Just terminal -> decodeMerged terminal
     Nothing -> Left (Maybe.fromMaybe missingCompletion (firstFailure events))
   where
-    completedResponses =
-        [ response
-        | ResponseCompletedEvent { response } <- events
-        ]
+    terminalResponses = Maybe.mapMaybe terminalResponse events
     doneItems =
         [ Aeson.toJSON item
         | ResponseOutputItemDoneEvent { item } <- events
@@ -85,9 +82,14 @@ buildResponse events = case lastMaybe completedResponses of
                     (LBS.toStrict (Aeson.encode merged))))
 
     missingCompletion = JsonDecodeError
-        "No response.completed event found in xAI SSE stream"
+        "No terminal response event found in xAI SSE stream"
         (Text.take 2000 (Text.decodeUtf8With Text.lenientDecode
             (LBS.toStrict (Aeson.encode events))))
+
+    terminalResponse = \case
+        ResponseCompletedEvent { response } -> Just response
+        ResponseIncompleteEvent { response } -> Just response
+        _ -> Nothing
 
 firstFailure :: [ResponseStreamEvent] -> Maybe ApiError
 firstFailure = Maybe.listToMaybe . Maybe.mapMaybe failure

@@ -10,6 +10,7 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv
     , isPlanFileEditTarget
     , isPlanModeActive
+    , planFileName
     , planFilePath
     , planModeBlockedEditMessage
     )
@@ -27,6 +28,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
+import System.OsPath (equalFilePath)
 
 data SearchReplaceArgs = SearchReplaceArgs
     { filePath :: Text
@@ -77,9 +79,12 @@ guardPlanMode env planMode filePath = do
 checkPlanPath :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
 checkPlanPath env planMode filePath = do
     planPath <- lift (planFilePath planMode)
-    path <- resolvePath env filePath
-    unless (isPlanFileEditTarget planPath path)
-        (throwE (planModeBlockedEditMessage planPath))
+    if equalFilePath planFileName (fromText filePath)
+        then pure ()
+        else do
+            path <- resolvePath env filePath
+            unless (isPlanFileEditTarget planPath path)
+                (throwE (planModeBlockedEditMessage planPath))
 
 runSearchReplaceBody :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 runSearchReplaceBody env args
