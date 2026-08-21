@@ -15,6 +15,7 @@ module Agent.CLI.AgentViewport
     , renderAgentViewportFrame
     , renderAgentViewportFrameFor
     , responseItemLines
+    , responseItemPreviewLines
     , selectAgentTarget
     , selectedAgentEntry
     ) where
@@ -266,48 +267,109 @@ pickAgentViewport color selected entries = do
                 _ -> Nothing
 
 responseItemLines :: [ResponseItem] -> [Text]
-responseItemLines = concatMap itemLines
+responseItemLines = concatMap responseItemLineList
+
+-- | Keep a compact agent preview: the first line for picker context plus
+-- only the most recent logical lines for the live pane. Earlier response
+-- items are traversed only as list spine once the tail is full; their message
+-- bodies are not split or copied.
+responseItemPreviewLines :: Int -> [ResponseItem] -> [Text]
+responseItemPreviewLines count items
+    | count <= 0 = maybe [] pure (responseItemFirstLine items)
+    | remaining > 0 = trailing
+    | otherwise = case responseItemFirstLine items of
+        Nothing -> trailing
+        Just firstLine -> case trailing of
+            trailingFirst : _
+                | trailingFirst == firstLine -> trailing
+            _ -> firstLine : trailing
   where
-    itemLines = \case
-        MessageItem message ->
-            labelled (roleLabel message.role) (messageText message.content)
-        FunctionCallItem call ->
-            ["tool: " <> call.name]
-        CustomToolCallItem call ->
-            ["tool: " <> call.name]
-        FunctionCallOutputItem _ -> ["tool: completed"]
-        CustomToolCallOutputItem _ -> ["tool: completed"]
-        _ -> []
+    (remaining, trailing) =
+        foldr collectTail (count, []) items
+    collectTail item result@(needed, kept)
+        | needed <= 0 = result
+        | otherwise =
+            let rows = responseItemLineList item
+                rowCount = length rows
+                selected = drop (max 0 (rowCount - needed)) rows
+            in (max 0 (needed - rowCount), selected <> kept)
 
-    roleLabel = \case
-        RoleUser -> "user: "
-        RoleAssistant -> "assistant: "
-        RoleSystem -> "system: "
-        RoleDeveloper -> "developer: "
-        RoleUnknown value -> value <> ": "
+responseItemFirstLine :: [ResponseItem] -> Maybe Text
+responseItemFirstLine = go
+  where
+    go [] = Nothing
+    go (item : rest) = case responseItemFirstItemLine item of
+        Just line -> Just line
+        Nothing -> go rest
 
-    messageText = \case
-        MessageContentText text -> text
-        MessageContentParts parts ->
-            Text.intercalate "\n" (concatMap contentText parts)
+responseItemFirstItemLine :: ResponseItem -> Maybe Text
+responseItemFirstItemLine = \case
+    MessageItem message ->
+        labelledFirst
+            (responseRoleLabel message.role)
+            (responseMessageText message.content)
+    FunctionCallItem call ->
+        Just ("tool: " <> call.name)
+    CustomToolCallItem call ->
+        Just ("tool: " <> call.name)
+    FunctionCallOutputItem _ -> Just "tool: completed"
+    CustomToolCallOutputItem _ -> Just "tool: completed"
+    _ -> Nothing
 
-    contentText = \case
-        InputTextPart{text} -> [text]
-        OutputTextPart{text} -> [text]
-        RefusalPart{refusal} -> [refusal]
-        ReasoningTextPart{text} -> [text]
-        SummaryTextPart{text} -> [text]
-        InputImagePart{} -> ["[image]"]
-        InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
-        InputAudioPart{} -> ["[audio]"]
-        UnknownContentPart{} -> []
+responseItemLineList :: ResponseItem -> [Text]
+responseItemLineList = \case
+    MessageItem message ->
+        labelled
+            (responseRoleLabel message.role)
+            (responseMessageText message.content)
+    FunctionCallItem call ->
+        ["tool: " <> call.name]
+    CustomToolCallItem call ->
+        ["tool: " <> call.name]
+    FunctionCallOutputItem _ -> ["tool: completed"]
+    CustomToolCallOutputItem _ -> ["tool: completed"]
+    _ -> []
 
-    labelled prefix raw =
-        case Text.lines (Text.strip raw) of
-            [] -> []
-            firstLine : rest ->
-                (prefix <> firstLine)
-                    : map (Text.replicate (Text.length prefix) " " <>) rest
+responseRoleLabel :: ResponseRole -> Text
+responseRoleLabel = \case
+    RoleUser -> "user: "
+    RoleAssistant -> "assistant: "
+    RoleSystem -> "system: "
+    RoleDeveloper -> "developer: "
+    RoleUnknown value -> value <> ": "
+
+responseMessageText :: MessageContent -> Text
+responseMessageText = \case
+    MessageContentText text -> text
+    MessageContentParts parts ->
+        Text.intercalate "\n" (concatMap responseContentText parts)
+
+responseContentText :: ResponseContentPart -> [Text]
+responseContentText = \case
+    InputTextPart{text} -> [text]
+    OutputTextPart{text} -> [text]
+    RefusalPart{refusal} -> [refusal]
+    ReasoningTextPart{text} -> [text]
+    SummaryTextPart{text} -> [text]
+    InputImagePart{} -> ["[image]"]
+    InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
+    InputAudioPart{} -> ["[audio]"]
+    UnknownContentPart{} -> []
+
+labelled :: Text -> Text -> [Text]
+labelled prefix raw =
+    case Text.lines (Text.strip raw) of
+        [] -> []
+        firstLine : rest ->
+            (prefix <> firstLine)
+                : map (Text.replicate (Text.length prefix) " " <>) rest
+
+labelledFirst :: Text -> Text -> Maybe Text
+labelledFirst prefix raw =
+    let stripped = Text.strip raw
+    in if Text.null stripped
+        then Nothing
+        else Just (prefix <> Text.takeWhile (/= '\n') stripped)
 
 findByTarget :: AgentTarget -> [AgentEntry] -> Maybe AgentEntry
 findByTarget target = go

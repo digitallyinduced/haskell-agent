@@ -24,7 +24,7 @@ eventFollows = \case
 nativeProgressSignal :: UiEvent -> UiState -> Maybe Bool
 nativeProgressSignal event state = case event of
     UiLoop TurnStarted -> Just True
-    UiLoop (TurnFinished _) -> Just False
+    UiLoop (TurnFinished _) -> Just state.uiRunning
     UiTurnEnded _ -> Just False
     UiSetAwaitingInput True -> Just False
     UiTick

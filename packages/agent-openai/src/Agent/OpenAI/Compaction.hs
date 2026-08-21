@@ -168,4 +168,9 @@ compactTranscriptAtLastCheckpoint items = go [] (reverse items)
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case
     KnownResponseItem ItemCompaction _ -> True
+    MessageItem message
+        | message.role == RoleAssistant ->
+            maybe False
+                (Text.isPrefixOf summaryPrefix . Text.stripStart)
+                (messageText message)
     _ -> False

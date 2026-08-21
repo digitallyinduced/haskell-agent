@@ -8,6 +8,7 @@ module Agent.CLI
     , devMain
     , devMainResume
     , formatReplStatusLine
+    , formatStartupTimings
     , formatTokenUsage
     , run
     , withRestoredCurrentDirectory
@@ -22,7 +23,7 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemLines
+    , responseItemPreviewLines
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -190,9 +191,13 @@ import Agent.CLI.Terminal
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime
+    ( FullscreenInputBuffer
+    , FullscreenRuntime
     , emitUiEvent
+    , hasQueuedFullscreenInput
+    , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , queuedFullscreenInputDisplays
     , readFullscreenLine
     , requestFullscreenPermission
     , requestFullscreenChoice
@@ -205,7 +210,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.UI.Model
     ( PromptState(..)
     , UiEvent(..)
-    , UiState
+    , UiState(..)
     , initialUiState
     , reduceUi
     )
@@ -310,7 +315,8 @@ import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe
-    ( SomeException
+    ( Exception
+    , SomeException
     , catchAny
     , catchAsync
     , finally
@@ -320,7 +326,7 @@ import Control.Exception.Safe
 import Control.Monad (when)
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.List (elemIndex, findIndex)
+import Data.List (elemIndex, findIndex, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -328,8 +334,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
+import Text.Printf (printf)
 import Data.Time.Clock
     ( NominalDiffTime
+    , UTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
@@ -364,6 +372,28 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
+
+data StartupRuntime = StartupRuntime
+    { startupToolEnv :: !ToolEnv
+    , startupInterrupt :: !InterruptState
+    , startupEscPaused :: !(IORef Bool)
+    , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
+    , startupFullscreen :: !(Maybe FullscreenRuntime)
+    , startupTerminal :: !TerminalCapabilities
+    , startupUseColor :: !Bool
+    , startupStderrTty :: !Bool
+    , startupStdinTty :: !Bool
+    , startupStdoutTty :: !Bool
+    , startupAgentSnapshot :: !(IORef (IO (AgentTarget, [AgentEntry])))
+    , startupAgentSelect :: !(IORef (AgentTarget -> IO ()))
+    , startupStartedAt :: !UTCTime
+    , startupTimings :: !(IORef [(Text, NominalDiffTime)])
+    }
+
+newtype StartupFailure = StartupFailure String
+    deriving (Show)
+
+instance Exception StartupFailure
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
 -- session. Keeping the id in the generated GHCi command avoids a shared
@@ -452,13 +482,14 @@ run = do
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options =
-    withRestoredCurrentDirectory (go options Nothing)
+runAgentWithRestarts options = do
+    fullscreenInputs <- newFullscreenInputBuffer
+    withRestoredCurrentDirectory (go fullscreenInputs options Nothing)
   where
-    go current transition =
-        runAgent current transition >>= \case
+    go fullscreenInputs current transition =
+        runAgent fullscreenInputs current transition >>= \case
             RunResumeSession sessionId ->
-                go
+                go fullscreenInputs
                     current
                         { optProvider = Nothing
                         , optModel = Nothing
@@ -471,14 +502,18 @@ runAgentWithRestarts options =
                         }
                     Nothing
             RunSwitchProvider next ->
-                go (applyProviderTransition current next) (Just next)
+                go fullscreenInputs
+                    (applyProviderTransition current next)
+                    (Just next)
             RunProviderStartFailed apiError ->
                 case transition of
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
                             continueAutomaticFallback failed apiError >>= \case
                                 Just next ->
-                                    go (applyProviderTransition current next) (Just next)
+                                    go fullscreenInputs
+                                        (applyProviderTransition current next)
+                                        (Just next)
                                 Nothing -> do
                                     reportProviderUnavailable apiError
                                     pure DevQuit
@@ -537,8 +572,84 @@ printTurn turn = do
         _ -> pure ()
     putStrLn ""
 
-runAgent :: CliOptions -> Maybe ProviderTransition -> IO RunResult
-runAgent options transition = do
+setStartupNotice :: Maybe FullscreenRuntime -> Text -> IO ()
+setStartupNotice fullscreen message =
+    case fullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice (Just message))
+
+recordStartupTiming
+    :: UTCTime
+    -> IORef [(Text, NominalDiffTime)]
+    -> Text
+    -> IO ()
+recordStartupTiming startedAt timingsRef label = do
+    elapsed <- (`diffUTCTime` startedAt) <$> getCurrentTime
+    atomicModifyIORef' timingsRef \timings ->
+        (timings <> [(label, elapsed)], ())
+
+markStartupStage :: StartupRuntime -> Text -> IO ()
+markStartupStage startup label = do
+    recordStartupTiming startup.startupStartedAt startup.startupTimings label
+    setStartupNotice startup.startupFullscreen label
+
+finishStartup :: StartupRuntime -> IO ()
+finishStartup startup = do
+    recordStartupTiming startup.startupStartedAt startup.startupTimings "ready"
+    case startup.startupFullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice Nothing)
+    lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
+        Just "1" -> do
+            message <- formatStartupTimings <$> readIORef startup.startupTimings
+            case startup.startupFullscreen of
+                Nothing -> putTextLn stderr message
+                Just runtime -> emitUiEvent runtime (UiSystemMessage message)
+        _ -> pure ()
+
+startupDie :: StartupRuntime -> String -> IO a
+startupDie startup message =
+    case startup.startupFullscreen of
+        Nothing -> die message
+        Just _ -> throwIO (StartupFailure message)
+
+formatStartupTimings :: [(Text, NominalDiffTime)] -> Text
+formatStartupTimings timings =
+    "startup: "
+        <> Text.intercalate " · "
+            [ label <> " " <> formatStartupDuration elapsed
+            | (label, elapsed) <- sortOn snd timings
+            ]
+
+formatStartupDuration :: NominalDiffTime -> Text
+formatStartupDuration elapsed
+    | elapsed < 1 =
+        Text.pack (show (round (elapsed * 1000) :: Int)) <> "ms"
+    | otherwise =
+        Text.pack (printf "%.2fs" (realToFrac elapsed :: Double))
+
+setStartupRepository :: Maybe FullscreenRuntime -> Text -> OsPath -> IO ()
+setStartupRepository fullscreen branch cwd =
+    case fullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime $
+                UiSetRepository
+                    branch
+                    (toText (takeFileName (takeDirectory cwd))
+                        <> "/"
+                        <> toText (takeFileName cwd))
+
+runAgent
+    :: FullscreenInputBuffer
+    -> CliOptions
+    -> Maybe ProviderTransition
+    -> IO RunResult
+runAgent fullscreenInputs options transition = do
+    startedAt <- getCurrentTime
+    startupTimingsRef <- newIORef []
     home <- getHomeDirectory
     let root = sessionsRoot home
     resumed <- case options.optResume of
@@ -562,35 +673,6 @@ runAgent options transition = do
             | otherwise -> pure source
     setCurrentDirectory cwd
 
-    projectRoot <- resolveProjectRoot cwd
-    projectSettings <- loadProjectSettings projectRoot
-    isTty <- hIsTerminalDevice stdin
-    stdoutTty <- hIsTerminalDevice stdout
-    let transitionTarget = (.transitionTarget) <$> transition
-        pendingTurn = transition >>= (.transitionPendingTurn)
-        unavailableProviders =
-            maybe [] (.transitionUnavailableProviders) transition
-        requestedProvider = case transitionTarget of
-            Just target -> Just target.modelProvider
-            Nothing -> case resumed of
-                Just (meta, _) -> Just meta.metaProvider
-                Nothing -> options.optProvider
-    loaded <- loadAuth requestedProvider >>= either (die . Text.unpack) pure
-    case (transitionTarget, resumed) of
-        (Just target, _)
-            | loaded.loadedProvider /= target.modelProvider ->
-                die $ "provider transition requested "
-                    <> Text.unpack (providerSlug target.modelProvider)
-                    <> " but auth resolved "
-                    <> Text.unpack (providerSlug loaded.loadedProvider)
-        (Nothing, Just (meta, _))
-            | loaded.loadedProvider /= meta.metaProvider ->
-                die $ "session provider is "
-                    <> Text.unpack (providerSlug meta.metaProvider)
-                    <> " but auth resolved "
-                    <> Text.unpack (providerSlug loaded.loadedProvider)
-        _ -> pure ()
-
     toolEnv <- defaultToolEnv cwd
     interrupt <- newInterruptState \msg -> do
         -- Drop an in-place "Thinking…" status so the hint is its own line.
@@ -601,6 +683,130 @@ runAgent options transition = do
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
     uiRuntimeRef <- newIORef Nothing
+    stderrTty <- hIsTerminalDevice stderr
+    stdinTty <- hIsTerminalDevice stdin
+    stdoutTty <- hIsTerminalDevice stdout
+    terminal <- detectTerminalCapabilities stdout
+    reportTerminalCwd terminal stdout (toFilePath cwd)
+    useColor <- resolveColor stdout
+    agentSnapshotRef <- newIORef (pure (AgentRoot, []))
+    agentSelectRef <- newIORef (\_ -> pure ())
+    queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
+    let initialTurns = maybe [] snd resumed
+        fullscreenEnabled =
+            stdinTty
+                && stdoutTty
+                && not (isOneShot options)
+                && options.optScreenMode /= ScreenMinimal
+        initialFullscreenState =
+            (reduceUi
+                (UiSetNotice (Just "Loading project…"))
+                (reduceUi
+                    (UiSetRepository
+                        ""
+                        (toText (takeFileName (takeDirectory cwd))
+                            <> "/"
+                            <> toText (takeFileName cwd)))
+                    (hydrateUiHistory initialTurns)))
+                        { uiQueuedInputs = queuedInputDisplays }
+    fullscreen <- if fullscreenEnabled
+        then Just <$> newFullscreenRuntime
+            fullscreenInputs
+            (requestCancel toolEnv.toolCancel)
+            (noteFullscreenCtrlC interrupt)
+            (copyTerminalClipboard terminal stdout)
+            (setCliWindowTitle stdoutTty stdout)
+            (\active ->
+                when terminal.terminalNativeProgress $
+                    setNativeProgress stderr active)
+            (readIORef agentSnapshotRef >>= id)
+            (\target -> readIORef agentSelectRef >>= ($ target))
+            (recordStartupTiming startedAt startupTimingsRef "first frame")
+            useColor
+            initialFullscreenState
+        else pure Nothing
+    writeIORef uiRuntimeRef fullscreen
+    let startup = StartupRuntime
+            { startupToolEnv = toolEnv
+            , startupInterrupt = interrupt
+            , startupEscPaused = escPaused
+            , startupUiRuntimeRef = uiRuntimeRef
+            , startupFullscreen = fullscreen
+            , startupTerminal = terminal
+            , startupUseColor = useColor
+            , startupStderrTty = stderrTty
+            , startupStdinTty = stdinTty
+            , startupStdoutTty = stdoutTty
+            , startupAgentSnapshot = agentSnapshotRef
+            , startupAgentSelect = agentSelectRef
+            , startupStartedAt = startedAt
+            , startupTimings = startupTimingsRef
+            }
+        action =
+            runAgentInitialized
+                options transition home root resumed cwd startup
+    outcome <-
+        try @_ @StartupFailure
+            (case fullscreen of
+                Nothing -> action
+                Just runtime -> runFullscreen runtime action)
+            `finally` writeIORef uiRuntimeRef Nothing
+    either (\(StartupFailure message) -> die message) pure outcome
+
+runAgentInitialized
+    :: CliOptions
+    -> Maybe ProviderTransition
+    -> OsPath
+    -> OsPath
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> OsPath
+    -> StartupRuntime
+    -> IO RunResult
+runAgentInitialized options transition home root resumed cwd startup = do
+    let toolEnv = startup.startupToolEnv
+        interrupt = startup.startupInterrupt
+        escPaused = startup.startupEscPaused
+        uiRuntimeRef = startup.startupUiRuntimeRef
+        fullscreen = startup.startupFullscreen
+        isTty = startup.startupStdinTty
+        stdoutTty = startup.startupStdoutTty
+        setWindowTitle title =
+            case fullscreen of
+                Just runtime -> setFullscreenWindowTitle runtime title
+                Nothing -> setCliWindowTitle stdoutTty stdout title
+    projectRoot <- resolveProjectRoot cwd
+    projectSettings <- loadProjectSettings projectRoot
+    branch <- detectGitBranch cwd
+    setStartupRepository fullscreen branch cwd
+    markStartupStage startup "Loading credentials…"
+    let transitionTarget = (.transitionTarget) <$> transition
+        pendingTurn = transition >>= (.transitionPendingTurn)
+        unavailableProviders =
+            maybe [] (.transitionUnavailableProviders) transition
+        requestedProvider = case transitionTarget of
+            Just target -> Just target.modelProvider
+            Nothing -> case resumed of
+                Just (meta, _) -> Just meta.metaProvider
+                Nothing -> options.optProvider
+    loaded <-
+        loadAuth requestedProvider
+            >>= either (startupDie startup . Text.unpack) pure
+    case (transitionTarget, resumed) of
+        (Just target, _)
+            | loaded.loadedProvider /= target.modelProvider ->
+                startupDie startup $ "provider transition requested "
+                    <> Text.unpack (providerSlug target.modelProvider)
+                    <> " but auth resolved "
+                    <> Text.unpack (providerSlug loaded.loadedProvider)
+        (Nothing, Just (meta, _))
+            | loaded.loadedProvider /= meta.metaProvider ->
+                startupDie startup $ "session provider is "
+                    <> Text.unpack (providerSlug meta.metaProvider)
+                    <> " but auth resolved "
+                    <> Text.unpack (providerSlug loaded.loadedProvider)
+        _ -> pure ()
+
+    markStartupStage startup "Loading tools…"
     let basePlanHooks =
             cliPlanHooks interrupt escPaused (resolveColor stderr)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
@@ -745,8 +951,11 @@ runAgent options transition = do
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
-        setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
-        startupContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        setWindowTitle (cliWindowTitle cwd titleHint)
+        markStartupStage startup "Loading instructions…"
+        startupContext <-
+            loadAgentsContext
+                fullscreen options provider home cwd initialItems initialPrevious
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -754,7 +963,9 @@ runAgent options transition = do
         skillsRef <- newIORef (SkillCatalog [] [])
         skillInvocationsRef <- newIORef []
 
-        persist <- preparePersistence options root provider model cwd effort prompt resumed
+        persist <-
+            preparePersistence
+                fullscreen options root provider model cwd effort prompt resumed
         writeIORef persistSlotRef persist
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
@@ -769,6 +980,7 @@ runAgent options transition = do
                     PersistencePending _ -> pure ()
             PersistenceDisabled -> pure ()
         progName <- getProgName
+        markStartupStage startup "Connecting to provider…"
         withCtrlCHandler interrupt $
             withInterruptResume progName persist RunQuit do
                 case provider of
@@ -803,7 +1015,7 @@ runAgent options transition = do
                                             privateTranscript
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
-                                runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                                runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
@@ -812,7 +1024,9 @@ runAgent options transition = do
                                         Just active
                                             | active.transitionCause == AutomaticFallback ->
                                                 pure (RunProviderStartFailed err)
-                                        _ -> die ("openai auth: " <> show err)
+                                        _ ->
+                                            startupDie startup
+                                                ("openai auth: " <> show err)
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
@@ -835,7 +1049,7 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -859,12 +1073,13 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
-    :: CliOptions
+    :: Maybe FullscreenRuntime
+    -> CliOptions
     -> OsPath
     -> Provider
     -> Text
@@ -873,7 +1088,7 @@ preparePersistence
     -> Maybe Text
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
-preparePersistence options root provider model cwd effort prompt resumed =
+preparePersistence fullscreen options root provider model cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
             let handle = SessionHandle
@@ -884,10 +1099,14 @@ preparePersistence options root provider model cwd effort prompt resumed =
                         root </> fromText meta.metaId </> fromFilePath "transcript.jsonl"
                     , sessionMeta = meta
                     }
-            color <- resolveColor stderr
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession <> "session: " <> meta.metaId <> " (resumed)"))
+            let message = "session: " <> meta.metaId <> " (resumed)"
+            case fullscreen of
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
             newActivePersistence handle
         Nothing
             | shouldPersist options ->
@@ -966,7 +1185,7 @@ runSession
     -> [AppTool]
     -> ToolEnv
     -> PlanModeEnv
-    -> IORef (Maybe FullscreenRuntime)
+    -> StartupRuntime
     -> Maybe Text
     -> Maybe PendingTurn
     -> [Provider]
@@ -995,21 +1214,30 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
   ioLock <- newMVar ()
-  let showGeneratedTitle SessionTitleResult{..} =
-        case persist of
-            PersistenceDisabled -> pure ()
-            PersistenceEnabled slotRef ->
-                readIORef slotRef >>= \case
-                    PersistenceActive handle
-                        | handle.sessionMeta.metaId == resultSessionId
-                        , not handle.sessionMeta.metaTitleIsManual ->
-                            withMVar ioLock \_ -> do
-                                activeFullscreen <- readIORef uiRuntimeRef
-                                setActiveWindowTitle activeFullscreen
-                                    handle.sessionMeta.metaCwd resultTitle
-                    _ -> pure ()
+  let fullscreen = startup.startupFullscreen
+      terminal = startup.startupTerminal
+      useColor = startup.startupUseColor
+      stderrTty = startup.startupStderrTty
+      stdoutTty = startup.startupStdoutTty
+      setWindowTitle title =
+          case fullscreen of
+              Just runtime -> setFullscreenWindowTitle runtime title
+              Nothing -> setCliWindowTitle stdoutTty stdout title
+      showGeneratedTitle SessionTitleResult{..} =
+          case persist of
+              PersistenceDisabled -> pure ()
+              PersistenceEnabled slotRef ->
+                  readIORef slotRef >>= \case
+                      PersistenceActive handle
+                          | handle.sessionMeta.metaId == resultSessionId
+                          , not handle.sessionMeta.metaTitleIsManual ->
+                              withMVar ioLock \_ ->
+                                  setWindowTitle
+                                      (cliWindowTitle handle.sessionMeta.metaCwd
+                                          (Just resultTitle))
+                      _ -> pure ()
   withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -1031,43 +1259,75 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
-    let loadAgentEntries = do
+    let loadAgentEntries includeSummaries = do
+            selected <- readIORef selectedAgent
             rootItems <- readIORef transcriptRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
+            sessions <- readIORef subagentSessions
+            let previewCount target =
+                    if null agents
+                        then Nothing
+                        else if target == selected
+                            then Just 12
+                            else if includeSummaries
+                                then Just 0
+                                else Nothing
             let rootEntry = AgentEntry
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
                     , agentStatus = "active"
-                    , agentTranscript = responseItemLines rootItems
+                    , agentTranscript = case previewCount AgentRoot of
+                        Nothing -> []
+                        Just count ->
+                            responseItemPreviewLines count rootItems
                     }
-            children <- mapM materializeChild agents
+            children <- mapM
+                (materializeChild previewCount sessions)
+                agents
             pure (rootEntry : children)
           where
-            materializeChild (path, agentId, status) = do
-                sessions <- readIORef subagentSessions
-                stored <- case Map.lookup agentId sessions of
-                    Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
-                    Just session ->
-                        responseItemLines <$> readIORef session.subSessionTranscript
-                let transcript = stored <> case status of
-                        Completed (Just result)
-                            | not (Text.null (Text.strip result)) ->
-                                ["assistant: " <> Text.strip result]
-                        Errored message ->
-                            ["error: " <> Text.strip message]
-                        _ -> []
+            materializeChild previewCount sessions (path, agentId, status) = do
+                let target = AgentChild agentId
+                transcript <- case previewCount target of
+                    Nothing -> pure []
+                    Just count -> do
+                        stored <- case Map.lookup agentId sessions of
+                            Nothing ->
+                                pure ["(" <> formatAgentStatus status <> ")"]
+                            Just session ->
+                                responseItemPreviewLines count
+                                    <$> readIORef session.subSessionTranscript
+                        pure $
+                            compactAgentPreview count $
+                                stored <> case status of
+                                    Completed (Just result)
+                                        | not (Text.null (Text.strip result)) ->
+                                            ["assistant: " <> Text.strip result]
+                                    Errored message ->
+                                        ["error: " <> Text.strip message]
+                                    _ -> []
                 pure AgentEntry
-                    { agentTarget = AgentChild agentId
+                    { agentTarget = target
                     , agentPath = taskPathText path
                     , agentStatus = formatAgentStatus status
                     , agentTranscript = transcript
                     }
+            compactAgentPreview count rows
+                | length rows <= count = rows
+                | otherwise = case rows of
+                    [] -> []
+                    firstLine : _ ->
+                        firstLine
+                            : drop (max 0 (length rows - count)) rows
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
-            , viewportEntries = loadAgentEntries
+            , viewportEntries = loadAgentEntries True
             }
+    writeIORef startup.startupAgentSnapshot
+        ((,) <$> readIORef selectedAgent <*> loadAgentEntries False)
+    writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -1079,7 +1339,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             freshAgents <-
-                loadAgentsContext options provider home cwd [] Nothing
+                loadAgentsContext fullscreen options provider home cwd [] Nothing
             freshSkills <- loadSkillsCatalog options home projectRoot cwd True
             installSkillCatalog
                 reservedSlashNames True freshAgents
@@ -1093,42 +1353,6 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 reservedSlashNames queueContext startupContext
                 skillsRef skillInvocationsRef refreshed
     policyRef <- newIORef policy
-    stderrTty <- hIsTerminalDevice stderr
-    stdinTty <- hIsTerminalDevice stdin
-    stdoutTty <- hIsTerminalDevice stdout
-    terminal <- detectTerminalCapabilities stdout
-    reportTerminalCwd terminal stdout (toFilePath cwd)
-    useColor <- resolveColor stdout
-    branch <- detectGitBranch cwd
-    let fullscreenEnabled =
-            stdinTty
-                && stdoutTty
-                && not (isOneShot options)
-                && options.optScreenMode /= ScreenMinimal
-        initialFullscreenState =
-            reduceUi
-                (UiSetNotice (Just "Starting…"))
-                (reduceUi
-                    (UiSetRepository
-                        branch
-                        (toText (takeFileName (takeDirectory cwd))
-                            <> "/"
-                            <> toText (takeFileName cwd)))
-                    (hydrateUiHistory initialTurns))
-    fullscreen <- if fullscreenEnabled
-        then Just <$> newFullscreenRuntime
-            (requestCancel toolEnv.toolCancel)
-            (noteFullscreenCtrlC interrupt)
-            (copyTerminalClipboard terminal stdout)
-            (\active ->
-                when terminal.terminalNativeProgress $
-                    setNativeProgress stderr active)
-            ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
-            (writeIORef selectedAgent)
-            useColor
-            initialFullscreenState
-        else pure Nothing
-    writeIORef uiRuntimeRef fullscreen
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
             sessionDir <- readIORef planMode.planSessionDir
@@ -1245,6 +1469,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
+            , sessionSetWindowTitle = setWindowTitle
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -1258,6 +1483,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 <> ": "
                 <> warning.skillWarningMessage
         initializeSkills = do
+            markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalog
                 options home projectRoot cwd (isNothing fullscreen)
             installSkillCatalog
@@ -1270,7 +1496,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                     mapM_
                         (emitUiEvent runtime . UiSystemMessage . formatSkillWarning)
                         skills.catalogWarnings
-                    emitUiEvent runtime (UiSetNotice Nothing)
+            finishStartup startup
         sessionAction = do
             initializeSkills
             case pendingTurn of
@@ -1284,23 +1510,10 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                         finishTurn env True result
                     Nothing ->
                         repl env
-    result <-
-        (case fullscreen of
-            Nothing -> sessionAction
-            Just runtime -> runFullscreen runtime sessionAction)
-            `finally` writeIORef uiRuntimeRef Nothing
+    result <- sessionAction
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
-
-setActiveWindowTitle :: Maybe FullscreenRuntime -> OsPath -> Text -> IO ()
-setActiveWindowTitle fullscreen cwd title =
-    case fullscreen of
-        Just runtime ->
-            setFullscreenWindowTitle runtime (cliWindowTitle cwd (Just title))
-        Nothing -> do
-            tty <- hIsTerminalDevice stdout
-            setCliWindowTitle tty stdout (cliWindowTitle cwd (Just title))
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
 runPendingTurn = runPendingTurnWithCooldownRetry True
@@ -1341,9 +1554,7 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
             Just _ -> pure ()
         if exitAfter
             then pure RunQuit
-            else do
-                notifyAttention stderr InputRequested
-                repl env
+            else continueAfterTurn env
     TurnFailed ->
         if exitAfter
             then exitFailure
@@ -1351,8 +1562,7 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                 case env.sessionFullscreen of
                     Nothing -> putTrailingNewline env.sessionPrinted
                     Just _ -> pure ()
-                notifyAttention stderr InputRequested
-                repl env
+                continueAfterTurn env
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
         in requestAutomaticProviderFallback env apiError pending' >>= \case
@@ -1370,6 +1580,15 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                             else do
                                 notifyAttention stderr InputRequested
                                 replWithDraft env pending.pendingPromptText
+
+continueAfterTurn :: SessionEnv -> IO RunResult
+continueAfterTurn env = do
+    queued <- case env.sessionFullscreen of
+        Nothing -> pure False
+        Just runtime -> hasQueuedFullscreenInput runtime
+    when (not queued) $
+        notifyAttention stderr InputRequested
+    repl env
 
 waitAndRetryPendingTurn
     :: SessionEnv
@@ -1473,6 +1692,7 @@ replWithDraft env@SessionEnv
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
+    , sessionSetWindowTitle = setWindowTitle
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
@@ -1661,6 +1881,7 @@ replWithDraft env@SessionEnv
                                                 (roleError color err)
                                         continue
                                     Right skillInputs -> do
+                                        fullscreenEvent (UiUserSubmitted text)
                                         result <- runOneTurn env text skillInputs
                                         finishTurn env False result
                     ReplInvokeSkill invocationName arguments ->
@@ -2102,8 +2323,9 @@ replWithDraft env@SessionEnv
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
-                                setActiveWindowTitle fullscreen
-                                    meta.metaCwd meta.metaTitle
+                                setWindowTitle
+                                    (cliWindowTitle meta.metaCwd
+                                        (Just meta.metaTitle))
                                 let message = "new session: " <> meta.metaId
                                 displayInfo message $
                                     Text.hPutStrLn stderr
@@ -2163,9 +2385,9 @@ replWithDraft env@SessionEnv
                                             handle.sessionMeta.metaId
                                         updated <- setManualSessionTitle title handle
                                         writeIORef slotRef (PersistenceActive updated)
-                                        setActiveWindowTitle fullscreen
-                                            updated.sessionMeta.metaCwd
-                                            updated.sessionMeta.metaTitle
+                                        setWindowTitle
+                                            (cliWindowTitle updated.sessionMeta.metaCwd
+                                                (Just updated.sessionMeta.metaTitle))
                                         let message =
                                                 "session title: "
                                                     <> updated.sessionMeta.metaTitle
@@ -2912,14 +3134,15 @@ enterPlanFromSlash env@SessionEnv
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
 -- whatever instructions were already in history.
 loadAgentsContext
-    :: CliOptions
+    :: Maybe FullscreenRuntime
+    -> CliOptions
     -> Provider
     -> OsPath
     -> OsPath
     -> [ResponseItem]
     -> Maybe Text
     -> IO (IORef (Maybe Text))
-loadAgentsContext options provider home cwd initialItems initialPrevious
+loadAgentsContext fullscreen options provider home cwd initialItems initialPrevious
     | not options.optAgentsMd = newIORef Nothing
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
     | otherwise = do
@@ -2933,12 +3156,17 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
         case formatAgentsMdForProvider provider cwd loaded of
             Nothing -> newIORef Nothing
             Just text -> do
-                color <- resolveColor stderr
-                putTextLn stderr
-                    (roleMuted color
-                        (glyphSession <> "agents.md: loaded "
+                let message =
+                        "agents.md: loaded "
                             <> Text.pack (show (length files))
-                            <> if length files == 1 then " file" else " files"))
+                            <> if length files == 1 then " file" else " files"
+                case fullscreen of
+                    Nothing -> do
+                        color <- resolveColor stderr
+                        putTextLn stderr
+                            (roleMuted color (glyphSession <> message))
+                    Just runtime ->
+                        emitUiEvent runtime (UiSystemMessage message)
                 newIORef (Just text)
 
 preparePromptSkillInputs

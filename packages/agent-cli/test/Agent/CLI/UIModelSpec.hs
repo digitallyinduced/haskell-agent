@@ -81,6 +81,7 @@ spec = describe "fullscreen UI reducer" do
                     running
             after = reduceUi UiTick finished
         idle.uiElapsedTenths `shouldBe` 0
+        idle.uiFrame `shouldBe` 0
         running.uiElapsedTenths `shouldBe` 3
         after.uiElapsedTenths `shouldBe` 3
 
@@ -175,6 +176,80 @@ spec = describe "fullscreen UI reducer" do
                     `shouldBe` Just lastBlock.blockId
                 resumed.uiFollow `shouldBe` True
             _ -> expectationFailure "expected three blocks"
+
+    it "queues follow-ups in order and preserves the draft typed behind them" do
+        let afterFirstStarted =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetDraft "first follow-up" 15
+                    , UiInputQueued "first follow-up"
+                    , UiSetDraft "second follow-up" 16
+                    , UiInputQueued "second follow-up"
+                    , UiSetDraft "draft for later" 15
+                    , UiQueuedInputStarted
+                    , UiUserSubmitted "first follow-up"
+                    ]
+            afterSecondStarted =
+                reduceUi
+                    (UiUserSubmitted "second follow-up")
+                    (reduceUi UiQueuedInputStarted afterFirstStarted)
+        Foldable.toList afterFirstStarted.uiQueuedInputs
+            `shouldBe` ["second follow-up"]
+        afterFirstStarted.uiDraft `shouldBe` "draft for later"
+        afterFirstStarted.uiCursor `shouldBe` 15
+        map (.blockBody) (Foldable.toList afterFirstStarted.uiBlocks)
+            `shouldBe` ["first follow-up"]
+        Foldable.toList afterSecondStarted.uiQueuedInputs `shouldBe` []
+        afterSecondStarted.uiDraft `shouldBe` "draft for later"
+        map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
+            `shouldBe` ["first follow-up", "second follow-up"]
+
+    it "clears only the draft that was submitted immediately" do
+        let state =
+                apply
+                    [ UiSetAwaitingInput True
+                    , UiSetDraft "send this" 9
+                    , UiDraftSubmitted
+                    , UiUserSubmitted "send this"
+                    ]
+        state.uiDraft `shouldBe` ""
+        state.uiCursor `shouldBe` 0
+        state.uiAwaitingInput `shouldBe` False
+
+    it "stays busy between a model tool request and the next model round" do
+        let call =
+                functionToolCall
+                    "busy-tool"
+                    "run_terminal_cmd"
+                    "{\"command\":\"sleep 1\"}"
+            requestingTool =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [call] Nothing))
+                    ]
+            afterTool =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                { callId = "busy-tool"
+                                , output = "exit: 0"
+                                , callKind = FunctionCallKind
+                                })))
+                    (reduceUi (UiLoop (ToolStarted call)) requestingTool)
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r2" [] (Just "done"))))
+                    (reduceUi (UiLoop TurnStarted) afterTool)
+        requestingTool.uiRunning `shouldBe` True
+        requestingTool.uiActivity `shouldBe` "Running tools…"
+        afterTool.uiRunning `shouldBe` True
+        finished.uiRunning `shouldBe` False
+        finished.uiActivity `shouldBe` "Ready"
 
     it "deletes the previous word for command/option-backspace" do
         deleteWordBefore "hello brave world" 17

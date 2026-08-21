@@ -5,6 +5,7 @@ import Agent.CLI.TUI.Bridge
 import Agent.CLI.UI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
+import Agent.ToolDispatch (functionToolCall)
 import Test.Hspec
 
 spec :: Spec
@@ -17,14 +18,35 @@ spec = describe "fullscreen TUI bridge" do
     it "starts, refreshes, and clears native terminal progress" do
         let running = reduceUi (UiLoop TurnStarted) initialUiState
             refresh = running { uiFrame = 0 }
+            toolCall =
+                functionToolCall
+                    "tool-1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"sleep 1\"}"
+            continuing =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [toolCall] Nothing)))
+                    running
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r2" [] Nothing)))
+                    running
         nativeProgressSignal (UiLoop TurnStarted) running
             `shouldBe` Just True
         nativeProgressSignal UiTick refresh
             `shouldBe` Just True
         nativeProgressSignal
             (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing)))
-            running
+            finished
             `shouldBe` Just False
+        nativeProgressSignal
+            (UiLoop (TurnFinished (emptyTurnOutput "r1" [toolCall] Nothing)))
+            continuing
+            `shouldBe` Just True
         nativeProgressSignal (UiTurnEnded BlockCancelled) running
             `shouldBe` Just False
 

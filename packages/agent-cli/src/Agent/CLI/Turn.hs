@@ -15,7 +15,6 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.TUI.App
     ( emitUiEvent
-    , setFullscreenWindowTitle
     )
 import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
 import Agent.CLI.Render
@@ -52,7 +51,6 @@ import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
     , roleMuted
-    , setCliWindowTitle
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -71,7 +69,6 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
-import Agent.OsPath (OsPath)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -97,7 +94,7 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import System.IO (hIsTerminalDevice, stderr, stdout)
+import System.IO (stderr, stdout)
 import qualified System.OsPath
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
@@ -117,6 +114,7 @@ runOneTurn env@SessionEnv
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
+    , sessionSetWindowTitle = setWindowTitle
     , sessionBeginSubagentTurn = beginSubagentTurn
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
@@ -354,8 +352,9 @@ runOneTurn env@SessionEnv
                         )
                         (requestConversationTitle env countedHandle titleTurns)
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        setTurnWindowTitle env countedMeta.metaCwd
-                            countedMeta.metaTitle
+                        setWindowTitle
+                            (cliWindowTitle countedMeta.metaCwd
+                                (Just countedMeta.metaTitle))
                     applyPendingSessionTitles env
             case followUp of
                 Nothing -> pure TurnSucceeded
@@ -400,17 +399,9 @@ applyPendingSessionTitles env =
                                 resultTitle
                                 handle
                             writeIORef slotRef (PersistenceActive updated)
-                            setTurnWindowTitle env updated.sessionMeta.metaCwd
-                                updated.sessionMeta.metaTitle
-
-setTurnWindowTitle :: SessionEnv -> OsPath -> Text -> IO ()
-setTurnWindowTitle env cwd title =
-    case env.sessionFullscreen of
-        Just runtime ->
-            setFullscreenWindowTitle runtime (cliWindowTitle cwd (Just title))
-        Nothing -> do
-            tty <- hIsTerminalDevice stdout
-            setCliWindowTitle tty stdout (cliWindowTitle cwd (Just title))
+                            env.sessionSetWindowTitle
+                                (cliWindowTitle updated.sessionMeta.metaCwd
+                                    (Just updated.sessionMeta.metaTitle))
 
 finishTerminal
     :: Bool

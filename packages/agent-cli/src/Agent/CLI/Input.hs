@@ -21,6 +21,7 @@ module Agent.CLI.Input
     , appendReplHistory
     , readReplHistory
     , replHistoryPath
+    , terminalCharWidth
     , terminalTextWidth
     , truncateDisplayText
     , visibleEditorText
@@ -301,6 +302,9 @@ data DisplayCell = DisplayCell
 
 terminalTextWidth :: Text -> Int
 terminalTextWidth = cellsWidth . displayCells
+
+terminalCharWidth :: Char -> Int
+terminalCharWidth = (.displayCellWidth) . displayCell
 
 displayCells :: Text -> [DisplayCell]
 displayCells = map displayCell . Text.unpack
