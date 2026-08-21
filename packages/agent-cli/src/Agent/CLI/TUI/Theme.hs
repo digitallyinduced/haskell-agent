@@ -8,6 +8,9 @@ module Agent.CLI.TUI.Theme
     , footerAttr
     , headerAttr
     , codeAttr
+    , controlLinkActiveAttr
+    , controlLinkAttr
+    , controlLinkHoverAttr
     , emphasisAttr
     , headingAttr
     , inlineCodeAttr
@@ -24,12 +27,14 @@ module Agent.CLI.TUI.Theme
     ) where
 
 import Brick (AttrMap, AttrName, attrMap, attrName)
+import Data.Bits ((.|.))
 import qualified Graphics.Vty as V
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
+controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
 footerAttr = attrName "footer"
@@ -49,6 +54,9 @@ emphasisAttr = attrName "markdown-emphasis"
 inlineCodeAttr = attrName "markdown-inline-code"
 linkAttr = attrName "markdown-link"
 strongAttr = attrName "markdown-strong"
+controlLinkAttr = attrName "control-link"
+controlLinkHoverAttr = attrName "control-link-hover"
+controlLinkActiveAttr = attrName "control-link-active"
 
 solarizedDark :: AttrMap
 solarizedDark =
@@ -118,6 +126,17 @@ solarizedDark =
             `V.withForeColor` rgb 147 161 161
             `V.withBackColor` rgb 0 43 54
             `V.withStyle` V.bold)
+        , (controlLinkAttr, V.defAttr
+            `V.withForeColor` rgb 38 139 210
+            `V.withBackColor` rgb 0 43 54)
+        , (controlLinkHoverAttr, V.defAttr
+            `V.withForeColor` rgb 42 161 152
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.underline)
+        , (controlLinkActiveAttr, V.defAttr
+            `V.withForeColor` rgb 0 43 54
+            `V.withBackColor` rgb 38 139 210
+            `V.withStyle` V.bold)
         ]
 
 monochrome :: AttrMap
@@ -142,6 +161,10 @@ monochrome =
         , (inlineCodeAttr, V.defAttr `V.withStyle` V.reverseVideo)
         , (linkAttr, V.defAttr `V.withStyle` V.underline)
         , (strongAttr, V.defAttr `V.withStyle` V.bold)
+        , (controlLinkAttr, V.defAttr `V.withStyle` V.underline)
+        , (controlLinkHoverAttr, V.defAttr
+            `V.withStyle` (V.underline .|. V.bold))
+        , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
         ]
 
 rgb :: Int -> Int -> Int -> V.Color

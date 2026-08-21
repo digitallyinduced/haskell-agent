@@ -1,0 +1,33 @@
+--- a/src/Graphics/Vty/Platform/Unix/Input/Mouse.hs
++++ b/src/Graphics/Vty/Platform/Unix/Input/Mouse.hs
+@@ -41 +41 @@ requestMouseEvents :: ByteString
+-requestMouseEvents = BS8.pack "\ESC[?1000h\ESC[?1002h\ESC[?1006h"
++requestMouseEvents = BS8.pack "\ESC[?1000h\ESC[?1002h\ESC[?1003h\ESC[?1006h"
+@@ -45 +45 @@ disableMouseEvents :: ByteString
+-disableMouseEvents = BS8.pack "\ESC[?1000l\ESC[?1002l\ESC[?1006l"
++disableMouseEvents = BS8.pack "\ESC[?1003l\ESC[?1002l\ESC[?1000l\ESC[?1006l"
+@@ -72,0 +73,6 @@ ctrlBit = 16
++motionBit :: Int
++motionBit = 32
++
++noButton :: Int
++noButton = 3
++
+@@ -162 +168,2 @@ parseSGRMouseEvent readChar = do
+-    button <- getSGRButton mods
++        isMotion = mods `hasBitSet` motionBit
++        buttonCode = mods .&. buttonMask
+@@ -164,2 +171,11 @@ parseSGRMouseEvent readChar = do
+-        'M' -> return $ EvMouseDown (xCoord-1) (yCoord-1) button modifiers
+-        'm' -> return $ EvMouseUp   (xCoord-1) (yCoord-1) (Just button)
++        'M'
++            | isMotion && buttonCode == noButton ->
++                -- Event has no mouse-move constructor, so use a buttonless
++                -- release that higher layers can route by coordinates.
++                return $ EvMouseUp (xCoord-1) (yCoord-1) Nothing
++            | otherwise -> do
++                button <- getSGRButton mods
++                return $ EvMouseDown (xCoord-1) (yCoord-1) button modifiers
++        'm' -> do
++            button <- getSGRButton mods
++            return $ EvMouseUp (xCoord-1) (yCoord-1) (Just button)
