@@ -17,7 +17,12 @@ import Agent.CLI.Approval
     , childApprove
     , toggleAlwaysApprove
     )
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Btw
+    ( BtwBackendFactory
+    , formatBtwError
+    , runBtwWithCancel
+    )
+import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
@@ -45,6 +50,7 @@ import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
     , withCtrlCHandler
+    , withTurnCancel
     )
 import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
@@ -74,6 +80,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
+    , renderAssistantText
     , renderEvent
     )
 import Agent.CLI.Session
@@ -124,11 +131,12 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
-import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
+import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
+    , withCodexWsRetrying
     , withCodexWsWithProvider
     )
 import Agent.Provider
@@ -570,11 +578,16 @@ runAgent options transition = do
                                             transcriptRef
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
+                                    btwBackend privateParams privateTranscript =
+                                        freshOpenAiBackend
+                                            loaded.loadedTokenProvider
+                                            (readIORef privateParams)
+                                            privateTranscript
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend)
+                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -606,11 +619,14 @@ runAgent options transition = do
                                 withPendingNotices pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
+                            btwBackend privateParams privateTranscript =
+                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                    (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -634,11 +650,14 @@ runAgent options transition = do
                                 withPendingNotices pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
+                            btwBackend privateParams privateTranscript =
+                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                    (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -747,8 +766,9 @@ runSession
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> Backend
+    -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -821,6 +841,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             }
         env = SessionEnv
             { sessionLoop = config
+            , sessionBtwBackend = btwBackend
             , sessionRender = render
             , sessionProvider = provider
             , sessionUnavailableProviders = unavailableProvidersRef
@@ -892,7 +913,8 @@ repl env = replWithDraft env ""
 
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
-    { sessionRender = render
+    { sessionBtwBackend = btwBackend
+    , sessionRender = render
     , sessionProvider = provider
     , sessionPrevious = previous
     , sessionPrinted = printed
@@ -906,6 +928,7 @@ replWithDraft env@SessionEnv
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
+    , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionReset = sessionReset
@@ -1178,6 +1201,26 @@ replWithDraft env@SessionEnv
                             Just providerSwitch ->
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
+                    ReplBtw question -> do
+                        color <- resolveColor stdout
+                        putTextLn stdout
+                            (roleMuted color (glyphSession <> "btw · asking…"))
+                        result <- runBtwWithCancel
+                            (\cancel action ->
+                                withTurnCancel interrupt cancel $
+                                    withEscCancel cancel escPaused action)
+                            btwBackend
+                            paramsRef
+                            transcriptRef
+                            question
+                        case result of
+                            Left err -> do
+                                errorColor <- resolveColor stderr
+                                putTextLn stderr
+                                    (roleError errorColor (formatBtwError err))
+                            Right answer ->
+                                putTextLn stdout (renderAssistantText color answer)
+                        continue
                     ReplResume maybeId -> do
                         handleResume maybeId persist >>= \case
                             Nothing -> continue
@@ -1922,6 +1965,18 @@ lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript 
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
     in Backend \previous inputs onEvent ->
         withMVar wsLock \_ -> submit previous inputs onEvent
+
+-- | Use a disposable WebSocket for side questions so cancellation cannot
+-- leave abandoned response frames queued on the main conversation connection.
+freshOpenAiBackend
+    :: TokenProvider
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEvent ->
+    withCodexWsRetrying provider \conn _credential ->
+        let Backend submit = openAiBackend conn getParams transcript
+        in submit previous inputs onEvent
 
 -- | Prepend drained subagent completion notices to the next parent turn.
 withPendingNotices :: IORef [Text] -> Backend -> Backend

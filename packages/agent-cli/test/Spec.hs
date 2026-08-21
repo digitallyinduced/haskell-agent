@@ -4,6 +4,7 @@ import Test.Hspec (hspec)
 
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
+import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
@@ -37,6 +38,7 @@ main :: IO ()
 main = hspec do
     ApprovalSpec.spec
     AuthSpec.spec
+    BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec

@@ -4,6 +4,7 @@ module Agent.CLI.SessionEnv
     ) where
 
 import Agent.CLI.Interrupt (InterruptState)
+import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (SessionCreate, SessionHandle)
@@ -16,6 +17,7 @@ import Data.Text (Text)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
+    , sessionBtwBackend :: !BtwBackendFactory
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
     , sessionUnavailableProviders :: !(IORef [Provider])
