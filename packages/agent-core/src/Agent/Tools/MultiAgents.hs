@@ -22,7 +22,7 @@ import Agent.Subagents
     , sendInputMessage
     , spawnSubagentAt
     , waitAnyLive
-    , waitSubagents
+    , waitSubagentsFrom
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
@@ -232,7 +232,8 @@ runWait ctx args = do
     let timeoutMs = fromMaybe defaultWaitTimeoutMs args.timeoutMs
     case args.targets of
         Nothing -> do
-            (statuses, timedOut) <- waitAnyLive ctx.multiRegistry timeoutMs
+            (statuses, timedOut) <-
+                waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
             pure $ Right $ encodeJson $ object
                 [ "message" .= waitSummary timedOut statuses
                 , "timed_out" .= timedOut
@@ -243,7 +244,9 @@ runWait ctx args = do
             case sequence resolved of
                 Left err -> pure (Left err)
                 Right ids -> do
-                    (statuses, timedOut) <- waitSubagents ctx.multiRegistry ids timeoutMs
+                    (statuses, timedOut) <-
+                        waitSubagentsFrom
+                            ctx.multiRegistry ctx.multiSelfId ids timeoutMs
                     pure $ Right $ encodeJson $ object
                         [ "message" .= waitSummary timedOut statuses
                         , "timed_out" .= timedOut
@@ -315,13 +318,19 @@ runSendMessage ctx call args
             Right targetPath | targetPath == taskPathRoot ->
                 sendToRoot ctx (messageContent call args.message)
             _ -> do
-                _ <- maybeRestore ctx args.target
-                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-                case resolved of
+                restored <- maybeRestore ctx args.target
+                case restored of
                     Left err -> pure (Left err)
-                    Right agentId ->
-                        queueMessageFrom ctx.multiRegistry ctx.multiTaskPath agentId
-                            (messageContent call args.message)
+                    Right () -> do
+                        resolved <-
+                            resolveAgentTarget
+                                ctx.multiRegistry ctx.multiTaskPath args.target
+                        case resolved of
+                            Left err -> pure (Left err)
+                            Right agentId ->
+                                queueMessageFrom
+                                    ctx.multiRegistry ctx.multiTaskPath agentId
+                                    (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -348,13 +357,19 @@ runFollowup ctx call args
             Right targetPath | targetPath == taskPathRoot ->
                 pure (Left "followup_task cannot target the root agent; use send_message")
             _ -> do
-                _ <- maybeRestore ctx args.target
-                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-                case resolved of
+                restored <- maybeRestore ctx args.target
+                case restored of
                     Left err -> pure (Left err)
-                    Right agentId ->
-                        sendInputMessage ctx.multiRegistry ctx.multiTaskPath agentId
-                            (messageContent call args.message) False
+                    Right () -> do
+                        resolved <-
+                            resolveAgentTarget
+                                ctx.multiRegistry ctx.multiTaskPath args.target
+                        case resolved of
+                            Left err -> pure (Left err)
+                            Right agentId ->
+                                sendInputMessage
+                                    ctx.multiRegistry ctx.multiTaskPath agentId
+                                    (messageContent call args.message) False
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
 sendToRoot ctx content =
