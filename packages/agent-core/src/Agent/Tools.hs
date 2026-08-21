@@ -25,6 +25,11 @@ module Agent.Tools
     ) where
 
 import Agent.Provider (Provider(..))
+import Agent.ResourceScope
+    ( allocateResource
+    , closeResourceScope
+    , newResourceScope
+    )
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Grok (closeGrokSession, filterGrokToolsForType, grokTools, newGrokSession)
@@ -32,6 +37,7 @@ import Agent.Tools.Grok.Task (GrokSubagentSpecs)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
+import Control.Exception.Safe (onException)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -69,35 +75,39 @@ codingToolsForWithTypes
     -> GrokSubagentSpecs
     -> IO CodingTools
 codingToolsForWithTypes provider env hooks multi typesRef = do
-    plan <- newPlanModeEnv env.toolCwd hooks
-    case provider of
-        XAIProvider -> do
-            session <- newGrokSession env
-            ghci <- newGhciSession env
-            pure CodingTools
-                { codingAppTools = grokTools session ghci plan multi typesRef
-                , codingPlanMode = plan
-                , codingClose = closeGrokSession session >> closeGhciSession ghci
-                , codingAgentTypes = typesRef
-                }
-        OpenRouterProvider -> do
-            session <- newGrokSession env
-            ghci <- newGhciSession env
-            pure CodingTools
-                { codingAppTools = grokTools session ghci plan multi typesRef
-                , codingPlanMode = plan
-                , codingClose = closeGrokSession session >> closeGhciSession ghci
-                , codingAgentTypes = typesRef
-                }
-        OpenAIProvider -> do
-            ghci <- newGhciSession env
-            tools <- codexTools env ghci plan multi
-            pure CodingTools
-                { codingAppTools = tools
-                , codingPlanMode = plan
-                , codingClose = closeGhciSession ghci
-                , codingAgentTypes = typesRef
-                }
+    resources <- newResourceScope
+    flip onException (closeResourceScope resources) do
+        plan <- newPlanModeEnv env.toolCwd hooks
+        case provider of
+            XAIProvider ->
+                grokCodingTools resources plan
+            OpenRouterProvider ->
+                grokCodingTools resources plan
+            OpenAIProvider -> do
+                (_, ghci) <- allocateResource resources
+                    (newGhciSession env)
+                    closeGhciSession
+                tools <- codexTools env ghci plan multi
+                pure CodingTools
+                    { codingAppTools = tools
+                    , codingPlanMode = plan
+                    , codingClose = closeResourceScope resources
+                    , codingAgentTypes = typesRef
+                    }
+  where
+    grokCodingTools resources plan = do
+        (_, session) <- allocateResource resources
+            (newGrokSession env)
+            closeGrokSession
+        (_, ghci) <- allocateResource resources
+            (newGhciSession env)
+            closeGhciSession
+        pure CodingTools
+            { codingAppTools = grokTools session ghci plan multi typesRef
+            , codingPlanMode = plan
+            , codingClose = closeResourceScope resources
+            , codingAgentTypes = typesRef
+            }
 
 -- | Re-export for CLI child runners.
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]

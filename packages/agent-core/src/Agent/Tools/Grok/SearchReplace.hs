@@ -14,6 +14,13 @@ import Agent.Tools.PlanMode
     , planModeBlockedEditMessage
     )
 import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Control.Monad (unless, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , runExceptT
+    , throwE
+    )
 import Data.Aeson (FromJSON(..))
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -58,82 +65,78 @@ searchReplaceDescription =
     \- To create a new file, set old_string to an empty string. An empty old_string cannot overwrite an existing non-empty file."
 
 runSearchReplace :: ToolEnv -> PlanModeEnv -> SearchReplaceArgs -> IO (Either Text Text)
-runSearchReplace env planMode args = do
-    active <- isPlanModeActive planMode
-    if not active
-        then runSearchReplaceBody env args
-        else do
-            planPath <- planFilePath planMode
-            resolved <- resolveUnderCwd env (fromText args.filePath)
-            case resolved of
-                Left err -> pure (Left err)
-                Right path
-                    | isPlanFileEditTarget planPath path ->
-                        runSearchReplaceBody env args
-                    | otherwise ->
-                        pure (Left (planModeBlockedEditMessage planPath))
+runSearchReplace env planMode args = runExceptT do
+    guardPlanMode env planMode args.filePath
+    runSearchReplaceBody env args
 
-runSearchReplaceBody :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
+guardPlanMode :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
+guardPlanMode env planMode filePath = do
+    active <- lift (isPlanModeActive planMode)
+    when active (checkPlanPath env planMode filePath)
+
+checkPlanPath :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
+checkPlanPath env planMode filePath = do
+    planPath <- lift (planFilePath planMode)
+    path <- resolvePath env filePath
+    unless (isPlanFileEditTarget planPath path)
+        (throwE (planModeBlockedEditMessage planPath))
+
+runSearchReplaceBody :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 runSearchReplaceBody env args
     | args.oldString == args.newString =
-        pure (Left "Old string and new string are the same")
+        throwE "Old string and new string are the same"
     | Text.null args.oldString = createNewFile env args
     | otherwise = replaceInFile env args
 
-createNewFile :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
-createNewFile env args = resolveUnderCwd env (fromText args.filePath) >>= \case
-    Left err -> pure (Left err)
-    Right path -> gitignoreGuard env path args.filePath >>= \case
-        Just err -> pure (Left err)
-        Nothing -> doesFileExist path >>= \case
-            True -> readTextFile path >>= \case
-                Left err -> pure (Left err)
-                Right existing
-                    | Text.null existing -> writeCreated path
-                    | otherwise ->
-                        pure $ Left "An empty old_string cannot overwrite an existing non-empty file."
-            False -> writeCreated path
+createNewFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
+createNewFile env args = do
+    path <- resolvePath env args.filePath
+    gitignoreGuard env path args.filePath
+    exists <- lift (doesFileExist path)
+    when exists do
+        existing <- ExceptT (readTextFile path)
+        unless (Text.null existing) $
+            throwE "An empty old_string cannot overwrite an existing non-empty file."
+    writeCreated path
   where
-    writeCreated path = writeTextFile path args.newString >>= \case
-        Left err -> pure (Left err)
-        Right () -> pure $ Right $
-            "The file " <> args.filePath <> " has been created successfully."
+    writeCreated path = do
+        ExceptT (writeTextFile path args.newString)
+        pure ("The file " <> args.filePath <> " has been created successfully.")
 
-replaceInFile :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
-replaceInFile env args = resolveUnderCwd env (fromText args.filePath) >>= \case
-    Left err -> pure (Left err)
-    Right path -> gitignoreGuard env path args.filePath >>= \case
-        Just err -> pure (Left err)
-        Nothing -> doesFileExist path >>= \case
-            False -> pure $ Left $ "File not found: " <> args.filePath
-            True -> readTextFile path >>= \case
-                Left err -> pure (Left err)
-                Right content ->
-                    let count = countOccurrences args.oldString content
-                    in case count of
-                        0 -> pure $ Left $
-                            "The string to replace was not found in the file, use the read_file tool to see the correct string. The user may have changed the file since you last read it."
-                                <> nearestMatchHint content args.oldString
-                        n | n > 1 && not args.replaceAll ->
-                            pure $ Left
-                                "The string to replace was found multiple times in the file. Use replace_all to replace all occurrences, or include more context to only edit one occurrence."
-                        _ ->
-                            let updated = replaceOccurrences args.oldString args.newString args.replaceAll content
-                            in writeTextFile path updated >>= \case
-                                Left err -> pure (Left err)
-                                Right () -> pure $ Right $
-                                    if args.replaceAll && count > 1
-                                        then "The file " <> args.filePath
-                                            <> " has been updated. All occurrences were successfully replaced."
-                                        else "The file " <> args.filePath
-                                            <> " has been updated successfully."
+replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
+replaceInFile env args = do
+    path <- resolvePath env args.filePath
+    gitignoreGuard env path args.filePath
+    exists <- lift (doesFileExist path)
+    unless exists $
+        throwE ("File not found: " <> args.filePath)
+    content <- ExceptT (readTextFile path)
+    let count = countOccurrences args.oldString content
+    when (count == 0) $
+        throwE $
+            "The string to replace was not found in the file, use the read_file tool to see the correct string. The user may have changed the file since you last read it."
+                <> nearestMatchHint content args.oldString
+    when (count > 1 && not args.replaceAll) $
+        throwE
+            "The string to replace was found multiple times in the file. Use replace_all to replace all occurrences, or include more context to only edit one occurrence."
+    let updated = replaceOccurrences args.oldString args.newString args.replaceAll content
+    ExceptT (writeTextFile path updated)
+    pure $
+        if args.replaceAll && count > 1
+            then "The file " <> args.filePath
+                <> " has been updated. All occurrences were successfully replaced."
+            else "The file " <> args.filePath
+                <> " has been updated successfully."
 
-gitignoreGuard :: ToolEnv -> OsPath -> Text -> IO (Maybe Text)
+resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
+resolvePath env path =
+    ExceptT (resolveUnderCwd env (fromText path))
+
+gitignoreGuard :: ToolEnv -> OsPath -> Text -> ExceptT Text IO ()
 gitignoreGuard env path display = do
-    ignored <- isGitIgnored env.toolCwd path
-    pure $ if ignored
-        then Just $ "Error: " <> display <> " is ignored by .gitignore and cannot be edited."
-        else Nothing
+    ignored <- lift (isGitIgnored env.toolCwd path)
+    when ignored $
+        throwE ("Error: " <> display <> " is ignored by .gitignore and cannot be edited.")
 
 nearestMatchHint :: Text -> Text -> Text
 nearestMatchHint file oldString =
