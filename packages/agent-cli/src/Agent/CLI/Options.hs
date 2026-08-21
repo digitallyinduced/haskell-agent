@@ -245,7 +245,7 @@ usage = unlines
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
-    , "/resume [ID] prints a --resume hint (TTY: session picker)."
+    , "/resume [ID] resumes a persisted session (TTY: two-pane picker)."
     , "/paste [TEXT] attaches a clipboard image to the next"
     , "message and draws an in-terminal preview (Kitty/Ghostty/WezTerm/iTerm2);"
     , "/paste --send [TEXT] sends immediately. Cmd+V of a Finder image path also"

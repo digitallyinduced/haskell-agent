@@ -76,7 +76,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage"
-    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
+    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
     , cmd "new" [] "/new" "Start a fresh persisted session id"

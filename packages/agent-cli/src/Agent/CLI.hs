@@ -225,6 +225,9 @@ data RunResult
     | RunReload
     | RunSwitchProvider ProviderTransition
     | RunProviderStartFailed ApiError
+    | RunResumeSession Text
+      -- ^ Persisted session id. Consumed after the current provider-specific
+      -- backend shuts down before starting the selected session.
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
 afterDev :: DevResult -> IO String
@@ -281,7 +284,7 @@ devMain = do
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
         Right (RunAgent options) -> do
-            result <- runAgentWithProviderSwitches options
+            result <- runAgentWithRestarts options
             case result of
                 DevQuit -> clearDevResumePointer home >> pure DevQuit
                 DevReload -> pure DevReload
@@ -299,7 +302,7 @@ run = do
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
         Right (RunAgent options) -> do
-            result <- runAgentWithProviderSwitches options
+            result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
                 DevReload -> do
@@ -310,11 +313,24 @@ run = do
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
-runAgentWithProviderSwitches :: CliOptions -> IO DevResult
-runAgentWithProviderSwitches options = go options Nothing
+runAgentWithRestarts :: CliOptions -> IO DevResult
+runAgentWithRestarts options = go options Nothing
   where
     go current transition =
         runAgent current transition >>= \case
+            RunResumeSession sessionId ->
+                go
+                    current
+                        { optProvider = Nothing
+                        , optModel = Nothing
+                        , optCwd = Nothing
+                        , optWorktree = False
+                        , optEffort = Nothing
+                        , optPrompt = Nothing
+                        , optPromptFile = Nothing
+                        , optResume = Just sessionId
+                        }
+                    Nothing
             RunSwitchProvider next ->
                 go (applyProviderTransition current next) (Just next)
             RunProviderStartFailed apiError ->
@@ -1163,8 +1179,9 @@ replWithDraft env@SessionEnv
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
                     ReplResume maybeId -> do
-                        handleResume maybeId persist
-                        continue
+                        handleResume maybeId persist >>= \case
+                            Nothing -> continue
+                            Just result -> pure result
                     ReplClear -> do
                         sessionReset
                         color <- resolveColor stderr
@@ -1740,27 +1757,32 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
 handleResume
     :: Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> IO ()
+    -> IO (Maybe RunResult)
 handleResume maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
-    prog <- getProgName
-    let printHint sessionId =
-            Text.hPutStrLn stderr
-                (roleMuted color (resumeHint prog sessionId))
-    case maybeId of
-        Just sessionId -> printHint sessionId
-        Nothing -> do
-            sessions <- listSessions (sessionsRoot home)
+    let root = sessionsRoot home
+        resume sessionId = do
             currentId <- currentSessionId persist
-            pickResumeSession color sessions >>= \case
-                Nothing -> pure ()
-                Just sessionId
-                    | Just sessionId == currentId ->
-                        Text.hPutStrLn stderr
-                            (roleMuted color
-                                (glyphSession <> "already on session " <> sessionId))
-                    | otherwise -> printHint sessionId
+            if Just sessionId == currentId
+                then do
+                    Text.hPutStrLn stderr
+                        (roleMuted color
+                            (glyphSession <> "already on session " <> sessionId))
+                    pure Nothing
+                else
+                    loadSession root sessionId >>= \case
+                        Left err -> do
+                            Text.hPutStrLn stderr (roleError color (Text.pack err))
+                            pure Nothing
+                        Right _ -> pure (Just (RunResumeSession sessionId))
+    case maybeId of
+        Just sessionId -> resume sessionId
+        Nothing -> do
+            sessions <- listSessions root
+            pickResumeSession color root sessions >>= \case
+                Nothing -> pure Nothing
+                Just sessionId -> resume sessionId
 
 currentSessionId
     :: Maybe (IORef (Either SessionCreate SessionHandle))
