@@ -7,6 +7,7 @@ module Agent.ToolDispatch
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
+    , typedToolWithCall
     , noArgsTool
     , functionToolCall
     , customToolCall
@@ -40,6 +41,7 @@ data ToolCall = ToolCall
     , name :: !Text
     , arguments :: !Text
     , callKind :: !ToolCallKind
+    , argumentsEncrypted :: !Bool
     } deriving (Eq, Show)
 
 -- | Provider-neutral result ready for a transport adapter to encode.
@@ -55,6 +57,7 @@ functionToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = FunctionCallKind
+    , argumentsEncrypted = False
     }
 
 customToolCall :: Text -> Text -> Text -> ToolCall
@@ -63,6 +66,7 @@ customToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = CustomCallKind
+    , argumentsEncrypted = False
     }
 
 data ToolDispatchConfig = ToolDispatchConfig
@@ -74,10 +78,14 @@ data ToolDispatchConfig = ToolDispatchConfig
 
 data ToolHandler
     = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
+    | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
 typedTool :: FromJSON args => Text -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool = TypedTool
+
+typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
+typedToolWithCall = TypedToolWithCall
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -87,7 +95,7 @@ dispatchToolCall config handlers call = do
     let callName = call.name
         input = toolArgumentsValue call.arguments
         runTool = case findHandler callName handlers of
-            Just handler -> runHandler input handler
+            Just handler -> runHandler call input handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- Exception.try @SomeException runTool
     resultOutput <- case result of
@@ -149,13 +157,18 @@ multiAgentBareNames =
 handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ -> name
+    TypedToolWithCall name _ -> name
     NoArgsTool name _ -> name
 
-runHandler :: Value -> ToolHandler -> IO (Either Text Text)
-runHandler value = \case
+runHandler :: ToolCall -> Value -> ToolHandler -> IO (Either Text Text)
+runHandler call value = \case
     TypedTool _ run ->
         case decodeToolArguments value of
             Right args -> run args
+            Left err -> pure (Left err)
+    TypedToolWithCall _ run ->
+        case decodeToolArguments value of
+            Right args -> run call args
             Left err -> pure (Left err)
     NoArgsTool _ run ->
         run

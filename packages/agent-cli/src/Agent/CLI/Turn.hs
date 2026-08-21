@@ -52,7 +52,6 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
-import Agent.OpenAI.LoopBackend (toolResultToItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -65,7 +64,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Data.IORef
     ( atomicModifyIORef'
     , modifyIORef'
@@ -140,16 +139,33 @@ runOneTurn env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
+        persistIncomplete errorText = case persist of
+            Nothing -> pure ()
+            Just slotRef -> do
+                now <- getCurrentTime
+                handle <- ensureSession slotRef
+                writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                writeIORef storeRoot (Just handle.sessionDir)
+                let turn = SessionTurn
+                        { turnAt = now
+                        , turnUserText = promptText
+                        , turnAssistantText = Nothing
+                        , turnError = Just errorText
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        }
+                handle' <- appendTurn handle turn
+                writeIORef slotRef (Right handle')
     case result of
-        Left (LoopCancelled toolResults) -> do
+        Left cancelled@(LoopCancelled _) -> do
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
-            unless (null toolResults) do
-                modifyIORef' transcriptRef
-                    (<> map toolResultToItem toolResults)
+            writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            putTextLn stderr (formatLoopErrorColored color cancelled)
             model <- readIORef render.renderModelRef
             putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
+            persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
             afterItems <- readIORef transcriptRef
@@ -168,10 +184,12 @@ runOneTurn env@SessionEnv
                             }
                 _ -> do
                     finishTerminal terminal wallStarted finishedAt 1 "Agent turn failed"
+                    writeIORef transcriptRef beforeItems
                     color <- resolveColor stderr
                     putTextLn stderr (formatLoopErrorColored color err)
                     model <- readIORef render.renderModelRef
                     putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
+                    persistIncomplete (Text.pack (show err))
                     pure TurnFailed
         Right loopResult -> do
             finishTerminal terminal wallStarted finishedAt 0 "Agent finished"
@@ -212,6 +230,7 @@ runOneTurn env@SessionEnv
                             { turnAt = now
                             , turnUserText = promptText
                             , turnAssistantText = assistantText
+                            , turnError = Nothing
                             , turnResponseId = Just loopResult.finalResponseId
                             , turnItems = newItems
                             , turnUsage = Just loopResult.tokenUsage

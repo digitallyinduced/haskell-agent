@@ -17,6 +17,10 @@ import Agent.CLI.Input
     )
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Notification
+    ( AttentionRequest(InputRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Style
     ( agentBackground
     , paintBackgroundLines
@@ -60,6 +64,7 @@ confirmEnter resolveColor reason = do
         then pure False
         else do
             putTextLn stderr (roleMuted color reason)
+            notifyAttention stderr InputRequested
             let question = roleWarn color "Enter plan mode? [y/N] "
             readApprovalLine question >>= \case
                 Nothing -> pure False
@@ -77,7 +82,9 @@ decideExit interrupt resolveColor planBody = do
     putTextLn stderr (roleMuted color "──────────")
     if not isTty
         then pure PlanCancel
-        else promptDecision interrupt color
+        else do
+            notifyAttention stderr InputRequested
+            promptDecision interrupt color
 
 promptDecision :: InterruptState -> Bool -> IO PlanDecision
 promptDecision interrupt color = do
@@ -102,6 +109,7 @@ promptDecision interrupt color = do
 
 readChangeNotes :: InterruptState -> Bool -> IO Text
 readChangeNotes interrupt color = do
+    notifyAttention stderr InputRequested
     let chrome =
             rolePrompt color "changes> "
                 <> if color
@@ -112,6 +120,10 @@ readChangeNotes interrupt color = do
         ReplQuitInterrupt -> throwIO UserInterrupt
         ReplPasted text ->
             if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
+        ReplClipboardPaste text ->
+            if Text.null (Text.strip text)
+                then readChangeNotes interrupt color
+                else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
             readChangeNotes interrupt color
@@ -126,27 +138,33 @@ askQuestion interrupt resolveColor question options = do
     putTextLn stderr (roleMuted color question)
     if not isTty
         then pure Nothing
-        else case options of
-            [] -> do
-                let chrome =
-                        rolePrompt color "answer> "
-                            <> if color
-                                then Text.pack clearFromCursorToLineEndCode
-                                else mempty
-                readReplLine interrupt chrome >>= \case
-                    ReplEof -> pure Nothing
-                    ReplQuitInterrupt -> throwIO UserInterrupt
-                    ReplPasted text ->
-                        if Text.null (Text.strip text)
-                            then pure Nothing
-                            else pure (Just (Text.strip text))
-                    ReplCycleMode _ ->
-                        askQuestion interrupt resolveColor question []
-                    ReplText text
-                        | Text.null (Text.strip text) -> pure Nothing
-                        | otherwise -> pure (Just (Text.strip text))
-            opts ->
-                readChoiceSelection (formatChoiceLine color) opts
+        else do
+            notifyAttention stderr InputRequested
+            case options of
+                [] -> do
+                    let chrome =
+                            rolePrompt color "answer> "
+                                <> if color
+                                    then Text.pack clearFromCursorToLineEndCode
+                                    else mempty
+                    readReplLine interrupt chrome >>= \case
+                        ReplEof -> pure Nothing
+                        ReplQuitInterrupt -> throwIO UserInterrupt
+                        ReplPasted text ->
+                            if Text.null (Text.strip text)
+                                then pure Nothing
+                                else pure (Just (Text.strip text))
+                        ReplClipboardPaste text ->
+                            if Text.null (Text.strip text)
+                                then askQuestion interrupt resolveColor question []
+                                else pure (Just (Text.strip text))
+                        ReplCycleMode _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplText text
+                            | Text.null (Text.strip text) -> pure Nothing
+                            | otherwise -> pure (Just (Text.strip text))
+                opts ->
+                    readChoiceSelection (formatChoiceLine color) opts
 
 formatChoiceLine :: Bool -> Bool -> Text -> Text
 formatChoiceLine color selected label
