@@ -132,6 +132,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.PickerSpec
                     , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec

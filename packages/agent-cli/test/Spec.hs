@@ -22,6 +22,7 @@ import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
+import qualified Agent.CLI.PickerSpec as PickerSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProgressSpec as ProgressSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
@@ -60,6 +61,7 @@ main = hspec do
     OptionsSpec.spec
     PendingInputsSpec.spec
     PermissionSpec.spec
+    PickerSpec.spec
     PlanSpec.spec
     ProgressSpec.spec
     ProjectSpec.spec
