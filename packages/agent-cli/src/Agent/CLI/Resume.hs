@@ -295,6 +295,7 @@ loadRecentSessions root metas =
                             , turnUserText = ""
                             , turnAssistantText =
                                 Just ("Transcript unavailable: " <> Text.pack err)
+                            , turnError = Nothing
                             , turnResponseId = Nothing
                             , turnItems = []
                             , turnUsage = Nothing

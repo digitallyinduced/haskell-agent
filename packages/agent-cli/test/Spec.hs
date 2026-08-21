@@ -17,6 +17,7 @@ import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProgressSpec as ProgressSpec
@@ -51,6 +52,7 @@ main = hspec do
     ModelPickerSpec.spec
     ModelsSpec.spec
     OptionsSpec.spec
+    PendingInputsSpec.spec
     PermissionSpec.spec
     PlanSpec.spec
     ProgressSpec.spec

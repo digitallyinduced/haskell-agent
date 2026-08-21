@@ -45,7 +45,6 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
-import Agent.OpenAI.LoopBackend (toolResultToItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -58,7 +57,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Data.IORef
     ( atomicModifyIORef'
     , modifyIORef'
@@ -131,7 +130,6 @@ runOneTurn env@SessionEnv
         persistIncomplete errorText = case persist of
             Nothing -> pure ()
             Just slotRef -> do
-                afterItems <- readIORef transcriptRef
                 now <- getCurrentTime
                 handle <- ensureSession slotRef
                 writeIORef planMode.planSessionDir (Just handle.sessionDir)
@@ -142,18 +140,16 @@ runOneTurn env@SessionEnv
                         , turnAssistantText = Nothing
                         , turnError = Just errorText
                         , turnResponseId = Nothing
-                        , turnItems = drop (length beforeItems) afterItems
+                        , turnItems = []
                         , turnUsage = Nothing
                         }
                 handle' <- appendTurn handle turn
                 writeIORef slotRef (Right handle')
     case result of
-        Left (LoopCancelled toolResults) -> do
-            unless (null toolResults) do
-                modifyIORef' transcriptRef
-                    (<> map toolResultToItem toolResults)
+        Left cancelled@(LoopCancelled _) -> do
+            writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color (LoopCancelled toolResults))
+            putTextLn stderr (formatLoopErrorColored color cancelled)
             model <- readIORef render.renderModelRef
             putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete "cancelled"
@@ -172,6 +168,7 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    writeIORef transcriptRef beforeItems
                     color <- resolveColor stderr
                     putTextLn stderr (formatLoopErrorColored color err)
                     model <- readIORef render.renderModelRef

@@ -56,6 +56,7 @@ import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options
+import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
@@ -592,7 +593,7 @@ runAgent options transition = do
                                             (readIORef paramsRef)
                                             transcriptRef
                                     noticingBackend =
-                                        withPendingNotices pendingNotices lockedBackend
+                                        withPendingInputs pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
                                             loaded.loadedTokenProvider
@@ -631,7 +632,7 @@ runAgent options transition = do
                                         subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
-                                withPendingNotices pendingNotices $
+                                withPendingInputs pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
@@ -662,7 +663,7 @@ runAgent options transition = do
                                         subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
-                                withPendingNotices pendingNotices $
+                                withPendingInputs pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
@@ -1995,16 +1996,6 @@ freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEv
     withCodexWsRetrying provider \conn _credential ->
         let Backend submit = openAiBackend conn getParams transcript
         in submit previous inputs onEvent
-
--- | Prepend drained subagent completion notices to the next parent turn.
-withPendingNotices :: IORef [TurnInput] -> Backend -> Backend
-withPendingNotices pending (Backend submit) = Backend \previous inputs onEvent -> do
-    notices <- atomicModifyIORef' pending \xs -> ([], xs)
-    let prefixed
-            | null notices = inputs
-            | otherwise = notices <> inputs
-    submit previous prefixed onEvent
-
 -- | Child Codex agent: per-agent transcript (retained across send_input), same
 -- WS (locked), nested multi-agent tools.
 runCodexSubagent
