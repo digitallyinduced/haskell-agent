@@ -58,6 +58,13 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "transcript · /root"
             frame `shouldSatisfy` Text.isInfixOf "assistant: ready"
 
+        it "keeps the selected child transcript visible after the picker" do
+            let selected = AgentChild (SubagentId "alpha")
+                panel = renderAgentViewportPanelFor False 70 selected entries
+            panel `shouldSatisfy` Text.isInfixOf "transcript · /root/alpha"
+            panel `shouldSatisfy` Text.isInfixOf "assistant: working"
+            panel `shouldSatisfy` Text.isInfixOf "input routes to /root"
+
     describe "formatAgentStatus" do
         it "uses compact status labels" do
             map formatAgentStatus

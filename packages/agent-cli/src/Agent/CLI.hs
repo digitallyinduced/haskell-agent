@@ -18,7 +18,7 @@ import Agent.CLI.AgentViewport
     , AgentViewportEnv(..)
     , formatAgentStatus
     , pickAgentViewport
-    , renderAgentTree
+    , renderAgentViewportPanelFor
     , responseItemLines
     )
 import Agent.CLI.Approval
@@ -1009,17 +1009,22 @@ replWithDraft env@SessionEnv
     params <- readIORef paramsRef
     policy <- readIORef policyRef
     let idleMode = replModeFromState planState policy
+    termCols <- fmap snd <$> getTerminalSize
     case agentViewport of
         Nothing -> pure ()
         Just viewport -> do
             entries <- viewport.viewportEntries
             selected <- readIORef viewport.viewportSelected
-            let tree = renderAgentTree stdoutColor selected entries
-            when (not (Text.null tree)) (Text.putStrLn tree)
+            let panel =
+                    renderAgentViewportPanelFor
+                        stdoutColor
+                        (fromMaybe 100 termCols)
+                        selected
+                        entries
+            when (not (Text.null panel)) (Text.putStrLn panel)
     -- Status sits on the line above λ; the inline editor owns the prompt and
     -- any live completion rows below it.
     -- Token totals sit on the right of that line when the TTY width is known.
-    termCols <- fmap snd <$> getTerminalSize
     usage <- readIORef usageRef
     Text.putStrLn $ formatReplStatusLine stdoutColor termCols
         (currentModel params)

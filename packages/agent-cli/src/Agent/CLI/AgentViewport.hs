@@ -9,6 +9,7 @@ module Agent.CLI.AgentViewport
     , initialAgentViewportState
     , pickAgentViewport
     , renderAgentTree
+    , renderAgentViewportPanelFor
     , renderAgentViewportFrame
     , renderAgentViewportFrameFor
     , responseItemLines
@@ -136,10 +137,45 @@ renderAgentViewportFrameFor
     -> AgentViewportState
     -> Text
 renderAgentViewportFrameFor color terminalRows terminalCols state =
+    renderAgentViewportFor
+        color
+        (max 1 (terminalRows - 4))
+        terminalCols
+        "↑↓/jk switch viewport · enter keep · esc/q cancel"
+        state
+
+renderAgentViewportPanelFor
+    :: Bool
+    -> Int
+    -> AgentTarget
+    -> [AgentEntry]
+    -> Text
+renderAgentViewportPanelFor color terminalCols selected entries
+    | length entries <= 1 = ""
+    | otherwise =
+        renderAgentViewportFor
+            color
+            6
+            terminalCols
+            ("viewing " <> selectedPath
+                <> " · input routes to /root · /agents switch")
+            state
+  where
+    state = initialAgentViewportState selected entries
+    selectedPath =
+        maybe "/root" (.agentPath) (selectedEntry state)
+
+renderAgentViewportFor
+    :: Bool
+    -> Int
+    -> Int
+    -> Text
+    -> AgentViewportState
+    -> Text
+renderAgentViewportFor color bodyRows terminalCols footerText state =
     Text.intercalate "\n" (header : headings : body <> [footer])
   where
     cols = max 20 terminalCols
-    bodyRows = max 1 (terminalRows - 4)
     divider = roleMuted color " │ "
     leftWidth = max 12 (min 38 ((cols - 3) * 2 `div` 5))
     rightWidth = max 1 (cols - leftWidth - 3)
@@ -184,7 +220,7 @@ renderAgentViewportFrameFor color terminalRows terminalCols state =
             zipWith (\left right -> left <> divider <> right) leftRows rightRows
     footer =
         roleMuted color $
-            fitCell cols "↑↓/jk switch viewport · enter keep · esc/q cancel"
+            fitCell cols footerText
 
 pickAgentViewport
     :: Bool
