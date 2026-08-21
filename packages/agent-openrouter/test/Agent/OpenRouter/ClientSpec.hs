@@ -8,6 +8,7 @@ import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenAI.Responses.Types
 import Control.Concurrent.MVar
 import Control.Monad (when)
+import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -85,6 +86,32 @@ spec = do
             readIORef recorded `shouldReturn` []
 
     describe "retry boundaries" do
+        it "retries a transient HTTP failure before streaming starts" do
+            recorded <- newIORef []
+            attempts <- newIORef (0 :: Int)
+            let handler _request = do
+                    attempt <- atomicModifyIORef' attempts \current ->
+                        let next = current + 1
+                        in (next, next)
+                    pure $ if attempt == 1
+                        then Wai.responseLBS HTTP.status503
+                            [("Content-Type", "text/plain")]
+                            "temporarily unavailable"
+                        else sseResponse
+                            [ outputItemDone (assistantMessage "after retry")
+                            , completedEvent "resp-retry" []
+                            ]
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWithEventsPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    options
+                    (openRouterCredential "token-a")
+                    (helloRequest "hi")
+                    (const (pure ()))
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-retry"
+            length <$> readIORef recorded `shouldReturn` 2
+
         it "reports a terminal stream failure after one request" do
             recorded <- newIORef []
             let handler _request = pure $ sseResponse
@@ -111,6 +138,42 @@ spec = do
 
             requests <- readIORef recorded
             length requests `shouldBe` 1
+
+        it "does not retry a transient failure after a callback" do
+            attempts <- newIORef (0 :: Int)
+            callbacks <- newIORef (0 :: Int)
+            let overload =
+                    ProviderError OverloadedError "temporarily overloaded" Nothing
+                request emit = do
+                    modifyIORef' attempts (+ 1)
+                    emit ()
+                    pure (Left overload :: Either ApiError Text)
+            result <- retryTransientOpenRouterResultWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                request
+                (const (modifyIORef' callbacks (+ 1)))
+            result `shouldBe` Left overload
+            readIORef attempts `shouldReturn` 1
+            readIORef callbacks `shouldReturn` 1
+
+        it "does not retry when the stream callback throws" do
+            checkThrowingCallback
+
+        it "does not retry quota errors before streaming starts" do
+            attempts <- newIORef (0 :: Int)
+            let quota = ProviderError UsageLimitReached "quota" (Just 3600)
+                request _emit = do
+                    modifyIORef' attempts (+ 1)
+                    pure (Left quota :: Either ApiError Text)
+            result <- retryTransientOpenRouterResultWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                request
+                (const (pure ()))
+            result `shouldBe` Left quota
+            readIORef attempts `shouldReturn` 1
+
+        it "does not retry an unknown-code permanent client error" do
+            checkPermanentClientError
 
         it "classifies an OpenRouter 401 envelope as authentication rejected" do
             recorded <- newIORef []
@@ -258,6 +321,54 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+checkPermanentClientError :: IO ()
+checkPermanentClientError = do
+    recorded <- newIORef []
+    withMockOpenRouter recorded permanentClientErrorResponse \options -> do
+        result <- createResponseWithEventsPolicy
+            (constantDelay 0 <> limitRetries 3)
+            options
+            (openRouterCredential "token-a")
+            (helloRequest "hi")
+            (const (pure ()))
+        case result of
+            Left (ProviderError InvalidRequestError _ _) -> pure ()
+            other -> expectationFailure
+                ("expected InvalidRequestError, got " <> show other)
+    length <$> readIORef recorded `shouldReturn` 1
+
+checkThrowingCallback :: IO ()
+checkThrowingCallback = do
+    recorded <- newIORef []
+    callbacks <- newIORef (0 :: Int)
+    withMockOpenRouter recorded throwingCallbackResponse \options -> do
+        result <- createResponseWithEventsPolicy
+            (constantDelay 0 <> limitRetries 3)
+            options
+            (openRouterCredential "token-a")
+            (helloRequest "hi")
+            (throwingCallback callbacks)
+        case result of
+            Left ConnectionError{} -> pure ()
+            other -> expectationFailure
+                ("expected callback ConnectionError, got " <> show other)
+    length <$> readIORef recorded `shouldReturn` 1
+    readIORef callbacks `shouldReturn` 1
+
+permanentClientErrorResponse _request = pure $
+    Wai.responseLBS (HTTP.mkStatus 422 "Unprocessable Entity")
+        [("Content-Type", "application/json")]
+        "{\"error\":{\"code\":\"vendor_validation_failed\",\"message\":\"bad request\"}}"
+
+throwingCallbackResponse _request = pure $ sseResponse
+    [ outputItemDone (assistantMessage "hello")
+    , completedEvent "resp-callback" []
+    ]
+
+throwingCallback callbacks _event =
+    modifyIORef' callbacks (+ 1)
+        >> ioError (userError "callback failed")
 
 recordOutputItem :: MVar () -> ResponseStreamEvent -> IO ()
 recordOutputItem callbackSeen event =

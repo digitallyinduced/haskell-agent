@@ -9,15 +9,18 @@ OpenRouter transport package for the agent harness.
 - Decodes SSE incrementally into the canonical typed `ResponseStreamEvent`
   union, delivers callbacks while the response is still arriving, and
   assembles the terminal `Response`.
+- Retries transient connection and provider failures with 1s/2s/4s
+  exponential backoff, but only before the first stream callback. Once any
+  callback runs, failures return directly so output is never replayed.
 - Authenticates with a static OpenRouter API key.
 
 `Agent.OpenRouter.LoopBackend` implements the provider-neutral `Backend`
 used by `Agent.Loop`. Because the host does not store transcripts, the
 adapter keeps a local item list and resends it on each turn.
 
-The package contains no agent loop, context trimming, retry policy, or
-credential failover. Those concerns belong to the harness around the
-provider client.
+The package contains no agent loop, context trimming, or credential failover.
+Those concerns belong to the harness around the provider client. The transport
+owns only the bounded replay-safe retry policy described above.
 
 ```haskell
 import Agent.OpenAI.Responses.Types
