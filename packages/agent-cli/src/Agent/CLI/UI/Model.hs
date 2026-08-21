@@ -288,14 +288,13 @@ reduceUi event state = case event of
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
-    UiTick ->
-        state
-            { uiFrame = (state.uiFrame + 1) `mod` 10
-            , uiElapsedTenths =
-                if state.uiRunning
-                    then state.uiElapsedTenths + 1
-                    else state.uiElapsedTenths
-            }
+    UiTick
+        | not state.uiRunning -> state
+        | otherwise ->
+            state
+                { uiFrame = (state.uiFrame + 1) `mod` 10
+                , uiElapsedTenths = state.uiElapsedTenths + 1
+                }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of

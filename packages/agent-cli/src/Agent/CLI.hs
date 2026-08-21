@@ -23,7 +23,7 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemLines
+    , responseItemPreviewLines
     )
 import Agent.CLI.SessionTitle
     ( invalidateSessionTitles
@@ -1245,45 +1245,74 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
-    let loadAgentEntries = do
+    let loadAgentEntries includeSummaries = do
+            selected <- readIORef selectedAgent
             rootItems <- readIORef transcriptRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
+            sessions <- readIORef subagentSessions
+            let previewCount target =
+                    if null agents
+                        then Nothing
+                        else if target == selected
+                            then Just 12
+                            else if includeSummaries
+                                then Just 0
+                                else Nothing
             let rootEntry = AgentEntry
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
                     , agentStatus = "active"
-                    , agentTranscript = responseItemLines rootItems
+                    , agentTranscript = case previewCount AgentRoot of
+                        Nothing -> []
+                        Just count ->
+                            responseItemPreviewLines count rootItems
                     }
-            children <- mapM materializeChild agents
+            children <- mapM
+                (materializeChild previewCount sessions)
+                agents
             pure (rootEntry : children)
           where
-            materializeChild (path, agentId, status) = do
-                sessions <- readIORef subagentSessions
-                stored <- case Map.lookup agentId sessions of
-                    Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
-                    Just session ->
-                        responseItemLines <$> readIORef session.subSessionTranscript
-                let transcript = stored <> case status of
-                        Completed (Just result)
-                            | not (Text.null (Text.strip result)) ->
-                                ["assistant: " <> Text.strip result]
-                        Errored message ->
-                            ["error: " <> Text.strip message]
-                        _ -> []
+            materializeChild previewCount sessions (path, agentId, status) = do
+                let target = AgentChild agentId
+                transcript <- case previewCount target of
+                    Nothing -> pure []
+                    Just count -> do
+                        stored <- case Map.lookup agentId sessions of
+                            Nothing ->
+                                pure ["(" <> formatAgentStatus status <> ")"]
+                            Just session ->
+                                responseItemPreviewLines count
+                                    <$> readIORef session.subSessionTranscript
+                        pure $
+                            compactAgentPreview count $
+                                stored <> case status of
+                                    Completed (Just result)
+                                        | not (Text.null (Text.strip result)) ->
+                                            ["assistant: " <> Text.strip result]
+                                    Errored message ->
+                                        ["error: " <> Text.strip message]
+                                    _ -> []
                 pure AgentEntry
-                    { agentTarget = AgentChild agentId
+                    { agentTarget = target
                     , agentPath = taskPathText path
                     , agentStatus = formatAgentStatus status
                     , agentTranscript = transcript
                     }
+            compactAgentPreview count rows
+                | length rows <= count = rows
+                | otherwise = case rows of
+                    [] -> []
+                    firstLine : _ ->
+                        firstLine
+                            : drop (max 0 (length rows - count)) rows
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
-            , viewportEntries = loadAgentEntries
+            , viewportEntries = loadAgentEntries True
             }
     writeIORef startup.startupAgentSnapshot
-        ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
+        ((,) <$> readIORef selectedAgent <*> loadAgentEntries False)
     writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
