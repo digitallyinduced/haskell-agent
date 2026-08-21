@@ -30,7 +30,6 @@ import System.Directory.OsPath
 import System.OsPath
     ( equalFilePath
     , isAbsolute
-    , joinPath
     , makeRelative
     , splitDirectories
     , takeDirectory
@@ -44,10 +43,9 @@ import System.IO.Error (isDoesNotExistError)
 resolveUnderCwd :: ToolEnv -> OsPath -> IO (Either Text OsPath)
 resolveUnderCwd env requested = do
     absCwd <- canonicalizePath env.toolCwd
-    let combined0
+    let combined
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
-        combined = collapseDots combined0
     exists <- doesPathExist combined
     resolvedResult <- if exists
         then Right <$> canonicalizePath combined
@@ -79,21 +77,6 @@ resolveMissing path = do
                     if equalFilePath parent path
                         then pure (Right path)
                         else fmap (</> takeFileName path) <$> resolveMissing parent
-
-collapseDots :: OsPath -> OsPath
-collapseDots path = joinPath (go [] (splitDirectories path))
-  where
-    go acc [] = reverse acc
-    go acc (part : xs)
-        | part == dot = go acc xs
-        | part == dotDot = case acc of
-            [] -> go acc xs
-            (root : _) | root == slash -> go acc xs
-            (_ : rest) -> go rest xs
-        | otherwise = go (part : acc) xs
-    dot = fromFilePath "."
-    dotDot = fromFilePath ".."
-    slash = fromFilePath "/"
 
 isInside :: OsPath -> OsPath -> Bool
 isInside root path

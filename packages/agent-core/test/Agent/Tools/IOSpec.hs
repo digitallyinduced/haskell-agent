@@ -27,7 +27,8 @@ import Data.IORef
 import Data.List (sort)
 import qualified Data.Text as Text
 import System.Directory
-    ( createDirectory
+    ( canonicalizePath
+    , createDirectory
     , createDirectoryLink
     , getTemporaryDirectory
     , listDirectory
@@ -120,6 +121,22 @@ spec = describe "Agent.Tools.IO" do
             result <- resolveUnderCwd env
                 (fromFilePath ("link" </> "missing" </> "file.txt"))
             result `shouldSatisfy` isLeft
+
+    it "preserves parent-segment semantics after a directory symlink" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                targetParent = workspace </> "a"
+                target = targetParent </> "b"
+            createDirectory workspace
+            createDirectory targetParent
+            createDirectory target
+            createDirectoryLink target (workspace </> "link")
+            env <- defaultToolEnv (fromFilePath workspace)
+            result <- resolveUnderCwd env
+                (fromFilePath ("link" </> ".." </> "file.txt"))
+            canonicalParent <- canonicalizePath targetParent
+            result `shouldBe` Right
+                (fromFilePath (canonicalParent </> "file.txt"))
 
     it "cancels a long-running shell command via toolCancel" do
         withTempDir \dir -> do
