@@ -1005,6 +1005,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     reasoningBuffer <- newIORef ""
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
+    toolCallsRef <- newIORef Map.empty
     allowedToolsRef <- newIORef Set.empty
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
@@ -1112,6 +1113,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , renderModelRef = modelRef
             , renderActivityRef = activityRef
             , renderStartedAt = startedAtRef
+            , renderToolCalls = toolCallsRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
