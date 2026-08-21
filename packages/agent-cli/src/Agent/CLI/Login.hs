@@ -43,6 +43,7 @@ import Agent.CLI.Style
     , roleSuccess
     , roleWarn
     )
+import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
@@ -387,7 +388,7 @@ pickConnectProvider color =
                             <> roleMuted color (providerSlug provider))
                     [0 ..]
                     providers
-                <> [roleMuted color "↑↓/jk · enter · esc/q"]
+                <> [roleMuted color "↑↓/jk or scroll · click/enter · esc/q"]
     step key index = case key of
         PickerKeyCancel -> Left Nothing
         PickerKeyConfirm -> Left (accountAt index providers)
@@ -571,7 +572,7 @@ discoverOpenAIFile now path = do
     if not exists
         then pure Nothing
         else do
-            bytes <- LBS.readFile (toFilePath path)
+            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
@@ -602,7 +603,7 @@ discoverGrokFile path = do
         then pure Nothing
         else do
             raw <- Text.decodeUtf8 . LBS.toStrict
-                <$> LBS.readFile (toFilePath path)
+                <$> retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 token <- grokCredentialFromAuthJson raw
                 pure (grokAccount token (toText path)
@@ -796,7 +797,7 @@ renderLoginFrame color state =
         ]
             <> body
             <> [ roleMuted color
-                    "↑↓/jk · r refresh · a add · i import · e enable/disable · d disconnect · esc/q"
+                    "↑↓/jk or scroll · click/enter refresh · a add · i import · e enable/disable · d disconnect · esc/q"
                ]
   where
     body

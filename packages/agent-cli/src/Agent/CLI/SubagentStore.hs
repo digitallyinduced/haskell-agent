@@ -14,6 +14,7 @@ module Agent.CLI.SubagentStore
     , loadSubagentState
     ) where
 
+import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Subagents (SubagentId(..))
@@ -27,7 +28,6 @@ import qualified Data.Text as Text
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
-    , renameFile
     )
 import System.OsPath ((</>))
 import System.Posix.Files (setFileMode)
@@ -94,21 +94,15 @@ saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
         Right dir -> do
             let metaPath = dir </> fromFilePath "meta.json"
                 transcriptPath = dir </> fromFilePath "transcript.json"
-                metaTmp = metaPath <> fromFilePath ".tmp"
-                transcriptTmp = transcriptPath <> fromFilePath ".tmp"
             createDirectoryIfMissing True dir
             _ <- tryAny (setFileMode (toFilePath dir) 0o700)
-            LBS.writeFile (toFilePath metaTmp) $ Aeson.encode SubagentDiskMeta
+            writeLazyFileAtomically metaPath 0o600 $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
                 , diskAgentType = agentType
                 , diskAgentModel = agentModel
                 , diskCwd = cwd
                 }
-            _ <- tryAny (setFileMode (toFilePath metaTmp) 0o600)
-            LBS.writeFile (toFilePath transcriptTmp) (Aeson.encode items)
-            _ <- tryAny (setFileMode (toFilePath transcriptTmp) 0o600)
-            renameFile metaTmp metaPath
-            renameFile transcriptTmp transcriptPath
+            writeLazyFileAtomically transcriptPath 0o600 (Aeson.encode items)
             pure (Right ())
 
 loadSubagentState
@@ -139,7 +133,7 @@ loadSubagentState sessionDir agentId =
                             Right (Just (items, meta))
   where
     decodeFile path = do
-        raw <- LBS.readFile (toFilePath path)
+        raw <- retryOnFileBusy (LBS.readFile (toFilePath path))
         case Aeson.eitherDecode raw of
             Left err ->
                 pure $ Left $

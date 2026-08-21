@@ -81,7 +81,8 @@ renderPermissionFrame color state =
                 [0 ..]
                 permissionLabels
         footer =
-            roleMuted color "↑↓/jk · y once · a this tool · n/esc deny"
+            roleMuted color
+                "↑↓/jk or scroll · click/enter · y once · a this tool · n/esc deny"
     in Text.intercalate "\n" (header : rows <> [footer])
 
 renderRow :: Bool -> Bool -> Text -> Text

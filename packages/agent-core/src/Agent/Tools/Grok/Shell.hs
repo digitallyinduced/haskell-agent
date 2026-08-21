@@ -16,6 +16,14 @@ module Agent.Tools.Grok.Shell
     ) where
 
 import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath)
+import Agent.ResourceScope
+    ( ResourceKey
+    , ResourceScope
+    , allocateResource
+    , closeResourceScope
+    , newResourceScope
+    , releaseResource
+    )
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
@@ -23,13 +31,14 @@ import Agent.Tools.IO
     , runShellCommand
     , runningLiveOutput
     , startShellCommand
+    , stopShellCommand
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
-import Control.Exception (SomeException, try)
-import Control.Monad (forM_, void)
+import Control.Exception.Safe (mask, onException, throwIO, tryAny)
+import Control.Monad (void)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -37,12 +46,16 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Directory.OsPath (doesDirectoryExist, getTemporaryDirectory, removeFile)
+import System.Directory.OsPath
+    ( doesDirectoryExist
+    , doesFileExist
+    , getTemporaryDirectory
+    , removeFile
+    )
 import System.IO (hClose)
 import System.OsPath ((<.>), (</>))
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
 import System.Posix.Temp (mkstemp)
-import System.Process (interruptProcessGroupOf)
 
 data PersistentShell = PersistentShell
     { shellCwd :: !OsPath
@@ -52,6 +65,7 @@ data PersistentShell = PersistentShell
 data BackgroundTask = BackgroundTask
     { backgroundId :: !Text
     , backgroundRunning :: !RunningCommand
+    , backgroundResource :: !ResourceKey
     }
 
 data GrokSession = GrokSession
@@ -59,43 +73,53 @@ data GrokSession = GrokSession
     , grokShell :: !(MVar PersistentShell)
     , grokTasks :: !(MVar (Map Text BackgroundTask))
     , grokNextId :: !(IORef Int)
+    , grokResources :: !ResourceScope
     }
 
 newGrokSession :: ToolEnv -> IO GrokSession
 newGrokSession env = do
-    tmp <- getTemporaryDirectory
-    (envFileRaw, handle) <-
-        mkstemp (toFilePath (tmp </> fromFilePath "agent-grok-env"))
-    let envFile = fromFilePath envFileRaw
-    hClose handle
-    setFileMode envFileRaw (unionFileModes ownerReadMode ownerWriteMode)
-    Text.writeFile envFileRaw ""
-    shell <- newMVar PersistentShell
-        { shellCwd = env.toolCwd
-        , shellEnvFile = envFile
-        }
-    tasks <- newMVar Map.empty
-    nextId <- newIORef 0
-    pure GrokSession
-        { grokEnv = env
-        , grokShell = shell
-        , grokTasks = tasks
-        , grokNextId = nextId
-        }
+    resources <- newResourceScope
+    flip onException (closeResourceScope resources) do
+        (_, envFile) <- allocateResource resources acquireEnvFile cleanupEnvFiles
+        shell <- newMVar PersistentShell
+            { shellCwd = env.toolCwd
+            , shellEnvFile = envFile
+            }
+        tasks <- newMVar Map.empty
+        nextId <- newIORef 0
+        pure GrokSession
+            { grokEnv = env
+            , grokShell = shell
+            , grokTasks = tasks
+            , grokNextId = nextId
+            , grokResources = resources
+            }
+  where
+    acquireEnvFile =
+        mask \restore -> do
+            tmp <- getTemporaryDirectory
+            (envFileRaw, handle) <- restore $
+                mkstemp (toFilePath (tmp </> fromFilePath "agent-grok-env"))
+            let envFile = fromFilePath envFileRaw
+            let rollback = do
+                    void $ tryAny (hClose handle)
+                    removeIfExists envFile
+            flip onException rollback do
+                hClose handle
+                setFileMode envFileRaw
+                    (unionFileModes ownerReadMode ownerWriteMode)
+                Text.writeFile envFileRaw ""
+                pure envFile
+    cleanupEnvFiles envFile = do
+        removeIfExists envFile
+        removeIfExists (envFile <.> fromFilePath "cwd")
 
 -- | Delete the env/cwd dump and interrupt leftover background tasks.
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
-    tasks <- modifyMVar session.grokTasks \current ->
-        pure (Map.empty, current)
-    forM_ (Map.elems tasks) \task ->
-        void $ try @SomeException
-            (interruptProcessGroupOf task.backgroundRunning.runningHandle)
-    shell <- readMVar session.grokShell
-    _ <- try @SomeException (removeFile shell.shellEnvFile)
-    _ <- try @SomeException (removeFile (cwdFile shell))
-    pure ()
+    modifyMVar_ session.grokTasks (const (pure Map.empty))
+    closeResourceScope session.grokResources
 
 runForeground :: GrokSession -> String -> Int -> IO CommandResult
 runForeground session command timeoutMs =
@@ -113,15 +137,24 @@ startBackground session command = do
     -- Background wrappers source cwd/env but must not write them back;
     -- a later foreground command owns the persistent session.
     let wrapped = bashWrap (wrapScript shell False (Text.unpack command))
-    startShellCommand session.grokEnv session.grokEnv.toolCwd wrapped >>= \case
-        Left err -> pure (Left err)
-        Right running -> do
+    started <- tryAny $
+        allocateResource session.grokResources
+            (startShellCommand session.grokEnv session.grokEnv.toolCwd wrapped
+                >>= either (throwIO . userError . Text.unpack) pure)
+            stopShellCommand
+    case started of
+        Left exception ->
+            pure (Left (Text.pack (show exception)))
+        Right (resource, running) -> do
             taskId <- nextTaskId session
-            modifyMVar_ session.grokTasks \tasks ->
-                pure $ Map.insert taskId BackgroundTask
+            let task = BackgroundTask
                     { backgroundId = taskId
                     , backgroundRunning = running
-                    } tasks
+                    , backgroundResource = resource
+                    }
+            modifyMVar_ session.grokTasks
+                (\tasks -> pure (Map.insert taskId task tasks))
+                `onException` releaseResource resource
             pure $ Right $
                 "Command moved to background.\n\
                 \task_id: " <> taskId <> "\n\
@@ -159,16 +192,9 @@ killTask session taskId = do
     case Map.lookup taskId tasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
         Just task -> do
-            _ <- try @SomeException
-                (interruptProcessGroupOf task.backgroundRunning.runningHandle)
-            raced <- race
-                (threadDelay 5000000)
-                (readMVar task.backgroundRunning.runningResult)
-            case raced of
-                Left () ->
-                    pure $ "kill signal sent to " <> taskId <> ", still running"
-                Right result ->
-                    pure $ "killed " <> taskId <> "\n" <> formatExit result
+            releaseResource task.backgroundResource
+            result <- readMVar task.backgroundRunning.runningResult
+            pure $ "killed " <> taskId <> "\n" <> formatExit result
 
 nextTaskId :: GrokSession -> IO Text
 nextTaskId session = atomicModifyIORef' session.grokNextId \n ->
@@ -202,7 +228,7 @@ cwdFile shell = shell.shellEnvFile <.> fromFilePath "cwd"
 
 refreshCwd :: ToolEnv -> PersistentShell -> IO PersistentShell
 refreshCwd env shell = do
-    contents <- try @SomeException (Text.readFile (toFilePath (cwdFile shell)))
+    contents <- tryAny (Text.readFile (toFilePath (cwdFile shell)))
     case contents of
         Left _ -> pure shell
         Right raw -> do
@@ -222,6 +248,13 @@ quoteString path = "'" <> concatMap escape path <> "'"
   where
     escape '\'' = "'\\''"
     escape c = [c]
+
+removeIfExists :: OsPath -> IO ()
+removeIfExists path = do
+    exists <- doesFileExist path
+    if exists
+        then void $ tryAny (removeFile path)
+        else pure ()
 
 formatExit :: CommandResult -> Text
 formatExit result

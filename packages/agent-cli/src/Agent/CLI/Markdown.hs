@@ -1,6 +1,8 @@
 -- | Turn CommonMark-ish assistant text into ANSI-styled terminal output.
 module Agent.CLI.Markdown
     ( renderMarkdown
+    , renderMarkdownFragment
+    , splitMarkdownFragment
     ) where
 
 import Agent.CLI.Style
@@ -272,7 +274,14 @@ styleTableRow isHeader widths cells =
     in bar <> Text.intercalate bar (take (length widths) parts) <> bar
 
 styleInline :: Text -> Text
-styleInline = Text.concat . go Nothing
+styleInline = renderMarkdownFragment True Nothing
+
+-- | Render an inline markdown fragment whose first character may continue
+-- prose emitted by an earlier streaming chunk.
+renderMarkdownFragment :: Bool -> Maybe Char -> Text -> Text
+renderMarkdownFragment color prevChar text
+    | not color = text
+    | otherwise = Text.concat (go prevChar (Text.filter (/= '\ESC') text))
   where
     go :: Maybe Char -> Text -> [Text]
     go prev t
@@ -316,6 +325,76 @@ styleInline = Text.concat . go Nothing
         , SetUnderlining SingleUnderline
         ]
     urlStyle = [fg solarizedBase01]
+
+-- | Split an inline markdown stream into a prefix that can be rendered without
+-- future input and a suffix beginning at a possibly incomplete construct.
+--
+-- This lets the TUI remain append-only while holding delimiters such as @**@
+-- until their closing delimiter arrives. A newline makes an unmatched inline
+-- construct literal because the renderer does not span inline markup across
+-- lines.
+splitMarkdownFragment :: Maybe Char -> Text -> (Text, Text, Maybe Char)
+splitMarkdownFragment initialPrev = go initialPrev []
+  where
+    go prev chunks t
+        | Text.null t = (Text.concat (reverse chunks), "", prev)
+        | Just (code, rest) <- takeInlineCode t =
+            consume (lastChar code) rest
+        | Just (_linkText, _url, rest) <- takeLink t =
+            consume (Just ')') rest
+        | Just (inner, rest) <- takeEmphasis prev "**" t =
+            consume (lastChar inner) rest
+        | Just (inner, rest) <- takeEmphasis prev "__" t =
+            consume (lastChar inner) rest
+        | Just (inner, rest) <- takeEmphasis prev "*" t =
+            consume (lastChar inner) rest
+        | Just (inner, rest) <- takeEmphasis prev "_" t =
+            consume (lastChar inner) rest
+        | shouldWait prev t =
+            (Text.concat (reverse chunks), t, prev)
+        | otherwise =
+            let (plain, rest) = Text.break (`elem` ['`', '[', '*', '_']) t
+            in if Text.null plain
+                then
+                    let literal = Text.take 1 t
+                    in go (lastChar literal) (literal : chunks) (Text.drop 1 t)
+                else go (lastChar plain) (plain : chunks) rest
+      where
+        consume nextPrev rest =
+            let consumedLength = Text.length t - Text.length rest
+                consumed = Text.take consumedLength t
+            in go nextPrev (consumed : chunks) rest
+
+    shouldWait prev t
+        | Text.any (== '\n') t = False
+        | Text.isPrefixOf "`" t = True
+        | Text.isPrefixOf "[" t = incompleteLink t
+        | Text.isPrefixOf "**" t = potentialEmphasis prev "**" t
+        | Text.isPrefixOf "__" t = potentialEmphasis prev "__" t
+        | Text.isPrefixOf "*" t = potentialEmphasis prev "*" t
+        | Text.isPrefixOf "_" t = potentialEmphasis prev "_" t
+        | otherwise = False
+
+    incompleteLink t =
+        case Text.breakOn "]" (Text.drop 1 t) of
+            (_, rest) | Text.null rest -> True
+            (_, rest) ->
+                let afterBracket = Text.drop 1 rest
+                in Text.null afterBracket
+                    || (Text.isPrefixOf "(" afterBracket
+                        && not (")" `Text.isInfixOf` Text.drop 1 afterBracket))
+
+    potentialEmphasis prev delim t =
+        let after = Text.drop (Text.length delim) t
+        in case Text.uncons after of
+            Nothing -> True
+            Just (first, _)
+                | isSpace first -> False
+                | delim == "_" || delim == "__" ->
+                    maybe True (not . isWordChar) prev
+                | otherwise -> True
+
+    lastChar value = snd <$> Text.unsnoc value
 
 takeInlineCode :: Text -> Maybe (Text, Text)
 takeInlineCode t =
