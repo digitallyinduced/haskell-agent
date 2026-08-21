@@ -6,6 +6,7 @@ module Agent.CLI.Plan
     , stripProposedPlan
     , renderPlanMarkdown
     , parsePlanDecisionAnswer
+    , planDecisionFollowUp
     ) where
 
 import Agent.CLI.CancelWatch (withStdinPaused)
@@ -31,7 +32,11 @@ import Agent.CLI.Style
     , solarizedCyan
     , style
     )
-import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeHooks(..)
+    , planApprovedContinuation
+    )
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.IORef (IORef)
@@ -195,6 +200,18 @@ parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of
     "n" -> Just PlanCancel
     "no" -> Just PlanCancel
     _ -> Nothing
+
+-- | Build the synthetic turn that follows a plan decision.
+-- Approval and requested changes continue immediately; cancellation stops.
+planDecisionFollowUp :: PlanDecision -> Maybe Text
+planDecisionFollowUp PlanApprove = Just planApprovedContinuation
+planDecisionFollowUp (PlanRequestChanges notes) =
+    Just $ Text.intercalate "\n"
+        [ "The user requested changes to the plan. Stay in plan mode and revise."
+        , "Feedback:"
+        , notes
+        ]
+planDecisionFollowUp PlanCancel = Nothing
 
 -- | Pull the first @\<proposed_plan\>…\</proposed_plan\>@ block (Codex).
 extractProposedPlan :: Text -> Maybe Text

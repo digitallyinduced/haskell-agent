@@ -183,6 +183,7 @@ import Agent.Subagents
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , closeSubagentRegistry
+    , interruptActiveSubagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
@@ -956,6 +957,9 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionAgentViewport = Just agentViewport
+            , sessionAbortSubagents = case multiCtx of
+                Just ctx -> interruptActiveSubagents ctx.multiRegistry
+                Nothing -> pure ()
             , sessionReset = sessionReset
             }
     case pendingTurn of
@@ -1044,6 +1048,7 @@ replWithDraft env@SessionEnv
         planPending = planState == PlanPending
     params <- readIORef paramsRef
     policy <- readIORef policyRef
+    pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
     termCols <- fmap snd <$> getTerminalSize
     case agentViewport of
@@ -1080,6 +1085,10 @@ replWithDraft env@SessionEnv
         chromePrompt =
             beginBackground stdoutColor userBackground
                 <> modeTag
+                <> if null pendingAttachments
+                    then ""
+                    else roleMuted stdoutColor
+                        ("[📎 " <> Text.pack (show (length pendingAttachments)) <> "] ")
                 <> rolePrompt stdoutColor "λ "
                 <> if stdoutColor
                     then Text.pack clearFromCursorToLineEndCode
@@ -1124,7 +1133,7 @@ replWithDraft env@SessionEnv
                     let chip = formatPasteChip stripped
                     when (chip /= stripped) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLine stripped of
+                case parseReplLine line of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do

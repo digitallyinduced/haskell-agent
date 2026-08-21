@@ -1,7 +1,8 @@
 { mkDerivation, aeson, agent-core, agent-openai, agent-openrouter
 , agent-xai, ansi-terminal, async, base, base64-bytestring
 , bytestring, colour, containers, directory, filepath, haskeline
-, hspec, lib, process, safe-exceptions, text, time, unix
+, hspec, lib, process, safe-exceptions, text, time, transformers
+, unix
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -13,7 +14,7 @@ mkDerivation {
     aeson agent-core agent-openai agent-openrouter agent-xai
     ansi-terminal async base base64-bytestring bytestring colour
     containers directory filepath haskeline process safe-exceptions
-    text time unix
+    text time transformers unix
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [

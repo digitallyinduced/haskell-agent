@@ -45,5 +45,6 @@ data SessionEnv = SessionEnv
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
+    , sessionAbortSubagents :: !(IO ())
     , sessionReset :: !(IO ())
     }

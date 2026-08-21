@@ -23,6 +23,14 @@ spec = do
             parseReplLine "list the files" `shouldBe` ReplPrompt "list the files"
             parseReplLine ":status" `shouldBe` ReplPrompt ":status"
 
+        it "preserves ordinary prompt whitespace exactly" do
+            parseReplLine "  indented prompt  "
+                `shouldBe` ReplPrompt "  indented prompt  "
+            parseReplLine "\n    code\n"
+                `shouldBe` ReplPrompt "\n    code\n"
+            parseReplLine "  :status  "
+                `shouldBe` ReplPrompt "  :status  "
+
         it "shows the current effort with a bare /effort" do
             parseReplLine "/effort" `shouldBe` ReplShowEffort
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
@@ -250,6 +258,19 @@ spec = do
             fmap (.slashMenuReplaceStart) menu `shouldBe` Just 8
             fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions)) menu
                 `shouldBe` Just ["high", "xhigh"]
+
+        it "replaces the whole token when completing from the middle" do
+            fmap (\menu -> (menu.slashMenuReplaceStart, menu.slashMenuReplaceEnd))
+                (slashMenuFor "/mofoo" 3)
+                `shouldBe` Just (0, 6)
+            fmap (\menu -> (menu.slashMenuReplaceStart, menu.slashMenuReplaceEnd))
+                (slashMenuFor "/effort hi" 9)
+                `shouldBe` Just (8, 10)
+
+        it "does not offer single-argument completions in later slots" do
+            slashMenuFor "/effort high " 13 `shouldBe` Nothing
+            slashMenuFor "/help model " 12 `shouldBe` Nothing
+            slashMenuFor "/paste --send " 14 `shouldBe` Nothing
 
         it "renders /help with usage and summary" do
             let listing = Text.unpack (formatSlashHelp False Nothing)

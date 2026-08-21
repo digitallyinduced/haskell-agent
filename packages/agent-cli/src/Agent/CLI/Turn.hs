@@ -5,7 +5,7 @@ module Agent.CLI.Turn
 
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
-import Agent.CLI.Plan (extractProposedPlan)
+import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
@@ -93,6 +93,7 @@ runOneTurn env@SessionEnv
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
+    , sessionAbortSubagents = abortSubagents
     } promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
@@ -160,6 +161,7 @@ runOneTurn env@SessionEnv
     case result of
         Left cancelled@(LoopCancelled _) -> do
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
+            abortSubagents
             writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color cancelled)
@@ -168,6 +170,7 @@ runOneTurn env@SessionEnv
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
+            abortSubagents
             afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
@@ -281,13 +284,10 @@ handleProposedPlan planMode = \case
                 case decision of
                     PlanApprove -> do
                         deactivatePlanMode planMode
-                        pure Nothing
+                        pure (planDecisionFollowUp decision)
                     PlanCancel -> do
                         deactivatePlanMode planMode
                         pure Nothing
-                    PlanRequestChanges notes ->
-                        pure $ Just $
-                            "The user requested changes to the plan. Stay in plan mode and revise.\n\
-                            \Feedback:\n"
-                                <> notes
+                    PlanRequestChanges _ ->
+                        pure (planDecisionFollowUp decision)
             _ -> pure Nothing

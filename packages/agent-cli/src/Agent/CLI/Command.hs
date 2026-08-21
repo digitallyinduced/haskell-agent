@@ -133,13 +133,13 @@ parseReplLine raw =
             then ReplReload
             else case Text.uncons line of
                 Just ('/', _) -> parseSlash line
-                Just (':', _) -> parseColon line
-                _ -> ReplPrompt line
+                Just (':', _) -> parseColon raw
+                _ -> ReplPrompt raw
 
 parseColon :: Text -> ReplAction
-parseColon line
-    | isAlwaysApproveAlias (Text.drop 1 line) = ReplToggleAlwaysApprove
-    | otherwise = ReplPrompt line
+parseColon raw
+    | isAlwaysApproveAlias (Text.drop 1 (Text.strip raw)) = ReplToggleAlwaysApprove
+    | otherwise = ReplPrompt raw
 
 parseSlash :: Text -> ReplAction
 parseSlash line = case Text.words line of
@@ -420,14 +420,14 @@ slashMenuFor :: Text -> Int -> Maybe SlashMenu
 slashMenuFor text cursor
     | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
     | otherwise =
-        let before = Text.take cursor text
-            (commandToken, commandRest) = Text.break isSpace before
-        in if Text.null commandRest
-            then commandMenu commandToken cursor
-            else argumentMenu commandToken before cursor
+        let commandToken = Text.takeWhile (not . isSpace) text
+            commandEnd = Text.length commandToken
+        in if cursor <= commandEnd
+            then commandMenu (Text.take cursor text) commandEnd
+            else argumentMenu commandToken commandEnd text cursor
 
 commandMenu :: Text -> Int -> Maybe SlashMenu
-commandMenu token cursor =
+commandMenu token replaceEnd =
     let query = Text.toLower (Text.drop 1 token)
         scored = mapMaybe (scoreCommand query) (zip [0 :: Int ..] slashCommands)
         ordered
@@ -449,7 +449,7 @@ commandMenu token cursor =
         then Nothing
         else Just SlashMenu
             { slashMenuReplaceStart = 0
-            , slashMenuReplaceEnd = cursor
+            , slashMenuReplaceEnd = replaceEnd
             , slashMenuSuggestions = rows
             }
 
@@ -467,12 +467,22 @@ scoreCommand query (order, command)
             (score, positions) : _ ->
                 Just (score, order, command, positions)
 
-argumentMenu :: Text -> Text -> Int -> Maybe SlashMenu
-argumentMenu commandToken before cursor = do
+argumentMenu :: Text -> Int -> Text -> Int -> Maybe SlashMenu
+argumentMenu commandToken commandEnd text cursor = do
     command <- lookupSlashCommand commandToken
-    let options = argCompletions command
+    let before = Text.take cursor text
         suffix = Text.takeWhileEnd (not . isSpace) before
         argStart = Text.length before - Text.length suffix
+        tokenEnd =
+            cursor
+                + Text.length
+                    (Text.takeWhile (not . isSpace) (Text.drop cursor text))
+        precedingArgs =
+            Text.words
+                (Text.take (argStart - commandEnd) (Text.drop commandEnd text))
+        options
+            | null precedingArgs = argCompletions command
+            | otherwise = []
         query = Text.toLower suffix
         ordered = sortOn (\(score, option, _) -> (Down score, option))
             [ (score, option, positions)
@@ -493,7 +503,7 @@ argumentMenu commandToken before cursor = do
         then Nothing
         else Just SlashMenu
             { slashMenuReplaceStart = argStart
-            , slashMenuReplaceEnd = cursor
+            , slashMenuReplaceEnd = tokenEnd
             , slashMenuSuggestions = rows
             }
 

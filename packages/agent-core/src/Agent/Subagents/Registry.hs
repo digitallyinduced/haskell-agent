@@ -9,6 +9,7 @@ module Agent.Subagents.Registry
     , setSubagentRunner
     , setSubagentOnComplete
     , closeSubagentRegistry
+    , interruptActiveSubagents
     , resetSubagentRegistry
     , spawnSubagent
     , spawnSubagentWithCwd
@@ -61,7 +62,7 @@ import Control.Concurrent
     )
 import Control.Concurrent.Async (race)
 import Control.Concurrent.STM
-import Control.Exception.Safe (SomeException, mask, onException, tryAny)
+import Control.Exception.Safe (SomeException, finally, mask, onException, tryAny)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Map.Strict (Map)
@@ -409,8 +410,17 @@ stopWorker worker = do
 notifyComplete :: SubagentRegistry -> SubagentId -> SubagentStatus -> IO ()
 notifyComplete registry agentId status
     | isFinalStatus status && status /= Closed && status /= NotFound = do
-        onComplete <- readIORef registry.registryOnCompleteRef
-        onComplete agentId status
+        shouldNotify <- atomically do
+            closed <- readTVar registry.registryClosed
+            agents <- readTVar registry.registryAgents
+            case Map.lookup agentId agents of
+                Nothing -> pure False
+                Just record -> do
+                    current <- readTVar record.recordStatus
+                    pure (not closed && current == status)
+        whenIO shouldNotify do
+            onComplete <- readIORef registry.registryOnCompleteRef
+            onComplete agentId status
     | otherwise = pure ()
 
 releaseSlot :: SubagentRegistry -> SubagentRecord -> IO ()
@@ -576,6 +586,48 @@ shutdownRecord registry record = do
         Nothing -> pure ()
         Just worker -> stopWorker worker
     releaseSlot registry record
+
+-- | Stop every currently pending/running child while keeping completed agent
+-- records and the registry available for later turns. The registry is closed
+-- during the transition so a descendant cannot publish a newly-created worker
+-- after the abort snapshot has been taken.
+interruptActiveSubagents :: SubagentRegistry -> IO ()
+interruptActiveSubagents registry = do
+    (wasClosed, records) <- atomically do
+        wasClosed <- readTVar registry.registryClosed
+        writeTVar registry.registryClosed True
+        agents <- Map.elems <$> readTVar registry.registryAgents
+        records <- filterMSTM isActiveRecord agents
+        pure (wasClosed, records)
+    mapM_ (interruptRecord registry) records
+        `finally`
+            atomically (writeTVar registry.registryClosed wasClosed)
+  where
+    isActiveRecord :: SubagentRecord -> STM Bool
+    isActiveRecord record = do
+        status <- readTVar record.recordStatus
+        pure (status == Pending || status == Running)
+
+interruptRecord :: SubagentRegistry -> SubagentRecord -> IO ()
+interruptRecord registry record = do
+    requestCancel record.recordCancel
+    mworker <- atomically do
+        writeTVar record.recordStatus Interrupted
+        _ <- flushTQueue record.recordMailbox
+        readTVar record.recordWorker
+    case mworker of
+        Nothing -> pure ()
+        Just worker -> stopWorker worker
+    atomically $ writeTVar record.recordStatus Interrupted
+    releaseSlot registry record
+
+filterMSTM :: (a -> STM Bool) -> [a] -> STM [a]
+filterMSTM predicate = fmap reverse . go []
+  where
+    go kept [] = pure kept
+    go kept (value : rest) = do
+        include <- predicate value
+        go (if include then value : kept else kept) rest
 
 -- | Re-admit a previously persisted agent that is not currently in the
 -- in-memory map (e.g. after close, or across a process restart within the

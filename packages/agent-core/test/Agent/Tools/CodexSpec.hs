@@ -17,7 +17,7 @@ import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToo
 import Agent.Tools.ApplyPatch (parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.PlanMode (newPlanModeEnv)
+import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Aeson as Aeson
@@ -41,7 +41,14 @@ spec = describe "Agent.Tools.Codex" do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
             coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
-            names `shouldBe` ["shell_command", "apply_patch", "update_plan", "run_ghci"]
+            names `shouldBe`
+                [ "shell_command"
+                , "apply_patch"
+                , "update_plan"
+                , "run_ghci"
+                , "enter_plan_mode"
+                , "ask_user_question"
+                ]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
@@ -87,6 +94,19 @@ spec = describe "Agent.Tools.Codex" do
                     ("expected encrypted spawn message schema, got " <> show other)
             coding.codingClose
             closeSubagentRegistry registry
+
+    it "lets the OpenAI agent enter plan mode proactively" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            plan <- newPlanModeEnv env.toolCwd Nothing
+            tools <- codexTools env ghci plan Nothing
+            (do
+                result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+                    (functionToolCall "call-enter-plan" "enter_plan_mode"
+                        "{\"explanation\":\"The user requested a design plan.\"}")
+                result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
+                isPlanModeActive plan `shouldReturn` True)
+                `finally` closeGhciSession ghci
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do
