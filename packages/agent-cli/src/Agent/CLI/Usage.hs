@@ -2,6 +2,7 @@
 module Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatAccountUsage
+    , formatDuration
     , formatUsageReport
     , formatUsageWindow
     , shortAccountId
