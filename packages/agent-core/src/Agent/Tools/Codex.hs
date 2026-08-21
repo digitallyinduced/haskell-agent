@@ -27,6 +27,8 @@ import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
 import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
+    , askUserQuestionTool
+    , enterPlanModeTool
     , isPlanModeActive
     )
 import Agent.Tools.Types
@@ -56,6 +58,8 @@ codexTools env ghci planMode multi = do
         , applyPatchTool env
         , updatePlanTool planMode planRef
         , runGhciTool ghci
+        , enterPlanModeTool planMode
+        , askUserQuestionTool planMode
         ]
         ++ maybe [] multiAgentTools multi
 
