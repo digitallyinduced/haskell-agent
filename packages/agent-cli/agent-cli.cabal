@@ -51,6 +51,7 @@ library
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
+                    , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.Picker
@@ -121,6 +122,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
