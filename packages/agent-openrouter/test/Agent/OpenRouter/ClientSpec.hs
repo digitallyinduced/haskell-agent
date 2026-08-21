@@ -5,7 +5,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenRouter.Client
 import Agent.OpenRouter.Options
 import Agent.Provider (Credential(..), Provider(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Concurrent.MVar
 import Control.Monad (when)
 import Control.Retry (constantDelay, limitRetries)

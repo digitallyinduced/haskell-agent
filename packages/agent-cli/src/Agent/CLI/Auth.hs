@@ -2,9 +2,12 @@
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
+    , grokEmailFromAuthJson
     , loadAuth
     , openAIOAuthClientId
+    , openAiAuthStateChanged
     , openaiAuthStateFromJson
+    , probeLoadedAuth
     , reloadableFileCredentialProvider
     , xaiOAuthClientId
     ) where
@@ -15,7 +18,7 @@ import Agent.CLI.CredentialStore
     , ManagedCredential(..)
     , ManagedSecret(..)
     , loadManagedCredentials
-    , upsertManagedCredential
+    , updateManagedCredentialSecret
     )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.FileRetry (retryOnFileBusy)
@@ -33,22 +36,53 @@ import Agent.Provider
     , seedTokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
-import Agent.XAI.Auth (accountIdFromAccessToken)
+import Agent.XAI.Auth (accountIdFromAccessToken, emailFromToken)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (bracket, bracket_)
+import Control.Monad (when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , runExceptT
+    , throwE
+    , withExceptT
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.Either (partitionEithers)
+import Data.Function (on)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.List (find, nubBy)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import System.Directory.OsPath (doesFileExist, getHomeDirectory)
-import System.Environment (lookupEnv)
-import System.OsPath ((</>))
+import System.Directory.OsPath
+    ( createDirectoryIfMissing
+    , doesFileExist
+    , getHomeDirectory
+    )
+import System.IO (SeekMode(AbsoluteSeek))
+import System.OsPath (takeDirectory, (</>))
+import qualified System.OsPath as OsPath
+import System.Posix.Files (setFileMode)
+import System.Posix.IO
+    ( LockRequest(Unlock, WriteLock)
+    , OpenFileFlags(..)
+    , OpenMode(ReadWrite)
+    , closeFd
+    , defaultFileFlags
+    , openFd
+    , setLock
+    , waitToSetLock
+    )
+import System.Posix.Types (Fd)
+import qualified System.Process.Environment.OsString as Environment
 
 openAIOAuthClientId :: Maybe Text -> Text
 openAIOAuthClientId =
@@ -65,74 +99,88 @@ data LoadedAuth = LoadedAuth
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
 
-loadAuth :: Maybe Provider -> IO (Either String LoadedAuth)
-loadAuth requested = do
-    brokerUrl <- lookupNonEmpty "AGENT_BROKER_URL"
+loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
+loadAuth requested = runExceptT do
+    brokerUrl <- lift (lookupNonEmpty "AGENT_BROKER_URL")
     case brokerUrl of
         Just url -> loadBroker url requested
         Nothing -> do
             provider <- detectProvider requested
             case provider of
-                Left err -> pure (Left err)
-                Right XAIProvider -> loadXai
-                Right OpenAIProvider -> loadOpenAi
-                Right OpenRouterProvider -> loadOpenRouter
+                XAIProvider -> loadXai
+                OpenAIProvider -> loadOpenAi
+                OpenRouterProvider -> loadOpenRouter
 
-detectProvider :: Maybe Provider -> IO (Either String Provider)
-detectProvider (Just provider) = pure (Right provider)
+-- | Ask the token source whether it has a usable credential now without
+-- making a model request, preserving a successful checkout for later use.
+probeLoadedAuth :: LoadedAuth -> IO (Either ApiError LoadedAuth)
+probeLoadedAuth loaded = do
+    result <- getNextToken loaded.loadedTokenProvider Nothing
+    case result of
+        Left err -> pure (Left err)
+        Right credential
+            | credential.provider /= loaded.loadedProvider ->
+                pure $ Left $ ProviderError AuthenticationError
+                    "credential provider does not match loaded auth"
+                    Nothing
+            | otherwise -> do
+                tokenProvider <-
+                    seedTokenProvider loaded.loadedTokenProvider credential
+                pure $ Right loaded { loadedTokenProvider = tokenProvider }
+
+detectProvider :: Maybe Provider -> ExceptT Text IO Provider
+detectProvider (Just provider) = pure provider
 detectProvider Nothing = do
-    grok <- hasGrokAuth
-    openai <- hasOpenAiAuth
-    openrouter <- hasOpenRouterAuth
-    pure $ if grok
-        then Right XAIProvider
+    grok <- lift hasGrokAuth
+    openai <- lift hasOpenAiAuth
+    openrouter <- lift hasOpenRouterAuth
+    if grok
+        then pure XAIProvider
         else if openai
-            then Right OpenAIProvider
+            then pure OpenAIProvider
             else if openrouter
-                then Right OpenRouterProvider
-                else Left noAuthHint
+                then pure OpenRouterProvider
+                else throwE noAuthHint
 
-loadBroker :: Text -> Maybe Provider -> IO (Either String LoadedAuth)
+loadBroker :: Text -> Maybe Provider -> ExceptT Text IO LoadedAuth
 loadBroker url requested = do
-    token <- lookupNonEmpty "AGENT_BROKER_TOKEN"
-    case token of
-        Nothing -> pure (Left "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN")
-        Just serviceToken -> do
-            let supportedProviders = case requested of
-                    Just selected -> [selected]
-                    Nothing -> [OpenAIProvider, XAIProvider, OpenRouterProvider]
-            provider <- newBrokerTokenProviderFor
-                BrokerOptions
-                    { baseUrl = Text.unpack url
-                    , serviceToken
-                    }
-                supportedProviders
-            first <- getNextToken provider Nothing
-            case first of
-                Left err -> pure (Left ("broker: " <> show err))
-                Right credential ->
-                    let actual = credential.provider
-                    in if maybe False (/= actual) requested
-                        then pure $ Left $
-                            "broker returned " <> show actual
-                                <> " but --provider asked for a different vendor"
-                        else do
-                            seeded <- seedTokenProvider provider credential
-                            pure $ Right LoadedAuth
-                                { loadedProvider = actual
-                                , loadedTokenProvider = seeded
-                                , loadedOpenAiPool = Nothing
-                                }
+    serviceToken <- lift (lookupNonEmpty "AGENT_BROKER_TOKEN")
+        >>= maybe
+            (throwE "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN")
+            pure
+    let supportedProviders = case requested of
+            Just selected -> [selected]
+            Nothing -> [OpenAIProvider, XAIProvider, OpenRouterProvider]
+    provider <- lift $ newBrokerTokenProviderFor
+        BrokerOptions
+            { baseUrl = Text.unpack url
+            , serviceToken
+            }
+        supportedProviders
+    credential <- withExceptT
+        (\err -> "broker: " <> Text.pack (show err))
+        (ExceptT (getNextToken provider Nothing))
+    let actual = credential.provider
+    when (maybe False (/= actual) requested) $
+        throwE $
+            "broker returned " <> Text.pack (show actual)
+                <> " but --provider asked for a different vendor"
+    seeded <- lift (seedTokenProvider provider credential)
+    pure LoadedAuth
+        { loadedProvider = actual
+        , loadedTokenProvider = seeded
+        , loadedOpenAiPool = Nothing
+        }
 
-loadXai :: IO (Either String LoadedAuth)
+loadXai :: ExceptT Text IO LoadedAuth
 loadXai = do
-    credential <- loadXaiCredential
+    credential <- lift loadXaiCredential
     case credential of
-        Nothing -> pure (Left noAuthHint)
+        Nothing -> throwE noAuthHint
         Just loaded -> do
-            provider <- reloadableFileCredentialProvider
+            provider <- lift $ reloadableFileCredentialProvider
                 XAIProvider loaded loadXaiCredential
-            pure $ Right LoadedAuth
+            pure LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider = provider
                 , loadedOpenAiPool = Nothing
@@ -153,132 +201,351 @@ loadOpenRouterKey = do
         Just (_, secret) -> pure (Just secret.secretPayload)
         Nothing -> lookupNonEmpty "OPENROUTER_API_KEY"
 
-loadOpenRouter :: IO (Either String LoadedAuth)
+loadOpenRouter :: ExceptT Text IO LoadedAuth
 loadOpenRouter = do
-    key <- loadOpenRouterKey
+    key <- lift loadOpenRouterKey
     case key of
-        Nothing -> pure (Left noAuthHint)
+        Nothing -> throwE noAuthHint
         Just apiKey -> do
             let initial = credentialFromApiKey apiKey
-            provider <- reloadableFileCredentialProvider OpenRouterProvider initial
+            provider <- lift $ reloadableFileCredentialProvider OpenRouterProvider initial
                 (fmap (fmap credentialFromApiKey) loadOpenRouterKey)
-            pure $ Right LoadedAuth
+            pure LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
                 , loadedOpenAiPool = Nothing
                 }
 
-loadOpenAi :: IO (Either String LoadedAuth)
+loadOpenAi :: ExceptT Text IO LoadedAuth
 loadOpenAi = do
-    managed <- loadManagedCredential OpenAIProvider
-    fromEnvToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
-    fromEnvJson <- lookupNonEmpty "CODEX_AUTH_JSON"
-    home <- getHomeDirectory
+    managedResult <- lift loadManagedCredentials
+    fromEnvToken <- lift (lookupNonEmpty "CODEX_ACCESS_TOKEN")
+    fromEnvJson <- lift (lookupNonEmpty "CODEX_AUTH_JSON")
+    home <- lift getHomeDirectory
     let filePath =
             home </> fromFilePath ".codex" </> fromFilePath "auth.json"
-    fileExists <- doesFileExist filePath
+    fileExists <- lift (doesFileExist filePath)
     fileBytes <- if fileExists
-        then Just <$> retryOnFileBusy (LBS.readFile (toFilePath filePath))
+        then lift (Just <$> retryOnFileBusy (LBS.readFile (toFilePath filePath)))
         else pure Nothing
-    now <- getCurrentTime
-    case managed of
-        Just (metadata, secret) ->
-            loadManagedOpenAI now metadata secret
-        Nothing ->
-            case fromEnvToken of
-                Just token -> do
-                    accountId <- openaiAccountIdForToken token
-                    pure $ Right LoadedAuth
-                        { loadedProvider = OpenAIProvider
-                        , loadedTokenProvider = staticCredentialProvider Credential
-                            { accessToken = token
-                            , accountId
-                            , leaseId = Nothing
-                            , provider = OpenAIProvider
-                            }
-                        , loadedOpenAiPool = Nothing
-                        }
-                Nothing -> case envOrFileState now fromEnvJson fileBytes of
-                    Nothing -> pure (Left noAuthHint)
-                    Just state ->
-                        openAiPoolAuth fileExists filePath state
+    now <- lift getCurrentTime
+    let (storeErrors, managed) = case managedResult of
+            Left err -> ([err], [])
+            Right credentials ->
+                ( []
+                , [ credential
+                  | credential@(metadata, _) <- credentials
+                  , metadata.managedProvider == OpenAIProvider
+                  ]
+                )
+    envTokenAccount <- lift $ traverse (openAiStaticAccount now) fromEnvToken
+    let enabledManaged =
+            [ credential
+            | credential@(metadata, _) <- managed
+            , metadata.managedEnabled
+            ]
+        (managedErrors, managedAccounts) =
+            partitionEithers (map (managedOpenAiAccount now) enabledManaged)
+        managedAccountIds =
+            map ((.accountId) . (.openAiState)) managedAccounts
+        envJsonAccount =
+            OpenAiAccount
+                <$> (fromEnvJson >>= openaiAuthStateFromJson now
+                    . LBS.fromStrict . TextEncoding.encodeUtf8)
+                <*> pure OpenAiEnvironmentOAuth
+        fileAccount =
+            OpenAiAccount
+                <$> (fileBytes >>= openaiAuthStateFromJson now)
+                <*> pure (OpenAiAuthFile filePath)
+        externalAccounts =
+            filter
+                (\account ->
+                    account.openAiState.accountId `notElem` managedAccountIds)
+                (catMaybes [envTokenAccount, envJsonAccount, fileAccount])
+        accounts = deduplicateOpenAiAccounts
+            (managedAccounts <> externalAccounts)
+    when (null accounts) $
+        throwE $ case storeErrors <> managedErrors of
+            [] -> noAuthHint
+            errors ->
+                "no valid OpenAI credentials found: "
+                    <> Text.intercalate "; " errors
+    clientId <-
+        lift $
+            openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    refreshLock <- lift (newMVar ())
+    pool <- lift $ OpenAI.newPool
+        (map (.openAiState) accounts)
+        (refreshOpenAiAccount refreshLock clientId accounts)
+    tokenProvider <- lift (OpenAICredential.poolTokenProvider pool)
+    pure LoadedAuth
+        { loadedProvider = OpenAIProvider
+        , loadedTokenProvider = tokenProvider
+        , loadedOpenAiPool = Just pool
+        }
 
-loadManagedOpenAI
+data OpenAiCredentialSource
+    = OpenAiManagedOAuth !Text
+    | OpenAiManagedBearer
+    | OpenAiEnvironmentOAuth
+    | OpenAiEnvironmentBearer
+    | OpenAiAuthFile !OsPath
+
+data OpenAiAccount = OpenAiAccount
+    { openAiState :: !OpenAI.AuthState
+    , openAiSource :: !OpenAiCredentialSource
+    }
+
+managedOpenAiAccount
     :: UTCTime
-    -> ManagedCredential
-    -> ManagedSecret
-    -> IO (Either String LoadedAuth)
-loadManagedOpenAI now metadata secret =
+    -> (ManagedCredential, ManagedSecret)
+    -> Either Text OpenAiAccount
+managedOpenAiAccount now (metadata, secret) =
     case metadata.managedAuthKind of
         ManagedOpenAIAuthJson ->
             case openaiAuthStateFromJson now
                 (LBS.fromStrict (TextEncoding.encodeUtf8 secret.secretPayload)) of
                 Nothing ->
-                    pure $ Left
-                        "managed OpenAI OAuth credential contains invalid auth JSON"
-                Just state -> do
-                    clientId <-
-                        openAIOAuthClientId
-                            <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-                    let refresh stale =
-                            OpenAI.refreshAccessTokenHTTP clientId stale >>= \case
-                                Left err -> pure (Left err)
-                                Right newState -> do
-                                    stamped <- authStateToJson newState <$> getCurrentTime
-                                    let payload =
-                                            TextEncoding.decodeUtf8
-                                                (LBS.toStrict (Aeson.encode stamped))
-                                    upsertManagedCredential
-                                        metadata
-                                        secret { secretPayload = payload }
-                                        >>= \case
-                                            Left err ->
-                                                pure $ Left $ ConnectionError err
-                                            Right () -> pure (Right newState)
-                    pool <- OpenAI.newPool [state] refresh
-                    tokenProvider <- OpenAICredential.poolTokenProvider pool
-                    pure $ Right LoadedAuth
-                        { loadedProvider = OpenAIProvider
-                        , loadedTokenProvider = tokenProvider
-                        , loadedOpenAiPool = Just pool
-                        }
+                    Left $
+                        "managed OpenAI OAuth credential "
+                            <> metadata.managedId
+                            <> " contains invalid auth JSON"
+                Just state
+                    | state.accountId /= metadata.managedAccountId ->
+                        Left $
+                            "managed OpenAI credential "
+                                <> metadata.managedId
+                                <> " account id does not match its auth payload"
+                    | otherwise ->
+                        Right OpenAiAccount
+                            { openAiState = state
+                            , openAiSource =
+                                OpenAiManagedOAuth metadata.managedId
+                            }
         _ ->
-            pure $ Right LoadedAuth
-                { loadedProvider = OpenAIProvider
-                , loadedTokenProvider =
-                    staticCredentialProvider Credential
-                        { accessToken = secret.secretPayload
-                        , accountId = metadata.managedAccountId
-                        , leaseId = Nothing
-                        , provider = OpenAIProvider
-                        }
-                , loadedOpenAiPool = Nothing
+            Right OpenAiAccount
+                { openAiState = staticOpenAiState
+                    now metadata.managedAccountId secret.secretPayload
+                , openAiSource = OpenAiManagedBearer
                 }
 
-openAiPoolAuth
-    :: Bool
-    -> OsPath
-    -> OpenAI.AuthState
-    -> IO (Either String LoadedAuth)
-openAiPoolAuth persistRefresh filePath state = do
-    clientId <-
-        openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-    let refresh stale =
-            OpenAI.refreshAccessTokenHTTP clientId stale >>= \case
-                Left err -> pure (Left err)
-                Right newState
-                    | persistRefresh -> do
-                        stamped <- authStateToJson newState <$> getCurrentTime
-                        OpenAILogin.writeAuthFile filePath stamped
-                        pure (Right newState)
-                    | otherwise -> pure (Right newState)
-    pool <- OpenAI.newPool [state] refresh
-    tokenProvider <- OpenAICredential.poolTokenProvider pool
-    pure $ Right LoadedAuth
-        { loadedProvider = OpenAIProvider
-        , loadedTokenProvider = tokenProvider
-        , loadedOpenAiPool = Just pool
+openAiStaticAccount :: UTCTime -> Text -> IO OpenAiAccount
+openAiStaticAccount now token = do
+    accountId <- openaiAccountIdForToken token
+    pure OpenAiAccount
+        { openAiState = staticOpenAiState now accountId token
+        , openAiSource = OpenAiEnvironmentBearer
         }
+
+staticOpenAiState :: UTCTime -> Text -> Text -> OpenAI.AuthState
+staticOpenAiState now accountId accessToken =
+    OpenAI.AuthState
+        { accessToken
+        , refreshToken = ""
+        , accountId
+        , idToken = Nothing
+        , lastRefresh = now
+        }
+
+deduplicateOpenAiAccounts :: [OpenAiAccount] -> [OpenAiAccount]
+deduplicateOpenAiAccounts =
+    nubBy ((==) `on` ((.accountId) . (.openAiState)))
+
+refreshOpenAiAccount
+    :: MVar ()
+    -> Text
+    -> [OpenAiAccount]
+    -> OpenAI.AuthState
+    -> IO (Either ApiError OpenAI.AuthState)
+refreshOpenAiAccount lock clientId accounts stale =
+    withMVar lock \_ ->
+        case find
+            ((== stale.accountId) . (.accountId) . (.openAiState))
+            accounts of
+            Nothing ->
+                pure $ Left $ ProviderError AuthenticationError
+                    ("OpenAI refresh source is unavailable for account "
+                        <> stale.accountId)
+                    Nothing
+            Just account ->
+                withOpenAiSourceLock account.openAiSource do
+                    reloadOpenAiAccount account.openAiSource stale >>= \case
+                        Left err -> pure (Left err)
+                        Right current
+                            | current.accountId /= stale.accountId ->
+                                pure $ Left $ ProviderError AuthenticationError
+                                    "OpenAI auth source changed account identity"
+                                    Nothing
+                            | openAiAuthStateChanged stale current ->
+                                pure (Right current)
+                            | otherwise ->
+                                OpenAI.refreshAccessTokenHTTP clientId current >>= \case
+                                    Left err -> pure (Left err)
+                                    Right newState
+                                        | newState.accountId /= stale.accountId ->
+                                            pure $ Left $ ProviderError AuthenticationError
+                                                "OpenAI refresh changed account identity"
+                                                Nothing
+                                        | otherwise ->
+                                            persistRefreshedOpenAiAccount
+                                                account.openAiSource newState
+
+openAiAuthStateChanged :: OpenAI.AuthState -> OpenAI.AuthState -> Bool
+openAiAuthStateChanged stale current =
+    current.accessToken /= stale.accessToken
+        || current.refreshToken /= stale.refreshToken
+
+withOpenAiSourceLock :: OpenAiCredentialSource -> IO a -> IO a
+withOpenAiSourceLock source action =
+    openAiSourceLockPath source >>= \case
+        Nothing -> action
+        Just path -> withAdvisoryFileLock path action
+
+openAiSourceLockPath :: OpenAiCredentialSource -> IO (Maybe OsPath)
+openAiSourceLockPath source =
+    case source of
+        OpenAiManagedOAuth managedId ->
+            Just <$> managedRefreshLockPath managedId
+        OpenAiAuthFile filePath ->
+            pure (Just (fromFilePath (toFilePath filePath <> ".refresh.lock")))
+        _ ->
+            pure Nothing
+
+managedRefreshLockPath :: Text -> IO OsPath
+managedRefreshLockPath managedId = do
+    home <- getHomeDirectory
+    let fileName =
+            "refresh-" <> Text.unpack (safeLockName managedId) <> ".lock"
+    pure $
+        home
+            </> fromFilePath ".haskell-agent"
+            </> fromFilePath "credentials"
+            </> fromFilePath fileName
+
+safeLockName :: Text -> Text
+safeLockName = Text.map replace
+  where
+    replace character
+        | Text.any (== character) allowed = character
+        | otherwise = '-'
+    allowed =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+
+withAdvisoryFileLock :: OsPath -> IO a -> IO a
+withAdvisoryFileLock path action = do
+    createDirectoryIfMissing True (takeDirectory path)
+    setFileMode (toFilePath (takeDirectory path)) 0o700
+    bracket
+        (openRefreshLock path)
+        closeFd
+        (\fd -> bracket_ (lockRefreshFd fd) (unlockRefreshFd fd) action)
+
+openRefreshLock :: OsPath -> IO Fd
+openRefreshLock path =
+    openFd
+        (toFilePath path)
+        ReadWrite
+        defaultFileFlags { creat = Just 0o600, cloexec = True }
+
+lockRefreshFd :: Fd -> IO ()
+lockRefreshFd fd =
+    waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
+
+unlockRefreshFd :: Fd -> IO ()
+unlockRefreshFd fd =
+    setLock fd (Unlock, AbsoluteSeek, 0, 0)
+
+reloadOpenAiAccount
+    :: OpenAiCredentialSource
+    -> OpenAI.AuthState
+    -> IO (Either ApiError OpenAI.AuthState)
+reloadOpenAiAccount source stale =
+    case source of
+        OpenAiManagedOAuth managedId ->
+            loadManagedCredentials >>= \case
+                Left err -> pure (Left (ConnectionError err))
+                Right credentials ->
+                    case find
+                        ((== managedId) . (.managedId) . fst)
+                        credentials of
+                        Nothing ->
+                            pure $ Left $ ProviderError AuthenticationError
+                                ("managed OpenAI credential " <> managedId
+                                    <> " no longer exists")
+                                Nothing
+                        Just (metadata, secret)
+                            | not metadata.managedEnabled ->
+                                pure $ Left $ ProviderError AuthenticationError
+                                    ("managed OpenAI credential " <> managedId
+                                        <> " is disabled")
+                                    Nothing
+                            | otherwise -> do
+                                now <- getCurrentTime
+                                pure $ case openaiAuthStateFromJson now
+                                    (LBS.fromStrict
+                                        (TextEncoding.encodeUtf8
+                                            secret.secretPayload)) of
+                                    Nothing ->
+                                        Left $ ProviderError AuthenticationError
+                                            ("managed OpenAI credential "
+                                                <> managedId
+                                                <> " contains invalid auth JSON")
+                                            Nothing
+                                    Just current -> Right current
+        OpenAiAuthFile filePath -> do
+            exists <- doesFileExist filePath
+            if not exists
+                then pure $ Left $ ProviderError AuthenticationError
+                    "OpenAI auth file no longer exists"
+                    Nothing
+                else do
+                    now <- getCurrentTime
+                    bytes <- retryOnFileBusy
+                        (LBS.readFile (toFilePath filePath))
+                    pure $ case openaiAuthStateFromJson now bytes of
+                        Nothing ->
+                            Left $ ProviderError AuthenticationError
+                                "OpenAI auth file contains invalid auth JSON"
+                                Nothing
+                        Just current -> Right current
+        OpenAiEnvironmentOAuth ->
+            pure (Right stale)
+        OpenAiManagedBearer ->
+            staticRefreshError stale.accountId
+        OpenAiEnvironmentBearer ->
+            staticRefreshError stale.accountId
+
+staticRefreshError :: Text -> IO (Either ApiError OpenAI.AuthState)
+staticRefreshError accountId =
+    pure $ Left $ ProviderError AuthenticationError
+        ("OpenAI account " <> accountId
+            <> " uses a static bearer token that cannot be refreshed")
+        Nothing
+
+persistRefreshedOpenAiAccount
+    :: OpenAiCredentialSource
+    -> OpenAI.AuthState
+    -> IO (Either ApiError OpenAI.AuthState)
+persistRefreshedOpenAiAccount source newState = do
+    stamped <- authStateToJson newState <$> getCurrentTime
+    case source of
+        OpenAiManagedOAuth managedId -> do
+            let payload =
+                    TextEncoding.decodeUtf8
+                        (LBS.toStrict (Aeson.encode stamped))
+            updateManagedCredentialSecret managedId payload
+                >>= \case
+                    Left err -> pure $ Left $ ConnectionError err
+                    Right () -> pure (Right newState)
+        OpenAiAuthFile filePath ->
+            OpenAILogin.writeAuthFile filePath stamped
+                >> pure (Right newState)
+        OpenAiEnvironmentOAuth ->
+            pure (Right newState)
+        OpenAiManagedBearer ->
+            staticRefreshError newState.accountId
+        OpenAiEnvironmentBearer ->
+            staticRefreshError newState.accountId
 
 loadManagedCredential
     :: Provider
@@ -309,15 +576,6 @@ managedBearerCredential metadata secret =
         , leaseId = Nothing
         , provider = metadata.managedProvider
         }) <$> token
-
-envOrFileState
-    :: UTCTime
-    -> Maybe Text
-    -> Maybe LBS.ByteString
-    -> Maybe OpenAI.AuthState
-envOrFileState now fromEnvJson fileBytes =
-    (fromEnvJson >>= openaiAuthStateFromJson now . LBS.fromStrict . TextEncoding.encodeUtf8)
-        <|> (fileBytes >>= openaiAuthStateFromJson now)
 
 openaiAuthStateFromJson :: UTCTime -> LBS.ByteString -> Maybe OpenAI.AuthState
 openaiAuthStateFromJson now bytes = do
@@ -394,6 +652,26 @@ grokCredentialFromAuthJson raw = do
             , Just token <- [entryToken nested]
             ]
     firstNestedToken _ = Nothing
+
+grokEmailFromAuthJson :: Text -> Maybe Text
+grokEmailFromAuthJson raw = do
+    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
+    entryEmail value <|> firstNestedEmail value
+  where
+    entryEmail (Aeson.Object object) =
+        textField "email" object
+            <|> (textField "id_token" object >>= emailFromToken)
+            <|> (textField "access_token" object >>= emailFromToken)
+            <|> (textField "key" object >>= emailFromToken)
+    entryEmail _ = Nothing
+
+    firstNestedEmail (Aeson.Object object) =
+        listToMaybe
+            [ email
+            | nested <- KeyMap.elems object
+            , Just email <- [entryEmail nested]
+            ]
+    firstNestedEmail _ = Nothing
 
 grokCredential :: Text -> Credential
 grokCredential token = Credential
@@ -490,19 +768,14 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
                 Just credential -> pure (Right credential)
                 Nothing -> loadFresh Nothing
 
-staticCredentialProvider :: Credential -> TokenProvider
-staticCredentialProvider credential = TokenProvider \failed ->
-    case failed of
-        Nothing -> pure (Right credential)
-        Just _ -> pure $ Left $ ProviderError AuthenticationError
-            "static credential was rejected"
-            Nothing
-
 lookupNonEmpty :: String -> IO (Maybe Text)
 lookupNonEmpty name = do
-    value <- lookupEnv name
+    value <- Environment.getEnv (OsPath.unsafeEncodeUtf name)
     pure $ case value of
-        Just text | not (null text) -> Just (Text.pack text)
+        Just raw
+            | Right text <- OsPath.decodeUtf raw
+            , not (null text) ->
+                Just (Text.pack text)
         _ -> Nothing
 
 textField :: Text -> Aeson.Object -> Maybe Text
@@ -510,7 +783,7 @@ textField name object = case KeyMap.lookup (Key.fromText name) object of
     Just (Aeson.String value) | not (Text.null value) -> Just value
     _ -> Nothing
 
-noAuthHint :: String
+noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
     \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."

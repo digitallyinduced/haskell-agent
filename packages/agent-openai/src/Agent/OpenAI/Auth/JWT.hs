@@ -1,5 +1,6 @@
 module Agent.OpenAI.Auth.JWT
     ( deriveAccountId
+    , deriveEmail
     , needsRefresh
     , parseJwtExp
     , refreshMarginSeconds
@@ -24,9 +25,12 @@ refreshMarginSeconds = 10 * 60
 -- | Refresh only when the access-token JWT is about to expire.
 needsRefresh :: AuthState -> UTCTime -> Bool
 needsRefresh state now =
-    case parseJwtExp state.accessToken of
-        Nothing    -> True
-        Just expAt -> diffUTCTime expAt now < fromIntegral refreshMarginSeconds
+    if Text.null state.refreshToken
+        then False
+        else case parseJwtExp state.accessToken of
+            Nothing    -> True
+            Just expAt ->
+                diffUTCTime expAt now < fromIntegral refreshMarginSeconds
 
 -- | Parse the @exp@ claim from a JWT without signature verification.
 parseJwtExp :: Text -> Maybe UTCTime
@@ -42,13 +46,26 @@ parseJwtExp token = do
 -- | Derive the ChatGPT account id from an @id_token@ JWT.
 deriveAccountId :: Text -> Maybe Text
 deriveAccountId idTok = do
-    payloadB64 <- Text.splitOn "." idTok !!? 1
-    payloadBytes <- either (const Nothing) Just
-        (Base64.decode (Text.encodeUtf8 (base64UrlToBase64 payloadB64)))
-    Aeson.Object km <- Aeson.decode (LBS.fromStrict payloadBytes)
+    km <- jwtClaims idTok
     Aeson.Object authKm <- KeyMap.lookup "https://api.openai.com/auth" km
     Aeson.String accId <- KeyMap.lookup "chatgpt_account_id" authKm
     pure accId
+
+deriveEmail :: Text -> Maybe Text
+deriveEmail token = do
+    claims <- jwtClaims token
+    Aeson.String email <- KeyMap.lookup "email" claims
+    if Text.null (Text.strip email)
+        then Nothing
+        else Just email
+
+jwtClaims :: Text -> Maybe Aeson.Object
+jwtClaims token = do
+    payloadB64 <- Text.splitOn "." token !!? 1
+    payloadBytes <- either (const Nothing) Just
+        (Base64.decode (Text.encodeUtf8 (base64UrlToBase64 payloadB64)))
+    Aeson.Object claims <- Aeson.decode (LBS.fromStrict payloadBytes)
+    pure claims
 
 base64UrlToBase64 :: Text -> Text
 base64UrlToBase64 text =

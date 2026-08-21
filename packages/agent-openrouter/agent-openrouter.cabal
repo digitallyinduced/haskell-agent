@@ -44,7 +44,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
-                    , agent-openai          >= 0.1 && < 0.2
+                    , agent-responses       >= 0.1 && < 0.2
                     , text
                     , bytestring
                     , aeson                 >= 2.0
@@ -66,13 +66,12 @@ test-suite agent-openrouter-test
                     , Agent.OpenRouter.CredentialSpec
                     , Agent.OpenRouter.ErrorSpec
                     , Agent.OpenRouter.FunctionalSpec
-                    , Agent.OpenRouter.LoopBackendSpec
                     , Agent.OpenRouter.RequestSpec
                     , Agent.OpenRouter.UsageSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
-                    , agent-openai
+                    , agent-responses
                     , agent-openrouter
                     , hspec
                     , aeson

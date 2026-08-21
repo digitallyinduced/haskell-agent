@@ -1,6 +1,7 @@
 -- | Parent and child tool-approval policy for interactive CLI sessions.
 module Agent.CLI.Approval
     ( approveToolDecision
+    , approveToolDecisionWith
     , childApprove
     , toggleAlwaysApprove
     ) where
@@ -21,7 +22,6 @@ import Agent.CLI.Style
     , roleWarn
     )
 import Agent.CLI.Terminal (resolveColor)
-import Agent.CLI.Tools (lookupAppTool)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (OsPath, fromText)
 import Agent.ToolDispatch (ToolCall(..))
@@ -33,7 +33,11 @@ import Agent.Tools.PlanMode
     , planFilePath
     , planModeBlockedEditMessage
     )
-import Agent.Tools.Types (AppTool, toolAllowsWithoutPrompt)
+import Agent.Tools.Types
+    ( ToolRegistry
+    , lookupRegisteredTool
+    , toolAllowsWithoutPrompt
+    )
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -49,11 +53,30 @@ import System.IO (stderr)
 approveToolDecision
     :: IORef ApprovalPolicy
     -> IORef (Set Text)
-    -> [AppTool]
+    -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
     -> IO (Either Text Bool)
 approveToolDecision policyRef allowedToolsRef tools planMode call = do
+    approveToolDecisionWith
+        (\requested -> do
+            color <- resolveColor stderr
+            promptPermission color requested)
+        policyRef
+        allowedToolsRef
+        tools
+        planMode
+        call
+
+approveToolDecisionWith
+    :: (ToolCall -> IO (Maybe PermissionChoice))
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -74,7 +97,7 @@ approveToolDecision policyRef allowedToolsRef tools planMode call = do
                     putTextLn stderr (roleWarn color msg)
                     pure (Left msg)
                 else do
-                    readOnly <- case lookupAppTool call.name tools of
+                    readOnly <- case lookupRegisteredTool call.name tools of
                         Nothing -> pure False
                         Just tool -> toolAllowsWithoutPrompt tool call
                     -- plan.md edits are auto-approved while plan mode is active.
@@ -91,7 +114,7 @@ approveToolDecision policyRef allowedToolsRef tools planMode call = do
                                         | readOnly -> pure (Right True)
                                         | otherwise -> do
                                             color <- resolveColor stderr
-                                            promptPermission color call >>= \case
+                                            requestPermission call >>= \case
                                                 Nothing -> pure (Right False)
                                                 Just PermissionAllowOnce ->
                                                     pure (Right True)
@@ -139,7 +162,7 @@ toggleAlwaysApprove policyRef projectRoot = do
         ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
         _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
 
-childApprove :: ApprovalPolicy -> [AppTool] -> ToolCall -> IO (Either Text Bool)
+childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do
@@ -154,7 +177,7 @@ childApprove policy tools call = case policy of
                 \Re-run the parent with auto-approve/--yolo, or have the \
                 \parent perform this edit."
 
-isReadOnlyCall :: [AppTool] -> ToolCall -> IO Bool
-isReadOnlyCall tools call = case lookupAppTool call.name tools of
+isReadOnlyCall :: ToolRegistry -> ToolCall -> IO Bool
+isReadOnlyCall tools call = case lookupRegisteredTool call.name tools of
     Just tool -> toolAllowsWithoutPrompt tool call
     Nothing -> pure False

@@ -1,25 +1,35 @@
 -- | Run provider compaction and rewrite the local transcript.
 module Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , codexAutoCompactTokenLimit
+    , autoCompactOpenAiBackend
+    , autoCompactOpenAiBackendWith
     , runProviderCompact
     ) where
 
-import Agent.Error (ApiError)
+import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Loop
+    ( Backend(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnOutput(..)
+    )
 import Agent.OpenAI.CompactClient
     ( CompactRequest(..)
     , compactConversation
     )
 import Agent.OpenAI.Compaction
     ( buildLocalCompactedHistory
+    , compactTranscriptAtLastCheckpoint
     , estimateItemsTokens
     , summarizationPrompt
     , userTextItem
     )
-import Agent.OpenAI.LoopBackend
+import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , withRequestInput
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Provider
     ( Credential
     , Provider(..)
@@ -37,10 +47,13 @@ import Control.Monad.Trans.Except
     , throwE
     , withExceptT
     )
-import Data.IORef (IORef, readIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+codexAutoCompactTokenLimit :: Int
+codexAutoCompactTokenLimit = 244800
 
 data CompactOutcome = CompactOutcome
     { compactBeforeTokens :: !Int
@@ -60,14 +73,18 @@ runProviderCompact provider tokenProvider paramsRef transcriptRef focus =
     runExceptT do
         params <- lift (readIORef paramsRef)
         history <- lift (readIORef transcriptRef)
-        let before = estimateItemsTokens history
         case provider of
-            OpenAIProvider ->
-                compactOpenAI tokenProvider params history before focus
+            OpenAIProvider -> do
+                let effectiveHistory =
+                        compactTranscriptAtLastCheckpoint history
+                compactOpenAI tokenProvider params effectiveHistory
+                    (estimateItemsTokens effectiveHistory) focus
             XAIProvider ->
-                compactLocalXai tokenProvider params history before focus
+                compactLocalXai tokenProvider params history
+                    (estimateItemsTokens history) focus
             OpenRouterProvider ->
-                compactLocalOpenRouter tokenProvider params history before focus
+                compactLocalOpenRouter tokenProvider params history
+                    (estimateItemsTokens history) focus
 
 compactOpenAI
     :: Maybe TokenProvider
@@ -183,6 +200,62 @@ summarizeLocal send provider params history before focus = do
         , compactHistory = items
         , compactSummary = summary
         }
+
+autoCompactOpenAiBackend
+    :: TokenProvider
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
+    -> Backend
+    -> Backend
+autoCompactOpenAiBackend tokenProvider getParams transcriptRef contextTokensRef
+        backend =
+    autoCompactOpenAiBackendWith compactAction transcriptRef contextTokensRef backend
+  where
+    compactAction = do
+        paramsRef <- newIORef =<< getParams
+        runProviderCompact OpenAIProvider (Just tokenProvider)
+            paramsRef transcriptRef Nothing
+
+autoCompactOpenAiBackendWith
+    :: IO (Either Text CompactOutcome)
+    -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
+    -> Backend
+    -> Backend
+autoCompactOpenAiBackendWith compactAction transcriptRef contextTokensRef
+        (Backend submit) =
+    Backend \previous inputs onEvent -> do
+        contextState <- readIORef contextTokensRef
+        historyLength <- length <$> readIORef transcriptRef
+        case contextState of
+            Just (tokens, observedLength)
+                | observedLength == historyLength
+                , tokens >= codexAutoCompactTokenLimit ->
+                    compactThenSubmit contextState inputs onEvent
+            _ -> submitAndTrack contextState previous inputs onEvent
+  where
+    compactThenSubmit oldTokens inputs onEvent = do
+        onEvent (ActivityUpdated "Compacting context…")
+        compactAction >>= \case
+                Left err ->
+                    pure $ Left $ ProviderError ApiErrorType
+                        ("automatic compaction failed: " <> err) Nothing
+                Right outcome -> do
+                    writeIORef transcriptRef outcome.compactHistory
+                    submitAndTrack oldTokens Nothing inputs onEvent
+
+    submitAndTrack oldTokens previous inputs onEvent = do
+        result <- submit previous inputs onEvent
+        case result of
+            Left _ -> writeIORef contextTokensRef oldTokens
+            Right output -> do
+                historyLength <- length <$> readIORef transcriptRef
+                writeIORef contextTokensRef $ Just
+                    ( output.tokenUsage.inputTokens + output.tokenUsage.outputTokens
+                    , historyLength
+                    )
+        pure result
 
 requireTokenProvider
     :: Provider

@@ -11,7 +11,7 @@ module Agent.CLI.Btw
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
 import Agent.Error (ApiError)
 import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
     , FunctionCall(..)

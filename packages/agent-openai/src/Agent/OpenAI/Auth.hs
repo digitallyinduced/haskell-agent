@@ -21,6 +21,7 @@ module Agent.OpenAI.Auth
     , reportRateLimit
     , reportAuthBroken
     , refreshAfterAuthFailure
+    , authFailureRetrySeconds
 
       -- * Inspection and manual refresh
     , allAccountIds
@@ -39,11 +40,13 @@ module Agent.OpenAI.Auth
     , parseJwtExp
     , needsRefresh
     , deriveAccountId
+    , deriveEmail
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Auth.JWT
     ( deriveAccountId
+    , deriveEmail
     , needsRefresh
     , parseJwtExp
     )
@@ -107,11 +110,11 @@ data Pool = Pool
 rateLimitCooldownSeconds :: Int
 rateLimitCooldownSeconds = 60
 
--- | Cooldown duration when an account returns 401/403 from Agent.OpenAI. Long
--- enough to let a scheduled refresh job rotate the token, short enough that
--- a transient 403 doesn't permanently black-hole the account.
-authBrokenCooldownSeconds :: Int
-authBrokenCooldownSeconds = 30 * 60
+-- | Retry window when an account returns 401/403 from Agent.OpenAI.
+-- Authentication recovery already forces an immediate refresh; if that still
+-- fails, retry soon instead of black-holing the only configured account.
+authFailureRetrySeconds :: Int
+authFailureRetrySeconds = 60
 
 --------------------------------------------------------------------------------
 -- Construction
@@ -361,11 +364,11 @@ reportRateLimit pool limitedAccountId retryAfter = do
 
 -- | Mark the account with the given OpenAI @accountId@ as auth-broken
 -- (401/403 from Codex). Uses the same cooldown mechanism as
--- 'reportRateLimit' with 'authBrokenCooldownSeconds'.
+-- 'reportRateLimit' with 'authFailureRetrySeconds'.
 reportAuthBroken :: Pool -> Text -> IO ()
 reportAuthBroken pool brokenAccountId = do
     now <- getCurrentTime
-    let until_ = addUTCTime (fromIntegral authBrokenCooldownSeconds) now
+    let until_ = addUTCTime (fromIntegral authFailureRetrySeconds) now
     setCooldown pool brokenAccountId until_
 
 -- | Force-rotate an access token that Codex has rejected with HTTP 401/403,
@@ -400,7 +403,8 @@ setCooldown pool targetAccountId until_ =
     go entry = do
         state <- readIORef entry.entryAuthRef
         when (state.accountId == targetAccountId) $
-            writeIORef entry.entryCooldownUntil (Just until_)
+            atomicModifyIORef' entry.entryCooldownUntil \current ->
+                (Just (maybe until_ (max until_) current), ())
 
 clearCooldown :: Pool -> Text -> IO ()
 clearCooldown pool targetAccountId =

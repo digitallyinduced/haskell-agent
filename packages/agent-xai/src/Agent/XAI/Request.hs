@@ -5,7 +5,7 @@ module Agent.XAI.Request
     , buildRequest
     ) where
 
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Maybe as Maybe
@@ -29,7 +29,7 @@ mapModel options model = case lookup model options.modelOverrides of
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request = defaultResponseCreateParams
-    { model = mapModel options <$> request.model
+    { model = Just (maybe options.defaultModel (mapModel options) request.model)
     , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
     , tools = Maybe.mapMaybe xaiTool <$> request.tools
     , store = Just False

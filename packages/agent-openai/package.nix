@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-core, base, base64-bytestring
+{ mkDerivation, aeson, agent-core, agent-responses, base, base64-bytestring
 , bytestring, case-insensitive, containers, directory, exceptions
 , filepath, hashable, HsOpenSSL, hspec, http-client
 , http-client-tls, http-conduit, http-streams, http-types
@@ -12,7 +12,7 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-core base base64-bytestring bytestring containers
+    aeson agent-core agent-responses base base64-bytestring bytestring containers
     directory exceptions filepath hashable HsOpenSSL http-client
     http-client-tls http-conduit http-streams http-types io-streams
     network-uri retry safe-exceptions scientific text time unix vector
@@ -22,7 +22,7 @@ mkDerivation {
     agent-core base directory filepath text
   ];
   testHaskellDepends = [
-    aeson agent-core base base64-bytestring bytestring case-insensitive
+    aeson agent-core agent-responses base base64-bytestring bytestring case-insensitive
     directory filepath hspec http-types retry temporary text time unix
     vector wai warp websockets
   ];

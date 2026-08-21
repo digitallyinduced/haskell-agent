@@ -10,7 +10,7 @@ import Agent.XAI.Error
 import Agent.XAI.Options
 import Agent.XAI.Request
 import Agent.XAI.Stream
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -52,6 +52,13 @@ spec = do
             KeyMap.lookup "text" object `shouldBe` Nothing
             KeyMap.lookup "tool_choice" object `shouldBe` Nothing
             KeyMap.lookup "parallel_tool_calls" object `shouldBe` Nothing
+
+        it "uses the configured default when the canonical model is absent" do
+            let request = setModel Nothing sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            KeyMap.lookup "model" object
+                `shouldBe` Just (Aeson.String defaultClientOptions.defaultModel)
 
         it "turns instructions into a leading system message item" do
             let value = requestValue defaultClientOptions sampleRequest
@@ -214,6 +221,13 @@ spec = do
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"created_at\":0,\"model\":\"grok-4.6\",\"status\":\"completed\"}}\n\n"
             map responseStreamEventType events `shouldBe` [EventResponseCompleted]
 
+        it "returns a terminal incomplete response instead of hanging" do
+            events <- expectRight $ parseSseEvents $ sseBlock "response.incomplete"
+                "{\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-i\",\"created_at\":0,\"model\":\"grok-4.6\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}"
+            response <- expectRight (buildResponse events)
+            response.responseId `shouldBe` "resp-i"
+            response.status `shouldBe` ResponseIncomplete
+
         it "surfaces typed stream errors" do
             events <- expectRight $ parseSseEvents $ sseBlock "error"
                 "{\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limited\",\"resets_in_seconds\":120}}"
@@ -230,7 +244,7 @@ spec = do
 
             case buildResponse [] of
                 Left (JsonDecodeError message _) ->
-                    message `shouldSatisfy` Text.isInfixOf "response.completed"
+                    message `shouldSatisfy` Text.isInfixOf "terminal response"
                 other -> expectationFailure ("expected JsonDecodeError, got " <> show other)
 
 sseBlock :: Text -> Text -> Text
@@ -301,6 +315,10 @@ setInstructions newInstructions ResponseCreateParams { instructions = _, .. } =
 setInclude :: Maybe [ResponseInclude] -> ResponseCreateParams -> ResponseCreateParams
 setInclude newInclude ResponseCreateParams { include = _, .. } =
     ResponseCreateParams { include = newInclude, .. }
+
+setModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+setModel newModel ResponseCreateParams { model = _, .. } =
+    ResponseCreateParams { model = newModel, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

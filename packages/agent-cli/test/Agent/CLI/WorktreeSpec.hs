@@ -4,6 +4,8 @@ import Agent.CLI.Worktree
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Exception (bracket)
 import Data.List (dropWhileEnd, isInfixOf)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import qualified System.Directory as Directory
 import System.Directory.OsPath (doesDirectoryExist)
@@ -64,11 +66,13 @@ spec = describe "Agent.CLI.Worktree" do
 
         it "rejects a directory that is not a git checkout" $
             withTempDir "agent-not-git-" \dir -> do
-                result <- createWorktree dir (dir </> fromFilePath "worktrees")
+                let root = dir </> fromFilePath "worktrees"
+                result <- createWorktree dir root
                 case result of
-                    Left err -> err `shouldSatisfy` ("--worktree" `isInfixOf`)
+                    Left err -> err `shouldSatisfy` Text.isInfixOf "--worktree"
                     Right path ->
                         expectationFailure ("expected failure, got " <> toFilePath path)
+                doesDirectoryExist root `shouldReturn` False
 
         it "creates two distinct worktrees for the same repo" $
             withTempGitRepo \repo ->
@@ -89,11 +93,11 @@ spec = describe "Agent.CLI.Worktree" do
                 branches <- git repo ["branch", "--list", branch]
                 branches `shouldBe` ""
 
-expectRight :: Either String OsPath -> IO OsPath
+expectRight :: Either Text OsPath -> IO OsPath
 expectRight = \case
     Right path -> pure path
     Left err -> do
-        expectationFailure ("expected Right, got Left " <> err)
+        expectationFailure ("expected Right, got Left " <> Text.unpack err)
         pure (fromFilePath "")
 
 withTempGitRepo :: (OsPath -> IO a) -> IO a

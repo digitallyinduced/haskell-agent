@@ -9,8 +9,17 @@ module Agent.CLI.Worktree
 
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Exception.Safe (mask, onException, tryAny)
-import Data.Char (isSpace)
-import Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
+import Control.Monad (void)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , runExceptT
+    , throwE
+    , withExceptT
+    )
+import Data.List (isPrefixOf)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
@@ -49,29 +58,24 @@ worktreePath root repoName day hex8 =
 
 -- | Add a new worktree of @source@ under @root@. @root@ is injected so tests
 -- can use a temp directory instead of the real home.
-createWorktree :: OsPath -> OsPath -> IO (Either String OsPath)
-createWorktree source root = do
-    gitToplevel source >>= \case
-        Left err -> pure (Left err)
-        Right repo -> do
-            now <- getCurrentTime
-            let repoName = takeFileName repo
-                day = utctDay now
-                start = posixMicros now
-            createDirectoryIfMissing True (root </> repoName)
-            addUnique repo root repoName day start 0
+createWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
+createWorktree source root = runExceptT do
+    repo <- gitToplevel source
+    now <- lift getCurrentTime
+    let repoName = takeFileName repo
+        day = utctDay now
+        start = posixMicros now
+    lift (createDirectoryIfMissing True (root </> repoName))
+    addUnique repo root repoName day start 0
 
 -- | Remove a managed worktree and the branch created for it.
-removeWorktree :: OsPath -> OsPath -> IO (Either String ())
-removeWorktree source path = do
-    gitToplevel source >>= \case
-        Left err -> pure (Left err)
-        Right repo ->
-            git repo ["worktree", "remove", "--force", toFilePath path] >>= \case
-                Left err -> pure (Left err)
-                Right _ ->
-                    fmap (fmap (const ())) $
-                        git repo ["branch", "-D", toFilePath (takeFileName path)]
+removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
+removeWorktree source path = runExceptT do
+    repo <- gitToplevel source
+    void $ ExceptT $
+        git repo ["worktree", "remove", "--force", toFilePath path]
+    void $ ExceptT $
+        git repo ["branch", "-D", toFilePath (takeFileName path)]
 
 addUnique
     :: OsPath
@@ -80,60 +84,71 @@ addUnique
     -> Day
     -> Integer
     -> Int
-    -> IO (Either String OsPath)
+    -> ExceptT Text IO OsPath
 addUnique repo root repoName day start attempt
     | attempt >= 32 =
-        pure (Left "could not pick a unique worktree path")
+        throwE "could not pick a unique worktree path"
     | otherwise = do
         let path = worktreePath root repoName day (hex8 (start + fromIntegral attempt))
-        exists <- doesPathExist path
+        exists <- lift (doesPathExist path)
         if exists
             then addUnique repo root repoName day start (attempt + 1)
-            else mask \restore -> do
-                added <- restore (git repo ["worktree", "add", toFilePath path])
-                    `onException` cleanupWorktreeCandidate repo path
+            else do
+                added <- lift $ mask \restore ->
+                    restore (git repo ["worktree", "add", toFilePath path])
+                        `onException` cleanupWorktreeCandidate repo path
                 case added of
                     Left err
                         | branchTaken err ->
                             addUnique repo root repoName day start (attempt + 1)
-                        | otherwise -> pure (Left err)
-                    Right _ -> pure (Right path)
+                        | otherwise -> do
+                            lift (cleanupWorktreeCandidate repo path)
+                            throwE err
+                    Right _ -> pure path
 
 cleanupWorktreeCandidate :: OsPath -> OsPath -> IO ()
 cleanupWorktreeCandidate repo path = do
-    _ <- git repo ["worktree", "remove", "--force", toFilePath path]
-    _ <- tryAny (removePathForcibly path)
-    _ <- git repo ["worktree", "prune"]
-    _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
-    pure ()
+    exists <- doesPathExist path
+    if not exists
+        then pure ()
+        else do
+            _ <- git repo ["worktree", "remove", "--force", toFilePath path]
+            _ <- tryAny (removePathForcibly path)
+            _ <- git repo ["worktree", "prune"]
+            _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
+            pure ()
 
-gitToplevel :: OsPath -> IO (Either String OsPath)
-gitToplevel source = git source ["rev-parse", "--show-toplevel"] >>= \case
-    Left err ->
-        pure $ Left $
-            "--worktree requires a git repository ("
-                <> trim err
-                <> ")"
-    Right path -> pure (Right (fromFilePath (trim path)))
+gitToplevel :: OsPath -> ExceptT Text IO OsPath
+gitToplevel source = do
+    path <- withExceptT
+        (\err -> "--worktree requires a git repository (" <> Text.strip err <> ")")
+        (ExceptT (git source ["rev-parse", "--show-toplevel"]))
+    pure (fromFilePath (Text.unpack (Text.strip path)))
 
-git :: OsPath -> [String] -> IO (Either String String)
+git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
     (code, out, err) <-
         readCreateProcessWithExitCode
             (proc "git" args) { cwd = Just (toFilePath dir) }
             ""
     case code of
-        ExitSuccess -> pure (Right out)
+        ExitSuccess -> pure (Right (Text.pack out))
         ExitFailure _ ->
             pure $ Left $
-                let msg = trim (if null (trim err) then out else err)
-                in if null msg then "git " <> unwords args <> " failed" else msg
+                let stderrText = Text.strip (Text.pack err)
+                    stdoutText = Text.strip (Text.pack out)
+                    message
+                        | Text.null stderrText = stdoutText
+                        | otherwise = stderrText
+                in if Text.null message
+                    then "git " <> Text.pack (unwords args) <> " failed"
+                    else message
 
-branchTaken :: String -> Bool
+branchTaken :: Text -> Bool
 branchTaken err =
-    "already used by worktree" `isInfixOf` err
-        || "already checked out" `isInfixOf` err
-        || "already exists" `isInfixOf` err
+    "already used by worktree" `Text.isInfixOf` err
+        || "already checked out" `Text.isInfixOf` err
+        || "already exists" `Text.isInfixOf` err
 
 posixMicros :: UTCTime -> Integer
 posixMicros t =
@@ -146,6 +161,3 @@ hex8 n =
 
 formatDay :: Day -> String
 formatDay = formatTime defaultTimeLocale "%Y-%m-%d"
-
-trim :: String -> String
-trim = dropWhileEnd isSpace . dropWhile isSpace

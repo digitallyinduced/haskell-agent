@@ -22,9 +22,11 @@ import Agent.FileRetry (retryOnFileBusy)
 import Agent.Provider (Provider(..))
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Control.Exception.Safe (tryAny)
+import qualified Data.ByteString as BS
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (doesFileExist, doesPathExist)
 import System.OsPath (takeDirectory, (</>))
@@ -147,10 +149,24 @@ applyByteBudget maxBytes loaded =
         | remaining <= 0 = []
         | otherwise =
             let content = file.instructionContent
-                size = Text.length content
+                size = BS.length (TextEncoding.encodeUtf8 content)
             in if size <= remaining
                 then file : go (remaining - size) rest
-                else [file { instructionContent = Text.take remaining content }]
+                else [file { instructionContent = takeUtf8Bytes remaining content }]
+
+takeUtf8Bytes :: Int -> Text -> Text
+takeUtf8Bytes budget = Text.pack . go budget . Text.unpack
+  where
+    go _ [] = []
+    go remaining (char : rest)
+        | width > remaining = []
+        | otherwise = char : go (remaining - width) rest
+      where
+        width
+            | char <= '\x7f' = 1
+            | char <= '\x7ff' = 2
+            | char <= '\xffff' = 3
+            | otherwise = 4
 
 formatAgentsMdForProvider :: Provider -> OsPath -> LoadedAgentsMd -> Maybe Text
 formatAgentsMdForProvider provider cwd loaded = case provider of

@@ -5,7 +5,7 @@ module Agent.OpenRouter.Request
     , buildRequest
     ) where
 
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenRouter.Options (ClientOptions(..))
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)

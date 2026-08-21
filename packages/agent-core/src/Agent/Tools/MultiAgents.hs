@@ -4,6 +4,7 @@
 -- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
+    , CollaborationSpawnOptions(..)
     , SubagentWorktree(..)
     , multiAgentTools
     , multiAgentNamespace
@@ -22,9 +23,9 @@ import Agent.Subagents
     , queueMessageFromForTurn
     , resolveAgentTarget
     , sendInputMessageForTurn
-    , spawnSubagentAtForTurn
+    , spawnSubagentAtPreparedForTurn
     , waitAnyLive
-    , waitSubagents
+    , waitSubagentsFrom
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
@@ -53,8 +54,9 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCall)
 import Agent.Tools.Types
-    ( AppTool(..)
-    , AppToolKind(..)
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -73,6 +75,12 @@ data SubagentWorktree = SubagentWorktree
     , subagentWorktreeCleanup :: !(IO (Either Text ()))
     }
 
+data CollaborationSpawnOptions = CollaborationSpawnOptions
+    { collaborationModel :: !(Maybe Text)
+    , collaborationReasoningEffort :: !(Maybe Text)
+    , collaborationForkTurns :: !(Maybe Text)
+    } deriving (Eq, Show)
+
 -- | Per-agent identity for nesting depth / parent linkage / task path.
 data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
@@ -85,6 +93,10 @@ data MultiAgentContext = MultiAgentContext
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
       -- | Optional host hook for Grok-style isolated worktree children.
     , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
+      -- | Record model/effort overrides and seed the child transcript before
+      -- its worker starts.
+    , multiPrepareSpawn
+        :: !(Maybe (SubagentId -> CollaborationSpawnOptions -> IO ()))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }
@@ -119,15 +131,9 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly =
+    jsonAppTool name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
 
 --------------------------------------------------------------------------------
 -- spawn_agent
@@ -179,11 +185,20 @@ runSpawn ctx call args
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
     | otherwise = do
-        _ <- pure (args.model, args.reasoningEffort, args.forkTurns)
         rootTurnId <- ctx.multiRootTurnId
-        result <- spawnSubagentAtForTurn
+        let spawnOptions = CollaborationSpawnOptions
+                { collaborationModel = sanitizeOverride args.model
+                , collaborationReasoningEffort =
+                    sanitizeOverride args.reasoningEffort
+                , collaborationForkTurns = normalizeForkTurns args.forkTurns
+                }
+            prepare agentId =
+                maybe (pure ()) (\hook -> hook agentId spawnOptions)
+                    ctx.multiPrepareSpawn
+        result <- spawnSubagentAtPreparedForTurn
             ctx.multiRegistry
             rootTurnId
+            prepare
             ctx.multiSelfId
             ctx.multiTaskPath
             ctx.multiDepth
@@ -204,7 +219,21 @@ validForkTurns = \case
     Just turns ->
         let stripped = Text.toLower (Text.strip turns)
         in stripped `elem` ["none", "all", ""]
-            || (not (Text.null stripped) && Text.all (\c -> c >= '0' && c <= '9') stripped)
+            || case reads (Text.unpack stripped) of
+                [(turns :: Int, "")] -> turns > 0
+                _ -> False
+
+sanitizeOverride :: Maybe Text -> Maybe Text
+sanitizeOverride value = value >>= \raw ->
+    let stripped = Text.strip raw
+    in if Text.null stripped then Nothing else Just stripped
+
+normalizeForkTurns :: Maybe Text -> Maybe Text
+normalizeForkTurns value =
+    case Text.toLower . Text.strip <$> value of
+        Nothing -> Just "all"
+        Just "" -> Just "all"
+        normalized -> normalized
 
 --------------------------------------------------------------------------------
 -- wait_agent
@@ -242,7 +271,8 @@ runWait ctx args = do
     let timeoutMs = fromMaybe defaultWaitTimeoutMs args.timeoutMs
     case args.targets of
         Nothing -> do
-            (statuses, timedOut) <- waitAnyLive ctx.multiRegistry timeoutMs
+            (statuses, timedOut) <-
+                waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
             pure $ Right $ encodeJson $ object
                 [ "message" .= waitSummary timedOut statuses
                 , "timed_out" .= timedOut
@@ -253,7 +283,9 @@ runWait ctx args = do
             case sequence resolved of
                 Left err -> pure (Left err)
                 Right ids -> do
-                    (statuses, timedOut) <- waitSubagents ctx.multiRegistry ids timeoutMs
+                    (statuses, timedOut) <-
+                        waitSubagentsFrom
+                            ctx.multiRegistry ctx.multiSelfId ids timeoutMs
                     pure $ Right $ encodeJson $ object
                         [ "message" .= waitSummary timedOut statuses
                         , "timed_out" .= timedOut
@@ -325,15 +357,21 @@ runSendMessage ctx call args
             Right targetPath | targetPath == taskPathRoot ->
                 sendToRoot ctx (messageContent call args.message)
             _ -> do
-                _ <- maybeRestore ctx args.target
-                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-                case resolved of
+                restored <- maybeRestore ctx args.target
+                case restored of
                     Left err -> pure (Left err)
-                    Right agentId -> do
-                        rootTurnId <- ctx.multiRootTurnId
-                        queueMessageFromForTurn ctx.multiRegistry rootTurnId
-                            ctx.multiTaskPath agentId
-                            (messageContent call args.message)
+                    Right () -> do
+                        resolved <-
+                            resolveAgentTarget
+                                ctx.multiRegistry ctx.multiTaskPath args.target
+                        case resolved of
+                            Left err -> pure (Left err)
+                            Right agentId -> do
+                                rootTurnId <- ctx.multiRootTurnId
+                                queueMessageFromForTurn
+                                    ctx.multiRegistry rootTurnId
+                                    ctx.multiTaskPath agentId
+                                    (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -360,15 +398,21 @@ runFollowup ctx call args
             Right targetPath | targetPath == taskPathRoot ->
                 pure (Left "followup_task cannot target the root agent; use send_message")
             _ -> do
-                _ <- maybeRestore ctx args.target
-                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-                case resolved of
+                restored <- maybeRestore ctx args.target
+                case restored of
                     Left err -> pure (Left err)
-                    Right agentId -> do
-                        rootTurnId <- ctx.multiRootTurnId
-                        sendInputMessageForTurn ctx.multiRegistry rootTurnId
-                            ctx.multiTaskPath agentId
-                            (messageContent call args.message) False
+                    Right () -> do
+                        resolved <-
+                            resolveAgentTarget
+                                ctx.multiRegistry ctx.multiTaskPath args.target
+                        case resolved of
+                            Left err -> pure (Left err)
+                            Right agentId -> do
+                                rootTurnId <- ctx.multiRootTurnId
+                                sendInputMessageForTurn
+                                    ctx.multiRegistry rootTurnId
+                                    ctx.multiTaskPath agentId
+                                    (messageContent call args.message) False
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
 sendToRoot ctx content =

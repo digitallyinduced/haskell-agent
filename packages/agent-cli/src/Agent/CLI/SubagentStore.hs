@@ -10,21 +10,27 @@ module Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
     , isValidSubagentStoreId
     , subagentStoreDir
+    , forkSubagentTranscript
     , saveSubagentState
     , loadSubagentState
     ) where
 
+import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
-import Agent.OpenAI.Responses.Types (ResponseItem)
-import Agent.Subagents (SubagentId(..))
+import Agent.Responses.Types
+import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
+import Agent.Subagents.TaskPath (taskPathText)
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Text.Read (readMaybe)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
@@ -34,26 +40,69 @@ import System.Posix.Files (setFileMode)
 
 data SubagentDiskMeta = SubagentDiskMeta
     { diskPreviousResponseId :: !(Maybe Text)
+    , diskStatus :: !(Maybe SubagentStatus)
     , diskAgentType :: !(Maybe Text)
     , diskAgentModel :: !(Maybe Text)
+    , diskReasoningEffort :: !(Maybe Text)
     , diskCwd :: !(Maybe OsPath)
+    , diskTaskPath :: !(Maybe Text)
+    , diskParentId :: !(Maybe SubagentId)
+    , diskDepth :: !(Maybe Int)
     } deriving (Eq, Show)
 
 instance ToJSON SubagentDiskMeta where
     toJSON meta = object
         [ "previousResponseId" .= meta.diskPreviousResponseId
+        , "status" .= fmap encodeDiskStatus meta.diskStatus
         , "agentType" .= meta.diskAgentType
         , "agentModel" .= meta.diskAgentModel
+        , "reasoningEffort" .= meta.diskReasoningEffort
         , "cwd" .= fmap toFilePath meta.diskCwd
+        , "taskPath" .= meta.diskTaskPath
+        , "parentId" .= meta.diskParentId
+        , "depth" .= meta.diskDepth
         ]
 
 instance FromJSON SubagentDiskMeta where
-    parseJSON = withObject "SubagentDiskMeta" \o ->
+    parseJSON = withObject "SubagentDiskMeta" \o -> do
+        statusValue <- o .:? "status"
+        diskStatus <- traverse decodeDiskStatus statusValue
         SubagentDiskMeta
             <$> o .:? "previousResponseId"
+            <*> pure diskStatus
             <*> o .:? "agentType"
             <*> o .:? "agentModel"
+            <*> o .:? "reasoningEffort"
             <*> (fmap fromFilePath <$> o .:? "cwd")
+            <*> o .:? "taskPath"
+            <*> o .:? "parentId"
+            <*> o .:? "depth"
+
+encodeDiskStatus :: SubagentStatus -> Aeson.Value
+encodeDiskStatus = \case
+    Pending -> Aeson.String "pending"
+    Running -> Aeson.String "running"
+    Interrupted -> Aeson.String "interrupted"
+    Closed -> Aeson.String "closed"
+    NotFound -> Aeson.String "not_found"
+    Completed finalText -> Aeson.object ["completed" .= finalText]
+    Errored err -> Aeson.object ["errored" .= err]
+
+decodeDiskStatus :: Aeson.Value -> Parser SubagentStatus
+decodeDiskStatus = \case
+    Aeson.String "pending" -> pure Pending
+    Aeson.String "pending_init" -> pure Pending
+    Aeson.String "running" -> pure Running
+    Aeson.String "interrupted" -> pure Interrupted
+    Aeson.String "closed" -> pure Closed
+    Aeson.String "shutdown" -> pure Closed
+    Aeson.String "not_found" -> pure NotFound
+    Aeson.Object object
+        | Just value <- KeyMap.lookup "completed" object ->
+            Completed <$> Aeson.parseJSON value
+        | Just value <- KeyMap.lookup "errored" object ->
+            Errored <$> Aeson.parseJSON value
+    value -> fail ("invalid persisted subagent status: " <> show value)
 
 -- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
 -- traversal so resume paths cannot escape @agents/@.
@@ -79,16 +128,44 @@ subagentStoreDir sessionDir agentId
                 </> fromFilePath (Text.unpack agentId.unSubagentId)
             )
 
+forkSubagentTranscript :: Maybe Text -> [ResponseItem] -> [ResponseItem]
+forkSubagentTranscript forkTurns items =
+    let completeItems = trimDanglingToolSuffix items
+        normalized = Text.toLower . Text.strip <$> forkTurns
+    in case normalized of
+        Just "none" -> []
+        Just turns
+            | Just count <- readMaybe (Text.unpack turns)
+            , count > 0 -> takeRecentTurns count completeItems
+        _ -> completeItems
+
+takeRecentTurns :: Int -> [ResponseItem] -> [ResponseItem]
+takeRecentTurns count items =
+    case drop (max 0 (length starts - count)) starts of
+        start : _ -> drop start items
+        [] -> items
+  where
+    starts =
+        [ index
+        | (index, MessageItem message) <- zip [0 :: Int ..] items
+        , message.role == RoleUser
+        ]
+
 saveSubagentState
     :: OsPath
     -> SubagentId
     -> [ResponseItem]
     -> Maybe Text
+    -> SubagentStatus
+    -> Maybe Text
     -> Maybe Text
     -> Maybe Text
     -> Maybe OsPath
+    -> Maybe SubagentIdentity
     -> IO (Either Text ())
-saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
+saveSubagentState
+        sessionDir agentId items previous status agentType agentModel
+        reasoningEffort cwd identity =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
@@ -98,9 +175,14 @@ saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
             _ <- tryAny (setFileMode (toFilePath dir) 0o700)
             writeLazyFileAtomically metaPath 0o600 $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
+                , diskStatus = Just status
                 , diskAgentType = agentType
                 , diskAgentModel = agentModel
+                , diskReasoningEffort = reasoningEffort
                 , diskCwd = cwd
+                , diskTaskPath = taskPathText . (.identityTaskPath) <$> identity
+                , diskParentId = identity >>= (.identityParent)
+                , diskDepth = (.identityDepth) <$> identity
                 }
             writeLazyFileAtomically transcriptPath 0o600 (Aeson.encode items)
             pure (Right ())
@@ -122,7 +204,8 @@ loadSubagentState sessionDir agentId =
                 else do
                     metaResult <- if hasMeta
                         then decodeFile metaPath
-                        else pure (Right (SubagentDiskMeta Nothing Nothing Nothing Nothing))
+                        else pure (Right (SubagentDiskMeta
+                            Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])

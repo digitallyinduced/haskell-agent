@@ -14,6 +14,7 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
@@ -22,6 +23,7 @@ import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -67,6 +69,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiRootTurnId = pure Nothing
                     , multiResumeFromDisk = Nothing
                     , multiCreateWorktree = Nothing
+                    , multiPrepareSpawn = Nothing
                     , multiSendToRoot = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
@@ -76,7 +79,7 @@ spec = describe "Agent.Tools.Codex" do
                     [ property
                     | tool <- coding.codingAppTools
                     , tool.appToolName == name
-                    , property <- tool.appToolParameters
+                    , property <- fromMaybe [] (jsonToolParameters tool)
                     ]
             map (.propertyName) (parameters "spawn_agent") `shouldBe`
                 [ "task_name"
@@ -165,6 +168,50 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             output `shouldSatisfy` Text.isInfixOf "Failed to find expected lines"
+
+    it "preserves unchanged blank lines in update hunks" do
+        withTempEnv \env -> do
+            Text.writeFile (toFilePath env.toolCwd </> "blank.txt")
+                "before\n\nold\nafter\n"
+            output <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: blank.txt"
+                , "@@"
+                , " before"
+                , " "
+                , "-old"
+                , "+new"
+                , " after"
+                , "*** End Patch"
+                ]
+            output `shouldSatisfy` Text.isInfixOf "M blank.txt"
+            Text.readFile (toFilePath env.toolCwd </> "blank.txt")
+                `shouldReturn` "before\n\nnew\nafter\n"
+
+    it "rejects malformed update lines without recursing forever" do
+        let parsed = parsePatch $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: malformed.txt"
+                , "@@"
+                , " context"
+                , ""
+                , "-old"
+                , "+new"
+                , "*** End Patch"
+                ]
+        parsed `shouldSatisfy` \case
+            Left err -> "Invalid update line" `Text.isInfixOf` err
+            Right _ -> False
+    it "preserves trailing whitespace in added lines" do
+        withTempEnv \env -> do
+            _ <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: spaces.txt"
+                , "+hello  "
+                , "*** End Patch"
+                ]
+            Text.readFile (toFilePath env.toolCwd </> "spaces.txt")
+                `shouldReturn` "hello  \n"
 
     it "stops applying hunks after the first failure" do
         withTempEnv \env -> do

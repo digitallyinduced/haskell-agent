@@ -10,8 +10,8 @@ import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
 import Agent.OpenAI.Http (decodeCodexHttpBody)
-import qualified Agent.OpenAI.Responses.Codec as Codec
-import qualified Agent.OpenAI.Responses.Types as Responses
+import qualified Agent.Responses.Codec as Codec
+import qualified Agent.Responses.Types as Responses
 import Agent.OpenAI.ToolDSL
 import Agent.OpenAI.WebSocketClient
 
@@ -102,6 +102,19 @@ spec = do
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
                 Aeson.Success Responses.ResponseCompletedEvent { response } ->
+                    response.responseId `shouldBe` "resp_1"
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes response incomplete into its typed terminal constructor" do
+            let original = Aeson.object
+                    [ "type" .= ("response.incomplete" :: Text)
+                    , "sequence_number" .= (5 :: Int)
+                    , "response" .= canonicalResponseJson "incomplete"
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success Responses.ResponseIncompleteEvent { response } -> do
+                    response.status `shouldBe` Responses.ResponseIncomplete
                     response.responseId `shouldBe` "resp_1"
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err

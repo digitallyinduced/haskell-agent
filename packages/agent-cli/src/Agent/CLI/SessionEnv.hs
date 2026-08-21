@@ -8,11 +8,13 @@ import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
-import Agent.CLI.Session (SessionCreate, SessionHandle)
+import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
+import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.OsPath (OsPath)
 import Agent.Provider (Provider, TokenProvider)
 import Agent.Subagents (RootTurnId)
@@ -31,7 +33,9 @@ data SessionEnv = SessionEnv
     , sessionParams :: !(IORef ResponseCreateParams)
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionTranscript :: !(IORef [ResponseItem])
-    , sessionPersist :: !(Maybe (IORef (Either SessionCreate SessionHandle)))
+    , sessionPersist :: !Persistence
+    , sessionTitleManager :: !SessionTitleManager
+    , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
@@ -47,9 +51,11 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
+    , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())
     , sessionAbortSubagentTurn :: !(Maybe RootTurnId -> IO ())
+    , sessionOnPersisted :: !(SessionHandle -> IO ())
     , sessionReset :: !(IO ())
     }

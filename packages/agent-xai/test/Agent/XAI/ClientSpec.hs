@@ -5,7 +5,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap

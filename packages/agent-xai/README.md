@@ -32,7 +32,7 @@ request = defaultResponseCreateParams
 main = createResponse credential request >>= print
 ```
 
-`agent-xai` depends on `agent-openai` for the canonical Responses wire model,
-OpenAI-compatible error decoding, typed stream events, and response merging.
-Provider credentials and common errors come from `agent-core`.
-`agent-openai` does not depend on `agent-xai`.
+`agent-xai` depends on `agent-responses` for the canonical Responses wire
+model, OpenAI-compatible error decoding, typed stream events, response
+merging, and stateless loop adaptation. Provider credentials and common
+errors come from `agent-core`.

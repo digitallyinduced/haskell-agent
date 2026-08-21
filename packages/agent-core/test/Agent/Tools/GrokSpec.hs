@@ -7,18 +7,20 @@ import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Tools.PlanMode (newPlanModeEnv)
+import Agent.Tools.PlanMode (PlanModeEnv, activatePlanMode, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (bracket, finally)
 import Data.Text (Text)
@@ -26,6 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory
     ( createDirectoryIfMissing
+    , createDirectoryLink
     , doesFileExist
     , getTemporaryDirectory
     )
@@ -57,7 +60,7 @@ spec = describe "Agent.Tools.Grok" do
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
             let outputSchemas =
-                    [ tool.appToolParameters
+                    [ fromMaybe [] (jsonToolParameters tool)
                     | tool <- grokTools session ghci plan Nothing typesRef
                     , tool.appToolName == "get_task_output"
                     ]
@@ -79,7 +82,7 @@ spec = describe "Agent.Tools.Grok" do
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
             let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                    (pure Nothing) Nothing Nothing Nothing
+                    (pure Nothing) Nothing Nothing Nothing Nothing
                 names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
             names `shouldContain` ["task"]
             closeSubagentRegistry registry
@@ -112,6 +115,17 @@ spec = describe "Agent.Tools.Grok" do
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
 
+    it "does not descend through directory symlinks" do
+        withTempSession \(session, ghci) -> do
+            let cwd = toFilePath session.grokEnv.toolCwd
+                outside = cwd </> ".outside"
+            createDirectoryIfMissing True outside
+            Text.writeFile (outside </> "secret.txt") "secret"
+            createDirectoryLink outside (cwd </> "outside-link")
+            output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
+            output `shouldSatisfy` Text.isInfixOf "outside-link"
+            output `shouldNotSatisfy` Text.isInfixOf "secret.txt"
+
     it "creates a file with empty old_string and replaces a unique match" do
         withTempSession \(session, ghci) -> do
             created <- runTool session ghci "search_replace"
@@ -126,10 +140,12 @@ spec = describe "Agent.Tools.Grok" do
 
     it "refuses a non-unique search_replace without replace_all" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
+            let path = toFilePath session.grokEnv.toolCwd </> "dup.txt"
+            Text.writeFile path "aaa bbb aaa\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
             output `shouldSatisfy` Text.isInfixOf "multiple times"
+            Text.readFile path `shouldReturn` "aaa bbb aaa\n"
 
     it "grep finds a literal match" do
         withTempSession \(session, ghci) -> do
@@ -198,6 +214,21 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"
+
+    it "only edits plan.md while plan mode is active" do
+        withTempSession \(session, ghci) -> do
+            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            activatePlanMode plan
+            blocked <- runToolWithPlan session ghci plan "search_replace"
+                "{\"file_path\":\"blocked.txt\",\"old_string\":\"\",\"new_string\":\"no\"}"
+            blocked `shouldSatisfy` Text.isInfixOf "only editable file is the plan file"
+            doesFileExist (toFilePath session.grokEnv.toolCwd </> "blocked.txt")
+                `shouldReturn` False
+            allowed <- runToolWithPlan session ghci plan "search_replace"
+                "{\"file_path\":\"plan.md\",\"old_string\":\"\",\"new_string\":\"# Plan\\n\"}"
+            allowed `shouldSatisfy` Text.isInfixOf "created successfully"
+            Text.readFile (toFilePath session.grokEnv.toolCwd </> "plan.md")
+                `shouldReturn` "# Plan\n"
 
     it "persists cwd and exported env across run_terminal_cmd calls" do
         withTempSession \(session, ghci) -> do
@@ -309,6 +340,10 @@ spec = describe "Agent.Tools.Grok" do
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
     plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+    runToolWithPlan session ghci plan name arguments
+
+runToolWithPlan :: GrokSession -> GhciSession -> PlanModeEnv -> Text -> Text -> IO Text
+runToolWithPlan session ghci plan name arguments = do
     typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
     result <- dispatchToolCall defaultLoopDispatch
         (appToolHandlers (grokTools session ghci plan Nothing typesRef))

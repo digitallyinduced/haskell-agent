@@ -9,9 +9,9 @@ module Agent.OpenRouter.Stream
     ) where
 
 import Agent.Error (ApiError(..))
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.Types
 import Agent.OpenRouter.Error (classifyStreamError)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -136,14 +136,11 @@ isSseWhitespace byte =
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
-buildResponse events = case lastMaybe completedResponses of
-    Just completed -> decodeMerged completed
+buildResponse events = case lastMaybe terminalResponses of
+    Just terminal -> decodeMerged terminal
     Nothing -> Left (Maybe.fromMaybe missingCompletion (firstFailure events))
   where
-    completedResponses =
-        [ response
-        | ResponseCompletedEvent { response } <- events
-        ]
+    terminalResponses = Maybe.mapMaybe terminalResponse events
     doneItems =
         [ Aeson.toJSON item
         | ResponseOutputItemDoneEvent { item } <- events
@@ -159,9 +156,14 @@ buildResponse events = case lastMaybe completedResponses of
                     (LBS.toStrict (Aeson.encode merged))))
 
     missingCompletion = JsonDecodeError
-        "No response.completed event found in OpenRouter SSE stream"
+        "No terminal response event found in OpenRouter SSE stream"
         (Text.take 2000 (Text.decodeUtf8With Text.lenientDecode
             (LBS.toStrict (Aeson.encode events))))
+
+    terminalResponse = \case
+        ResponseCompletedEvent { response } -> Just response
+        ResponseIncompleteEvent { response } -> Just response
+        _ -> Nothing
 
 firstFailure :: [ResponseStreamEvent] -> Maybe ApiError
 firstFailure = Maybe.listToMaybe . Maybe.mapMaybe failure

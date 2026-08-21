@@ -1,0 +1,94 @@
+module Agent.CLI.SessionTitleSpec (spec) where
+
+import Agent.CLI.SessionTitle
+import Agent.Loop (Backend(..), emptyTurnOutput)
+import Agent.OpenAI.Responses.Types
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    )
+import Data.IORef
+import qualified Data.Text as Text
+import Test.Hspec
+
+spec :: Spec
+spec = describe "Agent.CLI.SessionTitle" do
+    describe "cleanGeneratedTitle" do
+        it "normalizes labels, quotes, whitespace, and extra lines" do
+            cleanGeneratedTitle "Title: \"  Fix   auth races  \"\nExplanation"
+                `shouldBe` Just "Fix auth races"
+
+        it "rejects empty output and caps runaway titles" do
+            cleanGeneratedTitle "  " `shouldBe` Nothing
+            fmap Text.length (cleanGeneratedTitle (Text.replicate 100 "a"))
+                `shouldBe` Just 80
+
+    it "runs a private tool-free title request and returns a tagged result" do
+        seenParams <- newIORef Nothing
+        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
+        let backendFactory privateParams _privateTranscript =
+                Backend \_ _ _ -> do
+                    writeIORef seenParams . Just =<< readIORef privateParams
+                    pure (Right (emptyTurnOutput "title-response" [] (Just "Auth race cleanup")))
+        withSessionTitleManager backendFactory paramsRef \manager -> do
+            requestSessionTitle manager "session-1" 3 "conversation"
+            results <- waitForResults manager 100
+            results `shouldBe`
+                [ SessionTitleResult
+                    { resultSessionId = "session-1"
+                    , resultMilestone = 3
+                    , resultTitle = "Auth race cleanup"
+                    , resultGeneration = 0
+                    }
+                ]
+        Just sent <- readIORef seenParams
+        sent.tools `shouldBe` Just []
+        sent.parallelToolCalls `shouldBe` Just False
+        sent.maxOutputTokens `shouldBe` Just 100
+        sent.reasoning `shouldBe` Nothing
+
+    it "drops a stale result after a manual rename invalidates generation" do
+        started <- newEmptyMVar
+        release <- newEmptyMVar
+        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
+        let backendFactory _ _ =
+                Backend \_ _ _ -> do
+                    putMVar started ()
+                    takeMVar release
+                    pure (Right (emptyTurnOutput "title-response" [] (Just "Stale title")))
+        withSessionTitleManager backendFactory paramsRef \manager -> do
+            requestSessionTitle manager "session-1" 1 "conversation"
+            takeMVar started
+            invalidateSessionTitles manager "session-1"
+            putMVar release ()
+            threadDelay 50000
+            takeSessionTitleResults manager `shouldReturn` []
+
+    it "waits for an in-flight title before shutdown" do
+        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
+        let backendFactory _ _ =
+                Backend \_ _ _ -> do
+                    threadDelay 20000
+                    pure (Right (emptyTurnOutput "title-response" [] (Just "Finished title")))
+        withSessionTitleManager backendFactory paramsRef \manager -> do
+            requestSessionTitle manager "session-1" 6 "conversation"
+            waitForSessionTitleResults 1000000 manager
+                `shouldReturn`
+                    [ SessionTitleResult
+                        { resultSessionId = "session-1"
+                        , resultMilestone = 6
+                        , resultTitle = "Finished title"
+                        , resultGeneration = 0
+                        }
+                    ]
+
+waitForResults :: SessionTitleManager -> Int -> IO [SessionTitleResult]
+waitForResults manager attempts
+    | attempts <= 0 = pure []
+    | otherwise = do
+        results <- takeSessionTitleResults manager
+        if null results
+            then threadDelay 10000 >> waitForResults manager (attempts - 1)
+            else pure results

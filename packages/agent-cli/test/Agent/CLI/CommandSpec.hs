@@ -1,7 +1,7 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
@@ -59,6 +59,15 @@ spec = do
             parseReplLine "/session" `shouldBe` ReplShowSession
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
+
+        it "renames sessions or restores automatic titles" do
+            parseReplLine "/rename Fix auth races"
+                `shouldBe` ReplRename "Fix auth races"
+            parseReplLine "/title   keep  spaces"
+                `shouldBe` ReplRename "keep  spaces"
+            parseReplLine "/rename --auto" `shouldBe` ReplRenameAuto
+            parseReplLine "/rename"
+                `shouldBe` ReplCommandError "usage: /rename <TITLE>|--auto"
 
         it "reloads auth from disk/env" do
             parseReplLine "/reload-auth" `shouldBe` ReplReloadAuth
@@ -196,6 +205,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "session"
+                    , "rename"
                     , "login"
                     , "resume"
                     , "compact"
@@ -224,6 +234,8 @@ spec = do
                 `shouldBe` Just "login"
             fmap (.slashName) (lookupSlashCommand "/a")
                 `shouldBe` Just "agents"
+            fmap (.slashName) (lookupSlashCommand "/title")
+                `shouldBe` Just "rename"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -245,6 +257,8 @@ spec = do
                     "grok-4.6" `elem` xs
                         && "grok-4.5" `elem` xs
                         && "grok-4.5-mini" `elem` xs)
+            slashCompletionCandidates "emaner/" "-"
+                `shouldBe` ["--auto"]
 
         it "does not complete ordinary prompts" do
             slashCompletionCandidates "" "help" `shouldBe` []
