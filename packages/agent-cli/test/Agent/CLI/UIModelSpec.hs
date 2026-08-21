@@ -11,6 +11,7 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import qualified Data.Foldable as Foldable
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
@@ -52,6 +53,16 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
 
+    it "only marks structured cancellation results as cancelled" do
+        toolStateFor "exit: cancelled\npartial output"
+            `shouldBe` BlockCancelled
+        toolStateFor "Error: Command cancelled"
+            `shouldBe` BlockCancelled
+        toolStateFor "exit: 0\ncancellation complete"
+            `shouldBe` BlockComplete
+        toolStateFor "exit: 0\ncancelled work item"
+            `shouldBe` BlockComplete
+
     it "moves selection and toggles folding" do
         let initial =
                 apply
@@ -82,3 +93,26 @@ spec = describe "fullscreen UI reducer" do
 
 apply :: [UiEvent] -> UiState
 apply events = foldl (flip reduceUi) initialUiState events
+
+toolStateFor :: Text -> BlockState
+toolStateFor output =
+    let call =
+            functionToolCall
+                "cancel-test"
+                "run_terminal_cmd"
+                "{\"command\":\"echo test\"}"
+        result = ToolCallResult
+            { callId = "cancel-test"
+            , output
+            , callKind = FunctionCallKind
+            }
+        blocks = Foldable.toList $
+            (.uiBlocks) $
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+    in case blocks of
+        [block] -> block.blockState
+        _ -> BlockFailed

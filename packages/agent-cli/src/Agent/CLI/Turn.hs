@@ -14,9 +14,7 @@ import Agent.CLI.ProviderTransition
     , TurnResult(..)
     )
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime
-    , emitUiEvent
-    , withFullscreenSuspended
+    ( emitUiEvent
     )
 import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
 import Agent.CLI.Render
@@ -301,7 +299,7 @@ runOneTurn env@SessionEnv
                         color <- resolveColor stderr
                         putTextLn stderr
                             (formatTurnStatus color "ok" detail)
-            followUp <- handleProposedPlan fullscreen planMode loopResult.finalText
+            followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- readIORef printed
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
@@ -415,11 +413,10 @@ finishTerminal terminal started finished exitCode message = do
         notifyTerminal terminal stdout message
 
 handleProposedPlan
-    :: Maybe FullscreenRuntime
-    -> PlanModeEnv
+    :: PlanModeEnv
     -> Maybe Text
     -> IO (Maybe Text)
-handleProposedPlan fullscreen planMode = \case
+handleProposedPlan planMode = \case
     Nothing -> pure Nothing
     Just text -> do
         active <- isPlanModeActive planMode
@@ -427,10 +424,7 @@ handleProposedPlan fullscreen planMode = \case
             (True, Just planBody) -> do
                 _ <- writePlanMarkdown planMode planBody
                 let PlanModeHooks{ planDecideExit = decideExit } = planMode.planHooks
-                decision <- case fullscreen of
-                    Nothing -> decideExit planBody
-                    Just runtime ->
-                        withFullscreenSuspended runtime (decideExit planBody)
+                decision <- decideExit planBody
                 case decision of
                     PlanApprove -> do
                         deactivatePlanMode planMode

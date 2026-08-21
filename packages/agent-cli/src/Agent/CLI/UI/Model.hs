@@ -515,9 +515,7 @@ toolResultState :: Text -> BlockState
 toolResultState output
     | "tool call rejected by user" `Text.isInfixOf` lowered =
         BlockDenied
-    | "cancel" `Text.isInfixOf` lowered
-        && ("tool" `Text.isInfixOf` lowered
-            || "exit:" `Text.isPrefixOf` lowered) =
+    | structuredCancellation lowered =
         BlockCancelled
     | outputLooksFailed output = BlockFailed
     | Just code <- exitCodeFrom lowered
@@ -525,6 +523,17 @@ toolResultState output
     | otherwise = BlockComplete
   where
     lowered = Text.toLower (Text.strip output)
+
+structuredCancellation :: Text -> Bool
+structuredCancellation output =
+    let header = Text.strip (headLine output)
+    in header == "exit: cancelled"
+        || header == "error: command cancelled"
+        || header == "cancelled"
+        || "cancelled (" `Text.isPrefixOf` header
+
+headLine :: Text -> Text
+headLine = Text.takeWhile (/= '\n')
 
 exitCodeFrom :: Text -> Maybe Int
 exitCodeFrom text = do

@@ -1293,30 +1293,53 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    color <- resolveColor stderr
-    putTextLn stderr $ roleWarn color $
-        glyphWarn
-            <> "provider credentials temporarily unavailable; retrying this turn in "
-            <> formatDuration delay
-            <> " (Esc to cancel)"
+    let waitMessage =
+            "provider credentials temporarily unavailable; retrying this turn in "
+                <> formatDuration delay
+                <> " (Esc to cancel)"
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice (Just waitMessage))
+        Nothing -> do
+            color <- resolveColor stderr
+            putTextLn stderr $
+                roleWarn color (glyphWarn <> waitMessage)
     let cancel = env.sessionLoop.loopCancel
         -- Give the provider reset boundary a small margin so the automatic
         -- retry does not race a rounded server timestamp.
         waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
+        waitForCancel =
+            isJust <$> timeout waitMicros (waitCancel cancel)
+        waitAction = case env.sessionFullscreen of
+            Just _ -> waitForCancel
+            Nothing ->
+                withEscCancel cancel env.sessionEscPaused waitForCancel
     resetCancel cancel
     cancelled <-
-        ( withTurnCancel env.sessionInterrupt cancel $
-            withEscCancel cancel env.sessionEscPaused $
-                isJust <$> timeout waitMicros (waitCancel cancel)
-        ) `finally` resetCancel cancel
+        (withTurnCancel env.sessionInterrupt cancel waitAction)
+            `finally` resetCancel cancel
     if cancelled
         then do
-            putTextLn stderr (roleMuted color "automatic retry cancelled")
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "automatic retry cancelled"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color "automatic retry cancelled")
             if pending.pendingExitAfter
                 then pure RunQuit
                 else replWithDraft env pending.pendingPromptText
         else do
-            putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "retrying turn"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color (glyphOk <> "retrying turn"))
             runPendingTurnWithCooldownRetry False env pending
 
 reportProviderUnavailable :: ApiError -> IO ()
@@ -1981,7 +2004,9 @@ replWithDraft env@SessionEnv
                         legacy (runLoginManager color)
                         continue
                     ReplUsage -> do
-                        showAccountUsage provider tokenProvider openAiPool
+                        legacy
+                            (showAccountUsage
+                                provider tokenProvider openAiPool)
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
