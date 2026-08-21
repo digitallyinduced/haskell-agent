@@ -52,6 +52,23 @@ spec = do
             applyAgentViewportKey PickerKeyCancel moved
                 `shouldBe` Left Nothing
 
+        it "selects clicked targets and preserves them across live refreshes" do
+            let selected =
+                    selectAgentTarget
+                        (AgentChild (SubagentId "alpha"))
+                        state
+                refreshed =
+                    refreshAgentViewportState
+                        [ rootEntry
+                        , child "alpha" "/root/alpha" "done"
+                        , child "gamma" "/root/alpha/gamma" "running"
+                        ]
+                        selected
+            (.agentTarget) <$> selectedAgentEntry refreshed
+                `shouldBe` Just (AgentChild (SubagentId "alpha"))
+            (.agentStatus) <$> selectedAgentEntry refreshed
+                `shouldBe` Just "done"
+
         it "renders hierarchy and transcript panes" do
             let frame = renderAgentViewportFrameFor False 10 70 state
             frame `shouldSatisfy` Text.isInfixOf "hierarchy"

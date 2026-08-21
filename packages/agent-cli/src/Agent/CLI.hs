@@ -137,8 +137,8 @@ import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
+    , installSkillCatalog
     , loadSkillsCatalog
-    , queueSkillCatalogContext
     , reservedSlashNames
     , skillInvocationCommand
     )
@@ -234,7 +234,7 @@ import Agent.Skills
     ( Skill(..)
     , SkillCatalog(..)
     , SkillInvocation(..)
-    , buildSkillInvocations
+    , SkillWarning(..)
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -745,12 +745,12 @@ runAgent options transition = do
                 Nothing -> sessionTitleFromPrompt <$> prompt
         setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
         startupContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
-        skills <- loadSkillsCatalog options home projectRoot cwd True
-        skillsRef <- newIORef skills
-        skillInvocationsRef <- newIORef
-            (buildSkillInvocations reservedSlashNames skills)
-        when (null initialItems && not (isJust initialPrevious)) $
-            queueSkillCatalogContext startupContext skills
+        -- Fullscreen sessions load skills after Brick has taken over the
+        -- terminal, so filesystem discovery cannot delay the first frame.
+        -- Minimal and one-shot sessions still initialize them synchronously
+        -- before their first prompt/turn below.
+        skillsRef <- newIORef (SkillCatalog [] [])
+        skillInvocationsRef <- newIORef []
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
         writeIORef persistSlotRef persist
@@ -1066,20 +1066,17 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             freshAgents <-
                 loadAgentsContext options provider home cwd [] Nothing
             freshSkills <- loadSkillsCatalog options home projectRoot cwd True
-            writeIORef skillsRef freshSkills
-            writeIORef skillInvocationsRef
-                (buildSkillInvocations reservedSlashNames freshSkills)
-            queueSkillCatalogContext freshAgents freshSkills
+            installSkillCatalog
+                reservedSlashNames True freshAgents
+                skillsRef skillInvocationsRef freshSkills
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalog
                 options home projectRoot cwd queueContext
-            writeIORef skillsRef refreshed
-            writeIORef skillInvocationsRef
-                (buildSkillInvocations reservedSlashNames refreshed)
-            when queueContext $
-                queueSkillCatalogContext startupContext refreshed
+            installSkillCatalog
+                reservedSlashNames queueContext startupContext
+                skillsRef skillInvocationsRef refreshed
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
@@ -1095,12 +1092,14 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 && options.optScreenMode /= ScreenMinimal
         initialFullscreenState =
             reduceUi
-                (UiSetRepository
-                    branch
-                    (toText (takeFileName (takeDirectory cwd))
-                        <> "/"
-                        <> toText (takeFileName cwd)))
-                (hydrateUiHistory initialTurns)
+                (UiSetNotice (Just "Starting…"))
+                (reduceUi
+                    (UiSetRepository
+                        branch
+                        (toText (takeFileName (takeDirectory cwd))
+                            <> "/"
+                            <> toText (takeFileName cwd)))
+                    (hydrateUiHistory initialTurns))
     fullscreen <- if fullscreenEnabled
         then Just <$> newFullscreenRuntime
             (requestCancel toolEnv.toolCancel)
@@ -1110,6 +1109,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 when terminal.terminalNativeProgress $
                     setNativeProgress stderr active)
             ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
+            (writeIORef selectedAgent)
             useColor
             initialFullscreenState
         else pure Nothing
@@ -1237,17 +1237,38 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    let sessionAction = case pendingTurn of
-            Just pending ->
-                runPendingTurn env pending
-            Nothing -> case prompt of
-                Just text -> do
-                    inputs <- preparePromptSkillInputs env text [UserMessage text]
-                        >>= either (die . Text.unpack) pure
-                    result <- runOneTurn env text inputs
-                    finishTurn env True result
-                Nothing ->
-                    repl env
+    let formatSkillWarning warning =
+            "skill ignored: "
+                <> toText warning.skillWarningPath
+                <> ": "
+                <> warning.skillWarningMessage
+        initializeSkills = do
+            skills <- loadSkillsCatalog
+                options home projectRoot cwd (isNothing fullscreen)
+            installSkillCatalog
+                reservedSlashNames
+                (null initialTurns && not (isJust initialPrevious))
+                startupContext skillsRef skillInvocationsRef skills
+            case fullscreen of
+                Nothing -> pure ()
+                Just runtime -> do
+                    mapM_
+                        (emitUiEvent runtime . UiSystemMessage . formatSkillWarning)
+                        skills.catalogWarnings
+                    emitUiEvent runtime (UiSetNotice Nothing)
+        sessionAction = do
+            initializeSkills
+            case pendingTurn of
+                Just pending ->
+                    runPendingTurn env pending
+                Nothing -> case prompt of
+                    Just text -> do
+                        inputs <- preparePromptSkillInputs env text [UserMessage text]
+                            >>= either (die . Text.unpack) pure
+                        result <- runOneTurn env text inputs
+                        finishTurn env True result
+                    Nothing ->
+                        repl env
     result <-
         (case fullscreen of
             Nothing -> sessionAction

@@ -22,7 +22,11 @@ import Agent.CLI.Input
     , readReplHistory
     , terminalTextWidth
     )
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentTarget(..)
+    , agentEntryTreeLabel
+    )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
     ( ReplAction(..)
@@ -67,7 +71,7 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
 import Data.Foldable (toList)
-import Data.List (find, intersperse)
+import Data.List (find, intersperse, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -88,6 +92,7 @@ data Name
     | PermissionRow !Int
     | SlashRow !Int
     | OverlayCursor
+    | AgentRow !AgentTarget
     deriving (Eq, Ord, Show)
 
 data AppEvent
@@ -117,6 +122,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
+    , runtimeAgentSelect :: !(AgentTarget -> IO ())
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
@@ -161,6 +167,7 @@ newFullscreenRuntime
     -> (Text -> IO Bool)
     -> (Bool -> IO ())
     -> IO (AgentTarget, [AgentEntry])
+    -> (AgentTarget -> IO ())
     -> Bool
     -> UiState
     -> IO FullscreenRuntime
@@ -170,6 +177,7 @@ newFullscreenRuntime
     copyAction
     nativeProgress
     agentSnapshot
+    agentSelect
     color
     initial = FullscreenRuntime
     <$> newBChan 512
@@ -179,6 +187,7 @@ newFullscreenRuntime
     <*> pure copyAction
     <*> pure nativeProgress
     <*> pure agentSnapshot
+    <*> pure agentSelect
     <*> pure color
     <*> pure initial
 
@@ -575,7 +584,7 @@ drawAgentPane selected entries =
             borderWithLabel (txt " Agents ") $
                 padAll 1 $
                     vBox
-                        [ vBox (map drawEntry entries)
+                        [ vBox (map drawEntry (zip [0 ..] ordered))
                         , padTop (Pad 1) $
                             withAttr Theme.footerAttr $
                                 txtWrap
@@ -588,21 +597,22 @@ drawAgentPane selected entries =
                                 vBox (map txtWrap transcript)
                         ]
   where
+    ordered = sortOn (.agentPath) entries
     selectedEntry =
-        find ((== selected) . (.agentTarget)) entries
-    drawEntry entry =
+        find ((== selected) . (.agentTarget)) ordered
+    drawEntry (index, entry) =
         let
             marker =
                 if entry.agentTarget == selected then "› " else "  "
             row =
-                txtWrap
+                txt
                     (marker
-                        <> entry.agentPath
-                        <> "  "
-                        <> entry.agentStatus)
-        in if entry.agentTarget == selected
-            then withAttr Theme.successAttr row
-            else row
+                        <> agentEntryTreeLabel ordered index entry)
+            styled =
+                if entry.agentTarget == selected
+                    then withAttr Theme.successAttr row
+                    else row
+        in clickable (AgentRow entry.agentTarget) styled
     transcript = case selectedEntry of
         Nothing -> ["(agent unavailable)"]
         Just entry ->
@@ -1097,6 +1107,11 @@ handleEvent event = case event of
                         handleComposerKey (V.EvKey V.KUp [])
                     (SlashRow _, V.BScrollDown) ->
                         handleComposerKey (V.EvKey V.KDown [])
+                    (AgentRow target, V.BLeft) -> do
+                        liftIO
+                            (state.appRuntime.runtimeAgentSelect target)
+                        modify' \current ->
+                            current { appAgentSelected = target }
                     _ -> handleMouseDown name button
             (Nothing, Just _, _) ->
                 case (name, button) of
