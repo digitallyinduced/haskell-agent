@@ -1339,7 +1339,7 @@ drawFooter state =
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                            "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
                             "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
 
@@ -1752,18 +1752,21 @@ handleCtrlC = do
     pure decision
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
-handleNormalKey event = do
-    case event of
-        V.EvMouseDown _ _ V.BScrollUp _ ->
-            scrollConversationBy (-mouseScrollLines)
-        V.EvMouseDown _ _ V.BScrollDown _ ->
-            scrollConversationBy mouseScrollLines
-        _ -> do
-            state <- get
-            case state.appUi.uiFocus of
-                FocusScrollback -> handleScrollbackKey event
-                FocusComposer -> handleComposerKey event
-                FocusPermission -> pure ()
+handleNormalKey event
+    | Bridge.isSendNowKey event =
+        handleComposerKey event
+    | otherwise = do
+        case event of
+            V.EvMouseDown _ _ V.BScrollUp _ ->
+                scrollConversationBy (-mouseScrollLines)
+            V.EvMouseDown _ _ V.BScrollDown _ ->
+                scrollConversationBy mouseScrollLines
+            _ -> do
+                state <- get
+                case state.appUi.uiFocus of
+                    FocusScrollback -> handleScrollbackKey event
+                    FocusComposer -> handleComposerKey event
+                    FocusPermission -> pure ()
 
 activateSlashAt :: Int -> EventM Name AppState ()
 activateSlashAt index = do
@@ -1878,6 +1881,8 @@ handleComposerKey event = do
     let ui = state.appUi
         slashMenu = currentSlashMenu state
     case event of
+        _ | Bridge.isSendNowKey event ->
+            sendNow
         V.EvKey (V.KChar 'q') [V.MCtrl] ->
             submitRaw ReplEof
         V.EvKey (V.KChar 'd') [V.MCtrl]
@@ -2018,6 +2023,50 @@ handleComposerKey event = do
                 , appHistoryDraft = ""
                 }
         vScrollToEnd (viewportScroll ConversationViewport)
+
+    sendNow = do
+        state <- get
+        let ui = state.appUi
+            draft = ui.uiDraft
+        when ui.uiRunning $
+            if Text.null (Text.strip draft)
+                then
+                    if Seq.null ui.uiQueuedInputs
+                        then modifyUi
+                            (UiSetNotice
+                                (Just "There is no queued prompt to send now."))
+                        else do
+                            modifyUi
+                                (UiSetNotice
+                                    (Just
+                                        "Cancelling the current turn; sending the queued prompt next…"))
+                            liftIO state.appRuntime.runtimeCancel
+                else do
+                    liftIO (appendReplHistory draft)
+                    liftIO $ atomically $
+                        promoteFullscreenInput
+                            state.appRuntime.runtimeInput
+                            FullscreenInput
+                                { fullscreenInputLine =
+                                    if state.appPasted
+                                        then ReplPasted draft
+                                        else ReplText draft
+                                , fullscreenInputQueued = True
+                                , fullscreenInputDisplay = Just draft
+                                }
+                    modify' \current ->
+                        current
+                            { appUi =
+                                reduceUi (UiInputPromoted draft) current.appUi
+                            , appPasted = False
+                            , appHistory = draft : current.appHistory
+                            , appHistoryIndex = Nothing
+                            , appHistoryDraft = ""
+                            , appSlashIndex = 0
+                            , appSlashDismissed = False
+                            }
+                    liftIO state.appRuntime.runtimeCancel
+                    vScrollToEnd (viewportScroll ConversationViewport)
 
     enqueueInput state replLine display clearDraft = do
         let queued = not state.appUi.uiAwaitingInput
@@ -2325,6 +2374,37 @@ appendFullscreenInput
 appendFullscreenInput (FullscreenInputBuffer inputs) input = do
     queued <- readTVar inputs
     writeTVar inputs (queued Seq.|> input)
+
+-- | Put an interruptive prompt ahead of already queued prompts. Clipboard
+-- actions entered after the last submitted prompt belong to the current draft,
+-- so keep that trailing prelude immediately before the promoted prompt.
+promoteFullscreenInput
+    :: FullscreenInputBuffer
+    -> FullscreenInput
+    -> STM ()
+promoteFullscreenInput (FullscreenInputBuffer inputs) input = do
+    queued <- readTVar inputs
+    let (remaining, prelude) = splitTrailingPromptPrelude queued
+    writeTVar inputs $
+        prelude Seq.>< Seq.singleton input Seq.>< remaining
+
+splitTrailingPromptPrelude
+    :: Seq FullscreenInput
+    -> (Seq FullscreenInput, Seq FullscreenInput)
+splitTrailingPromptPrelude = go Seq.empty
+  where
+    go prelude queued =
+        case Seq.viewr queued of
+            remaining Seq.:> input
+                | isPromptPrelude input ->
+                    go (input Seq.<| prelude) remaining
+            _ -> (queued, prelude)
+
+isPromptPrelude :: FullscreenInput -> Bool
+isPromptPrelude input =
+    case input.fullscreenInputLine of
+        ReplClipboardPaste _ _ -> True
+        _ -> False
 
 takeFullscreenInput
     :: FullscreenInputBuffer

@@ -298,6 +298,22 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
             `shouldBe` ["first follow-up", "second follow-up"]
 
+    it "promotes a send-now draft ahead of existing queued inputs" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiInputQueued "later"
+                    , UiSetDraft "send now" 8
+                    , UiInputPromoted "send now"
+                    ]
+        Foldable.toList state.uiQueuedInputs
+            `shouldBe` ["send now", "later"]
+        state.uiDraft `shouldBe` ""
+        state.uiCursor `shouldBe` 0
+        state.uiNotice
+            `shouldBe`
+                Just "Cancelling the current turn; sending this prompt next…"
+
     it "clears only the draft that was submitted immediately" do
         let state =
                 apply
