@@ -1,6 +1,7 @@
 module Agent.CLI.AuthSpec (spec) where
 
 import Agent.CLI.Auth
+import Agent.CLI.CredentialStore
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Auth (AuthState(..))
 import Agent.Provider
@@ -10,16 +11,26 @@ import Agent.Provider
     , Provider(..)
     , getNextToken
     )
+import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..))
+import Data.Time.Clock (UTCTime(..), addUTCTime, getCurrentTime)
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeFile
+    , removePathForcibly
+    )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO (hClose, openTempFile)
 import Test.Hspec
 
 spec :: Spec
@@ -85,6 +96,98 @@ spec = do
                 "{\"issuer::client\":{\"access_token\":\"nested-tok\"}}"
                 `shouldBe` Just "nested-tok"
 
+    describe "grokAuthStateFromJson" do
+        it "loads refresh and absolute expiry state from managed JSON" do
+            let expiresAt = addUTCTime 3600 epoch
+                encoded = Text.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                    Aeson.object
+                        [ "access_token" .= ("access" :: Text)
+                        , "refresh_token" .= ("refresh" :: Text)
+                        , "id_token" .= ("id" :: Text)
+                        , "expires_at" .= expiresAt
+                        ]
+            case grokAuthStateFromJson epoch encoded of
+                Just state -> do
+                    state.grokAccessToken `shouldBe` "access"
+                    state.grokRefreshToken `shouldBe` Just "refresh"
+                    state.grokIdToken `shouldBe` Just "id"
+                    state.grokExpiresAt `shouldBe` Just expiresAt
+                Nothing -> expectationFailure "expected Grok auth state"
+
+    describe "managedGrokTokenProvider" do
+        it "refreshes an expiring token once and persists rotated tokens" $
+            withTempHome \_ -> do
+                now <- getCurrentTime
+                refreshes <- newIORef (0 :: Int)
+                let refresh refreshToken = do
+                        refreshToken `shouldBe` "refresh-old"
+                        modifyIORef' refreshes (+ 1)
+                        pure (Right refreshedGrokTokens)
+                    state = expiringGrokState now
+                    secret = managedGrokSecretFor state
+                upsertManagedCredential managedGrokMetadata secret
+                    `shouldReturn` Right ()
+                provider <- managedGrokTokenProvider
+                    managedGrokMetadata
+                    secret
+                    state
+                    refresh
+                getNextToken provider Nothing `shouldReturn`
+                    Right freshManagedGrok
+                getNextToken provider Nothing `shouldReturn`
+                    Right freshManagedGrok
+                readIORef refreshes `shouldReturn` 1
+                loaded <- loadManagedCredentials
+                case loaded of
+                    Right [(_, stored)] ->
+                        case grokAuthStateFromJson now stored.secretPayload of
+                            Just persisted -> do
+                                persisted.grokAccessToken `shouldBe` "fresh"
+                                persisted.grokRefreshToken
+                                    `shouldBe` Just "refresh-new"
+                            Nothing ->
+                                expectationFailure
+                                    "expected persisted Grok OAuth state"
+                    other ->
+                        expectationFailure
+                            ("expected one managed credential, got "
+                                <> show other)
+
+        it "force-refreshes an unexpired token after auth rejection" $
+            withTempHome \_ -> do
+                now <- getCurrentTime
+                let state = unexpiredGrokState now
+                    secret = managedGrokSecretFor state
+                upsertManagedCredential managedGrokMetadata secret
+                    `shouldReturn` Right ()
+                provider <- managedGrokTokenProvider
+                    managedGrokMetadata secret state
+                    (const (pure (Right refreshedGrokTokens)))
+                getNextToken provider
+                    (Just
+                        (FailedCredential staleManagedGrok
+                            AccountAuthenticationRejected))
+                    `shouldReturn` Right freshManagedGrok
+
+        it "adopts a token rotated by another process without refreshing" $
+            withTempHome \_ -> do
+                now <- getCurrentTime
+                refreshes <- newIORef (0 :: Int)
+                let staleState = expiringGrokState now
+                    staleSecret = managedGrokSecretFor staleState
+                    currentState = adoptedGrokState now
+                    refresh _ = do
+                        modifyIORef' refreshes (+ 1)
+                        pure (Right refreshedGrokTokens)
+                upsertManagedCredential managedGrokMetadata
+                    (managedGrokSecretFor currentState)
+                    `shouldReturn` Right ()
+                provider <- managedGrokTokenProvider
+                    managedGrokMetadata staleSecret staleState refresh
+                getNextToken provider Nothing `shouldReturn`
+                    Right adoptedManagedGrok
+                readIORef refreshes `shouldReturn` 0
+
     describe "reloadableFileCredentialProvider" do
         it "returns the cached credential without reloading" do
             loads <- newIORef (0 :: Int)
@@ -137,8 +240,65 @@ freshGrok = Credential
     , provider = XAIProvider
     }
 
+managedGrokMetadata :: ManagedCredential
+managedGrokMetadata =
+    ManagedCredential "grok-test" XAIProvider "account" "Grok"
+        ManagedSubscription ManagedGrokAuthJson True
+
+managedGrokSecretFor :: GrokAuthState -> ManagedSecret
+managedGrokSecretFor state =
+    ManagedSecret
+        "grok-test"
+        (Text.decodeUtf8
+            (LBS.toStrict (Aeson.encode (grokAuthStateToJson state))))
+
+expiringGrokState :: UTCTime -> GrokAuthState
+expiringGrokState now =
+    GrokAuthState "stale" (Just "refresh-old") (Just "id-old")
+        (Just (addUTCTime (-1) now))
+
+unexpiredGrokState :: UTCTime -> GrokAuthState
+unexpiredGrokState now =
+    GrokAuthState "stale" (Just "refresh-old") (Just "id-old")
+        (Just (addUTCTime 3600 now))
+
+staleManagedGrok :: Credential
+staleManagedGrok =
+    Credential "stale" "account" Nothing XAIProvider
+
+adoptedGrokState :: UTCTime -> GrokAuthState
+adoptedGrokState now =
+    GrokAuthState "adopted" (Just "refresh-adopted") Nothing
+        (Just (addUTCTime 3600 now))
+
+adoptedManagedGrok :: Credential
+adoptedManagedGrok =
+    Credential "adopted" "account" Nothing XAIProvider
+
+refreshedGrokTokens :: XAIAuth.OAuthTokens
+refreshedGrokTokens =
+    XAIAuth.OAuthTokens "fresh" (Just "refresh-new") (Just "id-new")
+        (Just 3600)
+
+freshManagedGrok :: Credential
+freshManagedGrok =
+    Credential "fresh" "account" Nothing XAIProvider
+
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) 0
+
+withTempHome :: (FilePath -> IO a) -> IO a
+withTempHome action =
+    bracket create removePathForcibly \home ->
+        withEnv "HOME" (Just home) (action home)
+  where
+    create = do
+        temporary <- getTemporaryDirectory
+        (path, handle) <- openTempFile temporary "agent-auth"
+        hClose handle
+        removeFile path
+        createDirectory path
+        pure path
 
 withEnv :: String -> Maybe String -> IO a -> IO a
 withEnv name value action =
