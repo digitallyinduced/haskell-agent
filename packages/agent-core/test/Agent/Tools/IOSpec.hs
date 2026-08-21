@@ -13,6 +13,7 @@ import Agent.Tools.IO
     , readTextFile
     , resolveUnderCwd
     , runShellCommand
+    , runShellCommandStreaming
     , runningLiveOutput
     , startShellCommand
     , stopShellCommand
@@ -154,6 +155,33 @@ spec = describe "Agent.Tools.IO" do
             commandCancelled `shouldBe` True
             commandTimedOut `shouldBe` False
 
+    it "publishes accumulated foreground output before completion" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            snapshots <- newIORef []
+            done <- newEmptyMVar
+            _ <- forkIO do
+                result <- runShellCommandStreaming
+                    env
+                    osDir
+                    "printf first; sleep 1; printf second"
+                    5000
+                    (\out err -> modifyIORef' snapshots (<> [out <> err]))
+                putMVar done result
+            sawFirst <- waitForSnapshot snapshots (Text.isInfixOf "first") 20
+            sawFirst `shouldBe` True
+            early <- readIORef snapshots
+            early `shouldSatisfy`
+                any (\snapshot ->
+                    "first" `Text.isInfixOf` snapshot
+                        && not ("second" `Text.isInfixOf` snapshot))
+            result <- takeMVar done
+            result.commandStdout `shouldBe` "firstsecond"
+            finalSnapshots <- readIORef snapshots
+            finalSnapshots `shouldSatisfy`
+                any (Text.isInfixOf "firstsecond")
+
     it "force-kills a process group on timeout" do
         withTempDir checkTimeoutKillsProcessGroup
 
@@ -165,6 +193,16 @@ spec = describe "Agent.Tools.IO" do
 
     it "caps live and final background output" do
         withTempDir checkBackgroundOutputCap
+
+waitForSnapshot :: IORef [Text.Text] -> (Text.Text -> Bool) -> Int -> IO Bool
+waitForSnapshot _ _ 0 = pure False
+waitForSnapshot ref predicate attempts = do
+    snapshots <- readIORef ref
+    if any predicate snapshots
+        then pure True
+        else do
+            threadDelay 50000
+            waitForSnapshot ref predicate (attempts - 1)
 
 checkTimeoutKillsProcessGroup dir = do
     let osDir = fromFilePath dir

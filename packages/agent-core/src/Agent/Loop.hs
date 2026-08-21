@@ -129,6 +129,8 @@ data LoopEvent
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall
+    -- | Latest accumulated output snapshot for an in-flight tool call.
+    | ToolOutputUpdated Text Text
     | ToolFinished ToolCallResult
     deriving (Eq, Show)
 
@@ -178,6 +180,7 @@ defaultLoopDispatch = ToolDispatchConfig
     , toolDispatchFormatException = \name exception ->
         "Tool " <> name <> " crashed: " <> Text.pack (show exception)
     , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
+    , toolDispatchOnOutput = \_call _output -> pure ()
     }
 
 runLoop
@@ -270,6 +273,14 @@ runOne config call = do
                 , callKind = call.callKind
                 }
         Right True ->
-            dispatchRegisteredToolCall config.loopDispatch config.loopTools call
+            dispatchRegisteredToolCall
+                config.loopDispatch
+                    { toolDispatchOnOutput = \progressCall output ->
+                        config.loopDispatch.toolDispatchOnOutput progressCall output
+                            >> config.loopOnEvent
+                                (ToolOutputUpdated progressCall.callId output)
+                    }
+                config.loopTools
+                call
     config.loopOnEvent (ToolFinished result)
     pure result
