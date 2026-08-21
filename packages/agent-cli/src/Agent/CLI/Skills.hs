@@ -1,6 +1,7 @@
 -- | CLI presentation and lifecycle helpers for filesystem Agent Skills.
 module Agent.CLI.Skills
     ( formatSkillsListing
+    , installSkillCatalog
     , loadSkillsCatalog
     , queueSkillCatalogContext
     , reservedSlashNames
@@ -25,7 +26,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (OsPath, toText)
 import Agent.Skills
 import Control.Monad (when)
-import Data.IORef (IORef, modifyIORef')
+import Data.IORef (IORef, modifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -92,6 +93,23 @@ queueSkillCatalogContext contextRef catalog =
                             <> "skills: "
                             <> Text.pack (show omitted)
                             <> " omitted from model context due to the catalog budget")
+
+-- | Publish a freshly discovered catalog to all session consumers. Keeping
+-- this transition in one helper lets fullscreen startup begin with empty refs
+-- and install the complete catalog once background discovery finishes.
+installSkillCatalog
+    :: [Text]
+    -> Bool
+    -> IORef (Maybe Text)
+    -> IORef SkillCatalog
+    -> IORef [SkillInvocation]
+    -> SkillCatalog
+    -> IO ()
+installSkillCatalog reservedNames queueContext contextRef catalogRef invocationsRef catalog = do
+    writeIORef catalogRef catalog
+    writeIORef invocationsRef (buildSkillInvocations reservedNames catalog)
+    when queueContext $
+        queueSkillCatalogContext contextRef catalog
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =
