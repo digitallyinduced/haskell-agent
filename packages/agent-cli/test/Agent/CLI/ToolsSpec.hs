@@ -6,7 +6,12 @@ import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ApprovalRule(..)
+    , freeformApplyPatchAppTool
+    , jsonAppTool
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -59,16 +64,10 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure ("expected custom tool, got " <> show other)
 
     it "emits collaboration as a Responses namespace tool" do
-        let spawn = AppTool
-                { appToolName = "spawn_agent"
-                , appToolDescription = "Spawn."
-                , appToolParameters =
-                    [ PropertySchema "message" PropertyString False Nothing ]
-                , appToolHandler = noArgsTool "spawn_agent" (pure (Right "ok"))
-                , appToolKind = JsonFunction
-                , appToolReadOnly = False
-                , appToolIsReadOnlyCall = Nothing
-                }
+        let spawn = jsonAppTool "spawn_agent" "Spawn."
+                [ PropertySchema "message" PropertyString False Nothing ]
+                AlwaysPrompt
+                (noArgsTool "spawn_agent" (pure (Right "ok")))
         case schemasFromAppTools OpenAIProvider [jsonTool, spawn] of
             [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
                 tagged.tag `shouldBe` "namespace"
@@ -77,12 +76,10 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
     it "omits an empty required list from reserved collaboration schemas" do
-        let wait = patchTool
-                { appToolName = "wait_agent"
-                , appToolKind = JsonFunction
-                , appToolParameters =
-                    [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
-                }
+        let wait = jsonAppTool "wait_agent" "Wait."
+                [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
+                AlwaysReadOnly
+                (noArgsTool "wait_agent" (pure (Right "ok")))
         case schemasFromAppTools OpenAIProvider [wait] of
             [_, KnownResponseTool ToolNamespace tagged] ->
                 case KeyMap.lookup "tools" tagged.fields of
@@ -99,29 +96,17 @@ spec = describe "schemasFromAppTools" do
                 ("expected collaboration namespace, got " <> show other)
 
 jsonTool :: AppTool
-jsonTool = AppTool
-    { appToolName = "read_file"
-    , appToolDescription = "Read a file."
-    , appToolParameters =
+jsonTool = jsonAppTool "read_file" "Read a file."
         [ PropertySchema "target_file" PropertyString True Nothing
         , PropertySchema "offset" PropertyInteger False Nothing
         ]
-    , appToolHandler = noArgsTool "read_file" (pure (Right "ok"))
-    , appToolKind = JsonFunction
-    , appToolReadOnly = True
-    , appToolIsReadOnlyCall = Nothing
-    }
+        AlwaysReadOnly
+        (noArgsTool "read_file" (pure (Right "ok")))
 
 patchTool :: AppTool
-patchTool = AppTool
-    { appToolName = "apply_patch"
-    , appToolDescription = "Apply a patch."
-    , appToolParameters = []
-    , appToolHandler = noArgsTool "apply_patch" (pure (Right "ok"))
-    , appToolKind = FreeformApplyPatch
-    , appToolReadOnly = False
-    , appToolIsReadOnlyCall = Nothing
-    }
+patchTool =
+    freeformApplyPatchAppTool "apply_patch" "Apply a patch." AlwaysPrompt
+        (noArgsTool "apply_patch" (pure (Right "ok")))
 
 required_ :: FunctionTool -> Maybe Aeson.Value
 required_ tool = do

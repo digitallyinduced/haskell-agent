@@ -1,7 +1,7 @@
 -- | Map the provider-neutral loop onto the OpenAI Responses WebSocket transport.
 --
--- Shared helpers convert 'TurnInput' / 'Response' / stream events so the xAI
--- adapter can reuse the same function_call and custom_tool_call encoding.
+-- Shared helpers convert 'TurnInput' / 'Response' / stream events so compatible
+-- Responses transports can reuse the same function-call and event mapping.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
     , openAiBackendReconnecting

@@ -2,7 +2,10 @@ module Agent.Tools.PlanModeSpec (spec) where
 
 import Agent.OsPath (fromFilePath, toText)
 import Agent.Tools.PlanMode
-import Agent.Tools.Types (AppTool(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    )
 import Test.Hspec
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
@@ -14,7 +17,9 @@ spec :: Spec
 spec = describe "Agent.Tools.PlanMode" do
     it "uses its dedicated confirmation instead of generic tool approval" do
         withTempPlan \env ->
-            (enterPlanModeTool env).appToolReadOnly `shouldBe` True
+            case (enterPlanModeTool env).appToolApproval of
+                AlwaysReadOnly -> pure ()
+                _ -> expectationFailure "enter_plan_mode should be read-only"
 
     it "activates and deactivates plan mode" do
         withTempPlan \env -> do

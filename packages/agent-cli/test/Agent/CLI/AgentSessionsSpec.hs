@@ -11,7 +11,11 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools.Types (AppTool(..), appToolHandlers)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , appToolHandlers
+    )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
 import Data.IORef
@@ -24,11 +28,15 @@ import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
+isReadOnly :: ApprovalRule -> Bool
+isReadOnly AlwaysReadOnly = True
+isReadOnly _ = False
+
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
     it "registers create/read/message tools with mutating flags" $
         withTempEnv \env _ -> do
-            map (\tool -> (tool.appToolName, tool.appToolReadOnly))
+            map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval))
                 (agentSessionTools env)
                 `shouldBe`
                     [ ("create_agent_session", False)

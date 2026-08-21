@@ -45,6 +45,12 @@ spec = do
                   , functionOutputItem "c1" "file contents"
                   ]
                 ]
+            readIORef transcript `shouldReturn`
+                [ userItem "read it"
+                , functionCallItem "c1" "read_file" "{\"target_file\":\"README.md\"}"
+                , functionOutputItem "c1" "file contents"
+                , assistantItem "done"
+                ]
             reverse <$> readIORef events `shouldReturn` [TextDelta "call"]
 
         it "leaves the transcript unchanged when the transport fails" do
