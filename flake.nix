@@ -201,11 +201,7 @@
                 };
 
                 checks = {
-                    # `nix flake check` is the test gate. Building the CLI
-                    # documentation here makes Haddock run in parallel with
-                    # the default Nix core count and can exhaust the CI
-                    # runner's memory after otherwise successful tests.
-                    agent-cli = pkgs.haskell.lib.dontHaddock agentCliPackage;
+                    agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
