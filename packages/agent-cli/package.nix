@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-core, agent-openai, agent-openrouter
 , agent-responses, agent-xai, ansi-terminal, async, base
 , base64-bytestring, brick, bytestring, colour, containers
-, directory, filepath, haskeline, hspec, lib, mtl, process
+, directory, filepath, haskeline, hspec, JuicyPixels, lib, mtl, process
 , safe-exceptions, stm, text, time, transformers, unix, vty
 , vty-crossplatform
 }:
@@ -14,7 +14,7 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-core agent-openai agent-openrouter agent-responses
     agent-xai ansi-terminal async base base64-bytestring brick
-    bytestring colour containers directory filepath haskeline mtl
+    bytestring colour containers directory filepath haskeline JuicyPixels mtl
     process safe-exceptions stm text time transformers unix vty
     vty-crossplatform
   ];
@@ -22,7 +22,7 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-core agent-openai agent-responses ansi-terminal base
     bytestring colour containers directory filepath haskeline hspec
-    process safe-exceptions text time unix
+    JuicyPixels process safe-exceptions text time unix
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";

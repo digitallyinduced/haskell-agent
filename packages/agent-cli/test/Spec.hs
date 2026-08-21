@@ -44,6 +44,7 @@ import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
+import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
 import qualified Agent.CLI.TUIMarkdownSpec as TUIMarkdownSpec
 import qualified Agent.CLI.UIModelSpec as UIModelSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
@@ -93,6 +94,7 @@ main = hspec do
     SubagentStoreSpec.spec
     ToolsSpec.spec
     TUIBridgeSpec.spec
+    TUIImagePreviewSpec.spec
     TUIMarkdownSpec.spec
     UIModelSpec.spec
     UsageSpec.spec

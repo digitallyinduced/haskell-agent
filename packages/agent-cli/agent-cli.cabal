@@ -82,6 +82,7 @@ library
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
+                    , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Markdown
                     , Agent.CLI.TUI.Theme
                     , Agent.CLI.UI.Model
@@ -105,6 +106,7 @@ library
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
+                    , JuicyPixels
                     , mtl
                     , process >= 1.6.26
                     , safe-exceptions
@@ -171,6 +173,7 @@ test-suite agent-cli-test
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIBridgeSpec
+                    , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIMarkdownSpec
                     , Agent.CLI.UIModelSpec
                     , Agent.CLI.UsageSpec
@@ -189,6 +192,7 @@ test-suite agent-cli-test
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
+                    , JuicyPixels
                     , process
                     , safe-exceptions
                     , text
