@@ -179,6 +179,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-openai
                     , agent-responses
+                    , agent-xai
                     , aeson
                     , ansi-terminal
                     , base >= 4.17 && < 5

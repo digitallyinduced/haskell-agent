@@ -16,7 +16,9 @@ module Agent.CLI.Login
     ) where
 
 import Agent.CLI.Auth
-    ( grokCredentialFromAuthJson
+    ( GrokAuthState(..)
+    , grokAuthStateToJson
+    , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
@@ -67,7 +69,6 @@ import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (join)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nubBy)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -75,7 +76,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -506,27 +507,38 @@ connectXAI color = do
             hFlush stderr
             XAIAuth.completeDeviceAuthorization options device >>= \case
                 Left err -> printLoginMessage color False err
-                Right tokens -> do
-                    let accountId =
-                            fromMaybe "grok"
-                                (XAIAuth.accountIdFromAccessToken
-                                    tokens.accessToken)
-                        label = fromMaybe "Grok" $
-                            (tokens.idToken >>= XAIAuth.emailFromToken)
-                                <|> XAIAuth.emailFromToken tokens.accessToken
-                        authJson = Aeson.object
-                            [ "access_token" .= tokens.accessToken
-                            , "refresh_token" .= tokens.refreshToken
-                            , "id_token" .= tokens.idToken
-                            ]
-                    storeConnectedCredential color
-                        XAIProvider
-                        accountId
-                        label
-                        ManagedSubscription
-                        ManagedGrokAuthJson
-                        (Text.decodeUtf8
-                            (LBS.toStrict (Aeson.encode authJson)))
+                Right tokens
+                    | Nothing <- tokens.refreshToken ->
+                        printLoginMessage color False
+                            "Grok login did not return a refresh token; reconnect with offline access"
+                    | otherwise -> do
+                        now <- getCurrentTime
+                        let accountId =
+                                fromMaybe "grok"
+                                    (XAIAuth.accountIdFromAccessToken
+                                        tokens.accessToken)
+                            label = fromMaybe "Grok" $
+                                (tokens.idToken >>= XAIAuth.emailFromToken)
+                                    <|> XAIAuth.emailFromToken
+                                        tokens.accessToken
+                            authJson = grokAuthStateToJson GrokAuthState
+                                { grokAccessToken = tokens.accessToken
+                                , grokRefreshToken = tokens.refreshToken
+                                , grokIdToken = tokens.idToken
+                                , grokExpiresAt =
+                                    ((`addUTCTime` now) . fromIntegral
+                                        <$> tokens.expiresInSeconds)
+                                        <|> OpenAI.parseJwtExp
+                                            tokens.accessToken
+                                }
+                        storeConnectedCredential color
+                            XAIProvider
+                            accountId
+                            label
+                            ManagedSubscription
+                            ManagedGrokAuthJson
+                            (Text.decodeUtf8
+                                (LBS.toStrict (Aeson.encode authJson)))
 
 connectOpenRouter :: Bool -> IO ()
 connectOpenRouter color =

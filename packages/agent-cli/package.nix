@@ -20,9 +20,9 @@ mkDerivation {
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    aeson agent-core agent-openai agent-responses ansi-terminal base
-    bytestring colour containers directory filepath haskeline hspec
-    process safe-exceptions text time unix
+    aeson agent-core agent-openai agent-responses agent-xai
+    ansi-terminal base bytestring colour containers directory filepath
+    haskeline hspec process safe-exceptions text time unix
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
