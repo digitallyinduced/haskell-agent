@@ -147,6 +147,10 @@
 
                 # Opens cabal repl on the agent-cli library and enters the
                 # GHCi :cmd loop that reloads + resumes after agent :reload.
+                # Keep this single-component: GHC 9.10 multi-home-unit mode
+                # does not support the :module or :cmd commands used below.
+                # Use the documented manual multi-package REPL when editing
+                # agent-tui or another dependency alongside agent-cli.
                 # expect waits for modules to load, then starts the agent
                 # (ghci scripts run before cabal loads the package).
                 agentRepl = pkgs.writeShellScriptBin "repl" ''
@@ -170,7 +174,7 @@
                       set timeout -1
                       set cabal $env(AGENT_REPL_CABAL)
                       set script $env(AGENT_REPL_SCRIPT)
-                      spawn -noecho $cabal repl lib:agent-cli lib:agent-tui --repl-options=-ghci-script=$script
+                      spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script
                       expect {
                         -re {Ok, [0-9]+ modules? loaded\.} {}
                         eof {
