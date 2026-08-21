@@ -193,5 +193,6 @@ test-suite agent-cli-test
                     , safe-exceptions
                     , text
                     , time
+                    , transformers
                     , unix
                     , vty >= 6.4 && < 7
