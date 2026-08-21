@@ -1,6 +1,7 @@
 module Agent.Tools.CodexSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
+import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
@@ -96,7 +97,7 @@ spec = describe "Agent.Tools.Codex" do
                 ]
             added `shouldSatisfy` Text.isInfixOf "Success."
             added `shouldSatisfy` Text.isInfixOf "A hello.txt"
-            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nworld\n"
+            Text.readFile (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` "hello\nworld\n"
 
             updated <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
@@ -108,7 +109,7 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             updated `shouldSatisfy` Text.isInfixOf "M hello.txt"
-            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nthere\n"
+            Text.readFile (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` "hello\nthere\n"
 
             deleted <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
@@ -116,11 +117,11 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             deleted `shouldSatisfy` Text.isInfixOf "D hello.txt"
-            doesFileExist (env.toolCwd </> "hello.txt") `shouldReturn` False
+            doesFileExist (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` False
 
     it "rejects apply_patch paths that escape cwd" do
         withTempEnv \env -> do
-            let name = takeFileName env.toolCwd <> "-outside.txt"
+            let name = takeFileName (toFilePath env.toolCwd) <> "-outside.txt"
             output <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
                 , "*** Add File: ../" <> Text.pack name
@@ -131,7 +132,7 @@ spec = describe "Agent.Tools.Codex" do
 
     it "rejects a patch whose context does not match the file" do
         withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "a.txt") "foo\n"
+            Text.writeFile (toFilePath env.toolCwd </> "a.txt") "foo\n"
             output <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
                 , "*** Update File: a.txt"
@@ -214,4 +215,4 @@ withTempEnv action = do
     bracket
         (mkdtemp (tmp </> "agent-codex-XXXXXX"))
         removeDirectoryRecursive
-        (\dir -> defaultToolEnv dir >>= action)
+        (\dir -> defaultToolEnv (fromFilePath dir) >>= action)

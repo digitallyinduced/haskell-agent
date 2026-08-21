@@ -1,12 +1,13 @@
 module Main where
 
 import qualified Agent.OpenAI.Login as Login
+import Agent.OsPath (fromFilePath, toFilePath)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import System.Directory (getHomeDirectory)
+import System.Directory.OsPath (getHomeDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (die)
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 
 main :: IO ()
 main = do
@@ -17,8 +18,9 @@ main = do
         _ -> die "OPENAI_OAUTH_CLIENT_ID must be set"
     let loginOptions = Login.defaultLoginOptions oauthClientId
     output <- case args of
-        [] -> pure (home </> ".codex" </> "auth.json")
-        ["--output", path] -> pure path
+        [] -> pure
+            (home </> fromFilePath ".codex" </> fromFilePath "auth.json")
+        ["--output", path] -> pure (fromFilePath path)
         _ -> die "usage: agent-openai-login [--output PATH]"
     requested <- Login.requestDeviceCode loginOptions
     deviceCode <- either (die . show) pure requested
@@ -30,4 +32,4 @@ main = do
     completed <- Login.completeDeviceCodeLogin loginOptions deviceCode
     auth <- either (die . show) pure completed
     Login.writeAuthFile output auth
-    putStrLn ("Login successful. Credentials written to " <> output)
+    putStrLn ("Login successful. Credentials written to " <> toFilePath output)

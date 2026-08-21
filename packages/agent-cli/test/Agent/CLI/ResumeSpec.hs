@@ -3,6 +3,7 @@ module Agent.CLI.ResumeSpec (spec) where
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Resume
 import Agent.CLI.Session (SessionMeta(..))
+import Agent.OsPath (fromFilePath)
 import Agent.Provider (Provider(..))
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
@@ -67,7 +68,7 @@ sampleMeta sid title =
         , metaUpdatedAt = posixSecondsToUTCTime 0
         , metaProvider = XAIProvider
         , metaModel = "grok-4.6"
-        , metaCwd = "/tmp/repo"
+        , metaCwd = fromFilePath "/tmp/repo"
         , metaEffort = "high"
         , metaTitle = title
         , metaLastResponseId = Nothing

@@ -179,6 +179,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv)
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
+import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath, toText)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -197,9 +198,14 @@ import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.Directory (getCurrentDirectory, getHomeDirectory, makeAbsolute, setCurrentDirectory)
+import System.Directory.OsPath
+    ( getCurrentDirectory
+    , getHomeDirectory
+    , makeAbsolute
+    , setCurrentDirectory
+    )
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.FilePath ((</>), takeDirectory)
+import System.OsPath ((</>), takeDirectory)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
@@ -379,7 +385,7 @@ runAgent options transition = do
             | options.optWorktree -> do
                 createWorktree source (worktreeRoot home) >>= either die \path -> do
                     color <- resolveColor stderr
-                    putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> Text.pack path))
+                    putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> toText path))
                     pure path
             | otherwise -> pure source
     setCurrentDirectory cwd
@@ -613,10 +619,10 @@ runAgent options transition = do
 
 preparePersistence
     :: CliOptions
-    -> FilePath
+    -> OsPath
     -> Provider
     -> Text
-    -> FilePath
+    -> OsPath
     -> Text
     -> Maybe Text
     -> Maybe (SessionMeta, [SessionTurn])
@@ -625,10 +631,11 @@ preparePersistence options root provider model cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
             let handle = SessionHandle
-                    { sessionDir = root </> Text.unpack meta.metaId
-                    , sessionMetaPath = root </> Text.unpack meta.metaId </> "meta.json"
+                    { sessionDir = root </> fromText meta.metaId
+                    , sessionMetaPath =
+                        root </> fromText meta.metaId </> fromFilePath "meta.json"
                     , sessionTranscriptPath =
-                        root </> Text.unpack meta.metaId </> "transcript.jsonl"
+                        root </> fromText meta.metaId </> fromFilePath "transcript.jsonl"
                     , sessionMeta = meta
                     }
             color <- resolveColor stderr
@@ -705,9 +712,9 @@ runSession
     -> IORef [ResponseItem]
     -> Maybe Text
     -> Maybe (IORef (Either SessionCreate SessionHandle))
-    -> FilePath
-    -> FilePath
-    -> FilePath
+    -> OsPath
+    -> OsPath
+    -> OsPath
     -> Maybe TokenProvider
     -> IORef (Maybe Text)
     -> IORef Bool
@@ -1612,7 +1619,7 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
             activatePlanMode planMode
             path <- planFilePath planMode
             putTextLn stderr
-                (roleMuted color (glyphSession <> "plan mode on (" <> Text.pack path <> ")"))
+                (roleMuted color (glyphSession <> "plan mode on (" <> toText path <> ")"))
             writeIORef printed False
             let planEnv = env { sessionStoreRoot = discardStore }
                 inputs = [UserMessage description]
@@ -1633,8 +1640,8 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
 loadAgentsContext
     :: CliOptions
     -> Provider
-    -> FilePath
-    -> FilePath
+    -> OsPath
+    -> OsPath
     -> [ResponseItem]
     -> Maybe Text
     -> IO (IORef (Maybe Text))
@@ -1721,7 +1728,7 @@ putTrailingNewline printed = do
 loadPrompt :: CliOptions -> IO (Maybe Text)
 loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (Just text, _) -> pure (Just text)
-    (_, Just path) -> Just . Text.strip <$> Text.readFile path
+    (_, Just path) -> Just . Text.strip <$> Text.readFile (toFilePath path)
     _ -> pure Nothing
 
 handleResume
@@ -1765,7 +1772,7 @@ data SubagentSession = SubagentSession
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
-type SubagentStoreRoot = IORef (Maybe FilePath)
+type SubagentStoreRoot = IORef (Maybe OsPath)
 
 -- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
 syncStoreRootFromPlan :: SubagentStoreRoot -> PlanModeEnv -> IO ()

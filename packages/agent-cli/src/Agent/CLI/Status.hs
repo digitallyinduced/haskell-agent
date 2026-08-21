@@ -16,6 +16,7 @@ import Agent.CLI.ReplMode
     )
 import Agent.CLI.Style (roleMuted)
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
+import Agent.OsPath (OsPath)
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeState(..)
@@ -54,7 +55,7 @@ formatReplStatusLine color width model effort mode usage =
 applyReplMode
     :: PlanModeEnv
     -> IORef ApprovalPolicy
-    -> FilePath
+    -> OsPath
     -> ReplMode
     -> IO ()
 applyReplMode planMode policyRef projectRoot = \case

@@ -15,6 +15,7 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
+import Agent.OsPath (fromFilePath)
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception (bracket)
 import Data.IORef (newIORef, readIORef)
@@ -94,22 +95,23 @@ spec = do
 
         it "applies plan, yolo, then ask" $
             withTempDir "agent-mode-" \root -> do
-                plan <- newPlanModeEnv root Nothing
+                let rootPath = fromFilePath root
+                plan <- newPlanModeEnv rootPath Nothing
                 policyRef <- newIORef PromptMutating
-                applyReplMode plan policyRef root ReplModePlan
+                applyReplMode plan policyRef rootPath ReplModePlan
                 readIORef plan.planStateRef `shouldReturn` PlanPending
                 readIORef policyRef `shouldReturn` PromptMutating
 
-                applyReplMode plan policyRef root ReplModeAlwaysApprove
+                applyReplMode plan policyRef rootPath ReplModeAlwaysApprove
                 readIORef plan.planStateRef `shouldReturn` PlanInactive
                 readIORef policyRef `shouldReturn` ApproveAll
-                settings <- loadProjectSettings root
+                settings <- loadProjectSettings rootPath
                 settings.settingsAutoApprove `shouldBe` True
 
-                applyReplMode plan policyRef root ReplModeNormal
+                applyReplMode plan policyRef rootPath ReplModeNormal
                 readIORef plan.planStateRef `shouldReturn` PlanInactive
                 readIORef policyRef `shouldReturn` PromptMutating
-                settings' <- loadProjectSettings root
+                settings' <- loadProjectSettings rootPath
                 settings'.settingsAutoApprove `shouldBe` False
 
     describe "formatTokenUsage" do

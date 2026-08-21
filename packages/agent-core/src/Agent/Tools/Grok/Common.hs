@@ -5,6 +5,7 @@ module Agent.Tools.Grok.Common
     , stripAnsi
     ) where
 
+import Agent.OsPath (OsPath, toFilePath)
 import Agent.ToolArgs (optInt, optText)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolHandler)
@@ -35,12 +36,12 @@ jsonTool name description parameters readOnly handler = AppTool
     , appToolIsReadOnlyCall = Nothing
     }
 
-isGitIgnored :: FilePath -> FilePath -> IO Bool
+isGitIgnored :: OsPath -> OsPath -> IO Bool
 isGitIgnored cwd path = findExecutable "git" >>= \case
     Nothing -> pure False
     Just git -> do
         (code, _, _) <- readProcessWithExitCode git
-            ["-C", cwd, "check-ignore", "-q", "--", path] ""
+            ["-C", toFilePath cwd, "check-ignore", "-q", "--", toFilePath path] ""
         pure (code == ExitSuccess)
 
 optionalTimeout :: Object -> Parser (Maybe Int)

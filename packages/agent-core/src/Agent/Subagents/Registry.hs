@@ -30,6 +30,7 @@ module Agent.Subagents.Registry
 
 import Agent.Cancel (CancelFlag, newCancelFlag, requestCancel)
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
+import Agent.OsPath (OsPath)
 import Agent.Subagents.Format (isFinalStatus)
 import Agent.Subagents.Types
     ( RunSubagent
@@ -86,13 +87,13 @@ data SubagentRegistry = SubagentRegistry
     , registryRunRef :: !(IORef RunSubagent)
     , registryOnEvent :: !(SubagentId -> LoopEvent -> IO ())
     , registryOnCompleteRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
-    , registryCwd :: !FilePath
+    , registryCwd :: !OsPath
     , registryClosed :: !(TVar Bool)
     }
 
 newSubagentRegistry
     :: SubagentConfig
-    -> FilePath
+    -> OsPath
     -> RunSubagent
     -> (SubagentId -> LoopEvent -> IO ())
     -> IO SubagentRegistry

@@ -13,6 +13,7 @@ module Agent.CLI.Resume
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Session (SessionMeta(..))
+import Agent.OsPath (toText)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess, roleWarn)
 import Agent.Provider (providerSlug)
 import Data.Char (isAlphaNum)
@@ -20,7 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.FilePath (takeFileName)
+import System.OsPath (takeFileName)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 
 data ResumeEntry = ResumeEntry
@@ -49,7 +50,7 @@ resumeEntriesFrom = map toEntry
             , resumeTitle =
                 if Text.null meta.metaTitle then "(untitled)" else meta.metaTitle
             , resumeModel = meta.metaModel
-            , resumeCwd = Text.pack (takeFileName meta.metaCwd)
+            , resumeCwd = toText (takeFileName meta.metaCwd)
             , resumeWhen =
                 Text.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M" meta.metaUpdatedAt)
             , resumeProvider = providerSlug meta.metaProvider

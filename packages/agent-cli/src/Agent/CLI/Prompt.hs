@@ -5,6 +5,7 @@ module Agent.CLI.Prompt
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
+import Agent.OsPath (OsPath, toText)
 import Agent.Provider (Provider(..))
 import Agent.Tools.Grok.Prompt (codingGrokPromptTools, grokSystemPrompt)
 import Data.Text (Text)
@@ -19,7 +20,7 @@ defaultModelFor = \case
     OpenRouterProvider -> "openai/gpt-5.1"
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
-systemPrompt :: Provider -> FilePath -> Day -> Bool -> Text
+systemPrompt :: Provider -> OsPath -> Day -> Bool -> Text
 systemPrompt provider cwd today isNonInteractive =
     base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
   where
@@ -41,10 +42,10 @@ ghciGuidance =
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
-codexSystemPrompt :: FilePath -> Day -> Text
+codexSystemPrompt :: OsPath -> Day -> Text
 codexSystemPrompt cwd today =
     Text.unlines
-        [ "You are a coding agent working in " <> Text.pack cwd <> "."
+        [ "You are a coding agent working in " <> toText cwd <> "."
         , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
         , ""
         , "Use these tools:"

@@ -1,6 +1,7 @@
 module Agent.Tools.Grok.TaskSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
+import Agent.OsPath (fromFilePath)
 import Agent.Subagents
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -21,7 +22,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Agent.Tools.Grok.Task" do
     it "defaults run_in_background and spawns a background agent" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "c"
                 , finalText = Just ("done:" <> prompt)
@@ -53,7 +54,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         names `shouldNotContain` ["task"]
 
     it "rejects worktree isolation" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty

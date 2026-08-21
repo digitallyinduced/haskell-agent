@@ -50,6 +50,7 @@ module Agent.CLI.Style
     , setCliWindowTitle
     ) where
 
+import Agent.OsPath (OsPath, toText)
 import Data.Colour (Colour)
 import Data.Colour.SRGB (RGB(..), sRGB24, toSRGB24)
 import Data.Text (Text)
@@ -66,7 +67,7 @@ import System.Console.ANSI.Codes
     , setSGRCode
     )
 import System.Environment (lookupEnv)
-import System.FilePath (takeFileName)
+import System.OsPath (takeFileName)
 import System.IO (Handle)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -303,13 +304,13 @@ osc8Link color url label
         "\ESC]8;;" <> url <> "\ESC\\" <> label <> "\ESC]8;;\ESC\\"
 
 -- | Window title: session name when known, otherwise the working directory.
-cliWindowTitle :: FilePath -> Maybe Text -> Text
+cliWindowTitle :: OsPath -> Maybe Text -> Text
 cliWindowTitle cwd sessionTitle =
     case sessionTitle of
         Just title
             | not (Text.null title)
             , title /= "untitled" -> title
-        _ -> Text.pack (takeFileName cwd)
+        _ -> toText (takeFileName cwd)
 
 -- | Set the terminal window title when @tty@ is 'True'; no-op otherwise.
 setCliWindowTitle :: Bool -> Handle -> Text -> IO ()

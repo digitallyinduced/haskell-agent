@@ -37,6 +37,7 @@ library
                     , Agent.Broker
                     , Agent.Loop
                     , Agent.JsonText
+                    , Agent.OsPath
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.Subagents

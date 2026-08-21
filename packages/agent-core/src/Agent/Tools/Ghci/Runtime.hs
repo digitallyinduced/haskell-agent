@@ -23,6 +23,7 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool)
+import Agent.OsPath (toFilePath)
 import Agent.Tools.Ghci.Classify
     ( GhciClass(..)
     , classifyGhciInput
@@ -215,7 +216,7 @@ ghciArgs = "-v0" : "-XGHC2021" : map ("-X" <>) defaultGhciExtensions
 spawnProcess :: ToolEnv -> IO GhciProcess
 spawnProcess env = do
     let spec = (proc "ghci" ghciArgs)
-            { cwd = Just env.toolCwd
+            { cwd = Just (toFilePath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe

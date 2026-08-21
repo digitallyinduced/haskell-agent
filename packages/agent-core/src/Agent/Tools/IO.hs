@@ -15,6 +15,7 @@ module Agent.Tools.IO
     ) where
 
 import Agent.Cancel (isCancelled, waitCancel)
+import Agent.OsPath (OsPath, toFilePath)
 import Agent.Tools.FileSystem
     ( deleteTextFile
     , listDirectoryEntries
@@ -77,13 +78,13 @@ runningLiveOutput running = do
 -- | Run a shell command in @workdir@, killing the process group on timeout.
 runShellCommand
     :: ToolEnv
-    -> FilePath
+    -> OsPath
     -> String
     -> Int
     -> IO CommandResult
 runShellCommand env workdir command timeoutMs = do
     let spec = (shell command)
-            { cwd = Just workdir
+            { cwd = Just (toFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
@@ -173,12 +174,12 @@ cancelledResult = CommandResult
 -- when the process exits. Use 'interruptProcessGroupOf' on 'runningHandle' to kill it.
 startShellCommand
     :: ToolEnv
-    -> FilePath
+    -> OsPath
     -> String
     -> IO (Either Text RunningCommand)
 startShellCommand env workdir command = do
     let spec = (shell command)
-            { cwd = Just workdir
+            { cwd = Just (toFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
