@@ -386,6 +386,7 @@ data StartupRuntime = StartupRuntime
     , startupStdoutTty :: !Bool
     , startupAgentSnapshot :: !(IORef (IO (AgentTarget, [AgentEntry])))
     , startupAgentSelect :: !(IORef (AgentTarget -> IO ()))
+    , startupRestartEffort :: !(IORef (Text -> IO ()))
     , startupStartedAt :: !UTCTime
     , startupTimings :: !(IORef [(Text, NominalDiffTime)])
     }
@@ -691,6 +692,7 @@ runAgent fullscreenInputs options transition = do
     useColor <- resolveColor stdout
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
+    restartEffortActionRef <- newIORef (\_ -> pure ())
     queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
     let initialTurns = maybe [] snd resumed
         fullscreenEnabled =
@@ -713,6 +715,7 @@ runAgent fullscreenInputs options transition = do
         then Just <$> newFullscreenRuntime
             fullscreenInputs
             (requestCancel toolEnv.toolCancel)
+            (\level -> readIORef restartEffortActionRef >>= ($ level))
             (noteFullscreenCtrlC interrupt)
             (copyTerminalClipboard terminal stdout)
             (setCliWindowTitle stdoutTty stdout)
@@ -739,6 +742,7 @@ runAgent fullscreenInputs options transition = do
             , startupStdoutTty = stdoutTty
             , startupAgentSnapshot = agentSnapshotRef
             , startupAgentSelect = agentSelectRef
+            , startupRestartEffort = restartEffortActionRef
             , startupStartedAt = startedAt
             , startupTimings = startupTimingsRef
             }
@@ -1256,6 +1260,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
+    restartEffortRef <- newIORef Nothing
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
@@ -1464,6 +1469,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
+            , sessionRestartEffort = restartEffortRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionLastAssistant = lastAssistantRef
@@ -1477,6 +1483,10 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
+    writeIORef startup.startupRestartEffort \level -> do
+        setSessionEffort env level
+        writeIORef restartEffortRef (Just level)
+        requestCancel toolEnv.toolCancel
     let formatSkillWarning warning =
             "skill ignored: "
                 <> toText warning.skillWarningPath
@@ -1563,6 +1573,17 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                     Nothing -> putTrailingNewline env.sessionPrinted
                     Just _ -> pure ()
                 continueAfterTurn env
+    TurnRestartRequested level pending -> do
+        setSessionEffort env level
+        writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+        case env.sessionFullscreen of
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSystemMessage
+                        ("restarting current turn with " <> level <> " effort"))
+            Nothing -> pure ()
+        result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
+        finishTurnWithCooldownRetry allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
         in requestAutomaticProviderFallback env apiError pending' >>= \case
@@ -1660,6 +1681,27 @@ reportProviderUnavailable apiError = do
     putTextLn stderr $ roleError color $
         "provider unavailable; no usable fallback provider account is available: "
             <> detail
+
+setSessionEffort :: SessionEnv -> Text -> IO ()
+setSessionEffort env level = do
+    modifyIORef' env.sessionParams (setReasoningEffort level)
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiSetPromptEffort level)
+        Nothing -> pure ()
+    case env.sessionPersist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                PersistencePending pending ->
+                    writeIORef slotRef
+                        (PersistencePending pending { createEffort = level })
+                PersistenceActive handle -> do
+                    let meta = handle.sessionMeta { metaEffort = level }
+                    writeSessionMeta handle.sessionMetaPath meta
+                    writeIORef slotRef
+                        (PersistenceActive handle { sessionMeta = meta })
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -2500,24 +2542,11 @@ replWithDraft env@SessionEnv
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
     setEffort level = do
         color <- resolveColor stdout
-        modifyIORef' paramsRef (setReasoningEffort level)
+        setSessionEffort env level
         displayInfo ("effort set to " <> level) $
             Text.putStrLn
                 (roleMuted color
                     (glyphOk <> "effort set to " <> level))
-        case persist of
-            PersistenceDisabled -> pure ()
-            PersistenceEnabled slotRef -> do
-                slot <- readIORef slotRef
-                case slot of
-                    PersistencePending pending ->
-                        writeIORef slotRef
-                            (PersistencePending pending { createEffort = level })
-                    PersistenceActive handle -> do
-                        let meta = handle.sessionMeta { metaEffort = level }
-                        writeSessionMeta handle.sessionMetaPath meta
-                        writeIORef slotRef
-                            (PersistenceActive handle { sessionMeta = meta })
     chooseEffort next = do
         params <- readIORef paramsRef
         effortChoice fullscreen (currentEffort params) >>= \case

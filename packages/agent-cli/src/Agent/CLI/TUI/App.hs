@@ -40,6 +40,7 @@ import Agent.CLI.Command
     , slashMenuForWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Options (reasoningEfforts)
 import Agent.CLI.ReplMode (replModeLabel)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
@@ -94,7 +95,8 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.List (find, findIndex, intersperse, sortOn)
+import Data.List (elemIndex, find, findIndex, intersperse, sortOn)
+import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -164,6 +166,7 @@ data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
+    , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeSetWindowTitle :: !(Text -> IO ())
@@ -184,7 +187,7 @@ data AppState = AppState
     , appRuntime :: !FullscreenRuntime
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
-    , appChoiceReply :: !(Maybe (TMVar (Maybe Int)))
+    , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
@@ -222,6 +225,7 @@ newFullscreenInputBuffer =
 newFullscreenRuntime
     :: FullscreenInputBuffer
     -> IO ()
+    -> (Text -> IO ())
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
     -> (Text -> IO ())
@@ -235,6 +239,7 @@ newFullscreenRuntime
 newFullscreenRuntime
     inputBuffer
     cancelAction
+    restartEffortAction
     ctrlCAction
     copyAction
     setWindowTitle
@@ -252,6 +257,7 @@ newFullscreenRuntime
             { runtimeEvents = events
             , runtimeInput = inputBuffer
             , runtimeCancel = cancelAction
+            , runtimeRestartEffort = restartEffortAction
             , runtimeCtrlC = ctrlCAction
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
@@ -329,6 +335,7 @@ updateRuntimeRunning runtime = \case
     UiLoop TurnStarted -> writeIORef runtime.runtimeRunning True
     UiLoop TurnFinished{} -> writeIORef runtime.runtimeRunning False
     UiTurnEnded _ -> writeIORef runtime.runtimeRunning False
+    UiTurnRestarted -> writeIORef runtime.runtimeRunning False
     UiSetAwaitingInput True -> writeIORef runtime.runtimeRunning False
     _ -> pure ()
 
@@ -594,6 +601,51 @@ handlePromptControlClick choice = do
                             current.appUi
                     }
 
+handleEffortControlClick :: EventM Name AppState ()
+handleEffortControlClick = do
+    state <- get
+    let ui = state.appUi
+        overlayOpen =
+            maybe False (const True) state.appTextPrompt
+                || maybe False (const True) state.appChoice
+                || maybe False (const True) ui.uiPermission
+    if ui.uiAwaitingInput
+        then handlePromptControlClick ReplChooseEffort
+        else if ui.uiRunning && not overlayOpen
+            then do
+                let efforts = reasoningEfforts
+                    current = ui.uiPrompt.promptEffort
+                    initial = fromMaybe 0 (elemIndex current efforts)
+                    choose = \case
+                        Just index
+                            | index >= 0
+                            , index < length efforts -> do
+                                let level = efforts !! index
+                                when (level /= current) $
+                                    state.appRuntime.runtimeRestartEffort level
+                        _ -> pure ()
+                modify' \currentState ->
+                    currentState
+                        { appChoice = Just ChoiceOverlay
+                            { choiceTitle = "Reasoning effort"
+                            , choiceBody =
+                                "Changing effort will restart the current turn."
+                            , choiceIndex = initial
+                            , choiceRows = [(effort, "") | effort <- efforts]
+                            }
+                        , appChoiceReply = Just choose
+                        }
+                vScrollToBeginning (viewportScroll OverlayViewport)
+            else
+                modify' \current ->
+                    current
+                        { appUi =
+                            reduceUi
+                                (UiSetNotice
+                                    (Just "Prompt settings cannot be changed right now."))
+                                current.appUi
+                        }
+
 confirmChoiceAt :: Int -> EventM Name AppState ()
 confirmChoiceAt index = do
     state <- get
@@ -640,7 +692,7 @@ activateControl = \case
     ComposerModel ->
         handlePromptControlClick ReplChooseModel
     ComposerEffort ->
-        handlePromptControlClick ReplChooseEffort
+        handleEffortControlClick
     ComposerMode ->
         handlePromptControlClick ReplCycleMode
     ChoiceRow index ->
@@ -662,11 +714,10 @@ resolveChoice confirmed = do
     case state.appChoiceReply of
         Nothing -> pure ()
         Just reply ->
-            liftIO $ atomically $
-                putTMVar reply $
-                    if confirmed
-                        then (.choiceIndex) <$> state.appChoice
-                        else Nothing
+            liftIO $ reply $
+                if confirmed
+                    then (.choiceIndex) <$> state.appChoice
+                    else Nothing
     modify' \current ->
         current
             { appChoice = Nothing
@@ -1431,7 +1482,7 @@ handleEvent event = case event of
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
                     }
-                , appChoiceReply = Just reply
+                , appChoiceReply = Just (atomically . putTMVar reply)
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppAskText title body initial reply) -> do
