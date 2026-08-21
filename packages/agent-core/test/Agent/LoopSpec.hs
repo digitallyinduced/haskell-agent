@@ -273,6 +273,16 @@ spec = describe "runLoop" do
         result <- runLoop config0 Nothing "go"
         result `shouldBe` Left (LoopCancelled [])
 
+    it "does not clear a cancel requested before the loop starts" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-too-late" [] (Just "too late"))]
+        config <- testConfig backend
+        requestCancel config.loopCancel
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        readIORef submissions `shouldReturn` []
+
     it "sums token usage across model steps in one user turn" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions

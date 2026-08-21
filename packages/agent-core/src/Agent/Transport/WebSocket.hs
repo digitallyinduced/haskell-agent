@@ -5,6 +5,8 @@ module Agent.Transport.WebSocket
     , WebSocketSessionOptions(..)
     , defaultWebSocketSessionOptions
     , withWebSocketSession
+    , withWebSocketRequest
+    , invalidateWebSocketSession
     , sendWebSocketText
     , receiveWebSocketData
     , transientWsRetryDelayMicros
@@ -18,6 +20,8 @@ import Agent.Error (ApiError(..))
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
+import Control.Exception.Safe (onException)
+import Control.Monad (unless)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -34,6 +38,7 @@ data WebSocketSession = WebSocketSession
     { sessionOut :: !(TQueue OutCommand)
     , sessionIn :: !(TBQueue (Either ApiError LBS.ByteString))
     , sessionClosed :: !(TVar Bool)
+    , sessionPoisoned :: !(TVar (Maybe ApiError))
     }
 
 -- | Transport-level settings for a reusable WebSocket session.
@@ -53,6 +58,7 @@ defaultWebSocketSessionOptions = WebSocketSessionOptions
 data OutCommand
     = SendText !LBS.ByteString !(TMVar (Either ApiError ()))
     | SendControl !WS.Message
+    | CloseSession !LBS.ByteString
 
 -- | Run an action with a reusable WebSocket session.
 --
@@ -69,12 +75,14 @@ withWebSocketSession options connection action =
         outbound <- newTQueueIO
         inbound <- newTBQueueIO (fromIntegral (max 1 options.inboundFrameCapacity))
         closed <- newTVarIO False
+        poisoned <- newTVarIO Nothing
         let session = WebSocketSession
                 { sessionOut = outbound
                 , sessionIn = inbound
                 , sessionClosed = closed
+                , sessionPoisoned = poisoned
                 }
-        withAsync (readerLoop connection inbound outbound closed) \_ ->
+        withAsync (readerLoop connection inbound outbound closed poisoned) \_ ->
             withAsync (writerLoop connection outbound closed) \_ ->
                 action session
   where
@@ -82,19 +90,48 @@ withWebSocketSession options connection action =
         Just seconds | seconds > 0 -> WS.withPingThread connection seconds (pure ()) inner
         _ -> inner
 
+-- | Poison the reusable connection if a response consumer is interrupted.
+-- Once interrupted, its remaining frames cannot be assigned safely to a
+-- later request.
+withWebSocketRequest :: WebSocketSession -> IO value -> IO value
+withWebSocketRequest session action =
+    action `onException`
+        invalidateWebSocketSession session "response consumer interrupted"
+
+-- | Mark a response boundary as lost and asynchronously close the socket.
+invalidateWebSocketSession :: WebSocketSession -> Text -> IO ()
+invalidateWebSocketSession session reason = atomically do
+    current <- readTVar session.sessionPoisoned
+    case current of
+        Just _ -> pure ()
+        Nothing -> do
+            let apiError = ConnectionError
+                    ("WebSocket session invalidated: " <> reason)
+            writeTVar session.sessionPoisoned (Just apiError)
+            writeTVar session.sessionClosed True
+            writeTQueue session.sessionOut
+                (CloseSession (LBS.fromStrict (Text.encodeUtf8 reason)))
+
 -- | Send one text frame through the session's serialized writer.
 sendWebSocketText :: WebSocketSession -> LBS.ByteString -> IO (Either ApiError ())
 sendWebSocketText session bytes = do
     reply <- newEmptyTMVarIO
     queued <- atomically do
+        poisoned <- readTVar session.sessionPoisoned
         closed <- readTVar session.sessionClosed
-        if closed
-            then pure False
-            else writeTQueue session.sessionOut (SendText bytes reply) >> pure True
-    if not queued
-        then pure (Left connectionClosedError)
-        else atomically $
+        case poisoned of
+            Just apiError -> pure (Left apiError)
+            Nothing
+                | closed -> pure (Left connectionClosedError)
+                | otherwise -> do
+                    writeTQueue session.sessionOut (SendText bytes reply)
+                    pure (Right ())
+    case queued of
+        Left apiError -> pure (Left apiError)
+        Right () -> atomically $
             takeTMVar reply
+            `orElse`
+            poisonedSession session
             `orElse`
             (do
                 closed <- readTVar session.sessionClosed
@@ -104,13 +141,24 @@ sendWebSocketText session bytes = do
 -- | Receive the next application data frame. Control frames are handled by
 -- the session pump and are never exposed to callers.
 receiveWebSocketData :: WebSocketSession -> IO (Either ApiError LBS.ByteString)
-receiveWebSocketData session = atomically $
-    readTBQueue session.sessionIn
-    `orElse`
-    (do
-        closed <- readTVar session.sessionClosed
-        check closed
-        pure (Left connectionClosedError))
+receiveWebSocketData session = atomically do
+    poisoned <- readTVar session.sessionPoisoned
+    case poisoned of
+        Just apiError -> pure (Left apiError)
+        Nothing ->
+            readTBQueue session.sessionIn
+            `orElse`
+            (do
+                closed <- readTVar session.sessionClosed
+                check closed
+                pure (Left connectionClosedError))
+
+poisonedSession :: WebSocketSession -> STM (Either ApiError value)
+poisonedSession session = do
+    poisoned <- readTVar session.sessionPoisoned
+    case poisoned of
+        Just apiError -> pure (Left apiError)
+        Nothing -> retry
 
 connectionClosedError :: ApiError
 connectionClosedError = ConnectionError "WebSocket connection closed"
@@ -120,8 +168,9 @@ readerLoop
     -> TBQueue (Either ApiError LBS.ByteString)
     -> TQueue OutCommand
     -> TVar Bool
+    -> TVar (Maybe ApiError)
     -> IO ()
-readerLoop connection inbound outbound closed = loop
+readerLoop connection inbound outbound closed poisoned = loop
   where
     loop = do
         result <- Exception.try @Exception.SomeException (WS.receive connection)
@@ -134,8 +183,11 @@ readerLoop connection inbound outbound closed = loop
                 let bytes = case message of
                         WS.Text value _ -> value
                         WS.Binary value -> value
-                atomically (writeTBQueue inbound (Right bytes))
-                loop
+                stopped <- atomically do
+                    readTVar poisoned >>= \case
+                        Just _ -> pure True
+                        Nothing -> writeTBQueue inbound (Right bytes) >> pure False
+                unless stopped loop
             Right (WS.ControlMessage (WS.Ping payload)) -> do
                 atomically (writeTQueue outbound
                     (SendControl (WS.ControlMessage (WS.Pong payload))))
@@ -148,7 +200,12 @@ readerLoop connection inbound outbound closed = loop
 
     terminate reason = atomically do
         writeTVar closed True
-        writeTBQueue inbound (Left (ConnectionError reason))
+        readTVar poisoned >>= \case
+            Just _ -> pure ()
+            Nothing -> do
+                full <- isFullTBQueue inbound
+                unless full $
+                    writeTBQueue inbound (Left (ConnectionError reason))
 
 writerLoop
     :: WS.Connection
@@ -160,6 +217,13 @@ writerLoop connection outbound closed = loop
     loop = do
         command <- atomically (readTQueue outbound)
         case command of
+            CloseSession reason -> do
+                result <- Exception.try @Exception.SomeException
+                    (WS.sendClose connection reason)
+                case result of
+                    Left exception | isAsyncException exception ->
+                        Exception.throwIO exception
+                    _ -> pure ()
             SendControl message -> do
                 result <- Exception.try @Exception.SomeException (WS.send connection message)
                 case result of

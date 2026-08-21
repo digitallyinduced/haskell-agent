@@ -284,10 +284,11 @@ sendWsRequestWithEventsAndOptions options cc request previousResponseId onEvent 
     sendOverWs session = do
         let wsPayload = buildWsPayloadWithOptions options request previousResponseId
             encoded = Aeson.encode wsPayload
-        sendRes <- WebSocket.sendWebSocketText session encoded
-        case sendRes of
-            Left apiError -> pure (Left apiError)
-            Right () -> receiveWsResponse session onEvent
+        WebSocket.withWebSocketRequest session do
+            sendRes <- WebSocket.sendWebSocketText session encoded
+            case sendRes of
+                Left apiError -> pure (Left apiError)
+                Right () -> receiveWsResponse session onEvent
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").
@@ -336,6 +337,8 @@ receiveWsResponse cc onEvent = do
                     Left err -> do
                         let msgPreview = Text.decodeUtf8With Text.lenientDecode (LBS.toStrict msgBytes)
                         logStreamStats "json_decode_error" itemsRef framesRef bytesRef
+                        WebSocket.invalidateWebSocketSession cc
+                            "received a malformed response frame"
                         pure $ Left (JsonDecodeError (Text.pack err) (Text.take 500 msgPreview))
                     Right event -> do
                         onEvent event
