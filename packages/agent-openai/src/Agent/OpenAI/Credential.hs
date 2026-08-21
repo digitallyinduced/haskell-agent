@@ -39,7 +39,7 @@ poolTokenProvider pool = do
                                 acquireFromPool pool
 
 authRecoveryGuardSeconds :: Int
-authRecoveryGuardSeconds = 5 * 60
+authRecoveryGuardSeconds = 60
 
 takeAuthRecoverySlot
     :: IORef (Map.Map Text UTCTime)
