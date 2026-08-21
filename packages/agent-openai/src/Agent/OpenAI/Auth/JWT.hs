@@ -25,9 +25,12 @@ refreshMarginSeconds = 10 * 60
 -- | Refresh only when the access-token JWT is about to expire.
 needsRefresh :: AuthState -> UTCTime -> Bool
 needsRefresh state now =
-    case parseJwtExp state.accessToken of
-        Nothing    -> True
-        Just expAt -> diffUTCTime expAt now < fromIntegral refreshMarginSeconds
+    if Text.null state.refreshToken
+        then False
+        else case parseJwtExp state.accessToken of
+            Nothing    -> True
+            Just expAt ->
+                diffUTCTime expAt now < fromIntegral refreshMarginSeconds
 
 -- | Parse the @exp@ claim from a JWT without signature verification.
 parseJwtExp :: Text -> Maybe UTCTime
