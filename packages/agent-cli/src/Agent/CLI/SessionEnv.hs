@@ -15,6 +15,7 @@ import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.OsPath (OsPath)
 import Agent.Provider (Provider, TokenProvider)
+import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Data.IORef (IORef)
 import Data.Text (Text)
@@ -47,6 +48,8 @@ data SessionEnv = SessionEnv
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
-    , sessionAbortSubagents :: !(IO ())
+    , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
+    , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())
+    , sessionAbortSubagentTurn :: !(Maybe RootTurnId -> IO ())
     , sessionReset :: !(IO ())
     }

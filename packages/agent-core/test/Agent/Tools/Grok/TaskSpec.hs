@@ -33,7 +33,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -68,8 +68,8 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let createIsolated _ = pure (Right (fromFilePath "/tmp"))
-            ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-                (Just createIsolated) Nothing
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
+                Nothing (Just createIsolated) Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"

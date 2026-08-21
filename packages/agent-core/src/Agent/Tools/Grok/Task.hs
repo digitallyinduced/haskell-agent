@@ -18,14 +18,15 @@ module Agent.Tools.Grok.Task
     , lookupAgentModel
     ) where
 
+import Agent.InterAgentMessage (plainInterAgentContent)
 import Agent.OsPath (OsPath, fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , getStatus
-    , sendInput
-    , spawnSubagentWithCwd
+    , sendInputMessageForTurn
+    , spawnSubagentWithCwdForTurn
     , waitSubagents
     )
 import Agent.ToolArgs
@@ -193,8 +194,10 @@ spawnFresh
     -> TaskArgs
     -> IO (Either Text Text)
 spawnFresh childCwd worktreePath ctx typesRef args = do
-    result <- spawnSubagentWithCwd
+    rootTurnId <- ctx.multiRootTurnId
+    result <- spawnSubagentWithCwdForTurn
         ctx.multiRegistry
+        rootTurnId
         childCwd
         ctx.multiSelfId
         ctx.multiDepth
@@ -282,7 +285,10 @@ resumeTask ctx typesRef args resumeId = do
                                 <> args.subagentType
                 _ -> do
                     recordAgentType typesRef agentId args.subagentType
-                    sent <- sendInput ctx.multiRegistry agentId args.prompt False
+                    rootTurnId <- ctx.multiRootTurnId
+                    sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
+                        ctx.multiTaskPath agentId
+                        (plainInterAgentContent args.prompt) False
                     case sent of
                         Left err -> pure (Left err)
                         Right _ ->

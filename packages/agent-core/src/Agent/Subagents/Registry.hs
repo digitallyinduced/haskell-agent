@@ -8,20 +8,26 @@ module Agent.Subagents.Registry
     , newSubagentRegistry
     , setSubagentRunner
     , setSubagentOnComplete
+    , beginRootTurn
+    , abortRootTurn
     , closeSubagentRegistry
     , interruptActiveSubagents
     , resetSubagentRegistry
     , spawnSubagent
     , spawnSubagentWithCwd
+    , spawnSubagentWithCwdForTurn
     , spawnSubagentAt
+    , spawnSubagentAtForTurn
     , restoreSubagent
     , restoreSubagentWithCwd
     , waitSubagents
     , waitAnyLive
     , sendInput
     , sendInputMessage
+    , sendInputMessageForTurn
     , queueMessage
     , queueMessageFrom
+    , queueMessageFromForTurn
     , closeSubagent
     , interruptSubagent
     , resumeSubagent
@@ -47,6 +53,7 @@ import Agent.OsPath (OsPath)
 import Agent.Subagents.Format (isFinalStatus)
 import Agent.Subagents.Types
     ( RunSubagent
+    , RootTurnId(..)
     , SubagentConfig(..)
     , SubagentId(..)
     , SubagentSpawnEnv(..)
@@ -67,10 +74,13 @@ import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Word (Word64)
 import Numeric (showHex)
 import Agent.Subagents.TaskPath
     ( TaskPath
@@ -88,14 +98,20 @@ data SubagentRecord = SubagentRecord
     , recordNickname :: !(Maybe Text)
     , recordStatus :: !(TVar SubagentStatus)
     , recordCancel :: !CancelFlag
-    , recordMailbox :: !(TQueue InterAgentMessage)
+    , recordMailbox :: !(TQueue SubagentWork)
     , recordWorker :: !(TVar (Maybe Worker))
+    , recordRootTurnId :: !(TVar (Maybe RootTurnId))
       -- | Whether this agent currently occupies a concurrency slot.
     , recordSlotHeld :: !(TVar Bool)
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
+    }
+
+data SubagentWork = SubagentWork
+    { workRootTurnId :: !(Maybe RootTurnId)
+    , workMessage :: !InterAgentMessage
     }
 
 data Worker = Worker
@@ -113,6 +129,8 @@ data SubagentRegistry = SubagentRegistry
     , registryOnCompleteRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
     , registryCwd :: !OsPath
     , registryClosed :: !(TVar Bool)
+    , registryNextRootTurnId :: !(TVar Word64)
+    , registryAbortedRootTurns :: !(TVar (Set RootTurnId))
     }
 
 newSubagentRegistry
@@ -126,6 +144,8 @@ newSubagentRegistry config cwd run onEvent = do
     paths <- newTVarIO Map.empty
     live <- newTVarIO 0
     closed <- newTVarIO False
+    nextRootTurnId <- newTVarIO 0
+    abortedRootTurns <- newTVarIO Set.empty
     runRef <- newIORef run
     onCompleteRef <- newIORef (\_ _ -> pure ())
     pure SubagentRegistry
@@ -140,6 +160,8 @@ newSubagentRegistry config cwd run onEvent = do
         , registryOnCompleteRef = onCompleteRef
         , registryCwd = cwd
         , registryClosed = closed
+        , registryNextRootTurnId = nextRootTurnId
+        , registryAbortedRootTurns = abortedRootTurns
         }
 
 setSubagentRunner :: SubagentRegistry -> RunSubagent -> IO ()
@@ -152,6 +174,13 @@ setSubagentOnComplete
     -> (SubagentId -> SubagentStatus -> IO ())
     -> IO ()
 setSubagentOnComplete registry = writeIORef registry.registryOnCompleteRef
+
+beginRootTurn :: SubagentRegistry -> IO RootTurnId
+beginRootTurn registry = atomically do
+    next <- readTVar registry.registryNextRootTurnId
+    let rootTurnId = RootTurnId (next + 1)
+    writeTVar registry.registryNextRootTurnId (next + 1)
+    pure rootTurnId
 
 closeSubagentRegistry :: SubagentRegistry -> IO ()
 closeSubagentRegistry registry = do
@@ -168,6 +197,7 @@ resetSubagentRegistry registry = do
         writeTVar registry.registryAgents Map.empty
         writeTVar registry.registryPaths Map.empty
         writeTVar registry.registryLiveCount 0
+        writeTVar registry.registryAbortedRootTurns Set.empty
         writeTVar registry.registryClosed False
 
 spawnSubagent
@@ -188,7 +218,19 @@ spawnSubagentWithCwd
     -> Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-spawnSubagentWithCwd registry childCwd parentId parentDepth message nickname = do
+spawnSubagentWithCwd registry =
+    spawnSubagentWithCwdForTurn registry Nothing
+
+spawnSubagentWithCwdForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> OsPath
+    -> Maybe SubagentId
+    -> Int
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnSubagentWithCwdForTurn registry rootTurnId childCwd parentId parentDepth message nickname = do
     parentPath <- case parentId of
         Nothing -> pure taskPathRoot
         Just pid -> do
@@ -202,7 +244,7 @@ spawnSubagentWithCwd registry childCwd parentId parentDepth message nickname = d
     -- still allocates internally; uniqueness comes from the id-derived name.
     fmap (fmap fst) $
         spawnSubagentAtWithCwd
-            registry childCwd parentId parentPath parentDepth taskName
+            registry rootTurnId childCwd parentId parentPath parentDepth taskName
                 (plainInterAgentContent message) nickname
 
 -- | Spawn with an explicit parent path and task_name (Codex multi-agent v2).
@@ -216,10 +258,24 @@ spawnSubagentAt
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
 spawnSubagentAt registry =
-    spawnSubagentAtWithCwd registry registry.registryCwd
+    spawnSubagentAtForTurn registry Nothing
+
+spawnSubagentAtForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> InterAgentMessageContent
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtForTurn registry rootTurnId =
+    spawnSubagentAtWithCwd registry rootTurnId registry.registryCwd
 
 spawnSubagentAtWithCwd
     :: SubagentRegistry
+    -> Maybe RootTurnId
     -> OsPath
     -> Maybe SubagentId
     -> TaskPath
@@ -228,7 +284,7 @@ spawnSubagentAtWithCwd
     -> InterAgentMessageContent
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
-spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskName content nickname = do
+spawnSubagentAtWithCwd registry rootTurnId childCwd parentId parentPath parentDepth taskName content nickname = do
     let nextDepth = parentDepth + 1
         cfg = registry.registryConfig
     case cfg.maxDepth of
@@ -242,6 +298,7 @@ spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskNam
                 mailbox <- newTQueueIO
                 statusVar <- newTVarIO Pending
                 workerVar <- newTVarIO Nothing
+                rootTurnVar <- newTVarIO rootTurnId
                 slotHeld <- newTVarIO True
                 previousVar <- newTVarIO Nothing
                 let record = SubagentRecord
@@ -253,6 +310,7 @@ spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskNam
                         , recordCancel = cancelFlag
                         , recordMailbox = mailbox
                         , recordWorker = workerVar
+                        , recordRootTurnId = rootTurnVar
                         , recordSlotHeld = slotHeld
                         , recordPreviousResponseId = previousVar
                         , recordTaskPath = childPath
@@ -260,8 +318,11 @@ spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskNam
                         }
                 admitted <- atomically do
                     closed <- readTVar registry.registryClosed
+                    aborted <- isRootTurnAborted registry rootTurnId
                     if closed
                         then pure (Left "Subagent registry is closed.")
+                        else if aborted
+                            then pure (Left "Root turn was aborted.")
                         else do
                             paths <- readTVar registry.registryPaths
                             if Map.member childPath paths
@@ -282,15 +343,18 @@ spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskNam
                 case admitted of
                     Left err -> pure (Left err)
                     Right () -> do
-                        let message = InterAgentMessage
-                                { messageAuthor = taskPathText parentPath
-                                , messageRecipient = taskPathText childPath
-                                , messageType = NewTaskMessage
-                                , messageContent = content
+                        let work = SubagentWork
+                                { workRootTurnId = rootTurnId
+                                , workMessage = InterAgentMessage
+                                    { messageAuthor = taskPathText parentPath
+                                    , messageRecipient = taskPathText childPath
+                                    , messageType = NewTaskMessage
+                                    , messageContent = content
+                                    }
                                 }
                         started <-
                             startRecordWorker registry record
-                                (runWorker registry record message)
+                                (runWorker registry record work)
                                 `onException` shutdownRecord registry record
                         if started
                             then pure (Right (agentId, childPath))
@@ -298,28 +362,30 @@ spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskNam
                                 shutdownRecord registry record
                                 pure (Left "Subagent closed before its worker started.")
 
-runWorker :: SubagentRegistry -> SubagentRecord -> InterAgentMessage -> IO ()
-runWorker registry record firstPrompt = do
+runWorker :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO ()
+runWorker registry record firstWork = do
     mayRun <- atomically do
         closed <- readTVar registry.registryClosed
         current <- readTVar record.recordStatus
-        if closed || current == Closed
+        if closed || current == Closed || current == Interrupted
             then pure False
             else do
                 writeTVar record.recordStatus Running
                 pure True
-    let env = SubagentSpawnEnv
-            { subId = record.recordId
-            , subDepth = record.recordDepth
-            , subParentId = record.recordParent
-            , subCwd = record.recordCwd
-            , subCancel = record.recordCancel
-            }
-        onEvent = registry.registryOnEvent record.recordId
-        loop prompt = do
+    let onEvent = registry.registryOnEvent record.recordId
+        loop work = do
+            atomically $ writeTVar record.recordRootTurnId work.workRootTurnId
+            let env = SubagentSpawnEnv
+                    { subId = record.recordId
+                    , subDepth = record.recordDepth
+                    , subParentId = record.recordParent
+                    , subCwd = record.recordCwd
+                    , subCancel = record.recordCancel
+                    , subRootTurnId = work.workRootTurnId
+                    }
             previous <- atomically $ readTVar record.recordPreviousResponseId
             run <- readIORef registry.registryRunRef
-            result <- tryAny (run env previous prompt onEvent)
+            result <- tryAny (run env previous work.workMessage onEvent)
             let status = case result of
                     Left (exc :: SomeException) ->
                         Errored (Text.pack (show exc))
@@ -346,15 +412,16 @@ runWorker registry record firstPrompt = do
                                 writeTVar record.recordStatus status
                                 pure Nothing
                             else do
-                                msg <- readTQueue record.recordMailbox
+                                nextWork <- readTQueue record.recordMailbox
+                                writeTVar record.recordRootTurnId nextWork.workRootTurnId
                                 writeTVar record.recordStatus Running
-                                pure (Just msg)
+                                pure (Just nextWork)
             case next of
                 -- Completed/errored/interrupted agents stay open and keep their
                 -- concurrency slot until close_agent, matching Codex v1.
                 Nothing -> notifyComplete registry record.recordId status
-                Just msg -> loop msg
-    whenIO mayRun (loop firstPrompt)
+                Just nextWork -> loop nextWork
+    whenIO mayRun (loop firstWork)
 
 -- | Record ownership before forking. The thread id is published immediately
 -- afterward, so shutdown can safely race startup and still cancel and join.
@@ -380,11 +447,13 @@ startRecordWorker registry record action = mask \restore -> do
     started <- atomically do
         closed <- readTVar registry.registryClosed
         status <- readTVar record.recordStatus
+        rootTurnId <- readTVar record.recordRootTurnId
+        aborted <- isRootTurnAborted registry rootTurnId
         current <- readTVar record.recordWorker
         case current of
             Just _ -> pure False
             Nothing
-                | closed || status == Closed -> pure False
+                | closed || aborted || status == Closed || status == Interrupted -> pure False
                 | otherwise -> do
                     writeTVar record.recordWorker (Just worker)
                     pure True
@@ -504,6 +573,17 @@ sendInputMessage
     -> Bool
     -> IO (Either Text Text)
 sendInputMessage registry senderPath agentId content interrupt = do
+    sendInputMessageForTurn registry Nothing senderPath agentId content interrupt
+
+sendInputMessageForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> Bool
+    -> IO (Either Text Text)
+sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt = do
     mrecord <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case mrecord of
         Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
@@ -513,32 +593,39 @@ sendInputMessage registry senderPath agentId content interrupt = do
                 Closed -> pure (Left "agent is closed")
                 NotFound -> pure (Left "agent not found")
                 _ -> do
-                    let message = InterAgentMessage
-                            { messageAuthor = taskPathText senderPath
-                            , messageRecipient = taskPathText record.recordTaskPath
-                            , messageType = FollowUpMessage
-                            , messageContent = content
+                    let work = SubagentWork
+                            { workRootTurnId = rootTurnId
+                            , workMessage = InterAgentMessage
+                                { messageAuthor = taskPathText senderPath
+                                , messageRecipient = taskPathText record.recordTaskPath
+                                , messageType = FollowUpMessage
+                                , messageContent = content
+                                }
                             }
                     whenIO interrupt (requestCancel record.recordCancel)
                     -- Admit before mutating status/mailbox so a failed resume
                     -- does not leave the agent stuck in Running with no worker.
                     kick <- atomically do
+                        aborted <- isRootTurnAborted registry rootTurnId
                         current <- readTVar record.recordStatus
-                        case current of
-                            Running -> do
-                                writeTQueue record.recordMailbox message
-                                pure KickNone
-                            Pending -> do
-                                writeTQueue record.recordMailbox message
-                                pure KickNone
-                            _ -> do
-                                admitted <- acquireSlot registry record
-                                case admitted of
-                                    Left err -> pure (KickFail err)
-                                    Right () -> do
-                                        writeTQueue record.recordMailbox message
-                                        writeTVar record.recordStatus Running
-                                        pure KickStart
+                        if aborted
+                            then pure (KickFail "Root turn was aborted.")
+                            else case current of
+                                Running -> do
+                                    writeTQueue record.recordMailbox work
+                                    pure KickNone
+                                Pending -> do
+                                    writeTQueue record.recordMailbox work
+                                    pure KickNone
+                                _ -> do
+                                    admitted <- acquireSlot registry record
+                                    case admitted of
+                                        Left err -> pure (KickFail err)
+                                        Right () -> do
+                                            writeTQueue record.recordMailbox work
+                                            writeTVar record.recordRootTurnId rootTurnId
+                                            writeTVar record.recordStatus Running
+                                            pure KickStart
                     case kick of
                         KickFail err -> pure (Left err)
                         KickNone -> pure (Right "queued")
@@ -586,6 +673,62 @@ shutdownRecord registry record = do
         Nothing -> pure ()
         Just worker -> stopWorker worker
     releaseSlot registry record
+
+abortRootTurn :: SubagentRegistry -> RootTurnId -> IO ()
+abortRootTurn registry rootTurnId = do
+    records <- atomically do
+        modifyTVar' registry.registryAbortedRootTurns (Set.insert rootTurnId)
+        agents <- Map.elems <$> readTVar registry.registryAgents
+        fmap concat $ mapM selectOwned agents
+    mapM_ (interruptRecordForTurn registry rootTurnId) records
+  where
+    selectOwned :: SubagentRecord -> STM [SubagentRecord]
+    selectOwned record = do
+        discardQueuedWork rootTurnId record.recordMailbox
+        owner <- readTVar record.recordRootTurnId
+        status <- readTVar record.recordStatus
+        pure
+            [ record
+            | owner == Just rootTurnId
+            , status == Pending || status == Running
+            ]
+
+interruptRecordForTurn :: SubagentRegistry -> RootTurnId -> SubagentRecord -> IO ()
+interruptRecordForTurn registry rootTurnId record = do
+    ownedWorker <- atomically do
+        owner <- readTVar record.recordRootTurnId
+        if owner == Just rootTurnId
+            then do
+                writeTVar record.recordStatus Interrupted
+                worker <- readTVar record.recordWorker
+                pure (Just worker)
+            else pure Nothing
+    case ownedWorker of
+        Nothing -> pure ()
+        Just mworker -> do
+            requestCancel record.recordCancel
+            case mworker of
+                Nothing -> pure ()
+                Just worker -> stopWorker worker
+            atomically do
+                owner <- readTVar record.recordRootTurnId
+                whenSTM (owner == Just rootTurnId) $
+                    writeTVar record.recordStatus Interrupted
+            releaseSlot registry record
+
+discardQueuedWork :: RootTurnId -> TQueue SubagentWork -> STM ()
+discardQueuedWork rootTurnId mailbox = do
+    queued <- flushTQueue mailbox
+    mapM_ (writeTQueue mailbox)
+        [ work
+        | work <- queued
+        , work.workRootTurnId /= Just rootTurnId
+        ]
+
+isRootTurnAborted :: SubagentRegistry -> Maybe RootTurnId -> STM Bool
+isRootTurnAborted _ Nothing = pure False
+isRootTurnAborted registry (Just rootTurnId) =
+    Set.member rootTurnId <$> readTVar registry.registryAbortedRootTurns
 
 -- | Stop every currently pending/running child while keeping completed agent
 -- records and the registry available for later turns. The registry is closed
@@ -662,12 +805,14 @@ restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previou
                 writeTVar record.recordStatus (Completed Nothing)
                 writeTVar record.recordPreviousResponseId previous
                 writeTVar record.recordWorker Nothing
+                writeTVar record.recordRootTurnId Nothing
             pure (Right agentId)
         Nothing -> do
             cancelFlag <- newCancelFlag
             mailbox <- newTQueueIO
             statusVar <- newTVarIO (Completed Nothing)
             workerVar <- newTVarIO Nothing
+            rootTurnVar <- newTVarIO Nothing
             slotHeld <- newTVarIO False
             previousVar <- newTVarIO previous
             let record = SubagentRecord
@@ -679,6 +824,7 @@ restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previou
                     , recordCancel = cancelFlag
                     , recordMailbox = mailbox
                     , recordWorker = workerVar
+                    , recordRootTurnId = rootTurnVar
                     , recordSlotHeld = slotHeld
                     , recordPreviousResponseId = previousVar
                     , recordTaskPath = taskPathRoot
@@ -836,6 +982,16 @@ queueMessageFrom
     -> InterAgentMessageContent
     -> IO (Either Text Text)
 queueMessageFrom registry senderPath agentId content = do
+    queueMessageFromForTurn registry Nothing senderPath agentId content
+
+queueMessageFromForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> IO (Either Text Text)
+queueMessageFromForTurn registry rootTurnId senderPath agentId content = do
     mrecord <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case mrecord of
         Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
@@ -845,14 +1001,20 @@ queueMessageFrom registry senderPath agentId content = do
                 Closed -> pure (Left "agent is closed")
                 NotFound -> pure (Left "agent not found")
                 _ -> do
-                    let message = InterAgentMessage
-                            { messageAuthor = taskPathText senderPath
-                            , messageRecipient = taskPathText record.recordTaskPath
-                            , messageType = QueuedMessage
-                            , messageContent = content
+                    let work = SubagentWork
+                            { workRootTurnId = rootTurnId
+                            , workMessage = InterAgentMessage
+                                { messageAuthor = taskPathText senderPath
+                                , messageRecipient = taskPathText record.recordTaskPath
+                                , messageType = QueuedMessage
+                                , messageContent = content
+                                }
                             }
-                    atomically $ writeTQueue record.recordMailbox message
-                    pure (Right "queued")
+                    atomically do
+                        aborted <- isRootTurnAborted registry rootTurnId
+                        if aborted
+                            then pure (Left "Root turn was aborted.")
+                            else writeTQueue record.recordMailbox work >> pure (Right "queued")
 
 -- | Wait until any live non-final agent reaches a final status (or timeout).
 waitAnyLive
