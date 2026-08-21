@@ -22,6 +22,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "openAIOAuthClientId" do
+        it "uses the Codex public client id by default" do
+            openAIOAuthClientId Nothing
+                `shouldBe` "app_EMoamEEZ73f0CkXaXp7hrann"
+
+        it "allows an application-specific override" do
+            openAIOAuthClientId (Just "custom-client")
+                `shouldBe` "custom-client"
+
     describe "openaiAuthStateFromJson" do
         it "reads the login file tokens object" do
             let encoded = Aeson.encode $ Aeson.object
