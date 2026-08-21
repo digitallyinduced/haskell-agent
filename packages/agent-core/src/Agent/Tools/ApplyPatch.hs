@@ -18,6 +18,14 @@ import Agent.Tools.IO
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv)
+import Control.Monad (unless)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , except
+    , runExceptT
+    , throwE
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -173,57 +181,48 @@ stripPrefix :: Text -> Text -> Maybe Text
 stripPrefix prefix line = Text.stripPrefix prefix (Text.stripStart line)
 
 applyPatch :: ToolEnv -> Text -> IO (Either Text Text)
-applyPatch env raw = case parsePatch raw of
-    Left err -> pure (Left err)
-    Right [] -> pure (Left "No files were modified.")
-    Right hunks -> applyHunks env hunks
+applyPatch env raw =
+    runExceptT do
+        hunks <- except (parsePatch raw)
+        if null hunks
+            then throwE "No files were modified."
+            else applyHunks env hunks
 
-applyHunks :: ToolEnv -> [Hunk] -> IO (Either Text Text)
+applyHunks :: ToolEnv -> [Hunk] -> ExceptT Text IO Text
 applyHunks env hunks = go hunks [] [] []
   where
     go [] added modified deleted =
-        pure $ Right $ summary added modified deleted
+        pure (summary added modified deleted)
     go (hunk : rest) added modified deleted = case hunk of
-        AddFile path contents ->
-            withResolved env path \resolved ->
-                writeTextFile resolved contents >>= \case
-                    Left err -> pure (Left err)
-                    Right () -> go rest (path : added) modified deleted
-        DeleteFile path ->
-            withResolved env path \resolved ->
-                doesFileExist resolved >>= \case
-                    False -> pure $ Left $ "Failed to delete file " <> Text.pack path
-                    True -> deleteTextFile resolved >>= \case
-                        Left err -> pure (Left err)
-                        Right () -> go rest added modified (path : deleted)
-        UpdateFile path moveTo chunks ->
-            withResolved env path \resolved ->
-                readTextFile resolved >>= \case
-                    Left err -> pure (Left err)
-                    Right original -> case applyChunks chunks (Text.lines original) of
-                        Left err -> pure (Left err)
-                        Right newLines -> do
-                            let newContents = joinFileLines newLines original
-                            case moveTo of
-                                Nothing ->
-                                    writeTextFile resolved newContents >>= \case
-                                        Left err -> pure (Left err)
-                                        Right () -> go rest added (path : modified) deleted
-                                Just dest ->
-                                    withResolved env dest \destResolved ->
-                                        writeTextFile destResolved newContents >>= \case
-                                            Left err -> pure (Left err)
-                                            Right () ->
-                                                deleteTextFile resolved >>= \case
-                                                    Left err -> pure (Left err)
-                                                    Right () ->
-                                                        go rest added (dest : modified) deleted
+        AddFile path contents -> do
+            resolved <- resolvePath env path
+            ExceptT (writeTextFile resolved contents)
+            go rest (path : added) modified deleted
+        DeleteFile path -> do
+            resolved <- resolvePath env path
+            exists <- lift (doesFileExist resolved)
+            unless exists $
+                throwE ("Failed to delete file " <> Text.pack path)
+            ExceptT (deleteTextFile resolved)
+            go rest added modified (path : deleted)
+        UpdateFile path moveTo chunks -> do
+            resolved <- resolvePath env path
+            original <- ExceptT (readTextFile resolved)
+            newLines <- except (applyChunks chunks (Text.lines original))
+            let newContents = joinFileLines newLines original
+            case moveTo of
+                Nothing -> do
+                    ExceptT (writeTextFile resolved newContents)
+                    go rest added (path : modified) deleted
+                Just dest -> do
+                    destResolved <- resolvePath env dest
+                    ExceptT (writeTextFile destResolved newContents)
+                    ExceptT (deleteTextFile resolved)
+                    go rest added (dest : modified) deleted
 
-withResolved :: ToolEnv -> FilePath -> (OsPath -> IO (Either Text Text)) -> IO (Either Text Text)
-withResolved env path action =
-    resolveUnderCwd env (fromFilePath path) >>= \case
-        Left err -> pure (Left err)
-        Right resolved -> action resolved
+resolvePath :: ToolEnv -> FilePath -> ExceptT Text IO OsPath
+resolvePath env path =
+    ExceptT (resolveUnderCwd env (fromFilePath path))
 
 applyChunks :: [UpdateChunk] -> [Text] -> Either Text [Text]
 applyChunks chunks start = foldl applyOne (Right start) chunks
