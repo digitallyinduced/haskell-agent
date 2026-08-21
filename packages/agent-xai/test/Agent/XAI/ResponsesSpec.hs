@@ -127,6 +127,11 @@ spec = do
                 ProviderError UsageLimitReached _ _ -> pure ()
                 other -> expectationFailure ("expected UsageLimitReached, got " <> show other)
 
+        it "recognises an exhausted Grok Build usage balance" do
+            let body = "{\"error\":\"Grok Build usage balance exhausted\"}"
+            classifyFailure 402 Nothing body
+                `shouldBe` ProviderError UsageLimitReached body Nothing
+
         it "leaves other statuses as plain HTTP errors" do
             classifyFailure 503 Nothing "unavailable"
                 `shouldBe` HttpError 503 "unavailable"
