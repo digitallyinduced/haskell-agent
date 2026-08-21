@@ -18,7 +18,9 @@ Provider-neutral infrastructure shared by the harness transports:
   `update_plan`). `apply_patch` is the Codex freeform patch language.
 - `Agent.Tools.IO` owns path confinement, file IO, and timed shell commands.
 - `Agent.Transport.WebSocket` owns reusable WebSocket sessions, ping/pong
-  handling, serialized writes, bounded receive buffering, and provider-neutral
-  failure classification.
+  handling, STM-scoped request ownership, serialized writes, bounded receive
+  buffering, and provider-neutral failure classification. Interrupted or
+  unfinished exchanges poison the session so abandoned frames cannot leak
+  into its successor.
 
 This package does not contain OpenAI, ChatGPT, xAI, or OpenRouter transport logic.
