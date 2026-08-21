@@ -142,6 +142,61 @@ spec = describe "Agent.Subagents" do
         Right _ <- spawnSubagent registry Nothing 0 "next" Nothing
         closeSubagentRegistry registry
 
+    it "releases pending capacity exactly once when an agent closes during preparation" do
+        preparedId <- newEmptyMVar
+        release <- newEmptyMVar
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically retry)
+            (\_ _ -> pure ())
+        spawning <- Async.async $
+            spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (\agentId -> do
+                    putMVar preparedId agentId
+                    takeMVar release
+                    pure mempty)
+                Nothing 0 "pending" Nothing
+        agentId <- takeMVar preparedId
+        closeSubagent registry agentId `shouldReturn` Right Pending
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its supervisor started."
+
+        Right _ <- spawnSubagent registry Nothing 0 "replacement" Nothing
+        extra <- spawnSubagent registry Nothing 0 "extra" Nothing
+        extra `shouldSatisfy` \case
+            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
+            Right _ -> False
+        closeSubagentRegistry registry
+
+    it "rejects a prepared spawn after its root turn is aborted" do
+        preparedId <- newEmptyMVar
+        release <- newEmptyMVar
+        leaseReleases <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically retry)
+            (\_ _ -> pure ())
+        rootTurnId <- beginRootTurn registry
+        spawning <- Async.async $
+            spawnSubagentWithCwdPreparedForTurn
+                registry (Just rootTurnId) (fromFilePath "/tmp")
+                (\agentId -> do
+                    putMVar preparedId agentId
+                    takeMVar release
+                    pure $ subagentLease $
+                        atomicModifyIORef' leaseReleases \n -> (n + 1, ()))
+                Nothing 0 "aborted" Nothing
+        agentId <- takeMVar preparedId
+
+        abortRootTurn registry rootTurnId
+        getStatus registry agentId `shouldReturn` Interrupted
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its supervisor started."
+        readIORef leaseReleases `shouldReturn` 1
+        getStatus registry agentId `shouldReturn` NotFound
+        closeSubagentRegistry registry
+
     it "preserves replacement paths when an old spawn rolls back" do
         entered <- newEmptyMVar
         release <- newEmptyMVar
