@@ -12,7 +12,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
-import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Auth (LoadedAuth(..), loadAuth, probeLoadedAuth)
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentTarget(..)
@@ -1929,7 +1929,7 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
                     putTextLn stderr $ roleWarn color $
                         glyphWarn
                             <> providerSlug current
-                            <> " unavailable; switching to "
+                            <> " unavailable; trying this turn with "
                             <> providerSlug choice.modelProvider
                             <> "/"
                             <> choice.modelId
@@ -1969,14 +1969,21 @@ validateProviderTarget choice =
                 <> providerSlug choice.modelProvider
                 <> ": "
                 <> err
-        Right loaded
-            | loaded.loadedProvider /= choice.modelProvider ->
-                pure $ Left $
+        Right loaded ->
+            probeLoadedAuth loaded >>= \case
+                Left err -> pure $ Left $
                     "cannot switch to "
                         <> providerSlug choice.modelProvider
-                        <> ": auth resolved "
-                        <> providerSlug loaded.loadedProvider
-            | otherwise -> pure (Right ())
+                        <> ": credentials unavailable: "
+                        <> Text.pack (show err)
+                Right usable
+                    | usable.loadedProvider /= choice.modelProvider ->
+                        pure $ Left $
+                            "cannot switch to "
+                                <> providerSlug choice.modelProvider
+                                <> ": auth resolved "
+                                <> providerSlug usable.loadedProvider
+                    | otherwise -> pure (Right ())
 
 ensureTransitionSessionId
     :: Maybe (IORef (Either SessionCreate SessionHandle))
