@@ -8,9 +8,13 @@ module Agent.CLI.TUI.Theme
     , footerAttr
     , headerAttr
     , codeAttr
+    , emphasisAttr
     , headingAttr
+    , inlineCodeAttr
+    , linkAttr
     , mutedAttr
     , selectedAttr
+    , strongAttr
     , successAttr
     , thinkingAttr
     , toolAttr
@@ -25,7 +29,7 @@ import qualified Graphics.Vty as V
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
-headingAttr, codeAttr :: AttrName
+headingAttr, codeAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
 footerAttr = attrName "footer"
@@ -41,6 +45,10 @@ borderAttr = attrName "border"
 borderActiveAttr = attrName "border-active"
 headingAttr = attrName "markdown-heading"
 codeAttr = attrName "markdown-code"
+emphasisAttr = attrName "markdown-emphasis"
+inlineCodeAttr = attrName "markdown-inline-code"
+linkAttr = attrName "markdown-link"
+strongAttr = attrName "markdown-strong"
 
 solarizedDark :: AttrMap
 solarizedDark =
@@ -95,6 +103,21 @@ solarizedDark =
         , (codeAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
             `V.withBackColor` rgb 7 54 66)
+        , (emphasisAttr, V.defAttr
+            `V.withForeColor` rgb 147 161 161
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.italic)
+        , (inlineCodeAttr, V.defAttr
+            `V.withForeColor` rgb 42 161 152
+            `V.withBackColor` rgb 7 54 66)
+        , (linkAttr, V.defAttr
+            `V.withForeColor` rgb 38 139 210
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.underline)
+        , (strongAttr, V.defAttr
+            `V.withForeColor` rgb 147 161 161
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.bold)
         ]
 
 monochrome :: AttrMap
@@ -115,6 +138,10 @@ monochrome =
         , (borderActiveAttr, V.defAttr `V.withStyle` V.bold)
         , (headingAttr, V.defAttr `V.withStyle` V.bold)
         , (codeAttr, V.defAttr)
+        , (emphasisAttr, V.defAttr `V.withStyle` V.italic)
+        , (inlineCodeAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (linkAttr, V.defAttr `V.withStyle` V.underline)
+        , (strongAttr, V.defAttr `V.withStyle` V.bold)
         ]
 
 rgb :: Int -> Int -> Int -> V.Color

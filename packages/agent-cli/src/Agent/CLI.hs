@@ -266,6 +266,7 @@ import Agent.Provider
 import Agent.Subagents
     ( RootTurnId
     , SubagentId(..)
+    , SubagentStatus(..)
     , abortRootTurn
     , beginRootTurn
     , closeSubagentRegistry
@@ -1023,10 +1024,17 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
           where
             materializeChild (path, agentId, status) = do
                 sessions <- readIORef subagentSessions
-                transcript <- case Map.lookup agentId sessions of
+                stored <- case Map.lookup agentId sessions of
                     Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
                     Just session ->
                         responseItemLines <$> readIORef session.subSessionTranscript
+                let transcript = stored <> case status of
+                        Completed (Just result)
+                            | not (Text.null (Text.strip result)) ->
+                                ["assistant: " <> Text.strip result]
+                        Errored message ->
+                            ["error: " <> Text.strip message]
+                        _ -> []
                 pure AgentEntry
                     { agentTarget = AgentChild agentId
                     , agentPath = taskPathText path
@@ -1093,6 +1101,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             (\active ->
                 when terminal.terminalNativeProgress $
                     setNativeProgress stderr active)
+            ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
             useColor
             initialFullscreenState
         else pure Nothing
@@ -1756,24 +1765,8 @@ replWithDraft env@SessionEnv
                                 pickAgentChoice
                                     fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
-                                    Just target -> do
+                                    Just target ->
                                         writeIORef viewport.viewportSelected target
-                                        case
-                                            [ entry
-                                            | entry <- entries
-                                            , entry.agentTarget == target
-                                            ] of
-                                            entry : _ ->
-                                                fullscreenEvent $
-                                                    UiSystemMessage $
-                                                        "agent "
-                                                            <> entry.agentPath
-                                                            <> " · "
-                                                            <> entry.agentStatus
-                                                            <> "\n"
-                                                            <> Text.unlines
-                                                                entry.agentTranscript
-                                            [] -> pure ()
                                 continue
 
                     ReplCopyLast -> do

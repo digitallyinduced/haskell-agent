@@ -18,6 +18,7 @@ import Agent.CLI.Input
     , readReplHistory
     , terminalTextWidth
     )
+import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
     ( ReplAction(..)
@@ -32,9 +33,9 @@ import Agent.CLI.ReplMode (replModeLabel)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.CLI.TUI.Theme as Theme
+import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Markdown (markdownWidget)
 import Agent.CLI.UI.Model
-import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
 import Brick.BChan (BChan, newBChan, writeBChan)
@@ -54,7 +55,7 @@ import Control.Concurrent.STM
     , readTQueue
     , writeTQueue
     )
-import Control.Monad (forever, void, when)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (SomeException, finally, throwIO, tryAny)
@@ -97,6 +98,7 @@ data AppEvent
         !(TMVar (Maybe Text))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
+    | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppStop
 
 data FullscreenRuntime = FullscreenRuntime
@@ -106,6 +108,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeNativeProgress :: !(Bool -> IO ())
+    , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
@@ -126,6 +129,8 @@ data AppState = AppState
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
+    , appAgentSelected :: !AgentTarget
+    , appAgentEntries :: ![AgentEntry]
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -147,6 +152,7 @@ newFullscreenRuntime
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
     -> (Bool -> IO ())
+    -> IO (AgentTarget, [AgentEntry])
     -> Bool
     -> UiState
     -> IO FullscreenRuntime
@@ -155,6 +161,7 @@ newFullscreenRuntime
     ctrlCAction
     copyAction
     nativeProgress
+    agentSnapshot
     color
     initial = FullscreenRuntime
     <$> newBChan 512
@@ -163,6 +170,7 @@ newFullscreenRuntime
     <*> pure ctrlCAction
     <*> pure copyAction
     <*> pure nativeProgress
+    <*> pure agentSnapshot
     <*> pure color
     <*> pure initial
 
@@ -235,6 +243,7 @@ withFullscreenSuspended runtime action = do
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
     history <- readReplHistory
+    (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     let vtyConfig =
             V.defaultConfig
                 { V.configPreferredColorMode = Just V.FullColor
@@ -263,6 +272,8 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appAgentSelected = initialAgent
+            , appAgentEntries = initialAgents
             }
     withAsync workerAction \worker ->
         withAsync ticker \_ticker ->
@@ -282,9 +293,17 @@ runFullscreen runtime workerAction = do
                         writeTQueue runtime.runtimeInput ReplEof
                     wait worker
   where
-    ticker = forever do
+    ticker = loop (0 :: Int)
+    loop tick = do
         threadDelay 100000
         writeBChan runtime.runtimeEvents (AppUi UiTick)
+        when (tick `mod` 5 == 0) do
+            tryAny runtime.runtimeAgentSnapshot >>= \case
+                Left _ -> pure ()
+                Right (selected, entries) ->
+                    writeBChan runtime.runtimeEvents
+                        (AppAgentSnapshot selected entries)
+        loop ((tick + 1) `mod` 10)
 
 handleChoiceKey :: V.Event -> EventM Name AppState ()
 handleChoiceKey = \case
@@ -482,15 +501,75 @@ drawMain state =
     withAttr Theme.baseAttr $
         vBox
             [ drawHeader state.appUi
-            , padTop (Pad 1) $
-                withVScrollBars OnRight $
-                    viewport ConversationViewport Vertical $
-                        padLeftRight 2 (drawTranscript state.appUi)
+            , drawWorkspace state
             , drawNotice state.appUi
             , drawSlashMenu state
             , drawComposer state.appUi
             , drawFooter state
             ]
+
+drawWorkspace :: AppState -> Widget Name
+drawWorkspace state =
+    padTop (Pad 1) $
+        hBox $
+            [ withVScrollBars OnRight $
+                viewport ConversationViewport Vertical $
+                    padLeftRight 2 (drawTranscript state.appUi)
+            ]
+                <> if length state.appAgentEntries <= 1
+                    then []
+                    else
+                        [ hLimit 42 $
+                            padLeft (Pad 1) $
+                                drawAgentPane
+                                    state.appAgentSelected
+                                    state.appAgentEntries
+                        ]
+
+drawAgentPane :: AgentTarget -> [AgentEntry] -> Widget Name
+drawAgentPane selected entries =
+    withAttr Theme.borderAttr $
+        withBorderStyle unicodeRounded $
+            borderWithLabel (txt " Agents ") $
+                padAll 1 $
+                    vBox
+                        [ vBox (map drawEntry entries)
+                        , padTop (Pad 1) $
+                            withAttr Theme.footerAttr $
+                                txtWrap
+                                    ("viewing "
+                                        <> maybe "/root" (.agentPath)
+                                            selectedEntry
+                                        <> " · /agents to switch")
+                        , padTop (Pad 1) $
+                            withAttr Theme.assistantAttr $
+                                vBox (map txtWrap transcript)
+                        ]
+  where
+    selectedEntry =
+        find ((== selected) . (.agentTarget)) entries
+    drawEntry entry =
+        let
+            marker =
+                if entry.agentTarget == selected then "› " else "  "
+            row =
+                txtWrap
+                    (marker
+                        <> entry.agentPath
+                        <> "  "
+                        <> entry.agentStatus)
+        in if entry.agentTarget == selected
+            then withAttr Theme.successAttr row
+            else row
+    transcript = case selectedEntry of
+        Nothing -> ["(agent unavailable)"]
+        Just entry ->
+            let rows =
+                    filter (not . Text.null . Text.strip)
+                        entry.agentTranscript
+            in if null rows
+                then ["(no transcript)"]
+                else drop (max 0 (length rows - 12)) rows
 
 drawHeader :: UiState -> Widget Name
 drawHeader state =
@@ -872,6 +951,13 @@ handleEvent event = case event of
             , appSlashIndex = 0
             , appSlashDismissed = False
             }
+    AppEvent (AppAgentSnapshot selected entries) ->
+        modify' \state ->
+            state
+                { appAgentSelected =
+                    Bridge.normalizeAgentSelection selected entries
+                , appAgentEntries = entries
+                }
     AppEvent (AppUi uiEvent) -> do
         modify' \state -> state
             { appUi = reduceUi uiEvent state.appUi
@@ -889,11 +975,11 @@ handleEvent event = case event of
                 _ -> state.appHistoryDraft
             }
         state <- get
-        case nativeProgressSignal uiEvent state.appUi of
+        case Bridge.nativeProgressSignal uiEvent state.appUi of
             Nothing -> pure ()
             Just active ->
                 liftIO (state.appRuntime.runtimeNativeProgress active)
-        when (eventFollows uiEvent && state.appUi.uiFollow) $
+        when (Bridge.eventFollows uiEvent && state.appUi.uiFollow) $
             vScrollToEnd (viewportScroll ConversationViewport)
     AppEvent (AppAskPermission summary reply) ->
         modify' \state ->
@@ -954,28 +1040,6 @@ handleEvent event = case event of
             (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
             (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
     _ -> pure ()
-
-eventFollows :: UiEvent -> Bool
-eventFollows = \case
-    UiLoop _ -> True
-    UiUserSubmitted _ -> True
-    UiAssistantHistory _ -> True
-    UiSystemMessage _ -> True
-    UiErrorMessage _ -> True
-    UiConversationCleared -> True
-    _ -> False
-
-nativeProgressSignal :: UiEvent -> UiState -> Maybe Bool
-nativeProgressSignal event state = case event of
-    UiLoop TurnStarted -> Just True
-    UiLoop (TurnFinished _) -> Just False
-    UiTurnEnded _ -> Just False
-    UiSetAwaitingInput True -> Just False
-    UiTick
-        | state.uiRunning
-        , state.uiFrame == 0 ->
-            Just True
-    _ -> Nothing
 
 handlePermissionKey :: V.Event -> EventM Name AppState ()
 handlePermissionKey = \case
@@ -1440,38 +1504,24 @@ handleComposerKey event = do
 
     moveHistory delta = do
         state <- get
-        let entries = state.appHistory
-            current = maybe (-1) id state.appHistoryIndex
-            next = current + delta
-        if null entries
-            then pure ()
-            else if next < 0
-                then modify' \currentState ->
-                    currentState
-                        { appUi =
-                            reduceUi
-                                (UiSetDraft
-                                    currentState.appHistoryDraft
-                                    (Text.length currentState.appHistoryDraft))
-                                currentState.appUi
-                        , appHistoryIndex = Nothing
-                        }
-                else when (next < length entries) do
-                    let text = entries !! next
-                        draft = case state.appHistoryIndex of
-                            Nothing -> state.appUi.uiDraft
-                            Just _ -> state.appHistoryDraft
-                    modify' \currentState ->
-                        currentState
-                            { appUi =
-                                reduceUi
-                                    (UiSetDraft text (Text.length text))
-                                    currentState.appUi
-                            , appHistoryIndex = Just next
-                            , appHistoryDraft = draft
-                            , appSlashIndex = 0
-                            , appSlashDismissed = False
-                            }
+        let (text, index, draft) =
+                Bridge.historyMove
+                    delta
+                    state.appHistory
+                    state.appHistoryIndex
+                    state.appUi.uiDraft
+                    state.appHistoryDraft
+        modify' \currentState ->
+            currentState
+                { appUi =
+                    reduceUi
+                        (UiSetDraft text (Text.length text))
+                        currentState.appUi
+                , appHistoryIndex = index
+                , appHistoryDraft = draft
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
 
     moveSlash delta count =
         modify' \current ->
