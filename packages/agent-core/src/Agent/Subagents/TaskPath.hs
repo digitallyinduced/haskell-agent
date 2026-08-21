@@ -78,7 +78,7 @@ validateAbsolute path
     | path == "/root" = Right ()
     | "/root/" `Text.isPrefixOf` path = do
         let rest = Text.drop (Text.length "/root/") path
-        mapM_ validateTaskName (filter (not . Text.null) (Text.splitOn "/" rest))
+        validateSegments (Text.splitOn "/" rest)
     | otherwise = Left "task path must start with /root"
 
 validateRelative :: Text -> Either Text ()
@@ -86,4 +86,9 @@ validateRelative reference
     | "/" `Text.isPrefixOf` reference =
         Left "relative target must not start with /"
     | otherwise =
-        mapM_ validateTaskName (filter (not . Text.null) (Text.splitOn "/" reference))
+        validateSegments (Text.splitOn "/" reference)
+
+validateSegments :: [Text] -> Either Text ()
+validateSegments segments
+    | any Text.null segments = Left "task path must not contain empty segments"
+    | otherwise = mapM_ validateTaskName segments

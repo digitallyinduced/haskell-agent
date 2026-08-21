@@ -95,7 +95,7 @@ library
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
-                    , process
+                    , process >= 1.6.26
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time

@@ -9,8 +9,7 @@ wrapped for tmux passthrough when `TMUX` is set.
 - Kitty graphics previews for pasted images.
 - OSC 7 working-directory reporting, including agent worktrees.
 - OSC 8 links for Markdown URLs and absolute tool file paths.
-- OSC 9 desktop notifications for long turns, failures, approvals, and
-  completed subagents.
+- OSC 9 desktop notifications for long turns, failures, and approvals.
 - OSC 9;4 native progress while the model is working.
 - OSC 52 clipboard commands:
   - `/copy` or `/copy-last`

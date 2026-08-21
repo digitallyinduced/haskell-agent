@@ -17,7 +17,8 @@ module Agent.CLI.SubagentStore
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Responses.Types (ResponseItem)
-import Agent.Subagents (SubagentId(..))
+import Agent.Subagents (SubagentId(..), SubagentIdentity(..))
+import Agent.Subagents.TaskPath (taskPathText)
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
@@ -37,6 +38,9 @@ data SubagentDiskMeta = SubagentDiskMeta
     , diskAgentType :: !(Maybe Text)
     , diskAgentModel :: !(Maybe Text)
     , diskCwd :: !(Maybe OsPath)
+    , diskTaskPath :: !(Maybe Text)
+    , diskParentId :: !(Maybe SubagentId)
+    , diskDepth :: !(Maybe Int)
     } deriving (Eq, Show)
 
 instance ToJSON SubagentDiskMeta where
@@ -45,6 +49,9 @@ instance ToJSON SubagentDiskMeta where
         , "agentType" .= meta.diskAgentType
         , "agentModel" .= meta.diskAgentModel
         , "cwd" .= fmap toFilePath meta.diskCwd
+        , "taskPath" .= meta.diskTaskPath
+        , "parentId" .= meta.diskParentId
+        , "depth" .= meta.diskDepth
         ]
 
 instance FromJSON SubagentDiskMeta where
@@ -54,6 +61,9 @@ instance FromJSON SubagentDiskMeta where
             <*> o .:? "agentType"
             <*> o .:? "agentModel"
             <*> (fmap fromFilePath <$> o .:? "cwd")
+            <*> o .:? "taskPath"
+            <*> o .:? "parentId"
+            <*> o .:? "depth"
 
 -- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
 -- traversal so resume paths cannot escape @agents/@.
@@ -87,8 +97,9 @@ saveSubagentState
     -> Maybe Text
     -> Maybe Text
     -> Maybe OsPath
+    -> Maybe SubagentIdentity
     -> IO (Either Text ())
-saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
+saveSubagentState sessionDir agentId items previous agentType agentModel cwd identity =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
@@ -101,6 +112,9 @@ saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
                 , diskAgentType = agentType
                 , diskAgentModel = agentModel
                 , diskCwd = cwd
+                , diskTaskPath = taskPathText . (.identityTaskPath) <$> identity
+                , diskParentId = identity >>= (.identityParent)
+                , diskDepth = (.identityDepth) <$> identity
                 }
             writeLazyFileAtomically transcriptPath 0o600 (Aeson.encode items)
             pure (Right ())
@@ -122,7 +136,8 @@ loadSubagentState sessionDir agentId =
                 else do
                     metaResult <- if hasMeta
                         then decodeFile metaPath
-                        else pure (Right (SubagentDiskMeta Nothing Nothing Nothing Nothing))
+                        else pure (Right (SubagentDiskMeta
+                            Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])

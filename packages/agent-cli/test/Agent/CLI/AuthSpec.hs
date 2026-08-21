@@ -10,6 +10,7 @@ import Agent.Provider
     , Provider(..)
     , getNextToken
     )
+import Control.Exception.Safe (bracket)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import Data.IORef
@@ -18,10 +19,23 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..))
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "loadAuth" do
+        it "returns Text errors for incomplete broker configuration" do
+            withEnv "AGENT_BROKER_URL" (Just "http://127.0.0.1:1") $
+                withEnv "AGENT_BROKER_TOKEN" Nothing do
+                    result <- loadAuth Nothing
+                    case result of
+                        Left err ->
+                            err `shouldBe`
+                                "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN"
+                        Right _ ->
+                            expectationFailure "expected broker configuration failure"
+
     describe "openAIOAuthClientId" do
         it "uses the Codex public client id by default" do
             openAIOAuthClientId Nothing
@@ -125,3 +139,17 @@ freshGrok = Credential
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) 0
+
+withEnv :: String -> Maybe String -> IO a -> IO a
+withEnv name value action =
+    bracket
+        (do
+            previous <- lookupEnv name
+            set value
+            pure previous)
+        set
+        (const action)
+  where
+    set = \case
+        Just current -> setEnv name current
+        Nothing -> unsetEnv name

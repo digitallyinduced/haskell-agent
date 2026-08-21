@@ -21,5 +21,7 @@ spec = describe "Agent.Subagents.TaskPath" do
         validateTaskName "Bad" `shouldSatisfy` isLeft
         validateTaskName "a/b" `shouldSatisfy` isLeft
         parseTaskPath "/not-root" `shouldSatisfy` isLeft
+        parseTaskPath "/root//worker" `shouldSatisfy` isLeft
+        parseTaskPath "/root/worker/" `shouldSatisfy` isLeft
   where
     isLeft = either (const True) (const False)

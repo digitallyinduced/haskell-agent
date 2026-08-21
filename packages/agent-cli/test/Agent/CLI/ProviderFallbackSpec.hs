@@ -2,14 +2,15 @@ module Agent.CLI.ProviderFallbackSpec (spec) where
 
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.ProviderFallback
-    ( fallbackCandidates
+    ( automaticCooldownRetryDelay
+    , fallbackCandidates
     , rankedModels
     )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (Provider(..))
 import Data.List (elemIndex)
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..))
+import Data.Time.Clock (UTCTime(..), addUTCTime)
 import Test.Hspec
 
 spec :: Spec
@@ -66,6 +67,29 @@ spec = do
                 (fallbackCandidates [XAIProvider] OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [OpenRouterProvider]
+
+    describe "automaticCooldownRetryDelay" do
+        let now = UTCTime (fromGregorian 2026 8 21) 0
+
+        it "waits through a brief credential cooldown" do
+            automaticCooldownRetryDelay now
+                (CredentialsExhausted (addUTCTime 60 now))
+                `shouldBe` Just 60
+
+        it "retries immediately when the reset time has just passed" do
+            automaticCooldownRetryDelay now
+                (CredentialsExhausted (addUTCTime (-1) now))
+                `shouldBe` Just 0
+
+        it "returns control for a long cooldown" do
+            automaticCooldownRetryDelay now
+                (CredentialsExhausted (addUTCTime 121 now))
+                `shouldBe` Nothing
+
+        it "does not retry authentication failures as cooldowns" do
+            automaticCooldownRetryDelay now
+                (ProviderError AuthenticationError "expired" Nothing)
+                `shouldBe` Nothing
 
 safeHead :: [a] -> Maybe a
 safeHead = \case

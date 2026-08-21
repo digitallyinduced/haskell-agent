@@ -119,6 +119,8 @@ newtype Backend = Backend
 data LoopEvent
     = TextDelta Text
     | ReasoningDelta Text
+    -- | Ephemeral transport/tool activity for the live CLI status line.
+    | ActivityUpdated Text
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall

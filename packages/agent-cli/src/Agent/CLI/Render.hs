@@ -128,6 +128,14 @@ renderEventUnlocked config = \case
                 hFlush config.renderStdout
     ReasoningDelta delta ->
         appendReasoningUnlocked config delta
+    ActivityUpdated activity -> do
+        writeIORef config.renderActivityRef activity
+        visible <- readIORef config.renderThinkingVisible
+        if visible
+            then paintThinkingFrame config 0
+            else if config.renderShowThinking
+                then startThinkingSpinnerUnlocked config
+                else putTextLn config.renderStderr (roleMuted config.renderColor activity)
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
         writeIORef config.renderMarkdownState emptyMarkdownStreamState

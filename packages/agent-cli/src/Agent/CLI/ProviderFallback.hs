@@ -1,6 +1,7 @@
 -- | Automatic cross-provider fallback policy.
 module Agent.CLI.ProviderFallback
-    ( fallbackCandidates
+    ( automaticCooldownRetryDelay
+    , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
     , rankedModels
@@ -10,6 +11,25 @@ import Agent.CLI.Models (ModelOption(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (Provider(..))
 import Data.List (nubBy, sortOn)
+import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
+
+-- | Keep brief provider cooldowns invisible to the user when no fallback
+-- account is available. Longer waits return control to the prompt instead of
+-- making the CLI appear hung.
+maxAutomaticCooldownWait :: NominalDiffTime
+maxAutomaticCooldownWait = 120
+
+automaticCooldownRetryDelay
+    :: UTCTime
+    -> ApiError
+    -> Maybe NominalDiffTime
+automaticCooldownRetryDelay now = \case
+    CredentialsExhausted{retryAt} ->
+        let delay = max 0 (diffUTCTime retryAt now)
+        in if delay <= maxAutomaticCooldownWait
+            then Just delay
+            else Nothing
+    _ -> Nothing
 
 -- | Curated models ordered from strongest to weakest for automatic selection.
 --
