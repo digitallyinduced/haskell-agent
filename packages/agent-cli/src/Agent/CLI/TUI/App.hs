@@ -1049,8 +1049,7 @@ drawBlock state block =
         highlighted = selected && state.uiFocus == FocusScrollback
         content = case block.blockKind of
             BlockUser ->
-                withAttr Theme.userAttr $
-                    padAll 1 (txtWrap block.blockBody)
+                roundedFill Theme.userAttr (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
@@ -1090,6 +1089,14 @@ drawBlock state block =
                 block.blockExpanded)
             rendered
         else rendered
+
+roundedFill :: AttrName -> Widget Name -> Widget Name
+roundedFill attr body =
+    vBox
+        [ padLeftRight 1 (withAttr attr (vLimit 1 (fill ' ')))
+        , withAttr attr (padLeftRight 1 body)
+        , padLeftRight 1 (withAttr attr (vLimit 1 (fill ' ')))
+        ]
 
 cacheableBlock :: UiBlock -> Bool
 cacheableBlock block =
