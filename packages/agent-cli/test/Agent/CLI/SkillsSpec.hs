@@ -38,6 +38,21 @@ spec = describe "Agent.CLI.Skills" do
             , skillCommandSource = "user · agents"
             }
 
+    it "installs a deferred catalog, invocations, and startup context together" do
+        context <- newIORef (Just "agents")
+        catalogRef <- newIORef (SkillCatalog [] [])
+        invocationsRef <- newIORef []
+        let catalog = SkillCatalog [fakeSkill] []
+        installSkillCatalog
+            ["help"] True context catalogRef invocationsRef catalog
+        readIORef catalogRef `shouldReturn` catalog
+        readIORef invocationsRef `shouldReturn`
+            [SkillInvocation "deploy" fakeSkill True]
+        readIORef context >>= \case
+            Nothing -> expectationFailure "expected startup context"
+            Just text ->
+                text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
+
 fakeSkill :: Skill
 fakeSkill = Skill
     { skillName = "deploy"
