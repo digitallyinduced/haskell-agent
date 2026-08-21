@@ -1969,7 +1969,7 @@ replWithDraft env@SessionEnv
                         displayInfo (formatSkillsListing False current invocations) $
                             Text.putStrLn listing
                         continue
-                    ReplPaste{pasteImmediate, pasteCaption} -> do
+                    ReplPaste pasteImmediate pasteCaption -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
                         imagesResult <- readClipboardImages

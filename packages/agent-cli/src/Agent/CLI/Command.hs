@@ -52,10 +52,7 @@ data ReplAction
     | ReplRenameAuto
     | ReplLogin
     | ReplReloadAuth
-    | ReplPaste
-        { pasteImmediate :: !Bool
-        , pasteCaption :: !Text
-        }
+    | ReplPaste !Bool !Text
     | ReplClearAttachments
     | ReplShowAttachments
     | ReplCopyLast
@@ -323,10 +320,7 @@ parsePasteCommand rest =
             ("--send":xs) -> (True, Text.unwords xs)
             ("-s":xs) -> (True, Text.unwords xs)
             _ -> (False, rest)
-    in ReplPaste
-        { pasteImmediate = immediate
-        , pasteCaption = Text.strip caption
-        }
+    in ReplPaste immediate (Text.strip caption)
 
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case

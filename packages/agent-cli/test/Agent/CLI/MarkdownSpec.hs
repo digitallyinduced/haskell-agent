@@ -120,8 +120,12 @@ spec = do
                     , "│" `Text.isInfixOf` l
                     , not ("─" `Text.isInfixOf` l)
                     ]
-            length body `shouldBe` 2
-            Text.length (head body) `shouldBe` Text.length (body !! 1)
+            case body of
+                [headerRow, bodyRow] ->
+                    Text.length headerRow `shouldBe` Text.length bodyRow
+                _ ->
+                    expectationFailure
+                        ("expected exactly two table rows, got " <> show body)
 
         it "renders a basic pipe table" do
             let sample = "| file | status |\n| --- | --- |\n| a.hs | ok |"
