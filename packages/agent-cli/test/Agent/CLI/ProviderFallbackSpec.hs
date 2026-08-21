@@ -61,6 +61,12 @@ spec = do
                 (ProviderError OverloadedError "busy" (Just 30))
                 `shouldBe` []
 
+        it "can continue past a replacement provider with rejected auth" do
+            map (.modelProvider)
+                (fallbackCandidates [XAIProvider] OpenAIProvider
+                    (ProviderError AuthenticationError "rejected" Nothing))
+                `shouldBe` [OpenRouterProvider]
+
 safeHead :: [a] -> Maybe a
 safeHead = \case
     [] -> Nothing

@@ -18,7 +18,7 @@ data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
-    , sessionUnavailableProviders :: ![Provider]
+    , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionPrevious :: !(IORef (Maybe Text))
     , sessionPrinted :: !(IORef Bool)
     , sessionParams :: !(IORef ResponseCreateParams)

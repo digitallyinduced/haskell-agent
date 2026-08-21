@@ -1,13 +1,16 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( TurnResult(..)
-    , runOneTurn
+    ( runOneTurn
     ) where
 
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan)
-import Agent.CLI.ProviderFallback (isUsageExhausted)
+import Agent.CLI.ProviderFallback (isProviderUnavailable)
+import Agent.CLI.ProviderTransition
+    ( PendingTurn(..)
+    , TurnResult(..)
+    )
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
@@ -34,7 +37,6 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
-import Agent.Error (ApiError)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopError(..)
@@ -68,11 +70,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.IO (hIsTerminalDevice, stderr, stdout)
-
-data TurnResult
-    = TurnSucceeded
-    | TurnFailed
-    | TurnUsageExhausted ApiError
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
@@ -146,8 +143,14 @@ runOneTurn env@SessionEnv
             case err of
                 LoopTransport apiError
                     | length afterItems == length beforeItems
-                    , isUsageExhausted apiError ->
-                        pure (TurnUsageExhausted apiError)
+                    , isProviderUnavailable apiError -> do
+                        planState <- readIORef planMode.planStateRef
+                        pure $ TurnProviderUnavailable apiError PendingTurn
+                            { pendingPromptText = promptText
+                            , pendingInputs = inputs
+                            , pendingExitAfter = False
+                            , pendingPlanState = planState
+                            }
                 _ -> do
                     color <- resolveColor stderr
                     putTextLn stderr (formatLoopErrorColored color err)

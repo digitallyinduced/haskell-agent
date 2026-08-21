@@ -1,6 +1,7 @@
 -- | Automatic cross-provider fallback policy.
 module Agent.CLI.ProviderFallback
     ( fallbackCandidates
+    , isProviderUnavailable
     , isUsageExhausted
     , rankedModels
     ) where
@@ -42,7 +43,7 @@ fallbackCandidates
     -> ApiError
     -> [ModelOption]
 fallbackCandidates unavailable current err
-    | not (isUsageExhausted err) = []
+    | not (isProviderUnavailable err) = []
     | otherwise =
         filter
             (\option ->
@@ -58,3 +59,16 @@ isUsageExhausted = \case
     CredentialsExhausted{} -> True
     ProviderError UsageLimitReached _ _ -> True
     _ -> False
+
+-- | Failures for which rebuilding the same provider cannot make progress.
+-- Authentication failures are included so an automatic transition whose
+-- replacement backend rejects its credentials can continue to another
+-- configured provider.
+isProviderUnavailable :: ApiError -> Bool
+isProviderUnavailable err
+    | isUsageExhausted err = True
+    | otherwise = case err of
+        HttpError status _ -> status == 401 || status == 403
+        ProviderError AuthenticationError _ _ -> True
+        ProviderError PermissionError _ _ -> True
+        _ -> False
