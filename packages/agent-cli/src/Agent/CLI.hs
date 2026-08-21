@@ -41,6 +41,7 @@ import Agent.CLI.Btw
     ( BtwBackendFactory
     , formatBtwError
     , runBtwWithCancel
+    , trimDanglingToolSuffix
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -123,6 +124,7 @@ import Agent.CLI.Status
     )
 import Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
+    , forkSubagentTranscript
     , loadSubagentState
     , saveSubagentState
     )
@@ -221,11 +223,12 @@ import Agent.Subagents
     , getSubagentCwd
     , getSubagentIdentity
     , getTaskPath
+    , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
     , restoreSubagent
-    , restoreSubagentAt
-    , restoreSubagentAtWithCwd
+    , restoreSubagentAtStatus
+    , restoreSubagentAtWithCwdStatus
     , restoreSubagentWithCwd
     , setPreviousResponseId
     , setSubagentOnComplete
@@ -242,11 +245,16 @@ import Agent.Tools.Grok.Task
     , GrokSubagentSpecs
     , defaultSubagentType
     , lookupAgentModel
+    , lookupAgentReasoningEffort
     , lookupAgentType
     , recordAgentSpec
     )
 import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
+import Agent.Tools.MultiAgents
+    ( CollaborationSpawnOptions(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree(..)
+    )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeHooks
@@ -568,6 +576,7 @@ runAgent options transition = do
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
+    subagentForkSource <- newIORef (Nothing :: Maybe (IORef [ResponseItem]))
     pendingNotices <- newIORef ([] :: [TurnInput])
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
@@ -596,6 +605,10 @@ runAgent options transition = do
                                 Left err -> pure (Left err)
                                 Right () -> pure (Right ())
                         }
+            , multiPrepareSpawn = Just
+                (prepareCollaborationSpawn
+                    subagentSessions subagentStoreRoot agentTypesRef
+                    subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
@@ -607,8 +620,9 @@ runAgent options transition = do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
-                        persistSubagentSnapshot subagentStoreRoot ctx.multiRegistry
-                            agentTypesRef agentId session.subSessionTranscript
+                        persistSubagentSnapshotWithStatus
+                            subagentStoreRoot ctx.multiRegistry agentTypesRef
+                            agentId status session.subSessionTranscript
                     Nothing -> pure ()
         Nothing -> pure ()
     let claimCurrentSession handle
@@ -648,9 +662,10 @@ runAgent options transition = do
         closeAll = do
             case multiCtx of
                 Just ctx -> do
-                    closeSubagentRegistry ctx.multiRegistry
+                    interruptActiveSubagents ctx.multiRegistry
                     flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
                         subagentSessions agentTypesRef
+                    closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
@@ -666,6 +681,7 @@ runAgent options transition = do
                 Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
+        writeIORef subagentForkSource (Just transcriptRef)
         prompt <- loadPrompt options
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
@@ -704,10 +720,7 @@ runAgent options transition = do
                                                 policy
                                                 planHooks
                                                 paramsRef
-                                                wsLock
                                                 loaded.loadedTokenProvider
-                                                wsHealthy
-                                                conn
                                                 ctx.multiRegistry
                                                 subagentSessions
                                                 subagentStoreRoot
@@ -2353,6 +2366,30 @@ syncStoreRootFromPlan storeRootRef planMode = do
                 Just dir -> writeIORef storeRootRef (Just dir)
                 Nothing -> pure ()
 
+prepareCollaborationSpawn
+    :: IORef (Map SubagentId SubagentSession)
+    -> SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> IORef (Maybe (IORef [ResponseItem]))
+    -> SubagentId
+    -> CollaborationSpawnOptions
+    -> IO ()
+prepareCollaborationSpawn
+        sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
+    recordAgentSpec typesRef agentId GrokSubagentSpec
+        { agentType = defaultSubagentType
+        , modelOverride = spawnOptions.collaborationModel
+        , reasoningEffortOverride =
+            spawnOptions.collaborationReasoningEffort
+        }
+    session <-
+        lookupOrCreateSubagentSession
+            sessionsRef storeRootRef typesRef agentId
+    source <- readIORef sourceRef
+    sourceItems <- maybe (pure []) readIORef source
+    writeIORef session.subSessionTranscript
+        (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
+
 persistSubagentSnapshot
     :: SubagentStoreRoot
     -> SubagentRegistry
@@ -2361,18 +2398,34 @@ persistSubagentSnapshot
     -> IORef [ResponseItem]
     -> IO ()
 persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = do
+    status <- getStatus registry agentId
+    persistSubagentSnapshotWithStatus
+        storeRootRef registry typesRef agentId status transcriptRef
+
+persistSubagentSnapshotWithStatus
+    :: SubagentStoreRoot
+    -> SubagentRegistry
+    -> GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentStatus
+    -> IORef [ResponseItem]
+    -> IO ()
+persistSubagentSnapshotWithStatus
+        storeRootRef registry typesRef agentId status transcriptRef = do
     mroot <- readIORef storeRootRef
     case mroot of
         Nothing -> pure ()
         Just sessionDir -> do
-            items <- readIORef transcriptRef
+            items <- trimDanglingToolSuffix <$> readIORef transcriptRef
             previous <- getPreviousResponseId registry agentId
             agentType <- lookupAgentType typesRef agentId
             agentModel <- lookupAgentModel typesRef agentId
+            reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
             agentCwd <- getSubagentCwd registry agentId
             identity <- getSubagentIdentity registry agentId
             _ <- saveSubagentState
-                sessionDir agentId items previous agentType agentModel agentCwd identity
+                sessionDir agentId items previous status agentType agentModel
+                reasoningEffort agentCwd identity
             pure ()
 
 flushAllSubagentSnapshots
@@ -2426,6 +2479,8 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                         recordAgentSpec typesRef agentId GrokSubagentSpec
                                             { agentType
                                             , modelOverride = meta.diskAgentModel
+                                            , reasoningEffortOverride =
+                                                meta.diskReasoningEffort
                                             }
                                     Nothing -> pure ()
                                 transcript <- newIORef items
@@ -2438,24 +2493,26 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                 pure (Right ())
     reopenPersisted meta =
         case meta.diskTaskPath of
-            Nothing ->
-                reopenInMemory meta.diskPreviousResponseId meta.diskCwd
+            Nothing -> restoreAt taskPathRoot
             Just pathText ->
                 case parseTaskPath pathText of
                     Left err -> pure (Left err)
-                    Right taskPath -> do
-                        let restoreAt =
-                                case meta.diskCwd of
-                                    Just childCwd ->
-                                        restoreSubagentAtWithCwd
-                                            registry childCwd
-                                    Nothing ->
-                                        restoreSubagentAt registry
-                        restoreAt
-                            agentId meta.diskParentId taskPath
-                            (fromMaybe 1 meta.diskDepth)
-                            Nothing meta.diskPreviousResponseId
-                            >>= pure . fmap (const ())
+                    Right taskPath -> restoreAt taskPath
+      where
+        restoredStatus = fromMaybe (Completed Nothing) meta.diskStatus
+        restoreAt taskPath = do
+            let restore =
+                    case meta.diskCwd of
+                        Just childCwd ->
+                            restoreSubagentAtWithCwdStatus
+                                registry childCwd
+                        Nothing ->
+                            restoreSubagentAtStatus registry
+            restore
+                agentId meta.diskParentId taskPath
+                (fromMaybe 1 meta.diskDepth)
+                Nothing meta.diskPreviousResponseId restoredStatus
+                >>= pure . fmap (const ())
     reopenInMemory previous requestedCwd = do
         restored <- case requestedCwd of
             Just childCwd ->
@@ -2494,28 +2551,31 @@ freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEv
     withCodexWsRetrying provider \conn _credential ->
         let Backend submit = openAiBackend conn getParams transcript
         in submit previous inputs onEvent
--- | Child Codex agent: per-agent transcript (retained across send_input), same
--- WS (locked), nested multi-agent tools.
+-- | Child Codex agent: per-agent transcript retained across follow-ups,
+-- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
     :: CliOptions
     -> ApprovalPolicy
     -> PlanModeHooks
     -> IORef ResponseCreateParams
-    -> MVar ()
     -> TokenProvider
-    -> IORef Bool
-    -> CodexConn
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef sendToRoot =
+runCodexSubagent options policy planHooks paramsRef tokenProvider registry sessionsRef storeRootRef typesRef sendToRoot =
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
         childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
+        session <-
+            lookupOrCreateSubagentSession
+                sessionsRef storeRootRef typesRef env.subId
+        nestedForkSource <- newIORef (Just session.subSessionTranscript)
+        childModel <- lookupAgentModel typesRef env.subId
+        childEffort <- lookupAgentReasoningEffort typesRef env.subId
         -- Inherit soft-cancel from the registry-owned child flag.
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
@@ -2526,20 +2586,25 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
+                , multiPrepareSpawn = Just
+                    (prepareCollaborationSpawn
+                        sessionsRef storeRootRef typesRef nestedForkSource)
                 , multiSendToRoot = sendToRoot
                 }
         -- Child tools create their own PlanModeEnv; sync store root from parent
         -- params is handled by noteSessionDir on the parent path. If the parent
         -- already has a session dir in storeRootRef, we persist; otherwise skip.
-        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
         syncStoreRootFromPlan storeRootRef coding.codingPlanMode
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
-            let model = fromMaybe (defaultModelFor OpenAIProvider) parentParams.model
-                effort = case parentParams.reasoning of
+            let model = fromMaybe
+                    (fromMaybe (defaultModelFor OpenAIProvider) parentParams.model)
+                    childModel
+                inheritedEffort = case parentParams.reasoning of
                     Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
                     Nothing -> defaultEffortFor OpenAIProvider
+                effort = fromMaybe inheritedEffort childEffort
                 baseInstructions =
                     fromMaybe
                         (systemPrompt OpenAIProvider env.subCwd today True)
@@ -2556,9 +2621,8 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
             toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
             let backend =
-                    lockedOpenAiBackend wsLock tokenProvider connectionHealthy conn
-                        (readIORef childParamsRef)
-                        session.subSessionTranscript
+                    freshOpenAiBackend tokenProvider
+                        (readIORef childParamsRef) session.subSessionTranscript
                 config = LoopConfig
                     { loopBackend = backend
                     , loopTools = toolRegistry
@@ -2572,7 +2636,9 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
             case result of
                 Right loopResult ->
                     setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ -> pure ()
+                Left _ ->
+                    modifyIORef' session.subSessionTranscript
+                        trimDanglingToolSuffix
             persistSubagentSnapshot storeRootRef registry typesRef env.subId
                 session.subSessionTranscript
             pure result
@@ -2595,6 +2661,10 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
         childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
+        session <-
+            lookupOrCreateSubagentSession
+                sessionsRef storeRootRef typesRef env.subId
+        nestedForkSource <- newIORef (Just session.subSessionTranscript)
         let childToolEnv = childEnv { toolCancel = env.subCancel }
             childCtx = MultiAgentContext
                 { multiRegistry = registry
@@ -2604,20 +2674,24 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
+                , multiPrepareSpawn = Just
+                    (prepareCollaborationSpawn
+                        sessionsRef storeRootRef typesRef nestedForkSource)
                 , multiSendToRoot = Nothing
                 }
-        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
         childModel <- lookupAgentModel typesRef env.subId
+        childEffort <- lookupAgentReasoningEffort typesRef env.subId
         coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
             let model = fromMaybe
                     (fromMaybe (defaultModelFor provider) parentParams.model)
                     childModel
-                effort = case parentParams.reasoning of
+                inheritedEffort = case parentParams.reasoning of
                     Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
                     Nothing -> defaultEffortFor provider
+                effort = fromMaybe inheritedEffort childEffort
                 baseInstructions = systemPrompt provider env.subCwd today True
                 instructions =
                     baseInstructions
@@ -2644,7 +2718,9 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
             case result of
                 Right loopResult ->
                     setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ -> pure ()
+                Left _ ->
+                    modifyIORef' session.subSessionTranscript
+                        trimDanglingToolSuffix
             persistSubagentSnapshot storeRootRef registry typesRef env.subId
                 session.subSessionTranscript
             pure result
@@ -2696,6 +2772,8 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
                     recordAgentSpec typesRef agentId GrokSubagentSpec
                         { agentType
                         , modelOverride = meta >>= (.diskAgentModel)
+                        , reasoningEffortOverride =
+                            meta >>= (.diskReasoningEffort)
                         }
                 Nothing -> pure ()
             let session = SubagentSession { subSessionTranscript = transcript }

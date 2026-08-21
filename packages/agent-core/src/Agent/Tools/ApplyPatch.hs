@@ -135,9 +135,15 @@ parseChunks lines_
             (eof, remaining) = case afterBody of
                 (line : rest) | Text.strip line == "*** End of File" -> (True, rest)
                 _ -> (False, afterBody)
-        chunk <- buildChunk header body eof
-        (more, leftover) <- parseChunks remaining
-        Right (chunk : more, leftover)
+        case (header, body, eof, lines_) of
+            (Nothing, [], False, line : _) ->
+                Left $
+                    "Invalid update line; expected '@@', '+', '-', or space prefix: "
+                        <> Text.take 200 line
+            _ -> do
+                chunk <- buildChunk header body eof
+                (more, leftover) <- parseChunks remaining
+                Right (chunk : more, leftover)
 
 nextHunk :: [Text] -> Bool
 nextHunk (line : _) =
