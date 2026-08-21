@@ -4,7 +4,8 @@ module Agent.XAI.Stream
     , buildResponse
     ) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), errorTypeFromText)
+import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
 import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.Responses.Types
@@ -94,8 +95,18 @@ firstFailure = Maybe.listToMaybe . Maybe.mapMaybe failure
     failure = \case
         ResponseErrorEvent { streamError } -> Just (classifyStreamError streamError)
         ResponseNestedErrorEvent { streamError } -> Just (classifyStreamError streamError)
-        ResponseFailedEvent { response } -> Just (ConnectionError (failedResponseMessage response))
+        ResponseFailedEvent { response } -> Just (failedResponseError response)
         _ -> Nothing
+
+failedResponseError :: Response -> ApiError
+failedResponseError response = case response.error of
+    Just responseError ->
+        mkOpenAIError
+            (errorTypeFromText responseError.code)
+            responseError.message
+            (Just responseError.code)
+            Nothing
+    Nothing -> ConnectionError (failedResponseMessage response)
 
 failedResponseMessage :: Response -> Text
 failedResponseMessage response = case response.error of

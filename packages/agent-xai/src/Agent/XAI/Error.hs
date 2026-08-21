@@ -3,6 +3,7 @@ module Agent.XAI.Error
     ( classifyFailure
     , classifyStreamError
     , isFreeLimitBody
+    , isUsageBalanceBody
     , isCapacityBody
     , capacityRetryAfterSeconds
     ) where
@@ -22,9 +23,11 @@ capacityRetryAfterSeconds = 30
 classifyFailure :: Int -> Maybe Int -> Text -> ApiError
 classifyFailure status retryAfterHeader body
     | status == 426 =
-        ProviderError InvalidRequestError
+        ProviderError ClientUpdateRequired
             ("xAI proxy rejected the client version: " <> Text.take 500 body)
             Nothing
+    | isUsageBalanceBody body =
+        ProviderError UsageBalanceExhausted (Text.take 500 body) retryAfterHeader
     | isFreeLimitBody body =
         ProviderError UsageLimitReached (Text.take 500 body) retryAfterHeader
     | isCapacityBody body =
@@ -43,12 +46,14 @@ classifyFailure status retryAfterHeader body
 -- | Convert a typed Responses streaming error into the shared error channel.
 classifyStreamError :: ResponseStreamError -> ApiError
 classifyStreamError streamError
+    | isUsageBalanceBody streamError.message =
+        ProviderError UsageBalanceExhausted streamError.message streamError.retryAfter
     | isFreeLimitBody streamError.message =
         ProviderError UsageLimitReached streamError.message streamError.retryAfter
     | isCapacityBody streamError.message =
         ProviderError OverloadedError streamError.message
             (streamError.retryAfter `orElse` Just capacityRetryAfterSeconds)
-    | Just errorType <- streamError.errorType =
+    | Just errorType <- streamError.errorType `orElse` streamError.code =
         mkOpenAIError
             (errorTypeFromText errorType)
             streamError.message
@@ -66,9 +71,14 @@ isFreeLimitBody :: Text -> Bool
 isFreeLimitBody body =
     "grok.com/supergrok" `Text.isInfixOf` lowered
         || "upgrade to a grok subscription" `Text.isInfixOf` lowered
-        || "grok build usage balance exhausted" `Text.isInfixOf` lowered
   where
     lowered = Text.toLower body
+
+-- | Grok's subscription proxy reports an exhausted metered balance as a
+-- flat HTTP 402 body instead of an OpenAI-shaped error object.
+isUsageBalanceBody :: Text -> Bool
+isUsageBalanceBody body =
+    "grok build usage balance exhausted" `Text.isInfixOf` Text.toLower body
 
 -- | Detect capacity / priority-processing pressure from unstructured xAI
 -- stream and HTTP bodies. These are short-lived overloads, not quota caps.

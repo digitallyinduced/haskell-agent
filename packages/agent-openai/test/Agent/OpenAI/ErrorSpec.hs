@@ -73,13 +73,49 @@ spec = do
             classifyHttpFailure 429 "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}"
                 `shouldBe` ProviderError RateLimitError "slow down" Nothing
 
+        it "classifies Codex response error codes exhaustively" do
+            let classify code =
+                    mkOpenAIError ApiErrorType "failed" (Just code) Nothing
+            classify "context_length_exceeded"
+                `shouldBe` ProviderError ContextWindowExceeded
+                    "failed (code: context_length_exceeded)" Nothing
+            classify "invalid_image"
+                `shouldBe` ProviderError InvalidImageError
+                    "failed (code: invalid_image)" Nothing
+            classify "insufficient_quota"
+                `shouldBe` ProviderError QuotaExceeded
+                    "failed (code: insufficient_quota)" Nothing
+            classify "usage_not_included"
+                `shouldBe` ProviderError UsageNotIncluded
+                    "failed (code: usage_not_included)" Nothing
+            classify "cyber_policy"
+                `shouldBe` ProviderError CyberPolicyError
+                    "failed (code: cyber_policy)" Nothing
+            classify "misalignment_policy_violation"
+                `shouldBe` ProviderError MisalignmentPolicyViolation
+                    "failed (code: misalignment_policy_violation)" Nothing
+
+        it "parses flat provider bodies and prose retry delays" do
+            classifyHttpFailure 400
+                "{\"code\":\"invalid_image\",\"error\":\"Invalid PNG image.\"}"
+                `shouldBe` ProviderError InvalidImageError
+                    "Invalid PNG image. (code: invalid_image)"
+                    Nothing
+            classifyHttpFailure 429
+                "{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit exceeded. Please try again in 1.898s.\"}}"
+                `shouldBe` ProviderError RateLimitError
+                    "Rate limit exceeded. Please try again in 1.898s. (code: rate_limit_exceeded)"
+                    (Just 2)
+            classifyHttpFailure 429 "{\"type\":\"error\",\"error\":\"slow down\"}"
+                `shouldBe` ProviderError RateLimitError "slow down" Nothing
+
         it "falls back to HttpError for non-JSON bodies" do
             classifyHttpFailure 502 "Bad Gateway"
                 `shouldBe` HttpError 502 "Bad Gateway"
 
-        it "falls back to HttpError for JSON bodies without an error object" do
+        it "types JSON detail bodies using the HTTP status" do
             classifyHttpFailure 429 "{\"detail\":\"too many requests\"}"
-                `shouldBe` HttpError 429 "{\"detail\":\"too many requests\"}"
+                `shouldBe` ProviderError RateLimitError "too many requests" Nothing
 
     describe "isInlineRetryableProviderError" do
         it "retries overload, server, connection, and transient HTTP failures" do
