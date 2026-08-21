@@ -182,7 +182,11 @@ readFullscreenLine
 readFullscreenLine runtime skills prompt initial = do
     writeBChan runtime.runtimeEvents (AppSetSkillCommands skills)
     emitUiEvent runtime (UiSetPrompt prompt)
-    emitUiEvent runtime (UiSetDraft initial (Text.length initial))
+    -- Keep anything the user started typing while the previous turn was
+    -- running. Non-empty explicit drafts (for example after cycling mode or
+    -- pasting an attachment) still take precedence.
+    when (not (Text.null initial)) $
+        emitUiEvent runtime (UiSetDraft initial (Text.length initial))
     emitUiEvent runtime (UiSetAwaitingInput True)
     atomically (readTQueue runtime.runtimeInput)
 
@@ -759,8 +763,8 @@ drawFooter state =
                     FocusScrollback ->
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
-                        | state.appUi.uiRunning ->
-                            "Esc/Ctrl+C cancel  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                        | not state.appUi.uiAwaitingInput ->
+                            "Enter queue  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
                         | otherwise ->
                             "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
 
@@ -1172,13 +1176,7 @@ handleComposerKey event = do
     state <- get
     let ui = state.appUi
         slashMenu = currentSlashMenu state
-    if not ui.uiAwaitingInput
-        && isDraftMutation event
-        && not (isCtrlDEof event ui.uiDraft)
-        then modifyUi
-            (UiSetNotice
-                (Just "Agent is busy; wait for the prompt or cancel the turn."))
-        else case event of
+    case event of
         V.EvKey (V.KChar 'q') [V.MCtrl] ->
             submitRaw ReplEof
         V.EvKey (V.KChar 'd') [V.MCtrl]
@@ -1219,11 +1217,7 @@ handleComposerKey event = do
         V.EvKey V.KEnter [] ->
             case slashMenu of
                 Just menu -> handleSlashEnter menu
-                Nothing
-                    | ui.uiAwaitingInput -> submitDraft
-                    | otherwise -> modifyUi
-                        (UiSetNotice
-                            (Just "Agent is running; press Esc or Ctrl+C to cancel."))
+                Nothing -> submitDraft
         V.EvKey V.KBS [] ->
             deleteBefore
         V.EvKey V.KBS modifiers
@@ -1312,6 +1306,7 @@ handleComposerKey event = do
     submitDraft = do
         state <- get
         let draft = state.appUi.uiDraft
+            queued = not state.appUi.uiAwaitingInput
         if Text.null (Text.strip draft)
             then pure ()
             else do
@@ -1323,15 +1318,25 @@ handleComposerKey event = do
                             else ReplText draft
                 modify' \current ->
                     current
-                        { appUi = if isLocalCommand state.appSkillCommands draft
-                            then reduceUi
-                                (UiSetDraft "" 0)
-                                (reduceUi
-                                    (UiSetAwaitingInput False)
-                                    current.appUi)
-                            else reduceUi
-                                (UiUserSubmitted draft)
-                                current.appUi
+                        { appUi =
+                            let submitted =
+                                    if isLocalCommand
+                                        state.appSkillCommands
+                                        draft
+                                        then reduceUi
+                                            (UiSetDraft "" 0)
+                                            (reduceUi
+                                                (UiSetAwaitingInput False)
+                                                current.appUi)
+                                        else reduceUi
+                                            (UiUserSubmitted draft)
+                                            current.appUi
+                            in if queued
+                                then reduceUi
+                                    (UiSetNotice
+                                        (Just "Queued for the next turn."))
+                                    submitted
+                                else submitted
                         , appPasted = False
                         , appHistory = draft : current.appHistory
                         , appHistoryIndex = Nothing
@@ -1341,7 +1346,7 @@ handleComposerKey event = do
 
     cancelOrClear = do
         state <- get
-        if state.appUi.uiRunning
+        if not state.appUi.uiAwaitingInput
             then do
                 liftIO state.appRuntime.runtimeCancel
                 modifyUi (UiSetNotice (Just "Cancelling…"))
@@ -1601,24 +1606,6 @@ decodePaste =
                 || character == '\t'
                 || not (isControl character))
         . Text.decodeUtf8With lenientDecode
-
-isDraftMutation :: V.Event -> Bool
-isDraftMutation = \case
-    V.EvPaste _ -> True
-    V.EvKey V.KBS _ -> True
-    V.EvKey V.KDel _ -> True
-    V.EvKey V.KEnter modifiers -> V.MShift `elem` modifiers
-    V.EvKey (V.KChar character) modifiers
-        | V.MCtrl `elem` modifiers ->
-            character `elem` ['d', 'k', 'u', 'w']
-        | otherwise -> null modifiers
-    _ -> False
-
-isCtrlDEof :: V.Event -> Text -> Bool
-isCtrlDEof event draft = case event of
-    V.EvKey (V.KChar 'd') modifiers ->
-        V.MCtrl `elem` modifiers && Text.null draft
-    _ -> False
 
 currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
