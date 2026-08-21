@@ -5,6 +5,7 @@ import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
+import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
@@ -28,6 +29,7 @@ main = hspec do
     JsonTextSpec.spec
     LoopSpec.spec
     ProjectInstructionsSpec.spec
+    ResourceScopeSpec.spec
     SubagentsSpec.spec
     TaskPathSpec.spec
     ToolArgsSpec.spec
