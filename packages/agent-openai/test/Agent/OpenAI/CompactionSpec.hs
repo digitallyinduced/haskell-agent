@@ -54,6 +54,15 @@ spec = do
                 history = [user "old", trigger, user "recent"]
             compactTranscriptAtLastCheckpoint history `shouldBe` history
 
+    describe "hasCompactionCheckpoint" do
+        it "recognizes remote and local compaction snapshots" do
+            hasCompactionCheckpoint [checkpoint "remote"] `shouldBe` True
+            hasCompactionCheckpoint
+                (buildLocalCompactedHistory 1 [user "old"] "local summary")
+                `shouldBe` True
+            hasCompactionCheckpoint [assistant "ordinary response"]
+                `shouldBe` False
+
     describe "isCompactSessionTurn" do
         it "recognizes compact markers" do
             isCompactSessionTurn "/compact" `shouldBe` True

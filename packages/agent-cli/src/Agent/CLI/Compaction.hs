@@ -5,6 +5,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWith
     , runProviderCompact
+    , shouldFallbackFromRemoteCompact
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -18,6 +19,7 @@ import Agent.OpenAI.CompactClient
     ( CompactRequest(..)
     , compactConversation
     )
+import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
     ( buildLocalCompactedHistory
     , compactTranscriptAtLastCheckpoint
@@ -31,8 +33,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Agent.Provider
-    ( Credential
-    , Provider(..)
+    ( Provider(..)
     , TokenProvider
     , runWithTokenProvider
     )
@@ -116,17 +117,30 @@ compactOpenAI tokenProvider params history before focus = do
                     fromMaybe True params.parallelToolCalls
                 , compactReasoning = params.reasoning
                 }
-    items <- withExceptT formatApiError $
-        ExceptT (compactConversation provider request)
-    pure CompactOutcome
-        { compactBeforeTokens = before
-        , compactAfterTokens = estimateItemsTokens items
-        , compactHistory = items
-        , compactSummary =
-            "remote compact returned "
-                <> Text.pack (show (length items))
-                <> " items"
-        }
+    remoteResult <- lift (compactConversation provider request)
+    case remoteResult of
+        Right items ->
+            pure CompactOutcome
+                { compactBeforeTokens = before
+                , compactAfterTokens = estimateItemsTokens items
+                , compactHistory = items
+                , compactSummary =
+                    "remote compact returned "
+                        <> Text.pack (show (length items))
+                        <> " items"
+                }
+        Left remoteError
+            | shouldFallbackFromRemoteCompact remoteError ->
+                withExceptT (formatFallbackError remoteError) $
+                    summarizeLocal
+                        OpenAI.createCodexMessageWithProvider
+                        provider
+                        params
+                        history
+                        before
+                        focus
+            | otherwise ->
+                throwE (formatApiError remoteError)
 
 compactLocalXai
     :: Maybe TokenProvider
@@ -139,7 +153,9 @@ compactLocalXai tokenProvider params history before focus = do
     provider <- requireTokenProvider XAIProvider tokenProvider
     options <- lift XAI.clientOptionsFromEnv
     summarizeLocal
-        (XAI.createResponseWith options)
+        (\tokens request ->
+            runWithTokenProvider tokens \credential ->
+                XAI.createResponseWith options credential request)
         provider
         params
         history
@@ -157,7 +173,9 @@ compactLocalOpenRouter tokenProvider params history before focus = do
     provider <- requireTokenProvider OpenRouterProvider tokenProvider
     options <- lift OpenRouter.clientOptionsFromEnv
     summarizeLocal
-        (OpenRouter.createResponseWith options)
+        (\tokens request ->
+            runWithTokenProvider tokens \credential ->
+                OpenRouter.createResponseWith options credential request)
         provider
         params
         history
@@ -165,7 +183,7 @@ compactLocalOpenRouter tokenProvider params history before focus = do
         focus
 
 summarizeLocal
-    :: (Credential -> ResponseCreateParams -> IO (Either ApiError Response))
+    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
     -> TokenProvider
     -> ResponseCreateParams
     -> [ResponseItem]
@@ -187,9 +205,7 @@ summarizeLocal send provider params history before focus = do
                 summaryParams
                 (history <> [userTextItem summaryPrompt])
     response <- withExceptT formatApiError $
-        ExceptT $
-            runWithTokenProvider provider \credential ->
-                send credential request
+        ExceptT (send provider request)
     summary <- case assistantTextFromResponse response of
         Nothing -> throwE "compaction produced no summary text"
         Just text -> pure text
@@ -274,6 +290,36 @@ providerLabel = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
+
+-- | The remote compact endpoint can be unavailable or reject payloads/models
+-- that the normal Responses endpoint accepts. Fall back locally for those
+-- endpoint-specific failures, but preserve terminal account, policy, quota,
+-- and context-window failures.
+shouldFallbackFromRemoteCompact :: ApiError -> Bool
+shouldFallbackFromRemoteCompact = \case
+    ConnectionError{} -> True
+    JsonDecodeError{} -> True
+    HttpError status _ ->
+        status `elem` [400, 404, 408, 409, 413, 422, 425]
+            || (status >= 500 && status < 600)
+    ProviderError errorType _ _ ->
+        errorType `elem`
+            [ NotFoundError
+            , PreviousResponseNotFound
+            , ApiErrorType
+            , OverloadedError
+            , ServiceUnavailableError
+            , PayloadTooLargeError
+            , WebSocketConnectionLimitReached
+            ]
+    CredentialsExhausted{} -> False
+
+formatFallbackError :: ApiError -> Text -> Text
+formatFallbackError remoteError localError =
+    "remote compact failed: "
+        <> formatApiError remoteError
+        <> "; local fallback failed: "
+        <> localError
 
 formatApiError :: ApiError -> Text
 formatApiError err = Text.pack (show err)
