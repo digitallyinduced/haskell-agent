@@ -4,6 +4,7 @@ module Agent.CLI.Plan
     ( cliPlanHooks
     , extractProposedPlan
     , stripProposedPlan
+    , renderPlanMarkdown
     , parsePlanDecisionAnswer
     ) where
 
@@ -15,8 +16,11 @@ import Agent.CLI.Input
     , readReplLine
     )
 import Agent.CLI.Interrupt (InterruptState)
+import Agent.CLI.Markdown (renderMarkdown)
 import Agent.CLI.Style
-    ( roleMuted
+    ( agentBackground
+    , paintBackgroundLines
+    , roleMuted
     , rolePrompt
     , roleSuccess
     , roleWarn
@@ -68,7 +72,7 @@ decideExit interrupt resolveColor planBody = do
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
     putTextLn stderr (roleMuted color "── plan ──")
-    Text.hPutStrLn stderr planBody
+    Text.hPutStrLn stderr (renderPlanMarkdown color planBody)
     hFlush stderr
     putTextLn stderr (roleMuted color "──────────")
     if not isTty
@@ -153,6 +157,10 @@ formatChoiceLine color selected label
             ]
             label
     | otherwise = roleMuted color label
+
+renderPlanMarkdown :: Bool -> Text -> Text
+renderPlanMarkdown color text =
+    paintBackgroundLines color agentBackground (renderMarkdown color text)
 
 parsePlanDecisionAnswer :: Text -> Maybe PlanDecision
 parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of
