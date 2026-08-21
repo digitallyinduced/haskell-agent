@@ -4,6 +4,7 @@ module Agent.TUI.Markdown
     , InlineStyle(..)
     , inlinePlainText
     , markdownWidget
+    , markdownWidgetWithCodeControls
     , parseInline
     ) where
 
@@ -72,55 +73,73 @@ data InlineSpan = InlineSpan
     deriving (Eq, Show)
 
 markdownWidget :: Text -> Widget n
-markdownWidget input =
-    vBox (renderLines False (Text.lines input))
+markdownWidget =
+    markdownWidgetWithCodeControls \_ language ->
+        if Text.null language
+            then emptyWidget
+            else withAttr Theme.mutedAttr (txt language)
 
-renderLines :: Bool -> [Text] -> [Widget n]
-renderLines _ [] = []
-renderLines False lines_
+-- | Render Markdown, allowing callers to add an interactive control to each
+-- fenced code block header. Code block indices are one-based.
+markdownWidgetWithCodeControls
+    :: (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithCodeControls codeHeader input =
+    vBox (renderLines codeHeader 1 False (Text.lines input))
+
+renderLines
+    :: (Int -> Text -> Widget n)
+    -> Int
+    -> Bool
+    -> [Text]
+    -> [Widget n]
+renderLines _ _ _ [] = []
+renderLines codeHeader codeIndex False lines_
     | Just (table, rest) <- takeTable lines_ =
-        table : renderLines False rest
-renderLines inFence (line : rest)
+        table : renderLines codeHeader codeIndex False rest
+renderLines codeHeader codeIndex inFence (line : rest)
     | isFence line =
         let language = Text.strip (Text.drop 3 (Text.stripStart line))
-            label
-                | inFence || Text.null language = []
-                | otherwise =
-                    [withAttr Theme.mutedAttr (txt language)]
-        in label <> renderLines (not inFence) rest
+        in if inFence
+            then renderLines codeHeader codeIndex False rest
+            else
+                codeHeader codeIndex language
+                    : renderLines codeHeader (codeIndex + 1) True rest
     | inFence =
         withAttr Theme.codeAttr
             (padLeftRight 1 (txt line))
-            : renderLines True rest
+            : renderLines codeHeader codeIndex True rest
     | Just heading <- stripHeading line =
         withAttr Theme.headingAttr
             (padTop (Pad 1) (inlineWidget (parseInline heading)))
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just item <- stripBullet line =
         hBox
             [ withAttr Theme.headingAttr (txt "• ")
             , inlineWidget (parseInline item)
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just (number, item) <- stripOrdered line =
         hBox
             [ withAttr Theme.headingAttr (txt (number <> ". "))
             , inlineWidget (parseInline item)
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just quote <- Text.stripPrefix "> " (Text.stripStart line) =
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
             , withAttr Theme.mutedAttr (inlineWidget (parseInline quote))
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Text.null (Text.strip line) =
-        txt " " : renderLines False rest
+        txt " " : renderLines codeHeader codeIndex False rest
     | isThematicBreak line =
         withAttr Theme.mutedAttr (fill '─')
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | otherwise =
-        inlineWidget (parseInline line) : renderLines False rest
+        inlineWidget (parseInline line)
+            : renderLines codeHeader codeIndex False rest
 
 isFence :: Text -> Bool
 isFence line =
