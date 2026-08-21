@@ -360,8 +360,7 @@ withRenderConfigNative showThinking color native action = do
     activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
-    markdownBuffer <- newIORef ""
-    markdownContext <- newIORef Nothing
+    markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
@@ -376,8 +375,7 @@ withRenderConfigNative showThinking color native action = do
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
-                , renderMarkdownBuffer = markdownBuffer
-                , renderMarkdownContext = markdownContext
+                , renderMarkdownState = markdownState
                 , renderLiveActive = liveActive
                 , renderLock = lock
                 , renderStdout = handle

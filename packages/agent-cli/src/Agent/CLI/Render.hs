@@ -1,8 +1,10 @@
 -- | Stream renderer and mutating-tool approval prompts.
 module Agent.CLI.Render
-    ( RenderConfig(..)
+    ( MarkdownStreamState
+    , RenderConfig(..)
     , clearThinking
     , commitThinking
+    , emptyMarkdownStreamState
     , formatActivityLine
     , formatElapsed
     , formatLoopError
@@ -82,10 +84,7 @@ data RenderConfig = RenderConfig
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
-    -- | Unemitted suffix beginning at a possibly incomplete inline construct.
-    , renderMarkdownBuffer :: !(IORef Text)
-    -- | Last visible source character emitted before 'renderMarkdownBuffer'.
-    , renderMarkdownContext :: !(IORef (Maybe Char))
+    , renderMarkdownState :: !(IORef MarkdownStreamState)
     -- | True after assistant text has been streamed for the current round.
     , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
@@ -96,6 +95,14 @@ data RenderConfig = RenderConfig
     , renderStartedAt :: !(IORef (Maybe UTCTime))
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     }
+
+data MarkdownStreamState = MarkdownStreamState
+    { pending :: !Text
+    , context :: !(Maybe Char)
+    }
+
+emptyMarkdownStreamState :: MarkdownStreamState
+emptyMarkdownStreamState = MarkdownStreamState "" Nothing
 
 -- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
 thinkingMaxWidth :: Int
@@ -121,8 +128,7 @@ renderEventUnlocked config = \case
         appendReasoningUnlocked config delta
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
-        writeIORef config.renderMarkdownBuffer ""
-        writeIORef config.renderMarkdownContext Nothing
+        writeIORef config.renderMarkdownState emptyMarkdownStreamState
         writeIORef config.renderLiveActive False
         writeIORef config.renderReasoningBuffer ""
         writeIORef config.renderActivityRef "Thinking…"
@@ -173,15 +179,15 @@ streamAssistantDelta config delta
     | Text.null delta = pure ()
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
-        pending <- readIORef config.renderMarkdownBuffer
-        context <- readIORef config.renderMarkdownContext
-        let (ready, pending', nextContext) =
-                splitMarkdownFragment context (pending <> safe)
-        writeIORef config.renderMarkdownBuffer pending'
+        (ready, context) <-
+            atomicModifyIORef' config.renderMarkdownState \state ->
+                let (ready, pending', nextContext) =
+                        splitMarkdownFragment state.context (state.pending <> safe)
+                    state' = MarkdownStreamState pending' nextContext
+                in (state', (ready, state.context))
         unless (Text.null ready) do
             writeIORef config.renderPrintedText True
             writeIORef config.renderLiveActive True
-            writeIORef config.renderMarkdownContext nextContext
             Text.hPutStr config.renderStdout
                 ( paintBackgroundLines True agentBackground
                     (renderMarkdownFragment True context ready)
@@ -195,10 +201,9 @@ finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
     buffered <- readIORef config.renderTextBuffer
     writeIORef config.renderTextBuffer ""
-    pending <- readIORef config.renderMarkdownBuffer
-    writeIORef config.renderMarkdownBuffer ""
-    context <- readIORef config.renderMarkdownContext
-    writeIORef config.renderMarkdownContext Nothing
+    (pending, context) <-
+        atomicModifyIORef' config.renderMarkdownState \state ->
+            (emptyMarkdownStreamState, (state.pending, state.context))
     live <- readIORef config.renderLiveActive
     writeIORef config.renderLiveActive False
     if live
