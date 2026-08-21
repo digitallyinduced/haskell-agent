@@ -26,7 +26,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
     it "allows collaboration coordination without approval" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         let tools = multiAgentTools (rootContext registry Nothing)

@@ -23,7 +23,7 @@ import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async, wait)
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Exception.Safe (bracket)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -130,11 +130,11 @@ spec = describe "Agent.Tools.Ghci" do
     it "honors cancellation and recovers the persistent process" do
         withTempEnv \env ->
             bracket (newGhciSession env) closeGhciSession \ghci -> do
-                running <- async (evalGhci ghci "last [1..]" 10000)
-                threadDelay 100000
-                requestCancel env.toolCancel
-                cancelled <- wait running
-                cancelled.ghciOutcome `shouldBe` GhciCancelled
+                withAsync (evalGhci ghci "last [1..]" 10000) \running -> do
+                    threadDelay 100000
+                    requestCancel env.toolCancel
+                    cancelled <- wait running
+                    cancelled.ghciOutcome `shouldBe` GhciCancelled
                 resetCancel env.toolCancel
                 recovered <- evalGhci ghci "2 + 3" 10000
                 recovered.ghciOk `shouldBe` True

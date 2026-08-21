@@ -7,6 +7,7 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
+import Control.Exception.Safe (finally)
 import Control.Monad (unless)
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -19,6 +20,10 @@ messagePayload :: InterAgentMessage -> Text
 messagePayload message = case message.messageContent of
     PlainInterAgentContent text -> text
     EncryptedInterAgentContent text -> text
+
+blockingRunner started cleanedUp _ _ _ _ =
+    (atomically (putTMVar started ()) >> atomically retry)
+        `finally` atomically (putTMVar cleanedUp ())
 
 spec :: Spec
 spec = describe "Agent.Subagents" do
@@ -219,6 +224,17 @@ spec = describe "Agent.Subagents" do
         threadDelay 50000
         seen <- readIORef notices
         seen `shouldBe` [(agentId, Completed (Just "notify-me"))]
+
+    it "cancels and joins a running worker when the registry closes" do
+        started <- newEmptyTMVarIO
+        cleanedUp <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (blockingRunner started cleanedUp)
+            (\_ _ -> pure ())
+        Right _ <- spawnSubagent registry Nothing 0 "wait" Nothing
+        atomically $ takeTMVar started
+        closeSubagentRegistry registry
+        atomically $ readTMVar cleanedUp
 
     it "restores a missing agent id into the registry" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
