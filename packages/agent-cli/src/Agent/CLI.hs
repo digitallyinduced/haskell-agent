@@ -94,7 +94,10 @@ import Agent.CLI.Project
     , resolveProjectRoot
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
-import Agent.CLI.ProviderFallback (fallbackCandidates)
+import Agent.CLI.ProviderFallback
+    ( automaticCooldownRetryDelay
+    , fallbackCandidates
+    )
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , ProviderTransition(..)
@@ -163,8 +166,9 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
+import Agent.Cancel (resetCancel, waitCancel)
 import Agent.Loop
-import Agent.Error (ApiError)
+import Agent.Error (ApiError(..))
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -276,7 +280,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
-import Data.Time.Clock (getCurrentTime, utctDay)
+import Data.Time.Clock
+    ( NominalDiffTime
+    , diffUTCTime
+    , getCurrentTime
+    , utctDay
+    )
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
     ( getCurrentDirectory
@@ -290,6 +299,7 @@ import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
+import System.Timeout (timeout)
 
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
@@ -417,7 +427,9 @@ runAgentWithRestarts options = go options Nothing
                             continueAutomaticFallback failed apiError >>= \case
                                 Just next ->
                                     go (applyProviderTransition current next) (Just next)
-                                Nothing -> pure DevQuit
+                                Nothing -> do
+                                    reportProviderUnavailable apiError
+                                    pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload -> pure DevReload
@@ -1084,17 +1096,33 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                 repl env
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
-runPendingTurn env pending = do
+runPendingTurn = runPendingTurnWithCooldownRetry True
+
+runPendingTurnWithCooldownRetry
+    :: Bool
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
-    finishTurn env pending.pendingExitAfter result
+    finishTurnWithCooldownRetry
+        allowCooldownRetry env pending.pendingExitAfter result
 
 finishTurn
     :: SessionEnv
     -> Bool
     -> TurnResult
     -> IO RunResult
-finishTurn env exitAfter = \case
+finishTurn = finishTurnWithCooldownRetry True
+
+finishTurnWithCooldownRetry
+    :: Bool
+    -> SessionEnv
+    -> Bool
+    -> TurnResult
+    -> IO RunResult
+finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         writeIORef env.sessionUnavailableProviders []
         putTrailingNewline env.sessionPrinted
@@ -1115,12 +1143,80 @@ finishTurn env exitAfter = \case
             env apiError (setPendingExitAfter exitAfter pending) >>= \case
             Just providerTransition ->
                 pure (RunSwitchProvider providerTransition)
-            Nothing ->
-                if exitAfter
-                    then exitFailure
-                    else do
-                        notifyAttention stderr InputRequested
-                        repl env
+            Nothing -> do
+                now <- getCurrentTime
+                case automaticCooldownRetryDelay now apiError of
+                    Just delay | allowCooldownRetry ->
+                        waitAndRetryPendingTurn
+                            env delay (setPendingExitAfter exitAfter pending)
+                    _ -> do
+                        reportProviderUnavailable apiError
+                        if exitAfter
+                            then exitFailure
+                            else do
+                                notifyAttention stderr InputRequested
+                                replWithDraft env pending.pendingPromptText
+
+waitAndRetryPendingTurn
+    :: SessionEnv
+    -> NominalDiffTime
+    -> PendingTurn
+    -> IO RunResult
+waitAndRetryPendingTurn env delay pending = do
+    color <- resolveColor stderr
+    let seconds = max 0 (ceiling delay :: Int)
+    putTextLn stderr $ roleWarn color $
+        glyphWarn
+            <> "provider credentials temporarily unavailable; retrying this turn in "
+            <> formatRetryDelay seconds
+            <> " (Esc to cancel)"
+    let cancel = env.sessionLoop.loopCancel
+        -- Give the provider reset boundary a small margin so the automatic
+        -- retry does not race a rounded server timestamp.
+        waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
+    resetCancel cancel
+    cancelled <-
+        ( withTurnCancel env.sessionInterrupt cancel $
+            withEscCancel cancel env.sessionEscPaused $
+                isJust <$> timeout waitMicros (waitCancel cancel)
+        ) `finally` resetCancel cancel
+    if cancelled
+        then do
+            putTextLn stderr (roleMuted color "automatic retry cancelled")
+            if pending.pendingExitAfter
+                then pure RunQuit
+                else replWithDraft env pending.pendingPromptText
+        else do
+            putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
+            runPendingTurnWithCooldownRetry False env pending
+
+formatRetryDelay :: Int -> Text
+formatRetryDelay totalSeconds
+    | totalSeconds < 60 =
+        Text.pack (show totalSeconds) <> "s"
+    | otherwise =
+        let (minutes, seconds) = totalSeconds `divMod` 60
+        in Text.pack (show minutes)
+            <> "m"
+            <> if seconds == 0
+                then ""
+                else " " <> Text.pack (show seconds) <> "s"
+
+reportProviderUnavailable :: ApiError -> IO ()
+reportProviderUnavailable apiError = do
+    color <- resolveColor stderr
+    now <- getCurrentTime
+    let detail = case apiError of
+            CredentialsExhausted{retryAt} ->
+                let seconds = max 0 (ceiling (diffUTCTime retryAt now) :: Int)
+                in "all configured accounts are temporarily unavailable"
+                    <> if seconds == 0
+                        then "; retry now"
+                        else "; retry in " <> formatRetryDelay seconds
+            _ -> Text.pack (show apiError)
+    putTextLn stderr $ roleError color $
+        "provider unavailable; no usable fallback provider account is available: "
+            <> detail
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -1829,12 +1925,7 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
     candidates = fallbackCandidates unavailable0 current apiError
 
     tryCandidates unavailable = \case
-        [] -> do
-            color <- resolveColor stderr
-            putTextLn stderr $ roleError color $
-                "provider unavailable; no other configured provider account is available: "
-                    <> Text.pack (show apiError)
-            pure Nothing
+        [] -> pure Nothing
         choice : rest ->
             validateProviderTarget choice >>= \case
                 Left err -> do
@@ -2057,7 +2148,9 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
                 TurnProviderUnavailable apiError pending ->
                     requestAutomaticProviderFallback
                         planEnv apiError pending >>= \case
-                            Nothing -> pure Nothing
+                            Nothing -> do
+                                reportProviderUnavailable apiError
+                                pure Nothing
                             Just providerTransition ->
                                 pure (Just providerTransition)
                 _ -> do
