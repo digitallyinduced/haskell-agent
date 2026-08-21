@@ -46,6 +46,7 @@ import Agent.CLI.Interrupt
     , newInterruptState
     , withCtrlCHandler
     )
+import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options
@@ -264,6 +265,10 @@ devMain = do
             die err
         Right ShowHelp -> putStr usage >> pure DevQuit
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
+        Right Login -> do
+            color <- resolveColor stderr
+            runLoginManager color
+            pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
         Right (RunAgent options) -> do
@@ -279,6 +284,9 @@ run = do
         Left err -> die err
         Right ShowHelp -> putStr usage
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0"
+        Right Login -> do
+            color <- resolveColor stderr
+            runLoginManager color
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
         Right (RunAgent options) -> do
@@ -1264,6 +1272,10 @@ replWithDraft env@SessionEnv
                                         Text.putStrLn
                                             (roleMuted color
                                                 (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+                        continue
+                    ReplLogin -> do
+                        color <- resolveColor stderr
+                        runLoginManager color
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider

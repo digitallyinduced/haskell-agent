@@ -37,6 +37,7 @@ data ReplAction
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplShowSession
+    | ReplLogin
     | ReplReloadAuth
     | ReplPaste
         { pasteImmediate :: !Bool
@@ -74,6 +75,7 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort"
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
     , cmd "session" [] "/session" "Print the current session id"
+    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
@@ -134,6 +136,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "login" ->
+                if null args
+                    then ReplLogin
+                    else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
             "compact" ->
                 let focus =
