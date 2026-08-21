@@ -6,6 +6,7 @@ module Agent.OpenAI.LoopBackend
     ( openAiBackend
     , openAiBackendReconnecting
     , openAiBackendWith
+    , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , turnInputsToItems
     , responseToTurnOutput
@@ -15,7 +16,10 @@ module Agent.OpenAI.LoopBackend
     , withRequestInput
     ) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error
+    ( ApiError(..)
+    , isInlineRetryableProviderResponseError
+    )
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent(..)
@@ -45,6 +49,12 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     )
 import Control.Applicative ((<|>))
+import Control.Retry
+    ( RetryPolicyM
+    , exponentialBackoff
+    , limitRetries
+    , retrying
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -142,33 +152,68 @@ openAiBackendWith
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-openAiBackendWith send getParams transcript = Backend \previousResponseId inputs onEvent -> do
-    baseParams <- getParams
-    history <- readIORef transcript
-    let newItems = turnInputsToItems inputs
-        deltaRequest = withRequestInput baseParams newItems
-        fullRequest = withRequestInput baseParams (history <> newItems)
-        emit event = mapM_ onEvent (streamEventToLoopEvent event)
-        -- After compaction (or any cleared chain), previousResponseId is Nothing
-        -- but local history is the compacted transcript — send it as a fresh chain.
-        (initialRequest, initialPrevious) =
-            case previousResponseId of
-                Nothing | not (null history) -> (fullRequest, Nothing)
-                _ -> (deltaRequest, previousResponseId)
-    result <- send initialRequest initialPrevious emit
-    recovered <- case result of
-        Left err
-            | isPreviousResponseIdError err && not (null history) ->
-                -- Server forgot the chain; replay the local transcript as a
-                -- fresh turn so resumed sessions keep working.
-                send fullRequest Nothing emit
-            | otherwise -> pure (Left err)
-        Right response -> pure (Right response)
-    case recovered of
-        Left err -> pure (Left err)
-        Right response -> do
-            writeIORef transcript (history <> newItems <> response.output)
-            pure (Right (responseToTurnOutput response))
+openAiBackendWith =
+    openAiBackendWithRetryPolicy transientStreamingResultPolicy
+
+-- | Streaming retries are replay-safe only until the loop has observed output.
+-- Server error events themselves are not loop-visible, so transient Codex
+-- failures can wait and retry without printing an error or duplicating output.
+openAiBackendWithRetryPolicy
+    :: RetryPolicyM IO
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
+    Backend \previousResponseId inputs onEvent -> do
+        baseParams <- getParams
+        history <- readIORef transcript
+        let newItems = turnInputsToItems inputs
+            deltaRequest = withRequestInput baseParams newItems
+            fullRequest = withRequestInput baseParams (history <> newItems)
+            emit event = mapM_ onEvent (streamEventToLoopEvent event)
+            -- After compaction (or any cleared chain), previousResponseId is Nothing
+            -- but local history is the compacted transcript — send it as a fresh chain.
+            (initialRequest, initialPrevious) =
+                case previousResponseId of
+                    Nothing | not (null history) -> (fullRequest, Nothing)
+                    _ -> (deltaRequest, previousResponseId)
+        result <- sendRetrying initialRequest initialPrevious emit
+        recovered <- case result of
+            Left err
+                | isPreviousResponseIdError err && not (null history) ->
+                    -- Server forgot the chain; replay the local transcript as a
+                    -- fresh turn so resumed sessions keep working.
+                    sendRetrying fullRequest Nothing emit
+                | otherwise -> pure (Left err)
+            Right response -> pure (Right response)
+        case recovered of
+            Left err -> pure (Left err)
+            Right response -> do
+                writeIORef transcript (history <> newItems <> response.output)
+                pure (Right (responseToTurnOutput response))
+  where
+    sendRetrying request previousResponseId onEvent = do
+        emittedLoopEvent <- newIORef False
+        retrying retryPolicy (shouldRetry emittedLoopEvent) \_status ->
+            send request previousResponseId \event -> do
+                if isJust (streamEventToLoopEvent event)
+                    then writeIORef emittedLoopEvent True
+                    else pure ()
+                onEvent event
+
+    shouldRetry emittedLoopEvent _retryStatus = \case
+        Left apiError
+            | isInlineRetryableProviderResponseError apiError ->
+                not <$> readIORef emittedLoopEvent
+        _ -> pure False
+
+transientStreamingResultPolicy :: RetryPolicyM IO
+transientStreamingResultPolicy =
+    exponentialBackoff 5_000_000 <> limitRetries 3
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.
