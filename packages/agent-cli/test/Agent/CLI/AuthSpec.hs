@@ -31,6 +31,15 @@ spec = do
             openAIOAuthClientId (Just "custom-client")
                 `shouldBe` "custom-client"
 
+    describe "xaiOAuthClientId" do
+        it "uses the Grok CLI public client id by default" do
+            xaiOAuthClientId Nothing
+                `shouldBe` "b1a00492-073a-47ea-816f-4c329264a828"
+
+        it "allows an application-specific override" do
+            xaiOAuthClientId (Just "custom-client")
+                `shouldBe` "custom-client"
+
     describe "openaiAuthStateFromJson" do
         it "reads the login file tokens object" do
             let encoded = Aeson.encode $ Aeson.object
