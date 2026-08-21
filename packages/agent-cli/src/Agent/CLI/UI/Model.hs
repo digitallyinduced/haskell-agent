@@ -127,6 +127,7 @@ data UiEvent
     | UiUserSubmitted !Text
     | UiDraftSubmitted
     | UiInputQueued !Text
+    | UiInputPromoted !Text
     | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
@@ -205,6 +206,14 @@ reduceUi event state = case event of
             , uiCursor = 0
             , uiQueuedInputs = state.uiQueuedInputs Seq.|> text
             , uiNotice = Nothing
+            }
+    UiInputPromoted text ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiQueuedInputs = text Seq.<| state.uiQueuedInputs
+            , uiNotice =
+                Just "Cancelling the current turn; sending this prompt next…"
             }
     UiQueuedInputStarted ->
         state
