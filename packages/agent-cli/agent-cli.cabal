@@ -45,6 +45,7 @@ library
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
+                    , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.ImagePreview
@@ -138,6 +139,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
