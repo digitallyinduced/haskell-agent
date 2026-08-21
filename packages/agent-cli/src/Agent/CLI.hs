@@ -145,7 +145,12 @@ import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatUsageReport
     )
-import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
+import Agent.CLI.Worktree
+    ( createWorktree
+    , isUnderWorktreeRoot
+    , removeWorktree
+    , worktreeRoot
+    )
 import Agent.Loop
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
@@ -223,7 +228,7 @@ import Agent.Tools.Grok.Task
     , recordAgentSpec
     )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeHooks
@@ -530,7 +535,13 @@ runAgent options transition = do
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
                     Left err -> pure (Left (Text.pack err))
-                    Right path -> pure (Right path)
+                    Right path -> pure $ Right SubagentWorktree
+                        { subagentWorktreePath = path
+                        , subagentWorktreeCleanup =
+                            removeWorktree source path >>= \case
+                                Left err -> pure (Left (Text.pack err))
+                                Right () -> pure (Right ())
+                        }
             , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef

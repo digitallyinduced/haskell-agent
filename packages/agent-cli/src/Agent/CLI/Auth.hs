@@ -6,6 +6,7 @@ module Agent.CLI.Auth
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , reloadableFileCredentialProvider
+    , xaiOAuthClientId
     ) where
 
 import Agent.Broker (BrokerOptions(..), newBrokerTokenProviderFor)
@@ -51,6 +52,10 @@ import System.OsPath ((</>))
 openAIOAuthClientId :: Maybe Text -> Text
 openAIOAuthClientId =
     fromMaybe "app_EMoamEEZ73f0CkXaXp7hrann"
+
+xaiOAuthClientId :: Maybe Text -> Text
+xaiOAuthClientId =
+    fromMaybe "b1a00492-073a-47ea-816f-4c329264a828"
 
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider

@@ -4,8 +4,10 @@ import Agent.InterAgentMessage
 import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
 import Agent.OsPath (fromFilePath)
 import Agent.Subagents
-import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.Subagents.TaskPath (TaskPath, taskPathRoot, taskPathText)
 import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.Async as Async
+import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
 import Control.Monad (unless)
@@ -40,6 +42,55 @@ spec = describe "Agent.Subagents" do
         (statuses, timedOut) <- waitSubagents registry [agentId] 15000
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "done:hello"))
+
+    it "does not launch a prepared worker after registry shutdown" do
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        ran <- newIORef False
+        registry <- shutdownRaceRegistry ran
+        spawning <- Async.async $
+            spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (blockPreparation entered release)
+                Nothing 0 "task" Nothing
+        takeMVar entered
+        closeSubagentRegistry registry
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its worker started."
+        readIORef ran `shouldReturn` False
+
+    it "rolls back prepared admission when spawning is cancelled" do
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        ran <- newIORef False
+        registry <- shutdownRaceRegistry ran
+        spawning <- Async.async $
+            spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (blockPreparation entered release)
+                Nothing 0 "cancelled" Nothing
+        takeMVar entered
+        Async.cancel spawning
+        _ <- Async.waitCatch spawning
+        Right _ <- spawnSubagent registry Nothing 0 "next" Nothing
+        closeSubagentRegistry registry
+
+    it "preserves replacement paths when an old spawn rolls back" do
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        ran <- newIORef False
+        registry <- shutdownRaceRegistry ran
+        oldSpawn <- Async.async $
+            spawnPreparedAt registry entered release
+        takeMVar entered
+        resetSubagentRegistry registry
+        Right (replacement, _) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "worker"
+                (plainInterAgentContent "new") Nothing
+        putMVar release ()
+        _ <- Async.wait oldSpawn
+        resolveAgentTarget registry taskPathRoot "worker"
+            `shouldReturn` Right replacement
+        closeSubagentRegistry registry
 
     it "rejects spawn past maxDepth" do
         let config = defaultSubagentConfig { maxDepth = Just 1 }
@@ -425,3 +476,24 @@ spec = describe "Agent.Subagents" do
         getStatus registry agentId
             `shouldReturn` Completed (Just "original")
         closeSubagentRegistry registry
+
+shutdownRaceRegistry :: IORef Bool -> IO SubagentRegistry
+shutdownRaceRegistry ran =
+    newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        (\_ _ _ _ -> writeIORef ran True >> pure (Left LoopNoResponseId))
+        (\_ _ -> pure ())
+
+blockPreparation :: MVar () -> MVar () -> SubagentId -> IO ()
+blockPreparation entered release _ =
+    putMVar entered () >> takeMVar release
+
+spawnPreparedAt
+    :: SubagentRegistry
+    -> MVar ()
+    -> MVar ()
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnPreparedAt registry entered release =
+    spawnSubagentAtWithCwdPrepared registry (fromFilePath "/tmp")
+        (blockPreparation entered release)
+        Nothing taskPathRoot 0 "worker"
+        (plainInterAgentContent "old") Nothing

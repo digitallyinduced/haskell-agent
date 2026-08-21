@@ -16,8 +16,11 @@ module Agent.Subagents.Registry
     , spawnSubagent
     , spawnSubagentWithCwd
     , spawnSubagentWithCwdForTurn
+    , spawnSubagentWithCwdPrepared
+    , spawnSubagentWithCwdPreparedForTurn
     , spawnSubagentAt
     , spawnSubagentAtForTurn
+    , spawnSubagentAtWithCwdPrepared
     , restoreSubagent
     , restoreSubagentWithCwd
     , waitSubagents
@@ -230,7 +233,36 @@ spawnSubagentWithCwdForTurn
     -> Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-spawnSubagentWithCwdForTurn registry rootTurnId childCwd parentId parentDepth message nickname = do
+spawnSubagentWithCwdForTurn registry rootTurnId childCwd =
+    spawnSubagentWithCwdPreparedForTurn
+        registry rootTurnId childCwd (\_ -> pure ())
+
+-- | Run host preparation after admission but before the worker starts.
+spawnSubagentWithCwdPrepared
+    :: SubagentRegistry
+    -> OsPath
+    -> (SubagentId -> IO ())
+    -> Maybe SubagentId
+    -> Int
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnSubagentWithCwdPrepared registry =
+    spawnSubagentWithCwdPreparedForTurn registry Nothing
+
+spawnSubagentWithCwdPreparedForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> OsPath
+    -> (SubagentId -> IO ())
+    -> Maybe SubagentId
+    -> Int
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnSubagentWithCwdPreparedForTurn
+        registry rootTurnId childCwd beforeStart
+        parentId parentDepth message nickname = do
     parentPath <- case parentId of
         Nothing -> pure taskPathRoot
         Just pid -> do
@@ -243,8 +275,9 @@ spawnSubagentWithCwdForTurn registry rootTurnId childCwd parentId parentDepth me
     -- Reuse the generated id by spawning with an explicit path helper that
     -- still allocates internally; uniqueness comes from the id-derived name.
     fmap (fmap fst) $
-        spawnSubagentAtWithCwd
-            registry rootTurnId childCwd parentId parentPath parentDepth taskName
+        spawnSubagentAtWithCwdPreparedForTurn
+            registry rootTurnId childCwd beforeStart
+            parentId parentPath parentDepth taskName
                 (plainInterAgentContent message) nickname
 
 -- | Spawn with an explicit parent path and task_name (Codex multi-agent v2).
@@ -271,12 +304,13 @@ spawnSubagentAtForTurn
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
 spawnSubagentAtForTurn registry rootTurnId =
-    spawnSubagentAtWithCwd registry rootTurnId registry.registryCwd
+    spawnSubagentAtWithCwdPreparedForTurn
+        registry rootTurnId registry.registryCwd (\_ -> pure ())
 
-spawnSubagentAtWithCwd
+spawnSubagentAtWithCwdPrepared
     :: SubagentRegistry
-    -> Maybe RootTurnId
     -> OsPath
+    -> (SubagentId -> IO ())
     -> Maybe SubagentId
     -> TaskPath
     -> Int
@@ -284,7 +318,24 @@ spawnSubagentAtWithCwd
     -> InterAgentMessageContent
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
-spawnSubagentAtWithCwd registry rootTurnId childCwd parentId parentPath parentDepth taskName content nickname = do
+spawnSubagentAtWithCwdPrepared registry =
+    spawnSubagentAtWithCwdPreparedForTurn registry Nothing
+
+spawnSubagentAtWithCwdPreparedForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> OsPath
+    -> (SubagentId -> IO ())
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> InterAgentMessageContent
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtWithCwdPreparedForTurn
+        registry rootTurnId childCwd beforeStart
+        parentId parentPath parentDepth taskName content nickname = do
     let nextDepth = parentDepth + 1
         cfg = registry.registryConfig
     case cfg.maxDepth of
@@ -342,25 +393,56 @@ spawnSubagentAtWithCwd registry rootTurnId childCwd parentId parentPath parentDe
                                             pure (Right ())
                 case admitted of
                     Left err -> pure (Left err)
-                    Right () -> do
-                        let work = SubagentWork
-                                { workRootTurnId = rootTurnId
-                                , workMessage = InterAgentMessage
-                                    { messageAuthor = taskPathText parentPath
-                                    , messageRecipient = taskPathText childPath
-                                    , messageType = NewTaskMessage
-                                    , messageContent = content
-                                    }
-                                }
-                        started <-
-                            startRecordWorker registry record
-                                (runWorker registry record work)
-                                `onException` shutdownRecord registry record
-                        if started
-                            then pure (Right (agentId, childPath))
-                            else do
-                                shutdownRecord registry record
-                                pure (Left "Subagent closed before its worker started.")
+                    Right () -> mask \restore ->
+                        (do
+                            prepared <- tryAny (restore (beforeStart agentId))
+                            case prepared of
+                                Left (exc :: SomeException) -> do
+                                    rollbackAdmission registry record
+                                    pure $ Left $
+                                        "Failed to prepare subagent: "
+                                            <> Text.pack (show exc)
+                                Right () ->
+                                    startPrepared restore agentId childPath record)
+                            `onException` rollbackAdmission registry record
+  where
+    startPrepared restore agentId childPath record = do
+        let work = SubagentWork
+                { workRootTurnId = rootTurnId
+                , workMessage = InterAgentMessage
+                    { messageAuthor = taskPathText parentPath
+                    , messageRecipient = taskPathText childPath
+                    , messageType = NewTaskMessage
+                    , messageContent = content
+                    }
+                }
+        started <-
+            restore
+                (startRecordWorker registry record
+                    (runWorker registry record work))
+                `onException` shutdownRecord registry record
+        if started
+            then pure (Right (agentId, childPath))
+            else do
+                rollbackAdmission registry record
+                pure (Left "Subagent closed before its worker started.")
+
+rollbackAdmission :: SubagentRegistry -> SubagentRecord -> IO ()
+rollbackAdmission registry record = atomically do
+    modifyTVar' registry.registryAgents (Map.delete record.recordId)
+    modifyTVar' registry.registryPaths $
+        deleteOwnedPath record.recordTaskPath record.recordId
+    held <- readTVar record.recordSlotHeld
+    whenSTM held do
+        writeTVar record.recordSlotHeld False
+        live <- readTVar registry.registryLiveCount
+        writeTVar registry.registryLiveCount (max 0 (live - 1))
+
+deleteOwnedPath :: TaskPath -> SubagentId -> Map TaskPath SubagentId -> Map TaskPath SubagentId
+deleteOwnedPath key expected mappings =
+    case Map.lookup key mappings of
+        Just actual | actual == expected -> Map.delete key mappings
+        _ -> mappings
 
 runWorker :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO ()
 runWorker registry record firstWork = do
