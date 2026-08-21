@@ -2221,12 +2221,15 @@ handleComposerKey event = do
                     if Seq.null ui.uiQueuedInputs
                         then modifyUi
                             (UiSetNotice
-                                (Just "There is no queued prompt to send now."))
+                                (Just
+                                    (warningNotice
+                                        "There is no queued prompt to send now.")))
                         else do
                             modifyUi
                                 (UiSetNotice
                                     (Just
-                                        "Cancelling the current turn; sending the queued prompt next…"))
+                                        (warningNotice
+                                            "Cancelling the current turn; sending the queued prompt next…")))
                             liftIO state.appRuntime.runtimeCancel
                 else do
                     liftIO (appendReplHistory draft)
