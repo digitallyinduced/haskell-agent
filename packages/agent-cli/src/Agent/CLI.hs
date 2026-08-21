@@ -215,10 +215,13 @@ import Agent.Subagents
     , getPreviousResponseId
     , getStatus
     , getSubagentCwd
+    , getSubagentIdentity
     , getTaskPath
     , listAgents
     , newSubagentRegistry
     , restoreSubagent
+    , restoreSubagentAt
+    , restoreSubagentAtWithCwd
     , restoreSubagentWithCwd
     , setPreviousResponseId
     , setSubagentOnComplete
@@ -239,7 +242,7 @@ import Agent.Tools.Grok.Task
     , lookupAgentType
     , recordAgentSpec
     )
-import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -2269,8 +2272,9 @@ persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = d
             agentType <- lookupAgentType typesRef agentId
             agentModel <- lookupAgentModel typesRef agentId
             agentCwd <- getSubagentCwd registry agentId
+            identity <- getSubagentIdentity registry agentId
             _ <- saveSubagentState
-                sessionDir agentId items previous agentType agentModel agentCwd
+                sessionDir agentId items previous agentType agentModel agentCwd identity
             pure ()
 
 flushAllSubagentSnapshots
@@ -2315,7 +2319,7 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                         -- Same-process close with no disk yet: still reopen.
                         reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
-                        result <- reopenInMemory meta.diskPreviousResponseId meta.diskCwd
+                        result <- reopenPersisted meta
                         case result of
                             Left err -> pure (Left err)
                             Right () -> do
@@ -2334,6 +2338,26 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                 atomicModifyIORef' sessionsRef \m ->
                                     (Map.insert agentId session m, ())
                                 pure (Right ())
+    reopenPersisted meta =
+        case meta.diskTaskPath of
+            Nothing ->
+                reopenInMemory meta.diskPreviousResponseId meta.diskCwd
+            Just pathText ->
+                case parseTaskPath pathText of
+                    Left err -> pure (Left err)
+                    Right taskPath -> do
+                        let restoreAt =
+                                case meta.diskCwd of
+                                    Just childCwd ->
+                                        restoreSubagentAtWithCwd
+                                            registry childCwd
+                                    Nothing ->
+                                        restoreSubagentAt registry
+                        restoreAt
+                            agentId meta.diskParentId taskPath
+                            (fromMaybe 1 meta.diskDepth)
+                            Nothing meta.diskPreviousResponseId
+                            >>= pure . fmap (const ())
     reopenInMemory previous requestedCwd = do
         restored <- case requestedCwd of
             Just childCwd ->

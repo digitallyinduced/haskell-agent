@@ -22,8 +22,11 @@ module Agent.Subagents.Registry
     , spawnSubagentAtForTurn
     , spawnSubagentAtWithCwdPrepared
     , restoreSubagent
+    , restoreSubagentAt
     , restoreSubagentWithCwd
+    , restoreSubagentAtWithCwd
     , waitSubagents
+    , waitSubagentsFrom
     , waitAnyLive
     , sendInput
     , sendInputMessage
@@ -37,6 +40,7 @@ module Agent.Subagents.Registry
     , getStatus
     , getPreviousResponseId
     , getSubagentCwd
+    , getSubagentIdentity
     , setPreviousResponseId
     , getTaskPath
     , resolveAgentTarget
@@ -66,12 +70,13 @@ import Agent.ResourceScope
     , newResourceScope
     , releaseResource
     )
-import Agent.Subagents.Format (isFinalStatus)
+import Agent.Subagents.Format (formatCompletionNotice, isFinalStatus)
 import Agent.Subagents.Types
     ( RunSubagent
     , RootTurnId(..)
     , SubagentConfig(..)
     , SubagentId(..)
+    , SubagentIdentity(..)
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , maxWaitTimeoutMs
@@ -117,6 +122,7 @@ data SubagentRecord = SubagentRecord
     , recordSlotHeld :: !(TVar Bool)
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
+    , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
     }
@@ -130,6 +136,9 @@ data SubagentRegistry = SubagentRegistry
     { registryAgents :: !(TVar (Map SubagentId SubagentRecord))
     , registryPaths :: !(TVar (Map TaskPath SubagentId))
     , registryLiveCount :: !(TVar Int)
+    , registryNextUpdateSeq :: !(TVar Int)
+    , registryWaitCursors :: !(TVar (Map (Maybe SubagentId) Int))
+    , registryActiveWaits :: !(TVar (Map (Maybe SubagentId) [SubagentId]))
     , registryConfig :: !SubagentConfig
     , registryRunRef :: !(IORef RunSubagent)
     , registryOnEvent :: !(SubagentId -> LoopEvent -> IO ())
@@ -152,6 +161,9 @@ newSubagentRegistry config cwd run onEvent = do
     agents <- newTVarIO Map.empty
     paths <- newTVarIO Map.empty
     live <- newTVarIO 0
+    nextUpdateSeq <- newTVarIO 0
+    waitCursors <- newTVarIO Map.empty
+    activeWaits <- newTVarIO Map.empty
     closed <- newTVarIO False
     nextRootTurnId <- newTVarIO 0
     abortedRootTurns <- newTVarIO Set.empty
@@ -163,6 +175,9 @@ newSubagentRegistry config cwd run onEvent = do
         { registryAgents = agents
         , registryPaths = paths
         , registryLiveCount = live
+        , registryNextUpdateSeq = nextUpdateSeq
+        , registryWaitCursors = waitCursors
+        , registryActiveWaits = activeWaits
         , registryConfig = config
             { maxConcurrent = max 1 config.maxConcurrent
             }
@@ -220,6 +235,9 @@ resetSubagentRegistry registry =
             writeTVar registry.registryAgents Map.empty
             writeTVar registry.registryPaths Map.empty
             writeTVar registry.registryLiveCount 0
+            writeTVar registry.registryNextUpdateSeq 0
+            writeTVar registry.registryWaitCursors Map.empty
+            writeTVar registry.registryActiveWaits Map.empty
             writeTVar registry.registryAbortedRootTurns Set.empty
             writeTVar registry.registryClosed False
 
@@ -372,6 +390,7 @@ spawnSubagentAtWithCwdPreparedForTurn
                 rootTurnVar <- newTVarIO rootTurnId
                 slotHeld <- newTVarIO True
                 previousVar <- newTVarIO Nothing
+                lastUpdateVar <- newTVarIO Nothing
                 let record = SubagentRecord
                         { recordId = agentId
                         , recordParent = parentId
@@ -384,6 +403,7 @@ spawnSubagentAtWithCwdPreparedForTurn
                         , recordRootTurnId = rootTurnVar
                         , recordSlotHeld = slotHeld
                         , recordPreviousResponseId = previousVar
+                        , recordLastUpdate = lastUpdateVar
                         , recordTaskPath = childPath
                         , recordCwd = childCwd
                         }
@@ -395,10 +415,12 @@ spawnSubagentAtWithCwdPreparedForTurn
                         else if aborted
                             then pure (Left "Root turn was aborted.")
                         else do
-                            parentOpen <- isParentOpenSTM registry parentId
-                            if not parentOpen
-                                then pure (Left "Parent subagent is closed or missing.")
-                                else do
+                            parentCheck <-
+                                validateParentSTM
+                                    registry parentId parentPath parentDepth
+                            case parentCheck of
+                                Left err -> pure (Left err)
+                                Right () -> do
                                     paths <- readTVar registry.registryPaths
                                     if Map.member childPath paths
                                         then pure $ Left $
@@ -470,15 +492,30 @@ deleteOwnedPath key expected mappings =
         Just actual | actual == expected -> Map.delete key mappings
         _ -> mappings
 
-isParentOpenSTM :: SubagentRegistry -> Maybe SubagentId -> STM Bool
-isParentOpenSTM _ Nothing = pure True
-isParentOpenSTM registry (Just parentId) = do
-    agents <- readTVar registry.registryAgents
-    case Map.lookup parentId agents of
-        Nothing -> pure False
-        Just parent -> do
-            status <- readTVar parent.recordStatus
-            pure (status /= Closed && status /= NotFound)
+validateParentSTM
+    :: SubagentRegistry
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> STM (Either Text ())
+validateParentSTM registry parentId parentPath parentDepth =
+    case parentId of
+        Nothing ->
+            if parentPath == taskPathRoot && parentDepth == 0
+                then pure (Right ())
+                else pure (Left "root spawn has inconsistent parent context")
+        Just pid -> do
+            agents <- readTVar registry.registryAgents
+            case Map.lookup pid agents of
+                Nothing -> pure (Left "Parent subagent is closed or missing.")
+                Just parent -> do
+                    status <- readTVar parent.recordStatus
+                    if status == Closed || status == NotFound
+                        then pure (Left "Parent subagent is closed or missing.")
+                        else if parent.recordTaskPath /= parentPath
+                            || parent.recordDepth /= parentDepth
+                            then pure (Left "parent agent context does not match registry")
+                            else pure (Right ())
 
 runWorker :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO ()
 runWorker registry record firstWork = do
@@ -523,15 +560,74 @@ runWorker registry record firstWork = do
                     resetCancel record.recordCancel
                     loop nextWork
                 WorkerComplete -> do
-                    _ <- tryAny $
-                        notifyComplete
-                            registry record.recordId work.workRootTurnId status
+                    notifyRoot <- atomically $
+                        publishCompletionSTM registry record status
+                    whenIO notifyRoot do
+                        _ <- tryAny $
+                            notifyComplete
+                                registry record.recordId work.workRootTurnId status
+                        pure ()
                     atomically (finishOrContinue record status) >>= \case
                         Nothing -> pure ()
                         Just nextWork -> do
                             resetCancel record.recordCancel
                             loop nextWork
     whenIO mayRun (loop firstWork)
+
+publishCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
+publishCompletionSTM registry record status = do
+    nextSeq <- readTVar registry.registryNextUpdateSeq
+    let updateSeq = nextSeq + 1
+    writeTVar registry.registryNextUpdateSeq updateSeq
+    writeTVar record.recordLastUpdate (Just (updateSeq, status))
+    routeCompletionSTM registry record status
+
+routeCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
+routeCompletionSTM registry record status =
+    case record.recordParent of
+        Nothing -> pure True
+        Just parentId -> do
+            awaited <-
+                completionIsAwaitedSTM registry (Just parentId) record.recordId
+            agents <- readTVar registry.registryAgents
+            if awaited
+                then pure False
+                else case Map.lookup parentId agents of
+                    Nothing -> pure True
+                    Just parent -> routeToParent parent
+  where
+    routeToParent parent = do
+        parentStatus <- readTVar parent.recordStatus
+        if parentStatus == Running || parentStatus == Pending
+            then do
+                rootTurnId <- readTVar record.recordRootTurnId
+                writeTQueue parent.recordMailbox
+                    SubagentWork
+                        { workRootTurnId = rootTurnId
+                        , workMessage = completionMessage record parent status
+                        }
+                pure False
+            else pure True
+
+completionIsAwaitedSTM
+    :: SubagentRegistry
+    -> Maybe SubagentId
+    -> SubagentId
+    -> STM Bool
+completionIsAwaitedSTM registry caller childId = do
+    waits <- readTVar registry.registryActiveWaits
+    pure $ case Map.lookup caller waits of
+        Nothing -> False
+        Just [] -> True
+        Just targets -> childId `elem` targets
+
+completionMessage :: SubagentRecord -> SubagentRecord -> SubagentStatus -> InterAgentMessage
+completionMessage child parent status =
+    InterAgentMessage
+        (taskPathText child.recordTaskPath)
+        (taskPathText parent.recordTaskPath)
+        QueuedMessage
+        (plainInterAgentContent (formatCompletionNotice child.recordId status))
 
 startRecordWorker
     :: SubagentRegistry
@@ -718,22 +814,39 @@ waitSubagents
     -> [SubagentId]
     -> Int
     -> IO (Map SubagentId SubagentStatus, Bool)
-waitSubagents registry targets timeoutMs = do
-    let clamped = max minWaitTimeoutMs (min maxWaitTimeoutMs (max 1 timeoutMs))
-        waitForFinal = atomically do
-            statuses <- mapM (readStatusSTM registry) targets
-            let pairs = zip targets statuses
-            if any (isFinalStatus . snd) pairs
-                then pure (Map.fromList pairs)
-                else retry
-        waitForTimeout = do
-            threadDelay (clamped * 1000)
-            atomically do
+waitSubagents registry = waitSubagentsFrom registry Nothing
+
+waitSubagentsFrom
+    :: SubagentRegistry
+    -> Maybe SubagentId
+    -> [SubagentId]
+    -> Int
+    -> IO (Map SubagentId SubagentStatus, Bool)
+waitSubagentsFrom registry caller targets timeoutMs =
+    finally wait unregister
+  where
+    wait = do
+        atomically $
+            modifyTVar' registry.registryActiveWaits
+                (Map.insert caller targets)
+        let clamped = max minWaitTimeoutMs (min maxWaitTimeoutMs (max 1 timeoutMs))
+            waitForFinal = atomically do
                 statuses <- mapM (readStatusSTM registry) targets
-                pure (Map.fromList (zip targets statuses))
-    race waitForFinal waitForTimeout >>= \case
-        Left statuses -> pure (statuses, False)
-        Right statuses -> pure (statuses, True)
+                let pairs = zip targets statuses
+                if any (isFinalStatus . snd) pairs
+                    then pure (Map.fromList pairs)
+                    else retry
+            waitForTimeout = do
+                threadDelay (clamped * 1000)
+                atomically do
+                    statuses <- mapM (readStatusSTM registry) targets
+                    pure (Map.fromList (zip targets statuses))
+        race waitForFinal waitForTimeout >>= \case
+            Left statuses -> pure (statuses, False)
+            Right statuses -> pure (statuses, True)
+    unregister =
+        atomically $
+            modifyTVar' registry.registryActiveWaits (Map.delete caller)
 
 sendInput
     :: SubagentRegistry
@@ -970,6 +1083,18 @@ restoreSubagent
 restoreSubagent registry =
     restoreSubagentWithCwd registry registry.registryCwd
 
+restoreSubagentAt
+    :: SubagentRegistry
+    -> SubagentId
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+restoreSubagentAt registry =
+    restoreSubagentAtWithCwd registry registry.registryCwd
+
 restoreSubagentWithCwd
     :: SubagentRegistry
     -> OsPath
@@ -980,6 +1105,21 @@ restoreSubagentWithCwd
     -> Maybe Text
     -> IO (Either Text SubagentId)
 restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previous =
+    restoreSubagentAtWithCwd
+        registry childCwd agentId parentId taskPathRoot depth nickname previous
+
+restoreSubagentAtWithCwd
+    :: SubagentRegistry
+    -> OsPath
+    -> SubagentId
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+restoreSubagentAtWithCwd
+        registry childCwd agentId parentId taskPath depth nickname previous =
     withMVar registry.registryLifecycle \_ -> do
         closed <- atomically $ readTVar registry.registryClosed
         if closed
@@ -1015,6 +1155,7 @@ restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previou
         rootTurnVar <- newTVarIO Nothing
         slotHeld <- newTVarIO False
         previousVar <- newTVarIO previous
+        lastUpdateVar <- newTVarIO Nothing
         let record = SubagentRecord
                 { recordId = agentId
                 , recordParent = parentId
@@ -1027,19 +1168,28 @@ restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previou
                 , recordRootTurnId = rootTurnVar
                 , recordSlotHeld = slotHeld
                 , recordPreviousResponseId = previousVar
-                , recordTaskPath = taskPathRoot
+                , recordLastUpdate = lastUpdateVar
+                , recordTaskPath = taskPath
                 , recordCwd = childCwd
                 }
         inserted <- atomically do
             closed <- readTVar registry.registryClosed
             if closed
-                then pure False
+                then pure (Left "Subagent registry is closed.")
                 else do
-                    modifyTVar' registry.registryAgents (Map.insert agentId record)
-                    pure True
-        pure $ if inserted
-            then Right agentId
-            else Left "Subagent registry is closed."
+                    paths <- readTVar registry.registryPaths
+                    case Map.lookup taskPath paths of
+                        Just owner | owner /= agentId ->
+                            pure $ Left $
+                                "task path already in use: " <> taskPathText taskPath
+                        _ -> do
+                            modifyTVar' registry.registryAgents
+                                (Map.insert agentId record)
+                            whenSTM (taskPath /= taskPathRoot) $
+                                modifyTVar' registry.registryPaths
+                                    (Map.insert taskPath agentId)
+                            pure (Right agentId)
+        pure inserted
 
 resumeSubagent
     :: SubagentRegistry
@@ -1081,6 +1231,18 @@ getSubagentCwd :: SubagentRegistry -> SubagentId -> IO (Maybe OsPath)
 getSubagentCwd registry agentId = atomically do
     agents <- readTVar registry.registryAgents
     pure ((.recordCwd) <$> Map.lookup agentId agents)
+
+getSubagentIdentity :: SubagentRegistry -> SubagentId -> IO (Maybe SubagentIdentity)
+getSubagentIdentity registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    case Map.lookup agentId agents of
+        Nothing -> pure Nothing
+        Just record ->
+            pure $ Just $
+                SubagentIdentity
+                    record.recordParent
+                    record.recordDepth
+                    record.recordTaskPath
 
 setPreviousResponseId :: SubagentRegistry -> SubagentId -> Text -> IO ()
 setPreviousResponseId registry agentId responseId = atomically do
@@ -1230,12 +1392,57 @@ queueMessageFromForTurn registry rootTurnId senderPath agentId content = do
 -- | Wait until any live non-final agent reaches a final status (or timeout).
 waitAnyLive
     :: SubagentRegistry
+    -> Maybe SubagentId
     -> Int
     -> IO (Map SubagentId SubagentStatus, Bool)
-waitAnyLive registry timeoutMs = do
-    nonFinal <- fmap (map fst . filter (not . isFinalStatus . snd)) (listLive registry)
-    if null nonFinal
-        then do
-            pairs <- listLive registry
-            pure (Map.fromList pairs, False)
-        else waitSubagents registry nonFinal timeoutMs
+waitAnyLive registry caller timeoutMs = do
+    let clamped = max minWaitTimeoutMs (min maxWaitTimeoutMs (max 1 timeoutMs))
+        wait = do
+            atomically $
+                modifyTVar' registry.registryActiveWaits
+                    (Map.insert caller [])
+            race
+                (atomically (takeAgentUpdatesSTM registry caller))
+                (threadDelay (clamped * 1000))
+                >>= \case
+                    Left statuses -> pure (statuses, False)
+                    Right () -> pure (Map.empty, True)
+        unregister =
+            atomically $
+                modifyTVar' registry.registryActiveWaits (Map.delete caller)
+    finally wait unregister
+
+takeAgentUpdatesSTM
+    :: SubagentRegistry
+    -> Maybe SubagentId
+    -> STM (Map SubagentId SubagentStatus)
+takeAgentUpdatesSTM registry caller = do
+    cursors <- readTVar registry.registryWaitCursors
+    let cursor = Map.findWithDefault 0 caller cursors
+    agents <- readTVar registry.registryAgents
+    updates <- fmap concat $ mapM (recordUpdateAfter caller cursor) (Map.elems agents)
+    case updates of
+        [] -> retry
+        _ -> do
+            let latest = maximum (map (\(_, seqNo, _) -> seqNo) updates)
+                statuses =
+                    Map.fromList
+                        [ (agentId, status)
+                        | (agentId, _, status) <- updates
+                        ]
+            writeTVar registry.registryWaitCursors (Map.insert caller latest cursors)
+            pure statuses
+
+recordUpdateAfter
+    :: Maybe SubagentId
+    -> Int
+    -> SubagentRecord
+    -> STM [(SubagentId, Int, SubagentStatus)]
+recordUpdateAfter caller cursor record
+    | caller == Just record.recordId = pure []
+    | otherwise = do
+        update <- readTVar record.recordLastUpdate
+        pure $ case update of
+            Just (seqNo, status) | seqNo > cursor ->
+                [(record.recordId, seqNo, status)]
+            _ -> []
