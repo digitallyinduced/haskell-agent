@@ -231,6 +231,10 @@ readChangeNotes interrupt color = do
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
             readChangeNotes interrupt color
+        ReplChooseModel _ ->
+            readChangeNotes interrupt color
+        ReplChooseEffort _ ->
+            readChangeNotes interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
@@ -263,6 +267,10 @@ askQuestion interrupt resolveColor question options = do
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
                         ReplCycleMode _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplChooseModel _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplChooseEffort _ ->
                             askQuestion interrupt resolveColor question []
                         ReplText text
                             | Text.null (Text.strip text) -> pure Nothing

@@ -23,10 +23,6 @@ module Agent.CLI.Session
     , sessionTitleTurnCountFromSlot
     , writeSessionMeta
     , ensureSession
-    , devResumePointerPath
-    , writeDevResumePointer
-    , readDevResumePointer
-    , clearDevResumePointer
     , resumeHint
     , sessionUsageFromTurns
     ) where
@@ -71,7 +67,6 @@ import System.Directory.OsPath
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
-    , removeFile
     )
 import System.OsPath ((</>))
 import System.Posix.Files (setFileMode)
@@ -83,37 +78,6 @@ sessionSchemaVersion = 1
 sessionsRoot :: OsPath -> OsPath
 sessionsRoot home =
     home </> fromFilePath ".haskell-agent" </> fromFilePath "sessions"
-
--- | Pointer written before a GHCi @:reload@ so @devMain@ can resume.
-devResumePointerPath :: OsPath -> OsPath
-devResumePointerPath home =
-    home </> fromFilePath ".haskell-agent" </> fromFilePath "dev-resume"
-
-writeDevResumePointer :: OsPath -> Text -> IO ()
-writeDevResumePointer home sessionId = do
-    let root = home </> fromFilePath ".haskell-agent"
-        path = devResumePointerPath home
-    ensurePrivateDir root
-    writeLazyFileAtomically
-        path
-        0o600
-        (LBS.fromStrict (Text.encodeUtf8 (sessionId <> "\n")))
-
-readDevResumePointer :: OsPath -> IO (Maybe Text)
-readDevResumePointer home = do
-    let path = devResumePointerPath home
-    exists <- doesFileExist path
-    if not exists
-        then pure Nothing
-        else do
-            raw <- Text.strip <$> retryOnFileBusy (Text.readFile (toFilePath path))
-            pure (if Text.null raw then Nothing else Just raw)
-
-clearDevResumePointer :: OsPath -> IO ()
-clearDevResumePointer home = do
-    let path = devResumePointerPath home
-    _ <- tryIO (removeFile path)
-    pure ()
 
 data SessionMeta = SessionMeta
     { metaVersion :: !Int

@@ -106,6 +106,19 @@ spec = do
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
+        it "decodes response incomplete into its typed terminal constructor" do
+            let original = Aeson.object
+                    [ "type" .= ("response.incomplete" :: Text)
+                    , "sequence_number" .= (5 :: Int)
+                    , "response" .= canonicalResponseJson "incomplete"
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success Responses.ResponseIncompleteEvent { response } -> do
+                    response.status `shouldBe` Responses.ResponseIncomplete
+                    response.responseId `shouldBe` "resp_1"
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
         it "decodes the Codex nested error envelope into a typed error" do
             let original = Aeson.object
                     [ "type" .= ("error" :: Text)

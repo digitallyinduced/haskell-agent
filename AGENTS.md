@@ -87,7 +87,7 @@ When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval p
 
 - Exit the agent (`:q` or Ctrl-D) before `:r`; a live stdin/WebSocket session blocks GHCi.
 - `repl` / `devMain` creates a new worktree on first open when not already under `~/.haskell-agent/worktrees`. `:reload` resumes the same session (and cwd). Manual `run` still needs `withArgs ["--worktree"]` (or `--resume` / `--cwd`) if you want a worktree.
-- `run` calls `setCurrentDirectory`, so later runs in the same GHCi process inherit that cwd.
+- The development entry point restores GHCi's original cwd when the agent exits, so a later fresh run does not silently reuse the previous worktree.
 - `cabal repl agent-cli:exe:agent-cli` + `:main` looks convenient but only interprets `Main.hs` and does **not** reload library source changes.
 - Use `ghcid` for typecheck-on-save; keep `cabal repl` + `withArgs ... run` for running the live agent.
 - Prefer `repl` when you want automatic `:reload` + session resume instead of the manual `:q` / `:r` / `run` loop.

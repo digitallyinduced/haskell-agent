@@ -15,9 +15,7 @@ import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
     ( glyphOk
-    , glyphSession
     , glyphWarn
-    , roleMuted
     , roleSuccess
     , roleWarn
     )
@@ -150,17 +148,16 @@ isPlanFileWrite active planPath call
             && isPlanFileEditTarget planPath (fromText target)
     | otherwise = False
 
-toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO ()
+toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do
-    color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->
         if policy == ApproveAll
             then (PromptMutating, PromptMutating)
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
-    putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
-        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
+    pure (case next of
+        ApproveAll -> "auto-approve on (saved for project)"
+        _ -> "auto-approve off (saved for project)")
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
 childApprove policy tools call = case policy of

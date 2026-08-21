@@ -42,6 +42,7 @@ library
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.ResourceScope
+                    , Agent.Skills
                     , Agent.Subagents
                     , Agent.Subagents.Format
                     , Agent.Subagents.Registry
@@ -94,6 +95,7 @@ library
                     , unix
                     , vector
                     , websockets
+                    , yaml
 
 test-suite agent-core-test
     import:           common-opts
@@ -106,6 +108,7 @@ test-suite agent-core-test
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
                     , Agent.ResourceScopeSpec
+                    , Agent.SkillsSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
                     , Agent.ToolArgsSpec
@@ -135,3 +138,4 @@ test-suite agent-core-test
                     , bytestring
                     , unix
                     , websockets
+                    , yaml

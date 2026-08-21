@@ -12,6 +12,7 @@ import Agent.ToolDispatch
     )
 import qualified Data.Foldable as Foldable
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -52,6 +53,40 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
+
+    it "tracks elapsed tenths only while a turn is running" do
+        let idle = apply [UiTick, UiTick]
+            running = apply [UiLoop TurnStarted, UiTick, UiTick, UiTick]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] Nothing)))
+                    running
+            after = reduceUi UiTick finished
+        idle.uiElapsedTenths `shouldBe` 0
+        running.uiElapsedTenths `shouldBe` 3
+        after.uiElapsedTenths `shouldBe` 3
+
+    it "shows a search-replace diff while the tool is running" do
+        let call =
+                functionToolCall
+                    "edit-1"
+                    "search_replace"
+                    "{\"file_path\":\"A.hs\",\"old_string\":\"old\",\"new_string\":\"new\"}"
+            blocks =
+                Foldable.toList $
+                    (.uiBlocks) $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            ]
+        case blocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockEdit
+                block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
+            _ -> expectationFailure "expected one running edit block"
 
     it "formats collaboration result JSON for display" do
         let call =
