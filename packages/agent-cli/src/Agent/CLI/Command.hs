@@ -57,6 +57,7 @@ data ReplAction
     | ReplCopyPath
     | ReplCopySession
     | ReplShowTerminal
+    | ReplAgents
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
@@ -104,6 +105,7 @@ slashCommands =
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
+    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     ]
   where
@@ -216,6 +218,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
+            "agents" ->
+                if null args
+                    then ReplAgents
+                    else ReplCommandError "usage: /agents"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove

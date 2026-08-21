@@ -104,3 +104,7 @@ cabal run agent-cli -- +RTS -M16G -RTS
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception
+- Never use bare `Control.Concurrent.Async.async`. Prefer structured
+  concurrency (`withAsync`, `race`, `concurrently`, etc.) so child lifetimes
+  are scoped. If work must outlive the current call, track its lifecycle and
+  completion explicitly, and cancel and join it when its owner closes.

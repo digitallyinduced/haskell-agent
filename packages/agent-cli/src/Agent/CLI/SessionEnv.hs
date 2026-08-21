@@ -4,6 +4,7 @@ module Agent.CLI.SessionEnv
     ) where
 
 import Agent.CLI.Interrupt (InterruptState)
+import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -43,5 +44,6 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
+    , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionReset :: !(IO ())
     }
