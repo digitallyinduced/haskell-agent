@@ -52,6 +52,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             [(handle, message)] <- readIORef launched
             message `shouldBe` "investigate this"
             handle.sessionMeta.metaTitle `shouldBe` "worker"
+            handle.sessionMeta.metaTitleIsManual `shouldBe` True
             handle.sessionMeta.metaModel `shouldBe` "model-2"
             handle.sessionMeta.metaEffort `shouldBe` "high"
             loadSession env.toolsRoot handle.sessionMeta.metaId
@@ -164,6 +165,7 @@ testCreate root = SessionCreate
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"
+    , createTitleIsManual = False
     }
 
 testCreateAt :: OsPath -> OsPath -> SessionCreate

@@ -9,6 +9,7 @@ import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -32,6 +33,8 @@ data SessionEnv = SessionEnv
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !Persistence
+    , sessionTitleManager :: !SessionTitleManager
+    , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath

@@ -345,6 +345,8 @@ runCreateAgentSession
 runCreateAgentSession env args
     | Text.null (Text.strip args.message) =
         pure (Left "create_agent_session requires a non-empty message")
+    | maybe False ((> 100) . Text.length . Text.strip) args.title =
+        pure (Left "create_agent_session title must be at most 100 characters")
     | otherwise = do
         let title = case Text.strip <$> args.title of
                 Just value | not (Text.null value) -> value
@@ -356,6 +358,8 @@ runCreateAgentSession env args
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
                 , createTitleHint = Just title
+                , createTitleIsManual =
+                    maybe False (not . Text.null . Text.strip) args.title
                 }
         handle <- createSession spec
         env.toolsLaunchTurn handle args.message >>= \case

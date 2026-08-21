@@ -16,6 +16,11 @@ module Agent.CLI.Session
     , listSessions
     , sessionsRoot
     , sessionTitleFromPrompt
+    , setGeneratedSessionTitle
+    , setManualSessionTitle
+    , resetSessionTitleToAuto
+    , sessionConversationText
+    , sessionTitleTurnCountFromSlot
     , writeSessionMeta
     , ensureSession
     , devResumePointerPath
@@ -120,6 +125,9 @@ data SessionMeta = SessionMeta
     , metaCwd :: !OsPath
     , metaEffort :: !Text
     , metaTitle :: !Text
+    , metaTitleIsManual :: !Bool
+    , metaTitleRefreshIndex :: !Int
+    , metaTitleUserTurns :: !Int
     , metaLastResponseId :: !(Maybe Text)
     , metaInputTokens :: !Int
     , metaOutputTokens :: !Int
@@ -137,6 +145,9 @@ instance ToJSON SessionMeta where
         , "cwd" .= toFilePath meta.metaCwd
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
+        , "titleIsManual" .= meta.metaTitleIsManual
+        , "titleRefreshIndex" .= meta.metaTitleRefreshIndex
+        , "titleUserTurns" .= meta.metaTitleUserTurns
         , "lastResponseId" .= meta.metaLastResponseId
         , "inputTokens" .= meta.metaInputTokens
         , "outputTokens" .= meta.metaOutputTokens
@@ -159,6 +170,9 @@ instance FromJSON SessionMeta where
             <*> (fromFilePath <$> o .: "cwd")
             <*> o .: "effort"
             <*> o .: "title"
+            <*> (o .:? "titleIsManual" .!= False)
+            <*> (o .:? "titleRefreshIndex" .!= 2)
+            <*> (o .:? "titleUserTurns" .!= 6)
             <*> o .:? "lastResponseId"
             <*> (o .:? "inputTokens" .!= 0)
             <*> (o .:? "outputTokens" .!= 0)
@@ -211,6 +225,7 @@ data SessionCreate = SessionCreate
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
+    , createTitleIsManual :: !Bool
     } deriving (Eq, Show)
 
 -- | Whether conversation state is stored on disk.
@@ -250,6 +265,9 @@ createSession spec = do
             , metaCwd = spec.createCwd
             , metaEffort = spec.createEffort
             , metaTitle = title
+            , metaTitleIsManual = spec.createTitleIsManual
+            , metaTitleRefreshIndex = 0
+            , metaTitleUserTurns = 0
             , metaLastResponseId = Nothing
             , metaInputTokens = 0
             , metaOutputTokens = 0
@@ -299,6 +317,27 @@ appendTurn handle turn = do
             }
     writeSessionMeta handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
+
+sessionConversationText :: [SessionTurn] -> Text
+sessionConversationText =
+    Text.intercalate "\n\n" . foldMap renderTurn
+  where
+    renderTurn turn =
+        [ "User:\n" <> turn.turnUserText ]
+            <> case turn.turnAssistantText of
+                Just text | not (Text.null (Text.strip text)) ->
+                    ["Assistant:\n" <> text]
+                _ -> []
+
+sessionTitleTurnCountFromSlot
+    :: Persistence
+    -> IO Int
+sessionTitleTurnCountFromSlot = \case
+    PersistenceDisabled -> pure 0
+    PersistenceEnabled slotRef ->
+        readIORef slotRef >>= \case
+            PersistencePending _ -> pure 0
+            PersistenceActive handle -> pure handle.sessionMeta.metaTitleUserTurns
 
 -- | Like 'appendTurn', but never derives the session title from this turn.
 -- Used for synthetic markers such as @/new@ and @/clear@.
@@ -368,10 +407,40 @@ writeSessionMeta path meta =
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
-    let oneLine = Text.unwords (Text.words (Text.strip prompt))
-    in if Text.length oneLine <= 72
-        then oneLine
-        else Text.take 69 oneLine <> "..."
+    let title = case take 10 (Text.words (Text.strip prompt)) of
+            [] -> "New session"
+            words' -> Text.unwords words'
+    in if Text.length title <= 72
+        then title
+        else Text.take 69 title <> "..."
+
+setGeneratedSessionTitle :: Int -> Text -> SessionHandle -> IO SessionHandle
+setGeneratedSessionTitle refreshIndex rawTitle handle
+    | handle.sessionMeta.metaTitleIsManual = pure handle
+    | otherwise = writeTitle False refreshIndex rawTitle handle
+
+setManualSessionTitle :: Text -> SessionHandle -> IO SessionHandle
+setManualSessionTitle = writeTitle True 2
+
+writeTitle :: Bool -> Int -> Text -> SessionHandle -> IO SessionHandle
+writeTitle manual refreshIndex rawTitle handle = do
+    let title = Text.unwords (Text.words (Text.strip rawTitle))
+        meta = handle.sessionMeta
+            { metaTitle = title
+            , metaTitleIsManual = manual
+            , metaTitleRefreshIndex = refreshIndex
+            }
+    writeSessionMeta handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
+resetSessionTitleToAuto :: SessionHandle -> IO SessionHandle
+resetSessionTitleToAuto handle = do
+    let meta = handle.sessionMeta
+            { metaTitleIsManual = False
+            , metaTitleRefreshIndex = 0
+            }
+    writeSessionMeta handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
 
 sessionUsageFromMeta :: SessionMeta -> TokenUsage
 sessionUsageFromMeta meta = TokenUsage

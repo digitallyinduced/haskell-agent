@@ -35,6 +35,7 @@ import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
+import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
@@ -81,6 +82,7 @@ main = hspec do
     TimestampSpec.spec
     TerminalSpec.spec
     SessionSpec.spec
+    SessionTitleSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
     UsageSpec.spec

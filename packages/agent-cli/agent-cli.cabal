@@ -70,6 +70,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.SessionTitle
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Style
@@ -97,6 +98,7 @@ library
                     , haskeline >= 0.8 && < 0.9
                     , process >= 1.6.26
                     , safe-exceptions
+                    , stm
                     , text >= 2.0 && < 2.2
                     , time
                     , transformers
@@ -151,6 +153,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.UsageSpec

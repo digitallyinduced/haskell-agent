@@ -42,10 +42,13 @@ spec = describe "Agent.CLI.Session" do
                 readDevResumePointer home `shouldReturn` Nothing
 
     describe "sessionTitleFromPrompt" do
-        it "collapses whitespace and truncates long prompts" do
+        it "collapses whitespace and keeps the first ten words" do
             sessionTitleFromPrompt "  hello   world  " `shouldBe` "hello world"
-            let long = Text.replicate 100 "a"
-            Text.length (sessionTitleFromPrompt long) `shouldBe` 72
+            sessionTitleFromPrompt "one two three four five six seven eight nine ten eleven"
+                `shouldBe` "one two three four five six seven eight nine ten"
+            sessionTitleFromPrompt "   " `shouldBe` "New session"
+            Text.length (sessionTitleFromPrompt (Text.replicate 200 "x"))
+                `shouldBe` 72
 
     describe "resumeHint" do
         it "prints a copy-pasteable --resume line with a quoted program name" do
@@ -210,6 +213,7 @@ testCreate root = SessionCreate
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
+    , createTitleIsManual = False
     }
 
 fixedTime :: UTCTime

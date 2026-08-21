@@ -22,6 +22,12 @@ import Agent.CLI.AgentViewport
     , renderAgentViewportPanelFor
     , responseItemLines
     )
+import Agent.CLI.SessionTitle
+    ( invalidateSessionTitles
+    , requestSessionTitle
+    , waitForSessionTitleResults
+    , withSessionTitleManager
+    )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
     , acquireSessionLock
@@ -156,7 +162,7 @@ import Agent.CLI.Terminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (schemasFromAppTools)
-import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
@@ -855,6 +861,7 @@ preparePersistence options root provider model cwd effort prompt resumed =
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
+                    , createTitleIsManual = False
                     }
             | otherwise -> pure PersistenceDisabled
 
@@ -949,7 +956,8 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+  withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -968,6 +976,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     unavailableProvidersRef <- newIORef unavailableProviders
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
+    titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     let loadAgentEntries = do
             rootItems <- readIORef transcriptRef
@@ -1089,6 +1098,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
             , sessionPersist = persist
+            , sessionTitleManager = titleManager
+            , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
@@ -1111,7 +1122,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    case pendingTurn of
+    result <- case pendingTurn of
         Just pending ->
             runPendingTurn env pending
         Nothing -> case prompt of
@@ -1120,6 +1131,9 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                 finishTurn env True result
             Nothing ->
                 repl env
+    _ <- waitForSessionTitleResults 5000000 titleManager
+    applyPendingSessionTitles env
+    pure result
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
 runPendingTurn = runPendingTurnWithCooldownRetry True
@@ -1691,6 +1705,7 @@ replWithDraft env@SessionEnv
                                                 { createModel = model
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
+                                                , createTitleIsManual = False
                                                 }
                                         PersistenceActive handle ->
                                             SessionCreate
@@ -1702,6 +1717,7 @@ replWithDraft env@SessionEnv
                                                     handle.sessionMeta.metaCwd
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
+                                                , createTitleIsManual = False
                                                 }
                                 handle <- createSession create
                                 let turn = SessionTurn
@@ -1723,6 +1739,7 @@ replWithDraft env@SessionEnv
                                 env.sessionOnPersisted handle'
                                 writeIORef slotRef
                                     (PersistenceActive handle'{sessionMeta = meta})
+                                writeIORef env.sessionTitleTurnCount 0
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
@@ -1750,6 +1767,78 @@ replWithDraft env@SessionEnv
                                         Text.putStrLn
                                             (roleMuted color
                                                 (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+                        continue
+                    ReplRename title -> do
+                        color <- resolveColor stderr
+                        case persist of
+                            PersistenceDisabled ->
+                                putTextLn stderr
+                                    (roleError color
+                                        "cannot rename a session that is not persisted")
+                            PersistenceEnabled slotRef ->
+                                readIORef slotRef >>= \case
+                                    PersistencePending pending -> do
+                                        writeIORef slotRef (PersistencePending pending
+                                            { createTitleHint = Just title
+                                            , createTitleIsManual = True
+                                            })
+                                        putTextLn stderr
+                                            (roleMuted color
+                                                (glyphOk <> "session title: " <> title))
+                                    PersistenceActive handle -> do
+                                        invalidateSessionTitles
+                                            env.sessionTitleManager
+                                            handle.sessionMeta.metaId
+                                        updated <- setManualSessionTitle title handle
+                                        writeIORef slotRef (PersistenceActive updated)
+                                        tty <- hIsTerminalDevice stdout
+                                        setCliWindowTitle tty stdout
+                                            (cliWindowTitle updated.sessionMeta.metaCwd
+                                                (Just updated.sessionMeta.metaTitle))
+                                        putTextLn stderr
+                                            (roleMuted color
+                                                (glyphOk <> "session title: "
+                                                    <> updated.sessionMeta.metaTitle))
+                        continue
+                    ReplRenameAuto -> do
+                        color <- resolveColor stderr
+                        case persist of
+                            PersistenceDisabled ->
+                                putTextLn stderr
+                                    (roleError color
+                                        "cannot rename a session that is not persisted")
+                            PersistenceEnabled slotRef ->
+                                readIORef slotRef >>= \case
+                                    PersistencePending pending -> do
+                                        writeIORef slotRef (PersistencePending pending
+                                            { createTitleHint = Nothing
+                                            , createTitleIsManual = False
+                                            })
+                                        putTextLn stderr
+                                            (roleMuted color
+                                                (glyphOk <> "automatic session titles enabled"))
+                                    PersistenceActive handle -> do
+                                        invalidateSessionTitles
+                                            env.sessionTitleManager
+                                            handle.sessionMeta.metaId
+                                        updated <- resetSessionTitleToAuto handle
+                                        writeIORef slotRef (PersistenceActive updated)
+                                        loadSession
+                                            (takeDirectory updated.sessionDir)
+                                            updated.sessionMeta.metaId
+                                            >>= \case
+                                                Left _ -> pure ()
+                                                Right (_, turns) -> do
+                                                    let source =
+                                                            sessionConversationText turns
+                                                    requestSessionTitle
+                                                        env.sessionTitleManager
+                                                        updated.sessionMeta.metaId
+                                                        1
+                                                        source
+                                        putTextLn stderr
+                                            (roleMuted color
+                                                (glyphOk <> "automatic session titles enabled"))
                         continue
                     ReplLogin -> do
                         color <- resolveColor stderr
