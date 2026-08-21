@@ -181,6 +181,10 @@ spec = do
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
             readIORef refreshCalls `shouldReturn` 1
 
+    describe "pooled static bearer credentials" do
+        it "report rejection as an authentication error" staticPoolAuthenticationTest
+        it "preserves another account's cooldown" staticPoolCooldownTest
+
     describe "staticBearerProvider" do
         it "returns the same bearer without an account id" do
             result <- getNextToken (staticBearerProvider "router-key") Nothing
@@ -217,6 +221,49 @@ spec = do
                 Left (ProviderError AuthenticationError _ _) -> pure ()
                 other -> expectationFailure
                     ("expected AuthenticationError, got " <> show other)
+
+staticPoolAuthenticationTest :: IO ()
+staticPoolAuthenticationTest = do
+    state <- freshAuth "acc-static"
+    pool <- newPool
+        [ state
+            { accessToken = "static-token"
+            , refreshToken = ""
+            }
+        ]
+        unexpectedRefresh
+    provider <- poolTokenProvider pool
+    initial <- expectCredential =<< getNextToken provider Nothing
+    rejected <- getNextToken provider
+        (failed initial AccountAuthenticationRejected)
+    case rejected of
+        Left (ProviderError AuthenticationError _ _) -> pure ()
+        other -> expectationFailure
+            ("expected AuthenticationError, got " <> show other)
+  where
+    unexpectedRefresh _ =
+        expectationFailure "static token must not refresh"
+            >> pure (Left (ConnectionError "unexpected refresh"))
+
+staticPoolCooldownTest :: IO ()
+staticPoolCooldownTest = do
+    staticState <- freshAuth "acc-static"
+    oauthState <- freshAuth "acc-oauth"
+    pool <- newPool
+        [ staticState { accessToken = "static-token", refreshToken = "" }
+        , oauthState
+        ]
+        (pure . Right)
+    Auth.reportRateLimit pool "acc-oauth" (Just 90)
+    provider <- poolTokenProvider pool
+    initial <- expectCredential =<< getNextToken provider Nothing
+    initial.accountId `shouldBe` "acc-static"
+    rejected <- getNextToken provider
+        (failed initial AccountAuthenticationRejected)
+    case rejected of
+        Left CredentialsExhausted{} -> pure ()
+        other -> expectationFailure
+            ("expected CredentialsExhausted, got " <> show other)
 
 localProvider
     :: [Text]

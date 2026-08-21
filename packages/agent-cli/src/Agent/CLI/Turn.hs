@@ -91,6 +91,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
+import Data.List (isPrefixOf)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -311,7 +312,10 @@ runOneTurn env@SessionEnv
                     putTextLn stdout (renderAssistantText useColor text)
                 _ -> pure ()
             afterItems <- readIORef transcriptRef
-            let newItems = drop (length beforeItems) afterItems
+            let newItems
+                    | beforeItems `isPrefixOf` afterItems =
+                        drop (length beforeItems) afterItems
+                    | otherwise = afterItems
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef -> do

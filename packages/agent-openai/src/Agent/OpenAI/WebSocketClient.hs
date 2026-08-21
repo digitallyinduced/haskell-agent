@@ -176,9 +176,7 @@ type StreamEventCallback = ResponseStreamEvent -> IO ()
 -- e.g. for compatibility with another streaming event model.
 type RawStreamEventCallback = Text -> Aeson.Value -> IO ()
 
--- | Optional controls for a WebSocket Responses request. Existing callers use
--- 'defaultCodexWsOptions'; long-running agents can opt into server-side
--- compaction without changing the shared 'ResponseCreateParams' type.
+-- | Optional controls for a WebSocket Responses request.
 data CodexWsOptions = CodexWsOptions
     { compactThreshold :: !(Maybe Int)
     } deriving (Eq, Show)

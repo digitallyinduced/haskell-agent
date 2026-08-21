@@ -61,6 +61,7 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , autoCompactOpenAiBackend
     , runProviderCompact
     )
 import Agent.CLI.ImagePreview
@@ -98,7 +99,8 @@ import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
-    ( osc9ProgressRemove
+    ( osc9ProgressIndeterminate
+    , osc9ProgressRemove
     , wrapOscForTmux
     )
 import Agent.CLI.Project
@@ -212,6 +214,7 @@ import Agent.ProjectInstructions
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
+    , hasCompactionCheckpoint
     , isTranscriptResetTurn
     , newSessionUserText
     )
@@ -715,6 +718,7 @@ runAgent options transition = do
                 Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         transcriptRef <- newIORef initialItems
+        contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just transcriptRef)
         prompt <- loadPrompt options
         let titleHint = case resumed of
@@ -769,6 +773,7 @@ runAgent options transition = do
                                             conn
                                             (readIORef paramsRef)
                                             transcriptRef
+                                            contextTokensRef
                                     noticingBackend =
                                         withPendingInputs pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
@@ -1078,6 +1083,9 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             (requestCancel toolEnv.toolCancel)
             (noteFullscreenCtrlC interrupt)
             (copyTerminalClipboard terminal stdout)
+            (\active ->
+                when terminal.terminalNativeProgress $
+                    setNativeProgress stderr active)
             initialFullscreenState
         else pure Nothing
     writeIORef uiRuntimeRef fullscreen
@@ -2544,11 +2552,18 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.
 clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle = do
+clearNativeProgress handle =
+    setNativeProgress handle False
+
+setNativeProgress :: Handle -> Bool -> IO ()
+setNativeProgress handle active = do
     tty <- hIsTerminalDevice handle
     when tty do
         inTmux <- isJust <$> lookupEnv "TMUX"
-        Text.hPutStr handle (wrapOscForTmux inTmux osc9ProgressRemove)
+        let sequence_
+                | active = osc9ProgressIndeterminate
+                | otherwise = osc9ProgressRemove
+        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
 -- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
@@ -2680,6 +2695,7 @@ currentSessionId = \case
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
+    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
@@ -2815,9 +2831,11 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                             }
                                     Nothing -> pure ()
                                 transcript <- newIORef items
+                                contextTokens <- newIORef Nothing
                                 let session =
                                         SubagentSession
                                             { subSessionTranscript = transcript
+                                            , subSessionContextTokens = contextTokens
                                             }
                                 atomicModifyIORef' sessionsRef \m ->
                                     (Map.insert agentId session m, ())
@@ -2855,8 +2873,8 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
             Left err -> Left err
             Right _ -> Right ()
 
--- | Serialize OpenAI WebSocket turns: parent and children share one connection,
--- and 'receiveWsResponse' is not multiplexed.
+-- | Serialize turns on the root OpenAI WebSocket connection because
+-- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
     :: MVar ()
     -> TokenProvider
@@ -2864,12 +2882,16 @@ lockedOpenAiBackend
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript =
+lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
+        contextTokens =
     let Backend submit =
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
-    in Backend \previous inputs onEvent ->
-        withMVar wsLock \_ -> submit previous inputs onEvent
+        serialized = Backend \previous inputs onEvent ->
+            withMVar wsLock \_ -> submit previous inputs onEvent
+    in autoCompactOpenAiBackend provider
+        getParams transcript contextTokens serialized
 
 -- | Use a disposable WebSocket for side questions so cancellation cannot
 -- leave abandoned response frames queued on the main conversation connection.
@@ -2951,9 +2973,15 @@ runCodexSubagent options policy planHooks paramsRef tokenProvider registry sessi
                     (schemasFromAppTools OpenAIProvider tools) effort
             toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
-            let backend =
+            let baseBackend =
                     freshOpenAiBackend tokenProvider
                         (readIORef childParamsRef) session.subSessionTranscript
+                backend =
+                    autoCompactOpenAiBackend tokenProvider
+                        (readIORef childParamsRef)
+                        session.subSessionTranscript
+                        session.subSessionContextTokens
+                        baseBackend
                 config = LoopConfig
                     { loopBackend = backend
                     , loopTools = toolRegistry
@@ -3098,6 +3126,7 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
                     Right (Just (xs, m)) -> (xs, Just m)
                     _ -> ([], Nothing)
             transcript <- newIORef items
+            contextTokens <- newIORef Nothing
             case meta >>= (.diskAgentType) of
                 Just agentType ->
                     recordAgentSpec typesRef agentId GrokSubagentSpec
@@ -3107,7 +3136,10 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
                             meta >>= (.diskReasoningEffort)
                         }
                 Nothing -> pure ()
-            let session = SubagentSession { subSessionTranscript = transcript }
+            let session = SubagentSession
+                    { subSessionTranscript = transcript
+                    , subSessionContextTokens = contextTokens
+                    }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
             pure session
 
@@ -3150,6 +3182,8 @@ foldSessionItems = go []
         | isTranscriptResetTurn turn.turnUserText =
             -- /clear and /new store an empty snapshot; /compact stores the
             -- rebuilt history. Either way, turnItems replaces prior history.
+            go turn.turnItems rest
+        | hasCompactionCheckpoint turn.turnItems =
             go turn.turnItems rest
         | otherwise = go (acc <> turn.turnItems) rest
 
