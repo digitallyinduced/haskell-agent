@@ -42,6 +42,7 @@ library
                     , Agent.OsPath
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
+                    , Agent.ResourceScope
                     , Agent.Subagents
                     , Agent.Subagents.Format
                     , Agent.Subagents.Registry
@@ -86,6 +87,7 @@ library
                     , http-conduit
                     , process
                     , retry >= 0.9.3.1 && < 0.10
+                    , resourcet
                     , safe-exceptions
                     , stm
                     , text
@@ -105,6 +107,7 @@ test-suite agent-core-test
                     , Agent.LoopSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
+                    , Agent.ResourceScopeSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
                     , Agent.ToolArgsSpec

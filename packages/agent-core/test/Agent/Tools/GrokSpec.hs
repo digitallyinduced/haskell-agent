@@ -13,7 +13,7 @@ import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Tools.PlanMode (newPlanModeEnv)
+import Agent.Tools.PlanMode (PlanModeEnv, activatePlanMode, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Data.IORef
@@ -126,10 +126,12 @@ spec = describe "Agent.Tools.Grok" do
 
     it "refuses a non-unique search_replace without replace_all" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
+            let path = toFilePath session.grokEnv.toolCwd </> "dup.txt"
+            Text.writeFile path "aaa bbb aaa\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
             output `shouldSatisfy` Text.isInfixOf "multiple times"
+            Text.readFile path `shouldReturn` "aaa bbb aaa\n"
 
     it "grep finds a literal match" do
         withTempSession \(session, ghci) -> do
@@ -198,6 +200,21 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"secret.txt\",\"old_string\":\"hidden\",\"new_string\":\"shown\"}"
             output `shouldSatisfy` Text.isInfixOf "gitignore"
+
+    it "only edits plan.md while plan mode is active" do
+        withTempSession \(session, ghci) -> do
+            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            activatePlanMode plan
+            blocked <- runToolWithPlan session ghci plan "search_replace"
+                "{\"file_path\":\"blocked.txt\",\"old_string\":\"\",\"new_string\":\"no\"}"
+            blocked `shouldSatisfy` Text.isInfixOf "only editable file is the plan file"
+            doesFileExist (toFilePath session.grokEnv.toolCwd </> "blocked.txt")
+                `shouldReturn` False
+            allowed <- runToolWithPlan session ghci plan "search_replace"
+                "{\"file_path\":\"plan.md\",\"old_string\":\"\",\"new_string\":\"# Plan\\n\"}"
+            allowed `shouldSatisfy` Text.isInfixOf "created successfully"
+            Text.readFile (toFilePath session.grokEnv.toolCwd </> "plan.md")
+                `shouldReturn` "# Plan\n"
 
     it "persists cwd and exported env across run_terminal_cmd calls" do
         withTempSession \(session, ghci) -> do
@@ -281,6 +298,16 @@ spec = describe "Agent.Tools.Grok" do
             closeGrokSession session
             doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` False
 
+    it "stops background commands when the session closes" do
+        withTempSession \(session, ghci) -> do
+            let escaped = toFilePath session.grokEnv.toolCwd </> "escaped"
+            started <- runTool session ghci "run_terminal_cmd"
+                "{\"command\":\"sleep 1; touch escaped\",\"description\":\"cleanup test\",\"background\":true}"
+            started `shouldSatisfy` Text.isInfixOf "task_id:"
+            closeGrokSession session
+            threadDelay 1500000
+            doesFileExist escaped `shouldReturn` False
+
     describe "hasUnwaitedBackgroundOp" do
         it "detects a trailing bare ampersand" do
             hasUnwaitedBackgroundOp "sleep 1 &" `shouldBe` True
@@ -299,6 +326,10 @@ spec = describe "Agent.Tools.Grok" do
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
     plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+    runToolWithPlan session ghci plan name arguments
+
+runToolWithPlan :: GrokSession -> GhciSession -> PlanModeEnv -> Text -> Text -> IO Text
+runToolWithPlan session ghci plan name arguments = do
     typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
     result <- dispatchToolCall defaultLoopDispatch
         (appToolHandlers (grokTools session ghci plan Nothing typesRef))

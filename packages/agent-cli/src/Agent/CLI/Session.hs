@@ -8,6 +8,7 @@ module Agent.CLI.Session
     , appendTurn
     , appendTurnKeepTitle
     , loadSession
+    , isValidSessionId
     , listSessions
     , sessionsRoot
     , sessionTitleFromPrompt
@@ -287,28 +288,44 @@ appendTurnKeepTitle handle turn = do
 
 
 loadSession :: OsPath -> Text -> IO (Either String (SessionMeta, [SessionTurn]))
-loadSession root sessionId = do
-    let dir = root </> fromFilePath (Text.unpack sessionId)
-        metaPath = dir </> fromFilePath "meta.json"
-        transcriptPath = dir </> fromFilePath "transcript.jsonl"
-    exists <- doesDirectoryExist dir
-    if not exists
-        then pure (Left ("session not found: " <> Text.unpack sessionId))
-        else do
-            metaResult <- decodeFileEither metaPath
-            case metaResult of
-                Left err -> pure (Left err)
-                Right meta
-                    | meta.metaVersion /= sessionSchemaVersion ->
-                        pure $ Left $
-                            "unsupported session schema version "
-                                <> show meta.metaVersion
-                                <> " (expected "
-                                <> show sessionSchemaVersion
-                                <> ")"
-                    | otherwise -> do
-                        turnsResult <- loadTranscript transcriptPath
-                        pure ((meta,) <$> turnsResult)
+loadSession root sessionId
+    | not (isValidSessionId sessionId) =
+        pure (Left "invalid session id")
+    | otherwise = do
+        let dir = root </> fromFilePath (Text.unpack sessionId)
+            metaPath = dir </> fromFilePath "meta.json"
+            transcriptPath = dir </> fromFilePath "transcript.jsonl"
+        exists <- doesDirectoryExist dir
+        if not exists
+            then pure (Left ("session not found: " <> Text.unpack sessionId))
+            else do
+                metaResult <- decodeFileEither metaPath
+                case metaResult of
+                    Left err -> pure (Left err)
+                    Right meta
+                        | not (isValidSessionId meta.metaId) ->
+                            pure (Left "invalid session id in metadata")
+                        | meta.metaId /= sessionId ->
+                            pure (Left "session id does not match directory")
+                        | meta.metaVersion /= sessionSchemaVersion ->
+                            pure $ Left $
+                                "unsupported session schema version "
+                                    <> show meta.metaVersion
+                                    <> " (expected "
+                                    <> show sessionSchemaVersion
+                                    <> ")"
+                        | otherwise -> do
+                            turnsResult <- loadTranscript transcriptPath
+                            pure ((meta,) <$> turnsResult)
+
+-- | Session ids are single path components. Keep this deliberately broader
+-- than the current date-plus-hex allocator so older ids remain resumable.
+isValidSessionId :: Text -> Bool
+isValidSessionId sessionId =
+    not (Text.null sessionId)
+        && sessionId /= "."
+        && sessionId /= ".."
+        && Text.all (\char -> char /= '/' && char /= '\\' && char /= '\NUL') sessionId
 
 listSessions :: OsPath -> IO [SessionMeta]
 listSessions root = do

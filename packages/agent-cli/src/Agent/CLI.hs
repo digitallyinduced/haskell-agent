@@ -22,6 +22,16 @@ import Agent.CLI.AgentViewport
     , renderAgentViewportPanelFor
     , responseItemLines
     )
+import Agent.CLI.AgentSessions
+    ( AgentSessionToolsEnv(..)
+    , acquireSessionLock
+    , agentSessionTools
+    , closeSessionProcessManager
+    , launchSessionTurn
+    , newSessionProcessManager
+    , releaseSessionLock
+    , sessionProcessStatus
+    )
 import Agent.CLI.Approval
     ( approveToolDecision
     , childApprove
@@ -58,6 +68,7 @@ import Agent.CLI.ReplMode
     )
 import Agent.CLI.Interrupt
     ( InterruptState
+    , isWrappedUserInterrupt
     , newInterruptState
     , withCtrlCHandler
     , withTurnCancel
@@ -249,7 +260,14 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
-import Control.Exception.Safe (catchAsync, finally, throwIO, try)
+import Control.Exception.Safe
+    ( SomeException
+    , catchAny
+    , catchAsync
+    , finally
+    , throwIO
+    , try
+    )
 import Control.Monad (when)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -468,7 +486,7 @@ runAgent options transition = do
             | otherwise -> makeAbsolute meta.metaCwd
         Nothing
             | options.optWorktree -> do
-                createWorktree source (worktreeRoot home) >>= either die \path -> do
+                createWorktree source (worktreeRoot home) >>= either (die . Text.unpack) \path -> do
                     color <- resolveColor stderr
                     putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> toText path))
                     pure path
@@ -515,6 +533,22 @@ runAgent options transition = do
     escPaused <- newIORef False
     let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
         provider = loaded.loadedProvider
+        model = fromMaybe
+            (case transitionTarget of
+                Just target -> target.modelId
+                Nothing ->
+                    maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
+            options.optModel
+        effort = fromMaybe
+            (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
+            options.optEffort
+        policy = resolveApprovalPolicy options isTty
+            projectSettings.settingsAutoApprove
+    sessionProcessManager <- newSessionProcessManager root
+    managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
+    activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
+    persistSlotRef <- newIORef
+        (Nothing :: Maybe (IORef (Either SessionCreate SessionHandle)))
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
@@ -538,12 +572,12 @@ runAgent options transition = do
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
-                    Left err -> pure (Left (Text.pack err))
+                    Left err -> pure (Left err)
                     Right path -> pure $ Right SubagentWorktree
                         { subagentWorktreePath = path
                         , subagentWorktreeCleanup =
                             removeWorktree source path >>= \case
-                                Left err -> pure (Left (Text.pack err))
+                                Left err -> pure (Left err)
                                 Right () -> pure (Right ())
                         }
             , multiSendToRoot = Just sendToRoot
@@ -564,7 +598,31 @@ runAgent options transition = do
                             agentTypesRef agentId session.subSessionTranscript
                     Nothing -> pure ()
         Nothing -> pure ()
-    let tools = coding.codingAppTools
+    let claimCurrentSession handle
+            | managedAgentSession = pure ()
+            | otherwise =
+                readIORef activeSessionLock >>= \case
+                    Just _ -> pure ()
+                    Nothing ->
+                        acquireSessionLock handle >>= \case
+                            Left err -> throwIO (userError (Text.unpack err))
+                            Right lockPath ->
+                                writeIORef activeSessionLock (Just lockPath)
+        sessionToolsEnv = AgentSessionToolsEnv
+            { toolsRoot = root
+            , toolsProvider = provider
+            , toolsModel = model
+            , toolsCwd = cwd
+            , toolsEffort = effort
+            , toolsCurrentSessionId =
+                readIORef persistSlotRef >>= currentSessionId
+            , toolsLaunchTurn =
+                launchSessionTurn sessionProcessManager
+                    (not (isOneShot options)) policy
+            , toolsSessionStatus =
+                sessionProcessStatus sessionProcessManager
+            }
+        tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -577,23 +635,14 @@ runAgent options transition = do
                     flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
                         subagentSessions agentTypesRef
                 Nothing -> pure ()
+            closeSessionProcessManager sessionProcessManager
+            readIORef activeSessionLock >>= mapM_ releaseSessionLock
             coding.codingClose
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let model = fromMaybe
-                (case transitionTarget of
-                    Just target -> target.modelId
-                    Nothing ->
-                        maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
-                options.optModel
-            instructions = systemPrompt provider cwd today (isOneShot options)
-            effort = fromMaybe
-                (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
-                options.optEffort
+        let instructions = systemPrompt provider cwd today (isOneShot options)
             params = requestParams model instructions
                 (schemasFromAppTools provider tools) effort
-            policy = resolveApprovalPolicy options isTty
-                projectSettings.settingsAutoApprove
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialPrevious = case transition of
                 Just _ -> Nothing
@@ -608,6 +657,7 @@ runAgent options transition = do
         agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
+        writeIORef persistSlotRef persist
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
@@ -615,13 +665,14 @@ runAgent options transition = do
             Just slotRef -> do
                 slot <- readIORef slotRef
                 case slot of
-                    Right handle ->
+                    Right handle -> do
+                        claimCurrentSession handle
                         noteSessionDir handle.sessionDir
                     Left _ -> pure ()
             Nothing -> pure ()
         progName <- getProgName
         withCtrlCHandler interrupt $
-            withInterruptResume progName persist do
+            withInterruptResume progName persist RunQuit do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
@@ -665,7 +716,7 @@ runAgent options transition = do
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -704,7 +755,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -735,7 +786,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -781,15 +832,29 @@ preparePersistence options root provider model cwd effort prompt resumed =
 withInterruptResume
     :: String
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> a
     -> IO a
     -> IO a
-withInterruptResume progName persist action =
-    action `catchAsync` \(e :: AsyncException) ->
+withInterruptResume progName persist interrupted action =
+    (action `catchAny` handleSyncException) `catchAsync` handleInterrupt
+  where
+    -- UserInterrupt can arrive asynchronously from the installed SIGINT
+    -- handler or wrapped as a synchronous exception by safe-exceptions when
+    -- the inline editor's double-Ctrl-C path calls throwIO.
+    handleInterrupt (e :: AsyncException) =
         case e of
-            UserInterrupt -> do
-                printResumeHint progName persist
-                throwIO e
+            UserInterrupt -> finishInterrupt
             _ -> throwIO e
+    handleSyncException (e :: SomeException)
+        | isWrappedUserInterrupt e = finishInterrupt
+        | otherwise = throwIO e
+    finishInterrupt = do
+        printResumeHint progName persist
+        -- The interrupt is the requested, graceful end of the CLI session.
+        -- Returning lets the surrounding brackets restore the SIGINT handler
+        -- and close tools without GHC's top-level exception handler printing
+        -- "user interrupt" and a backtrace.
+        pure interrupted
 
 printResumeHint
     :: String
@@ -846,10 +911,11 @@ runSession
     -> IORef [TurnInput]
     -> SubagentStoreRoot
     -> IORef TokenUsage
+    -> (SessionHandle -> IO ())
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -1007,6 +1073,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
             , sessionAbortSubagentTurn = abortSubagentTurn
+            , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
     case pendingTurn of

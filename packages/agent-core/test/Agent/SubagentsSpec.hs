@@ -223,7 +223,7 @@ spec = describe "Agent.Subagents" do
         _ <- closeSubagent registry parent
         result <- spawnSubagentAt registry (Just parent) parentPath 1 "child"
             (plainInterAgentContent "child") Nothing
-        result `shouldBe` Left "parent agent is not running"
+        result `shouldBe` Left "Parent subagent is closed or missing."
 
     it "waitSubagents returns when any target finishes" do
         gate <- newTVarIO False
@@ -399,6 +399,31 @@ spec = describe "Agent.Subagents" do
         notices <- readIORef rootNotices
         notices `shouldNotContain` [child]
 
+    it "allows completion callbacks to queue a follow-up without deadlocking" do
+        prompts <- newIORef ([] :: [Text])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> do
+                let payload = messagePayload prompt
+                atomicModifyIORef' prompts \seen -> (seen <> [payload], ())
+                pure $ Right LoopResult
+                    { finalResponseId = "response-" <> payload
+                    , finalText = Just payload
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId -> \case
+            Completed (Just "first") -> do
+                _ <- sendInput registry agentId "second" False
+                pure ()
+            _ -> pure ()
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses
+            `shouldBe` Just (Completed (Just "second"))
+        readIORef prompts `shouldReturn` ["first", "second"]
+
     it "cancels and joins a running worker when the registry closes" do
         started <- newEmptyTMVarIO
         cleanedUp <- newEmptyTMVarIO
@@ -449,6 +474,70 @@ spec = describe "Agent.Subagents" do
         status1 `shouldBe` Completed Nothing
         previous <- getPreviousResponseId registry agentId
         previous `shouldBe` Just "prev"
+        Right _ <- sendInput registry agentId "after-restore" False
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses
+            `shouldBe` Just (Completed (Just "after-restore"))
+
+    it "does not let sendInput resurrect a closed agent" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "r"
+                , finalText = Just (messagePayload prompt)
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        _ <- closeSubagent registry agentId
+        sendInput registry agentId "should-not-run" False
+            `shouldReturn` Left "agent is closed"
+        getStatus registry agentId `shouldReturn` Closed
+
+    it "reset cancels old workers and reopens with a fresh resource scope" do
+        started <- newEmptyMVar
+        notices <- newIORef ([] :: [SubagentId])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ ->
+                let payload = messagePayload prompt
+                in if payload == "old"
+                    then putMVar started () >> atomically retry
+                    else pure $ Right LoopResult
+                        { finalResponseId = "new"
+                        , finalText = Just payload
+                        , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
+                        })
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId _ ->
+            atomicModifyIORef' notices \ids -> (ids <> [agentId], ())
+        Right old <- spawnSubagent registry Nothing 0 "old" Nothing
+        takeMVar started
+        resetSubagentRegistry registry
+        getStatus registry old `shouldReturn` NotFound
+        readIORef notices `shouldReturn` []
+        Right fresh <- spawnSubagent registry Nothing 0 "fresh" Nothing
+        (statuses, timedOut) <- waitSubagents registry [fresh] 15000
+        timedOut `shouldBe` False
+        Map.lookup fresh statuses
+            `shouldBe` Just (Completed (Just "fresh"))
+
+    it "rejects spawning a descendant under a closed parent" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "r"
+                , finalText = Just (messagePayload prompt)
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                })
+            (\_ _ -> pure ())
+        Right parent <- spawnSubagent registry Nothing 0 "parent" Nothing
+        _ <- waitSubagents registry [parent] 15000
+        _ <- closeSubagent registry parent
+        result <- spawnSubagent registry (Just parent) 1 "child" Nothing
+        result `shouldBe` Left "Parent subagent is closed or missing."
 
     it "restored agents receive a fresh cancellation flag" do
         seenCancelled <- newIORef ([] :: [Bool])
@@ -595,6 +684,34 @@ spec = describe "Agent.Subagents" do
         rejected <- spawnSubagentWithCwdForTurn registry (Just ownedTurn)
             (fromFilePath "/tmp") Nothing 0 "too-late" Nothing
         rejected `shouldBe` Left "Root turn was aborted."
+        closeSubagentRegistry registry
+
+    it "can restart an interrupted agent in a later root turn" do
+        started <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ ->
+                if messagePayload prompt == "first"
+                    then atomically (putTMVar started ()) >> atomically retry
+                    else pure $ Right LoopResult
+                        { finalResponseId = "second"
+                        , finalText = Just (messagePayload prompt)
+                        , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
+                        })
+            (\_ _ -> pure ())
+        firstTurn <- beginRootTurn registry
+        secondTurn <- beginRootTurn registry
+        Right agentId <- spawnSubagentWithCwdForTurn registry (Just firstTurn)
+            (fromFilePath "/tmp") Nothing 0 "first" Nothing
+        atomically $ takeTMVar started
+        abortRootTurn registry firstTurn
+        getStatus registry agentId `shouldReturn` Interrupted
+        Right _ <- sendInputMessageForTurn registry (Just secondTurn)
+            taskPathRoot agentId (plainInterAgentContent "second") False
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses
+            `shouldBe` Just (Completed (Just "second"))
         closeSubagentRegistry registry
 
     it "removes failed-turn follow-ups queued behind unrelated work" do
