@@ -316,7 +316,8 @@ managedLoginAccount now (metadata, secret) =
         { loginManagedId = Just metadata.managedId
         , loginProvider = metadata.managedProvider
         , loginAccountId = metadata.managedAccountId
-        , loginLabel = metadata.managedLabel
+        , loginLabel = fromMaybe metadata.managedLabel
+            (openAIAccountEmail =<< openAIAuth)
         , loginBilling = case metadata.managedBilling of
             ManagedSubscription -> SubscriptionBilling Nothing
             ManagedApiCredits -> ApiCreditsBilling
@@ -328,11 +329,14 @@ managedLoginAccount now (metadata, secret) =
         , loginEnabled = metadata.managedEnabled
         }
   where
+    openAIAuth = case metadata.managedAuthKind of
+        ManagedOpenAIAuthJson ->
+            openaiAuthStateFromJson now
+                (LBS.fromStrict (Text.encodeUtf8 secret.secretPayload))
+        _ -> Nothing
     accessToken = fromMaybe "" case metadata.managedAuthKind of
         ManagedBearerToken -> Just secret.secretPayload
-        ManagedOpenAIAuthJson ->
-            (.accessToken) <$> openaiAuthStateFromJson now
-                (LBS.fromStrict (Text.encodeUtf8 secret.secretPayload))
+        ManagedOpenAIAuthJson -> (.accessToken) <$> openAIAuth
         ManagedGrokAuthJson ->
             grokCredentialFromAuthJson secret.secretPayload
 
@@ -471,7 +475,8 @@ connectOpenAI color = do
                             storeConnectedCredential color
                                 OpenAIProvider
                                 auth.accountId
-                                "ChatGPT"
+                                (fromMaybe "ChatGPT"
+                                    (openAIAccountEmail auth))
                                 ManagedSubscription
                                 ManagedOpenAIAuthJson
                                 (Text.decodeUtf8
@@ -608,8 +613,11 @@ discoverOpenAIEnv = do
                     explicitAccount
                         <|> (idToken >>= OpenAI.deriveAccountId)
                         <|> OpenAI.deriveAccountId accessToken
+            label = fromMaybe "ChatGPT" $
+                (idToken >>= OpenAI.deriveEmail)
+                    <|> OpenAI.deriveEmail accessToken
         pure $ subscriptionAccount
-            OpenAIProvider accountId "ChatGPT" "environment"
+            OpenAIProvider accountId label "environment"
             accessToken ManagedBearerToken accessToken
 
 discoverOpenAIFile :: UTCTime -> OsPath -> IO (Maybe LoginAccount)
@@ -624,7 +632,7 @@ discoverOpenAIFile now path = do
                 pure $ subscriptionAccount
                     OpenAIProvider
                     auth.accountId
-                    "ChatGPT"
+                    (fromMaybe "ChatGPT" (openAIAccountEmail auth))
                     (toText path)
                     auth.accessToken
                     ManagedOpenAIAuthJson
@@ -731,6 +739,11 @@ grokAccount token source authKind payload =
         token
         authKind
         payload
+
+openAIAccountEmail :: OpenAI.AuthState -> Maybe Text
+openAIAccountEmail auth =
+    (auth.idToken >>= OpenAI.deriveEmail)
+        <|> OpenAI.deriveEmail auth.accessToken
 
 refreshLoginAccount :: LoginAccount -> IO LoginAccount
 refreshLoginAccount account
