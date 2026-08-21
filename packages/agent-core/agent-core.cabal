@@ -2,7 +2,7 @@ cabal-version:      2.2
 name:               agent-core
 version:            0.1.0.0
 synopsis:           Provider-neutral infrastructure for the agent harness
-description:        Shared provider credentials, broker failover, errors,
+description:        Shared provider credentials, errors,
                     transport utilities, the agent loop, and JSON
                     tool-argument helpers.
 license:            BSD-3-Clause
@@ -36,7 +36,6 @@ library
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
-                    , Agent.Broker
                     , Agent.Loop
                     , Agent.JsonText
                     , Agent.OsPath
@@ -84,7 +83,6 @@ library
                     , containers
                     , directory
                     , filepath
-                    , http-conduit
                     , process
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet

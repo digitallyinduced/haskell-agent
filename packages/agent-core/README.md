@@ -4,7 +4,6 @@ Provider-neutral infrastructure shared by the harness transports:
 
 - `Agent.Error` defines the common transport and provider error channel.
 - `Agent.Provider` owns credentials, account-failure feedback, and failover.
-- `Agent.Broker` obtains provider credentials from the central broker.
 - `Agent.Loop` runs the provider-neutral tool-calling agent loop. Transport
   adapters live in `agent-openai` (`Agent.OpenAI.LoopBackend`), `agent-xai`
   (`Agent.XAI.LoopBackend`), and `agent-openrouter`

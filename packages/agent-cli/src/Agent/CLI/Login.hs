@@ -288,7 +288,6 @@ discoverLoginAccounts = do
     grokFile <- discoverGrokFile
         (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
     openRouter <- discoverOpenRouter
-    broker <- discoverBroker
     managed <- loadManagedCredentials
     let managedAccounts = case managed of
             Left _ -> []
@@ -296,8 +295,7 @@ discoverLoginAccounts = do
     pure $ nubBy sameAccount $
         managedAccounts
             <> catMaybes
-                [ broker
-                , openaiEnv
+                [ openaiEnv
                 , openaiFile
                 , grokEnv
                 , grokFile
@@ -693,29 +691,6 @@ discoverOpenRouter = do
             , loginSecretPayload = accessToken
             , loginEnabled = True
             }
-
-discoverBroker :: IO (Maybe LoginAccount)
-discoverBroker = do
-    url <- lookupNonEmpty "AGENT_BROKER_URL"
-    token <- lookupNonEmpty "AGENT_BROKER_TOKEN"
-    pure case (url, token) of
-        (Just brokerUrl, Just _) ->
-            Just LoginAccount
-                { loginManagedId = Nothing
-                , loginProvider = OpenAIProvider
-                , loginAccountId = "broker"
-                , loginLabel = "Credential broker"
-                , loginBilling = SubscriptionBilling Nothing
-                , loginSource = brokerUrl
-                , loginUsage =
-                    UsageUnavailable
-                        "account listing is not exposed by the broker client yet"
-                , loginAccessToken = ""
-                , loginAuthKind = ManagedBearerToken
-                , loginSecretPayload = ""
-                , loginEnabled = True
-                }
-        _ -> Nothing
 
 subscriptionAccount
     :: Provider
