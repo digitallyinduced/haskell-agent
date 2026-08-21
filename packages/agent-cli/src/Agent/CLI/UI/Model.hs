@@ -240,7 +240,9 @@ reduceUi event state = case event of
             , uiCursor = 0
             , uiQueuedInputs = text Seq.<| state.uiQueuedInputs
             , uiNotice =
-                Just "Cancelling the current turn; sending this prompt next…"
+                Just $
+                    warningNotice
+                        "Cancelling the current turn; sending this prompt next…"
             }
     UiQueuedInputStarted ->
         state

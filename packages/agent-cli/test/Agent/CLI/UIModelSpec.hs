@@ -346,7 +346,9 @@ spec = describe "fullscreen UI reducer" do
         state.uiCursor `shouldBe` 0
         state.uiNotice
             `shouldBe`
-                Just "Cancelling the current turn; sending this prompt next…"
+                Just
+                    (warningNotice
+                        "Cancelling the current turn; sending this prompt next…")
 
     it "clears only the draft that was submitted immediately" do
         let state =

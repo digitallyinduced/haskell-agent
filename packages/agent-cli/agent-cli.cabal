@@ -83,6 +83,7 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Markdown
+                    , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Theme
                     , Agent.CLI.UI.Model
                     , Agent.CLI.Turn
@@ -172,6 +173,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIMarkdownSpec
+                    , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UIModelSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
