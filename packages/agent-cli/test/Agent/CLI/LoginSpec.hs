@@ -77,6 +77,12 @@ spec = do
                         [openai { loginLabel = "person@example.com" }]
             body `shouldSatisfy` Text.isInfixOf "person@example.com"
 
+        it "shows the Grok account email in the account label" do
+            let body = renderLoginFrame False $
+                    initialLoginState
+                        [grok { loginLabel = "person@example.com" }]
+            body `shouldSatisfy` Text.isInfixOf "person@example.com"
+
         it "does not render access tokens" do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` (not . Text.isInfixOf "secret-openai")

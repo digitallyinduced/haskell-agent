@@ -100,6 +100,17 @@ spec = do
                 "{\"issuer::client\":{\"access_token\":\"nested-tok\"}}"
                 `shouldBe` Just "nested-tok"
 
+    describe "grokEmailFromAuthJson" do
+        it "reads profile emails and nested id-token claims" do
+            let token =
+                    "e30.eyJlbWFpbCI6InBlcnNvbkBleGFtcGxlLmNvbSJ9."
+            grokEmailFromAuthJson
+                "{\"issuer::client\":{\"email\":\"profile@example.com\"}}"
+                `shouldBe` Just "profile@example.com"
+            grokEmailFromAuthJson
+                ("{\"issuer::client\":{\"id_token\":\"" <> token <> "\"}}")
+                `shouldBe` Just "person@example.com"
+
     describe "reloadableFileCredentialProvider" do
         it "returns the cached credential without reloading" do
             loads <- newIORef (0 :: Int)

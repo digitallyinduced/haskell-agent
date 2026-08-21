@@ -2,6 +2,7 @@
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
+    , grokEmailFromAuthJson
     , loadAuth
     , openAIOAuthClientId
     , openaiAuthStateFromJson
@@ -34,7 +35,7 @@ import Agent.Provider
     , seedTokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
-import Agent.XAI.Auth (accountIdFromAccessToken)
+import Agent.XAI.Auth (accountIdFromAccessToken, emailFromToken)
 import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
@@ -419,6 +420,26 @@ grokCredentialFromAuthJson raw = do
             , Just token <- [entryToken nested]
             ]
     firstNestedToken _ = Nothing
+
+grokEmailFromAuthJson :: Text -> Maybe Text
+grokEmailFromAuthJson raw = do
+    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
+    entryEmail value <|> firstNestedEmail value
+  where
+    entryEmail (Aeson.Object object) =
+        textField "email" object
+            <|> (textField "id_token" object >>= emailFromToken)
+            <|> (textField "access_token" object >>= emailFromToken)
+            <|> (textField "key" object >>= emailFromToken)
+    entryEmail _ = Nothing
+
+    firstNestedEmail (Aeson.Object object) =
+        listToMaybe
+            [ email
+            | nested <- KeyMap.elems object
+            , Just email <- [entryEmail nested]
+            ]
+    firstNestedEmail _ = Nothing
 
 grokCredential :: Text -> Credential
 grokCredential token = Credential
