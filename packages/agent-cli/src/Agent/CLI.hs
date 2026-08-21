@@ -10,6 +10,7 @@ module Agent.CLI
     , formatReplStatusLine
     , formatTokenUsage
     , run
+    , withRestoredCurrentDirectory
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
@@ -448,9 +449,8 @@ run = do
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options = do
-    originalCwd <- getCurrentDirectory
-    go options Nothing `finally` setCurrentDirectory originalCwd
+runAgentWithRestarts options =
+    withRestoredCurrentDirectory (go options Nothing)
   where
     go current transition =
         runAgent current transition >>= \case
@@ -482,6 +482,14 @@ runAgentWithRestarts options = do
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
+
+-- | Restore the process cwd after an action succeeds or throws. Cabal gives
+-- GHCi relative source paths, so returning from an agent session in its cwd
+-- would make the following @:reload@ lose local modules.
+withRestoredCurrentDirectory :: IO a -> IO a
+withRestoredCurrentDirectory action = do
+    originalCwd <- getCurrentDirectory
+    action `finally` setCurrentDirectory originalCwd
 
 runListSessions :: IO ()
 runListSessions = do

@@ -8,6 +8,7 @@ import Agent.CLI
     , devArgs
     , formatReplStatusLine
     , formatTokenUsage
+    , withRestoredCurrentDirectory
     )
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Options (ApprovalPolicy(..))
@@ -20,9 +21,14 @@ import Agent.CLI.ReplMode
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
 import Agent.OsPath (fromFilePath)
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket, throwIO)
 import Data.IORef (newIORef, readIORef)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( getCurrentDirectory
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    , setCurrentDirectory
+    )
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -59,6 +65,23 @@ spec = do
                         , ":module +Agent.CLI"
                         , ":cmd afterDev =<< devMainResume (Just \"2026-08-20-abcd1234\")"
                         ]
+
+    describe "withRestoredCurrentDirectory" do
+        it "restores the GHCi cwd after normal completion" do
+            original <- getCurrentDirectory
+            withTempDir "agent-repl-cwd-" \temporary -> do
+                withRestoredCurrentDirectory (setCurrentDirectory temporary)
+                getCurrentDirectory `shouldReturn` original
+
+        it "restores the GHCi cwd after an exception" do
+            original <- getCurrentDirectory
+            withTempDir "agent-repl-cwd-" \temporary -> do
+                let failAfterChangingDirectory = do
+                        setCurrentDirectory temporary
+                        throwIO (userError "boom")
+                withRestoredCurrentDirectory failAfterChangingDirectory
+                    `shouldThrow` anyIOException
+                getCurrentDirectory `shouldReturn` original
 
     describe "formatReplStatusLine" do
         it "shows model, effort, and interaction mode" do
