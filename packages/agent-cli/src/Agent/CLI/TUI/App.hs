@@ -85,6 +85,8 @@ data Name
     | ComposerEffort
     | ComposerMode
     | ChoiceRow !Int
+    | PermissionRow !Int
+    | SlashRow !Int
     | OverlayCursor
     deriving (Eq, Ord, Show)
 
@@ -331,6 +333,10 @@ handleChoiceKey = \case
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
         vScrollPage (viewportScroll OverlayViewport) Down
+    V.EvMouseDown _ _ V.BScrollUp _ ->
+        vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ ->
+        vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
@@ -425,6 +431,10 @@ handleTextPromptKey = \case
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
         vScrollPage (viewportScroll OverlayViewport) Down
+    V.EvMouseDown _ _ V.BScrollUp _ ->
+        vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ ->
+        vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
     V.EvKey V.KBS [] -> edit \draft cursor ->
         if cursor <= 0
             then (draft, cursor)
@@ -767,9 +777,11 @@ drawSlashRow selected index suggestion =
                 , withAttr Theme.mutedAttr
                     (txt suggestion.slashSuggestionSummary)
                 ]
-    in if selected == index
-        then withAttr Theme.selectedAttr row
-        else row
+        styled =
+            if selected == index
+                then withAttr Theme.selectedAttr row
+                else row
+    in clickable (SlashRow index) styled
 
 drawComposer :: UiState -> Widget Name
 drawComposer state =
@@ -890,9 +902,11 @@ permissionRow :: Int -> Int -> Text -> Widget Name
 permissionRow selected index label =
     let prefix = if selected == index then "› " else "  "
         widget = txt (prefix <> label)
-    in if selected == index
-        then withAttr Theme.selectedAttr widget
-        else widget
+        styled =
+            if selected == index
+                then withAttr Theme.selectedAttr widget
+                else widget
+    in clickable (PermissionRow index) styled
 
 drawChoice :: ChoiceOverlay -> Widget Name
 drawChoice choice =
@@ -1058,6 +1072,17 @@ handleEvent event = case event of
              , state.appChoice
              , state.appUi.uiPermission
              ) of
+            (Just _, _, _) ->
+                case button of
+                    V.BScrollUp ->
+                        vScrollBy
+                            (viewportScroll OverlayViewport)
+                            (-mouseScrollLines)
+                    V.BScrollDown ->
+                        vScrollBy
+                            (viewportScroll OverlayViewport)
+                            mouseScrollLines
+                    _ -> pure ()
             (Nothing, Nothing, Nothing) ->
                 case (name, button) of
                     (ComposerModel, V.BLeft) ->
@@ -1066,13 +1091,35 @@ handleEvent event = case event of
                         handlePromptControlClick ReplChooseEffort
                     (ComposerMode, V.BLeft) ->
                         handlePromptControlClick ReplCycleMode
+                    (SlashRow index, V.BLeft) ->
+                        activateSlashAt index
+                    (SlashRow _, V.BScrollUp) ->
+                        handleComposerKey (V.EvKey V.KUp [])
+                    (SlashRow _, V.BScrollDown) ->
+                        handleComposerKey (V.EvKey V.KDown [])
                     _ -> handleMouseDown name button
             (Nothing, Just _, _) ->
                 case (name, button) of
                     (ChoiceRow index, V.BLeft) ->
                         confirmChoiceAt index
+                    (ChoiceRow _, V.BScrollUp) ->
+                        handleChoiceKey (V.EvKey V.KUp [])
+                    (ChoiceRow _, V.BScrollDown) ->
+                        handleChoiceKey (V.EvKey V.KDown [])
+                    (_, V.BScrollUp) ->
+                        vScrollBy
+                            (viewportScroll OverlayViewport)
+                            (-mouseScrollLines)
+                    (_, V.BScrollDown) ->
+                        vScrollBy
+                            (viewportScroll OverlayViewport)
+                            mouseScrollLines
                     _ -> pure ()
-            _ -> pure ()
+            (Nothing, Nothing, Just _) ->
+                case (name, button) of
+                    (PermissionRow index, V.BLeft) ->
+                        resolvePermission (permissionChoiceAt index)
+                    _ -> pure ()
     VtyEvent vtyEvent -> do
         state <- get
         case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
@@ -1099,10 +1146,8 @@ handlePermissionKey = \case
     V.EvKey V.KEnter [] -> do
         state <- get
         let choice = case state.appUi.uiPermission of
-                Just permission -> case permission.permissionIndex of
-                    0 -> PermissionAllowOnce
-                    1 -> PermissionAllowTool
-                    _ -> PermissionDeny
+                Just permission ->
+                    permissionChoiceAt permission.permissionIndex
                 Nothing -> PermissionDeny
         resolvePermission choice
     _ -> pure ()
@@ -1110,6 +1155,12 @@ handlePermissionKey = \case
     movePermission delta =
         modify' \state ->
             state { appUi = reduceUi (UiPermissionMoved delta) state.appUi }
+
+permissionChoiceAt :: Int -> PermissionChoice
+permissionChoiceAt = \case
+    0 -> PermissionAllowOnce
+    1 -> PermissionAllowTool
+    _ -> PermissionDeny
 
 resolvePermission
     :: PermissionChoice
@@ -1166,6 +1217,18 @@ handleNormalKey event = do
                 FocusScrollback -> handleScrollbackKey event
                 FocusComposer -> handleComposerKey event
                 FocusPermission -> pure ()
+
+activateSlashAt :: Int -> EventM Name AppState ()
+activateSlashAt index = do
+    state <- get
+    case currentSlashMenu state of
+        Just menu
+            | index >= 0
+            , index < length menu.slashMenuSuggestions -> do
+                modify' \current ->
+                    current { appSlashIndex = index }
+                handleComposerKey (V.EvKey V.KEnter [])
+        _ -> pure ()
 
 handleMouseDown :: Name -> V.Button -> EventM Name AppState ()
 handleMouseDown name button =
