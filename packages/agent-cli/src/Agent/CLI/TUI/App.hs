@@ -752,7 +752,7 @@ drawHeader state =
         padLeftRight 2 $
             hBox
                 [ hLimitPercent 68 (txt left)
-                , fill ' '
+                , vLimit 1 (fill ' ')
                 , txt right
                 ]
   where
