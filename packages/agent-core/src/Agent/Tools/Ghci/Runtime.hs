@@ -21,26 +21,41 @@ import Agent.Tools.Ghci.Classify
     , defaultGhciExtensions
     , typeLooksEffectful
     )
+import Agent.Tools.IO (terminateProcessGroup)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, async, cancel, race)
+import Control.Concurrent.Async
+    ( Async
+    , asyncWithUnmask
+    , cancel
+    , race
+    , waitCatch
+    )
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
     ( STM
-    , TChan
+    , TBQueue
+    , TMVar
     , atomically
-    , newTChanIO
-    , readTChan
-    , tryReadTChan
-    , writeTChan
+    , isFullTBQueue
+    , newEmptyTMVarIO
+    , newTBQueueIO
+    , orElse
+    , readTBQueue
+    , readTMVar
+    , retry
+    , tryReadTBQueue
+    , tryPutTMVar
+    , writeTBQueue
     )
 import Control.Exception.Safe
     ( SomeException
     , finally
+    , mask
     , onException
     , try
     )
-import Control.Monad (unless, void)
+import Control.Monad (void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.IORef
@@ -67,9 +82,9 @@ import System.Process
     , getProcessExitCode
     , interruptProcessGroupOf
     , proc
-    , terminateProcess
     )
-import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Posix.Signals (sigINT, signalProcessGroup)
+import System.Posix.Types (ProcessGroupID)
 
 data GhciOutcome
     = GhciCompleted
@@ -105,7 +120,10 @@ data GhciProcess = GhciProcess
     , ghciStdoutHandle :: !Handle
     , ghciStderrHandle :: !Handle
     , ghciHandle :: !ProcessHandle
-    , ghciEvents :: !(TChan GhciEvent)
+    , ghciGroupId :: !(Maybe ProcessGroupID)
+    , ghciEvents :: !(TBQueue GhciEvent)
+    , ghciStdoutClosed :: !(TMVar ())
+    , ghciStderrClosed :: !(TMVar ())
     , ghciStdoutDrain :: !(Async ())
     , ghciStderrDrain :: !(Async ())
     }
@@ -204,11 +222,10 @@ evalRawGhci session expression requestedTimeout = do
     cancelled <- isCancelled session.ghciEnv.toolCancel
     if cancelled
         then pure $ emptyResult GhciCancelled GhciEffectful "GHCi evaluation cancelled."
-        else ensureProcess session >>= \case
+        else prepareProcess session >>= \case
             Left err ->
                 pure $ emptyResult GhciProcessFailed GhciEffectful err
-            Right process -> do
-                flushEvents process
+            Right (process, restartedBefore) -> do
                 marker <- nextMarker session
                 sent <- try @_ @SomeException do
                     sendGhciInput process expression
@@ -218,7 +235,9 @@ evalRawGhci session expression requestedTimeout = do
                         restarted <- restartProcess session
                         pure $ (emptyResult GhciProcessFailed GhciEffectful
                             ("Failed to send input to GHCi: " <> Text.pack (show err)))
-                                { ghciRestarted = restarted }
+                                { ghciRestarted =
+                                    restartedBefore || restarted
+                                }
                     Right () -> do
                         awaited <- awaitMarker
                             (Just session.ghciEnv.toolCancel)
@@ -226,46 +245,88 @@ evalRawGhci session expression requestedTimeout = do
                             process
                             marker
                             timeoutMs
-                        finishAwaited session process awaited
+                        finishAwaited
+                            session process restartedBefore awaited
+
+prepareProcess :: GhciSession -> IO (Either Text (GhciProcess, Bool))
+prepareProcess session = do
+    ensured <- ensureProcess session
+    case ensured of
+        Left err -> pure (Left err)
+        Right process -> do
+            flushed <- flushEvents process
+            if flushed
+                then pure (Right (process, False))
+                else do
+                    restarted <- restartProcess session
+                    if not restarted
+                        then pure (Left staleOutputError)
+                        else do
+                            ensuredAgain <- ensureProcess session
+                            pure (markRestarted <$> ensuredAgain)
+  where
+    markRestarted process = (process, True)
+    staleOutputError =
+        "GHCi produced excessive stale output and could not be restarted."
 
 finishAwaited
     :: GhciSession
     -> GhciProcess
+    -> Bool
     -> Awaited
     -> IO GhciResult
-finishAwaited session process awaited =
+finishAwaited session process restartedBefore awaited =
     case awaited.awaitReason of
-        AwaitMarkers -> pure $ capturedResult GhciCompleted awaited.awaitOutput False
+        AwaitMarkers ->
+            pure $ capturedResult
+                GhciCompleted awaited.awaitOutput restartedBefore
         AwaitTimeout -> recover GhciTimedOut
         AwaitCancellation -> recover GhciCancelled
         AwaitProcessExit -> do
             restarted <- restartProcess session
-            pure $ (capturedResult GhciProcessFailed awaited.awaitOutput restarted)
+            pure $ (capturedResult GhciProcessFailed awaited.awaitOutput
+                (restartedBefore || restarted))
                 { ghciOk = False }
   where
     recover outcome = do
-        void $ try @_ @SomeException
-            (interruptProcessGroupOf process.ghciHandle)
-        recovered <- recoverAfterInterrupt session process
+        interruptGhciProcess process
+        recovered <-
+            if awaited.awaitOutput.capturedTruncated
+                then pure False
+                else recoverAfterInterrupt session process
         restarted <- if recovered
             then pure False
             else restartProcess session
-        pure $ (capturedResult outcome awaited.awaitOutput restarted)
+        pure $ (capturedResult outcome awaited.awaitOutput
+            (restartedBefore || restarted))
             { ghciOk = False }
 
 recoverAfterInterrupt :: GhciSession -> GhciProcess -> IO Bool
 recoverAfterInterrupt session process = do
-    flushEvents process
-    marker <- nextMarker session
-    sent <- try @_ @SomeException do
-        sendLine process ":type ()"
-        sendMarker process marker
-    case sent of
-        Left _ -> pure False
-        Right () -> do
-            awaited <- awaitMarker Nothing
-                session.ghciEnv.toolStdoutCap process marker 5000
-            pure (awaited.awaitReason == AwaitMarkers)
+    flushed <- flushEvents process
+    if not flushed
+        then pure False
+        else do
+            marker <- nextMarker session
+            sent <- try @_ @SomeException do
+                sendLine process ":type ()"
+                sendMarker process marker
+            case sent of
+                Left _ -> pure False
+                Right () -> do
+                    awaited <- awaitMarker Nothing
+                        session.ghciEnv.toolStdoutCap process marker 5000
+                    pure (awaited.awaitReason == AwaitMarkers)
+
+interruptGhciProcess :: GhciProcess -> IO ()
+interruptGhciProcess process =
+    case process.ghciGroupId of
+        Just groupId ->
+            void $ try @_ @SomeException
+                (signalProcessGroup sigINT groupId)
+        Nothing ->
+            void $ try @_ @SomeException
+                (interruptProcessGroupOf process.ghciHandle)
 
 capturedResult :: GhciOutcome -> CapturedOutput -> Bool -> GhciResult
 capturedResult outcome captured restarted =
@@ -338,33 +399,47 @@ ensureProcess session =
                     startProcess session
 
 startProcess :: GhciSession -> IO (Either Text GhciProcess)
-startProcess session =
+startProcess session = mask \restore ->
     spawnProcess session.ghciEnv >>= \case
         Left err -> pure (Left err)
-        Right process -> do
-            flushEvents process
-            marker <- nextMarker session
-            sent <- try @_ @SomeException (sendMarker process marker)
-            case sent of
-                Left err -> do
-                    shutdownProcess process
-                    pure $ Left
-                        ("Failed to initialize GHCi: " <> Text.pack (show err))
-                Right () -> do
-                    awaited <- awaitMarker Nothing
-                        session.ghciEnv.toolStdoutCap process marker 5000
-                    if awaited.awaitReason == AwaitMarkers
-                        && not (isGhciError awaited.awaitOutput.capturedStderr)
-                        then do
-                            writeIORef session.ghciState (GhciRunning process)
-                            pure (Right process)
-                        else do
-                            shutdownProcess process
-                            pure $ Left $
-                                "GHCi failed its startup handshake.\n"
-                                    <> combineOutput
-                                        awaited.awaitOutput.capturedStdout
-                                        awaited.awaitOutput.capturedStderr
+        Right process ->
+            restore (initialize process)
+                `onException` shutdownProcess process
+  where
+    initialize process = do
+        flushed <- flushEvents process
+        if not flushed
+            then do
+                shutdownProcess process
+                pure $ Left
+                    "GHCi produced excessive output during startup."
+            else do
+                marker <- nextMarker session
+                sent <- try @_ @SomeException (sendMarker process marker)
+                case sent of
+                    Left err -> do
+                        shutdownProcess process
+                        pure $ Left
+                            ("Failed to initialize GHCi: "
+                                <> Text.pack (show err))
+                    Right () -> do
+                        awaited <- awaitMarker Nothing
+                            session.ghciEnv.toolStdoutCap process marker 5000
+                        if awaited.awaitReason == AwaitMarkers
+                            && not
+                                (isGhciError
+                                    awaited.awaitOutput.capturedStderr)
+                            then do
+                                writeIORef session.ghciState
+                                    (GhciRunning process)
+                                pure (Right process)
+                            else do
+                                shutdownProcess process
+                                pure $ Left $
+                                    "GHCi failed its startup handshake.\n"
+                                        <> combineOutput
+                                            awaited.awaitOutput.capturedStdout
+                                            awaited.awaitOutput.capturedStderr
 
 restartProcess :: GhciSession -> IO Bool
 restartProcess session = do
@@ -398,33 +473,69 @@ spawnProcess env = do
             , std_err = CreatePipe
             , create_group = True
             }
-    try @_ @SomeException (createProcess spec) >>= \case
+    spawned <- try @_ @SomeException $ mask \restore -> do
+        created@(_, _, _, handle) <- createProcess spec
+        groupId <- getPid handle
+            `onException` cleanupSpawn Nothing created []
+        case created of
+            (Just hin, Just hout, Just herr, _) -> do
+                let cleanup drains =
+                        cleanupSpawn groupId created drains
+                mapM_ prepareHandle [hin, hout, herr]
+                    `onException` cleanup []
+                (events, stdoutClosed, stderrClosed) <-
+                    (do
+                        queue <- newTBQueueIO
+                            (fromIntegral ghciEventQueueCapacity)
+                        outClosed <- newEmptyTMVarIO
+                        errClosed <- newEmptyTMVarIO
+                        pure (queue, outClosed, errClosed))
+                        `onException` cleanup []
+                stdoutDrain <-
+                    asyncWithUnmask
+                        (\unmask ->
+                            unmask (drainHandle
+                                GhciStdout hout events stdoutClosed))
+                        `onException` cleanup []
+                stderrDrain <-
+                    asyncWithUnmask
+                        (\unmask ->
+                            unmask (drainHandle
+                                GhciStderr herr events stderrClosed))
+                        `onException` cleanup [stdoutDrain]
+                let process = GhciProcess
+                        { ghciStdin = hin
+                        , ghciStdoutHandle = hout
+                        , ghciStderrHandle = herr
+                        , ghciHandle = handle
+                        , ghciGroupId = groupId
+                        , ghciEvents = events
+                        , ghciStdoutClosed = stdoutClosed
+                        , ghciStderrClosed = stderrClosed
+                        , ghciStdoutDrain = stdoutDrain
+                        , ghciStderrDrain = stderrDrain
+                        }
+                restore (pure (Just process))
+                    `onException` shutdownProcess process
+            _ -> do
+                cleanupSpawn groupId created []
+                pure Nothing
+    case spawned of
         Left err ->
             pure $ Left ("Failed to start GHCi: " <> Text.pack (show err))
-        Right (Just hin, Just hout, Just herr, handle) -> do
-            let closeCreated = do
-                    mapM_ (void . try @_ @SomeException . hClose)
-                        [hin, hout, herr]
-                    void $ try @_ @SomeException (terminateProcess handle)
-            (do
-                mapM_ prepareHandle [hin, hout, herr]
-                events <- newTChanIO
-                stdoutDrain <- async
-                    (drainHandle GhciStdout hout events)
-                stderrDrain <- async
-                    (drainHandle GhciStderr herr events)
-                pure $ Right GhciProcess
-                    { ghciStdin = hin
-                    , ghciStdoutHandle = hout
-                    , ghciStderrHandle = herr
-                    , ghciHandle = handle
-                    , ghciEvents = events
-                    , ghciStdoutDrain = stdoutDrain
-                    , ghciStderrDrain = stderrDrain
-                    })
-                `onException` closeCreated
-        Right _ ->
-            pure (Left "Failed to create GHCi pipes.")
+        Right Nothing -> pure (Left "Failed to create GHCi pipes.")
+        Right (Just process) -> pure (Right process)
+
+cleanupSpawn
+    :: Maybe ProcessGroupID
+    -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+    -> [Async ()]
+    -> IO ()
+cleanupSpawn groupId (hin, hout, herr, handle) drains = do
+    terminateProcessGroup groupId handle
+    mapM_ (mapM_ (void . try @_ @SomeException . hClose))
+        [hin, hout, herr]
+    stopDrains drains
 
 prepareHandle :: Handle -> IO ()
 prepareHandle handle = do
@@ -434,23 +545,19 @@ prepareHandle handle = do
 shutdownProcess :: GhciProcess -> IO ()
 shutdownProcess process = do
     void $ try @_ @SomeException (sendLine process ":quit")
-    exited <- waitForExit process.ghciHandle 200
-    unless exited do
-        void $ try @_ @SomeException
-            (interruptProcessGroupOf process.ghciHandle)
-        void $ try @_ @SomeException (terminateProcess process.ghciHandle)
-        terminated <- waitForExit process.ghciHandle 1000
-        unless terminated do
-            getPid process.ghciHandle >>= mapM_ \pid ->
-                void $ try @_ @SomeException (signalProcessGroup sigKILL pid)
-            void $ waitForExit process.ghciHandle 1000
+    void $ waitForExit process.ghciHandle 200
+    terminateProcessGroup process.ghciGroupId process.ghciHandle
     mapM_ (void . try @_ @SomeException . hClose)
         [ process.ghciStdin
         , process.ghciStdoutHandle
         , process.ghciStderrHandle
         ]
-    cancel process.ghciStdoutDrain
-    cancel process.ghciStderrDrain
+    stopDrains [process.ghciStdoutDrain, process.ghciStderrDrain]
+
+stopDrains :: [Async ()] -> IO ()
+stopDrains drains = do
+    mapM_ (void . try @_ @SomeException . cancel) drains
+    mapM_ (void . waitCatch) drains
 
 waitForExit :: ProcessHandle -> Int -> IO Bool
 waitForExit handle timeoutMs = go (max 1 timeoutMs)
@@ -512,11 +619,18 @@ sendLine process text = do
     BS.hPut process.ghciStdin (encodeUtf8 (text <> "\n"))
     hFlush process.ghciStdin
 
-flushEvents :: GhciProcess -> IO ()
+-- | Drop one bounded queue snapshot. If the queue was full, a drain thread
+-- may already be blocked with more stale output, so the caller must restart.
+flushEvents :: GhciProcess -> IO Bool
 flushEvents process =
-    atomically (tryReadTChan process.ghciEvents) >>= \case
-        Nothing -> pure ()
-        Just _ -> flushEvents process
+    atomically do
+        wasFull <- isFullTBQueue process.ghciEvents
+        let go =
+                tryReadTBQueue process.ghciEvents >>= \case
+                    Nothing -> pure ()
+                    Just _ -> go
+        go
+        pure (not wasFull)
 
 data AwaitReason
     = AwaitMarkers
@@ -594,7 +708,6 @@ awaitMarker cancelFlag cap process marker requestedTimeout = do
                             Left () -> pure AwaitCancellation
                             Right (Left ()) -> pure AwaitTimeout
                             Right (Right completed) -> pure completed
-    drainAvailable stateRef cap (encodeUtf8 marker) process
     captured <- renderCapture cap <$> readIORef stateRef
     pure Awaited
         { awaitReason = reason
@@ -610,7 +723,8 @@ collectEvents
 collectEvents stateRef cap marker process = go
   where
     go = do
-        event <- atomically (readTChanCompat process.ghciEvents)
+        current <- readIORef stateRef
+        event <- atomically (readGhciEvent process current)
         state <- atomicModifyIORef' stateRef \current ->
             let updated = applyEvent cap marker event current
             in (updated, updated)
@@ -622,24 +736,23 @@ collectEvents stateRef cap marker process = go
                 then pure AwaitProcessExit
                 else go
 
--- Kept as a helper so the blocking operation is visually distinct from
--- non-blocking queue drains.
-readTChanCompat :: TChan a -> STM a
-readTChanCompat = readTChan
-
-drainAvailable
-    :: IORef CaptureState
-    -> Int
-    -> ByteString
-    -> GhciProcess
-    -> IO ()
-drainAvailable stateRef cap marker process =
-    atomically (tryReadTChan process.ghciEvents) >>= \case
-        Nothing -> pure ()
-        Just event -> do
-            atomicModifyIORef' stateRef \current ->
-                (applyEvent cap marker event current, ())
-            drainAvailable stateRef cap marker process
+readGhciEvent :: GhciProcess -> CaptureState -> STM GhciEvent
+readGhciEvent process state =
+    readTBQueue process.ghciEvents
+        `orElse` closedEvent
+            GhciStdout
+            state.stdoutCapture.streamClosed
+            process.ghciStdoutClosed
+        `orElse` closedEvent
+            GhciStderr
+            state.stderrCapture.streamClosed
+            process.ghciStderrClosed
+  where
+    closedEvent stream alreadyClosed closed
+        | alreadyClosed = retry
+        | otherwise = do
+            readTMVar closed
+            pure (GhciStreamClosed stream)
 
 applyEvent :: Int -> ByteString -> GhciEvent -> CaptureState -> CaptureState
 applyEvent cap marker event state =
@@ -727,16 +840,24 @@ renderStream cap capture =
                     <> " bytes]"
     in (decoded <> suffix, dropped)
 
-drainHandle :: GhciStream -> Handle -> TChan GhciEvent -> IO ()
-drainHandle stream handle events =
-    go `finally` atomically (writeTChan events (GhciStreamClosed stream))
+ghciEventQueueCapacity :: Int
+ghciEventQueueCapacity = 64
+
+drainHandle
+    :: GhciStream
+    -> Handle
+    -> TBQueue GhciEvent
+    -> TMVar ()
+    -> IO ()
+drainHandle stream handle events closed =
+    go `finally` atomically (void (tryPutTMVar closed ()))
   where
     go = do
         chunk <- BS.hGetSome handle 4096
         if BS.null chunk
             then pure ()
             else do
-                atomically (writeTChan events (GhciChunk stream chunk))
+                atomically (writeTBQueue events (GhciChunk stream chunk))
                 go
 
 normalizeTimeout :: Int -> Int
