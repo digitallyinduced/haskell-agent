@@ -15,6 +15,7 @@ module Agent.CLI.Terminal
     , osc133CommandFinished
     , synchronizedOutputBegin
     , synchronizedOutputEnd
+    , kittyKeyboardDisambiguatePush
     , kittyKeyboardPush
     , kittyKeyboardPop
     , wrapTerminalPassthrough
@@ -163,6 +164,12 @@ osc133CommandFinished exitCode =
 synchronizedOutputBegin, synchronizedOutputEnd :: Text
 synchronizedOutputBegin = "\ESC[?2026h"
 synchronizedOutputEnd = "\ESC[?2026l"
+
+-- | Push only Kitty's unambiguous-key flag. This is enough for an inline
+-- editor to receive modified keys such as Cmd+V without also receiving key
+-- release events.
+kittyKeyboardDisambiguatePush :: Text
+kittyKeyboardDisambiguatePush = "\ESC[>1u"
 
 -- | Push Kitty keyboard flags 1 and 2. Pop before returning to legacy input.
 kittyKeyboardPush, kittyKeyboardPop :: Text
