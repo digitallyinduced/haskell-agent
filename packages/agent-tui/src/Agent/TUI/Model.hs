@@ -129,6 +129,7 @@ data UiEvent
     | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
+    | UiSetPromptEffort !Text
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe Text)
@@ -146,6 +147,7 @@ data UiEvent
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
+    | UiTurnRestarted
     | UiTick
     deriving (Eq, Show)
 
@@ -216,6 +218,10 @@ reduceUi event state = case event of
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
+    UiSetPromptEffort effort ->
+        state
+            { uiPrompt = state.uiPrompt { promptEffort = effort }
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
@@ -287,6 +293,14 @@ reduceUi event state = case event of
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
+    UiTurnRestarted ->
+        state
+            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            , uiRunning = False
+            , uiActivity = "Restarting…"
+            , uiNotice = Just "Restarting current turn…"
+            , uiToolCalls = Map.empty
+            }
     UiTick
         | not state.uiRunning -> state
         | otherwise ->
@@ -330,6 +344,8 @@ reduceLoop event state = case event of
                 , uiActivity = summarizeToolCall call
                 , uiToolCalls = Map.insert call.callId call state.uiToolCalls
                 }
+    ToolOutputUpdated callId output ->
+        updateToolOutput callId output state
     ToolFinished result ->
         let displayed = case Map.lookup result.callId state.uiToolCalls of
                 Nothing -> result
@@ -422,6 +438,19 @@ completeTool result state =
                             { blockBody = result.output
                             , blockState = toolResultState result.output
                             }
+                        else block)
+                state.uiBlocks
+        }
+
+updateToolOutput :: Text -> Text -> UiState -> UiState
+updateToolOutput callId output state =
+    state
+        { uiBlocks =
+            fmap
+                (\block ->
+                    if block.blockCallId == Just callId
+                        && block.blockState == BlockRunning
+                        then block { blockBody = output }
                         else block)
                 state.uiBlocks
         }

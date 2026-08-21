@@ -40,6 +40,7 @@ import Agent.CLI.Command
     , slashMenuForWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Options (reasoningEfforts)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.TUI.Theme as Theme
@@ -53,18 +54,12 @@ import Brick.BChan
     ( BChan
     , newBChan
     , writeBChan
-    , writeBChanNonBlocking
     )
 import Brick.Widgets.Border (borderWithLabel)
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (centerLayer)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar
-    ( MVar
-    , newMVar
-    , withMVar
-    )
 import Control.Concurrent.STM
     ( STM
     , TMVar
@@ -88,13 +83,14 @@ import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.IORef
     ( IORef
-    , atomicModifyIORef'
     , newIORef
     , readIORef
     , writeIORef
     )
-import Data.List (find, findIndex, intersperse, sortOn)
-import Data.Sequence (Seq)
+import Data.List (elemIndex, find, findIndex, intersperse, sortOn)
+import Data.List.NonEmpty (NonEmpty(..))
+import Data.Maybe (fromMaybe)
+import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -120,18 +116,9 @@ data Name
     | AgentRow !AgentTarget
     deriving (Eq, Ord, Show)
 
-data DeltaKind
-    = DeltaText
-    | DeltaReasoning
-    deriving (Eq)
-
-data BufferedDelta = BufferedDelta
-    { bufferedKind :: !DeltaKind
-    , bufferedChunks :: !(Seq Text)
-    }
-
 data AppEvent
     = AppUi !UiEvent
+    | AppUiBatch !(NonEmpty UiEvent)
     | AppAskPermission !Text !(TMVar (Maybe PermissionChoice))
     | AppAskChoice
         !Text
@@ -150,6 +137,18 @@ data AppEvent
     | AppSetWindowTitle !Text
     | AppStop
 
+data PendingAppEvent
+    = PendingEvent !AppEvent
+    | PendingUi !PendingUiEvent
+
+data PendingUiEvent
+    = PendingExactUi !UiEvent
+    | PendingTextDeltas !(Seq Text)
+    | PendingReasoningDeltas !(Seq Text)
+
+newtype AppEventMailbox =
+    AppEventMailbox (TVar (Seq PendingAppEvent))
+
 data FullscreenInput = FullscreenInput
     { fullscreenInputLine :: !ReplLine
     , fullscreenInputQueued :: !Bool
@@ -161,8 +160,10 @@ newtype FullscreenInputBuffer =
 
 data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
+    , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
+    , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeSetWindowTitle :: !(Text -> IO ())
@@ -170,8 +171,6 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
     , runtimeFirstFrame :: !(IO ())
-    , runtimePendingDeltas :: !(IORef (Seq BufferedDelta))
-    , runtimeEventLock :: !(MVar ())
     , runtimeRunning :: !(IORef Bool)
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
@@ -183,7 +182,7 @@ data AppState = AppState
     , appRuntime :: !FullscreenRuntime
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
-    , appChoiceReply :: !(Maybe (TMVar (Maybe Int)))
+    , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
@@ -221,6 +220,7 @@ newFullscreenInputBuffer =
 newFullscreenRuntime
     :: FullscreenInputBuffer
     -> IO ()
+    -> (Text -> IO ())
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
     -> (Text -> IO ())
@@ -234,6 +234,7 @@ newFullscreenRuntime
 newFullscreenRuntime
     inputBuffer
     cancelAction
+    restartEffortAction
     ctrlCAction
     copyAction
     setWindowTitle
@@ -244,13 +245,14 @@ newFullscreenRuntime
     color
     initial = do
         events <- newBChan 512
-        pendingDeltas <- newIORef Seq.empty
-        eventLock <- newMVar ()
+        mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
         running <- newIORef False
         pure FullscreenRuntime
             { runtimeEvents = events
+            , runtimeMailbox = mailbox
             , runtimeInput = inputBuffer
             , runtimeCancel = cancelAction
+            , runtimeRestartEffort = restartEffortAction
             , runtimeCtrlC = ctrlCAction
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
@@ -258,82 +260,28 @@ newFullscreenRuntime
             , runtimeAgentSnapshot = agentSnapshot
             , runtimeAgentSelect = agentSelect
             , runtimeFirstFrame = firstFrame
-            , runtimePendingDeltas = pendingDeltas
-            , runtimeEventLock = eventLock
             , runtimeRunning = running
             , runtimeColor = color
             , runtimeInitial = initial
             }
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
-emitUiEvent runtime event =
-    case bufferedDelta event of
-        Just (kind, delta) ->
-            atomicModifyIORef' runtime.runtimePendingDeltas \pending ->
-                (appendBufferedDelta kind delta pending, ())
-        Nothing ->
-            withMVar runtime.runtimeEventLock \_ -> do
-                flushPendingDeltasUnlocked runtime
-                updateRuntimeRunning runtime event
-                writeBChan runtime.runtimeEvents (AppUi event)
-
-bufferedDelta :: UiEvent -> Maybe (DeltaKind, Text)
-bufferedDelta = \case
-    UiLoop (TextDelta delta) -> Just (DeltaText, delta)
-    UiLoop (ReasoningDelta delta) -> Just (DeltaReasoning, delta)
-    _ -> Nothing
-
-appendBufferedDelta
-    :: DeltaKind
-    -> Text
-    -> Seq BufferedDelta
-    -> Seq BufferedDelta
-appendBufferedDelta kind delta pending =
-    case Seq.viewr pending of
-        rest Seq.:> buffered
-            | buffered.bufferedKind == kind ->
-                rest Seq.|> buffered
-                    { bufferedChunks =
-                        buffered.bufferedChunks Seq.|> delta
-                    }
-        _ ->
-            pending Seq.|> BufferedDelta
-                { bufferedKind = kind
-                , bufferedChunks = Seq.singleton delta
-                }
-
-flushPendingUiEvents :: FullscreenRuntime -> IO ()
-flushPendingUiEvents runtime =
-    withMVar runtime.runtimeEventLock \_ ->
-        flushPendingDeltasUnlocked runtime
-
-flushPendingDeltasUnlocked :: FullscreenRuntime -> IO ()
-flushPendingDeltasUnlocked runtime = do
-    pending <- atomicModifyIORef' runtime.runtimePendingDeltas \buffered ->
-        (Seq.empty, buffered)
-    mapM_ emitBuffered pending
-  where
-    emitBuffered buffered =
-        writeBChan runtime.runtimeEvents $
-            AppUi $
-                UiLoop $
-                    case buffered.bufferedKind of
-                        DeltaText -> TextDelta body
-                        DeltaReasoning -> ReasoningDelta body
-      where
-        body = Text.concat (toList buffered.bufferedChunks)
+emitUiEvent runtime event = do
+    updateRuntimeRunning runtime event
+    enqueueAppEvent runtime (AppUi event)
 
 updateRuntimeRunning :: FullscreenRuntime -> UiEvent -> IO ()
 updateRuntimeRunning runtime = \case
     UiLoop TurnStarted -> writeIORef runtime.runtimeRunning True
     UiLoop TurnFinished{} -> writeIORef runtime.runtimeRunning False
     UiTurnEnded _ -> writeIORef runtime.runtimeRunning False
+    UiTurnRestarted -> writeIORef runtime.runtimeRunning False
     UiSetAwaitingInput True -> writeIORef runtime.runtimeRunning False
     _ -> pure ()
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
 setFullscreenWindowTitle runtime =
-    writeBChan runtime.runtimeEvents . AppSetWindowTitle
+    enqueueAppEvent runtime . AppSetWindowTitle
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -361,7 +309,7 @@ readFullscreenLine
     -> Text
     -> IO ReplLine
 readFullscreenLine runtime skills prompt initial = do
-    writeBChan runtime.runtimeEvents (AppSetSkillCommands skills)
+    enqueueAppEvent runtime (AppSetSkillCommands skills)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -384,7 +332,7 @@ requestFullscreenPermission
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
     let summary = summarizeToolCall call
-    writeBChan runtime.runtimeEvents (AppAskPermission summary reply)
+    enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
 requestFullscreenChoice
@@ -405,7 +353,7 @@ requestFullscreenChoiceWithBody
     -> IO (Maybe Int)
 requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
-    writeBChan runtime.runtimeEvents
+    enqueueAppEvent runtime
         (AppAskChoice title body initial rows reply)
     atomically (readTMVar reply)
 
@@ -417,14 +365,14 @@ requestFullscreenText
     -> IO (Maybe Text)
 requestFullscreenText runtime title body initial = do
     reply <- newEmptyTMVarIO
-    writeBChan runtime.runtimeEvents
+    enqueueAppEvent runtime
         (AppAskText title body initial reply)
     atomically (readTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
     reply <- newEmptyTMVarIO
-    writeBChan runtime.runtimeEvents (AppSuspend action reply)
+    enqueueAppEvent runtime (AppSuspend action reply)
     atomically (readTMVar reply) >>= either throwIO pure
 
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
@@ -474,39 +422,37 @@ runFullscreen runtime workerAction = do
     withAsync workerAction \worker ->
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
-                withAsync
-                    (void (waitCatch worker)
-                        >> flushPendingUiEvents runtime
-                        >> writeBChan runtime.runtimeEvents AppStop)
-                    \_notifier -> do
-                        finalState <-
-                            customMain
-                                initialVty
-                                buildVty
-                                (Just runtime.runtimeEvents)
-                                fullscreenApp
-                                initialState
-                            `finally` runtime.runtimeNativeProgress False
-                        when (not finalState.appWorkerStopped) $
-                            atomically $
-                                appendFullscreenInput runtime.runtimeInput FullscreenInput
-                                    { fullscreenInputLine = ReplEof
-                                    , fullscreenInputQueued = False
-                                    , fullscreenInputDisplay = Nothing
-                                    }
-                        wait worker
+                withAsync (eventPump runtime) \_eventPump ->
+                    withAsync
+                        (void (waitCatch worker)
+                            >> enqueueAppEvent runtime AppStop)
+                        \_notifier -> do
+                            finalState <-
+                                customMain
+                                    initialVty
+                                    buildVty
+                                    (Just runtime.runtimeEvents)
+                                    fullscreenApp
+                                    initialState
+                                `finally` runtime.runtimeNativeProgress False
+                            when (not finalState.appWorkerStopped) $
+                                atomically $
+                                    appendFullscreenInput
+                                        runtime.runtimeInput
+                                        FullscreenInput
+                                            { fullscreenInputLine = ReplEof
+                                            , fullscreenInputQueued = False
+                                            , fullscreenInputDisplay = Nothing
+                                            }
+                            wait worker
   where
     uiTicker = loop (0 :: Int)
       where
         loop tick = do
             threadDelay 50000
-            flushPendingUiEvents runtime
             running <- readIORef runtime.runtimeRunning
             when (running && tick `mod` 2 == 0) $
-                void $
-                    writeBChanNonBlocking
-                        runtime.runtimeEvents
-                        (AppUi UiTick)
+                enqueueAppEvent runtime (AppUi UiTick)
             loop ((tick + 1) `mod` 20)
 
     agentTicker previous = do
@@ -517,12 +463,131 @@ runFullscreen runtime workerAction = do
             Right snapshot
                 | snapshot == previous -> pure previous
                 | otherwise -> do
-                    written <-
-                        writeBChanNonBlocking
-                            runtime.runtimeEvents
-                            (uncurry AppAgentSnapshot snapshot)
-                    pure (if written then snapshot else previous)
+                    enqueueAppEvent runtime
+                        (uncurry AppAgentSnapshot snapshot)
+                    pure snapshot
         agentTicker previous'
+
+-- | Move events from the producer-facing mailbox into Brick. UI updates are
+-- collected for one frame so a fast token stream causes at most one redraw
+-- every ~16 ms. Blocking on Brick's bounded channel only blocks this pump,
+-- never the model/tool worker publishing into the mailbox.
+eventPump :: FullscreenRuntime -> IO ()
+eventPump runtime = loop
+  where
+    loop = do
+        pending <- atomically (takePendingAppEvent runtime.runtimeMailbox)
+        delivered <- case pending of
+            PendingUi first -> do
+                threadDelay uiFrameDelayMicros
+                rest <- atomically $
+                    takePendingUiEventPrefix
+                        (uiFrameBatchLimit - 1)
+                        runtime.runtimeMailbox
+                pure (AppUiBatch
+                    (pendingUiEvent first :| map pendingUiEvent rest))
+            PendingEvent event ->
+                pure event
+        writeBChan runtime.runtimeEvents delivered
+        loop
+
+uiFrameDelayMicros :: Int
+uiFrameDelayMicros = 16000
+
+uiFrameBatchLimit :: Int
+uiFrameBatchLimit = 256
+
+enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
+enqueueAppEvent runtime event =
+    atomically do
+        let AppEventMailbox pendingRef = runtime.runtimeMailbox
+        pending <- readTVar pendingRef
+        writeTVar pendingRef (appendAppEvent event pending)
+
+appendAppEvent :: AppEvent -> Seq PendingAppEvent -> Seq PendingAppEvent
+appendAppEvent event pending = case event of
+    AppUi (UiLoop (TextDelta delta)) ->
+        case Seq.viewr pending of
+            rest :> PendingUi (PendingTextDeltas deltas) ->
+                rest |> PendingUi (PendingTextDeltas (deltas |> delta))
+            _ ->
+                pending |> PendingUi
+                    (PendingTextDeltas (Seq.singleton delta))
+    AppUi (UiLoop (ReasoningDelta delta)) ->
+        case Seq.viewr pending of
+            rest :> PendingUi (PendingReasoningDeltas deltas) ->
+                rest |> PendingUi
+                    (PendingReasoningDeltas (deltas |> delta))
+            _ ->
+                pending |> PendingUi
+                    (PendingReasoningDeltas (Seq.singleton delta))
+    AppUi uiEvent ->
+        appendExactUiEvent uiEvent pending
+    _ ->
+        appendExactAppEvent event pending
+
+appendExactUiEvent
+    :: UiEvent
+    -> Seq PendingAppEvent
+    -> Seq PendingAppEvent
+appendExactUiEvent event pending =
+    case Seq.viewr pending of
+        rest :> PendingUi (PendingExactUi previous)
+            | Just merged <- Bridge.mergeUiEvents previous event ->
+                rest |> PendingUi (PendingExactUi merged)
+        _ ->
+            pending |> PendingUi (PendingExactUi event)
+
+appendExactAppEvent
+    :: AppEvent
+    -> Seq PendingAppEvent
+    -> Seq PendingAppEvent
+appendExactAppEvent event pending =
+    case (Seq.viewr pending, event) of
+        ( rest :> PendingEvent (AppAgentSnapshot _ _)
+            , AppAgentSnapshot selected entries
+            ) ->
+                rest |> PendingEvent (AppAgentSnapshot selected entries)
+        (rest :> PendingEvent (AppSetWindowTitle _), AppSetWindowTitle title) ->
+            rest |> PendingEvent (AppSetWindowTitle title)
+        _ ->
+            pending |> PendingEvent event
+
+takePendingAppEvent :: AppEventMailbox -> STM PendingAppEvent
+takePendingAppEvent (AppEventMailbox pendingRef) = do
+    pending <- readTVar pendingRef
+    case Seq.viewl pending of
+        EmptyL -> retry
+        event :< rest -> do
+            writeTVar pendingRef rest
+            pure event
+
+takePendingUiEventPrefix
+    :: Int
+    -> AppEventMailbox
+    -> STM [PendingUiEvent]
+takePendingUiEventPrefix limit (AppEventMailbox pendingRef) = do
+    pending <- readTVar pendingRef
+    let (events, rest) = go limit [] pending
+    writeTVar pendingRef rest
+    pure events
+  where
+    go remaining acc pending
+        | remaining <= 0 = (reverse acc, pending)
+        | otherwise =
+            case Seq.viewl pending of
+                PendingUi event :< rest ->
+                    go (remaining - 1) (event : acc) rest
+                _ ->
+                    (reverse acc, pending)
+
+pendingUiEvent :: PendingUiEvent -> UiEvent
+pendingUiEvent = \case
+    PendingExactUi event -> event
+    PendingTextDeltas deltas ->
+        UiLoop (TextDelta (Text.concat (toList deltas)))
+    PendingReasoningDeltas deltas ->
+        UiLoop (ReasoningDelta (Text.concat (toList deltas)))
 
 handleChoiceKey :: V.Event -> EventM Name AppState ()
 handleChoiceKey = \case
@@ -593,6 +658,51 @@ handlePromptControlClick choice = do
                             current.appUi
                     }
 
+handleEffortControlClick :: EventM Name AppState ()
+handleEffortControlClick = do
+    state <- get
+    let ui = state.appUi
+        overlayOpen =
+            maybe False (const True) state.appTextPrompt
+                || maybe False (const True) state.appChoice
+                || maybe False (const True) ui.uiPermission
+    if ui.uiAwaitingInput
+        then handlePromptControlClick ReplChooseEffort
+        else if ui.uiRunning && not overlayOpen
+            then do
+                let efforts = reasoningEfforts
+                    current = ui.uiPrompt.promptEffort
+                    initial = fromMaybe 0 (elemIndex current efforts)
+                    choose = \case
+                        Just index
+                            | index >= 0
+                            , index < length efforts -> do
+                                let level = efforts !! index
+                                when (level /= current) $
+                                    state.appRuntime.runtimeRestartEffort level
+                        _ -> pure ()
+                modify' \currentState ->
+                    currentState
+                        { appChoice = Just ChoiceOverlay
+                            { choiceTitle = "Reasoning effort"
+                            , choiceBody =
+                                "Changing effort will restart the current turn."
+                            , choiceIndex = initial
+                            , choiceRows = [(effort, "") | effort <- efforts]
+                            }
+                        , appChoiceReply = Just choose
+                        }
+                vScrollToBeginning (viewportScroll OverlayViewport)
+            else
+                modify' \current ->
+                    current
+                        { appUi =
+                            reduceUi
+                                (UiSetNotice
+                                    (Just "Prompt settings cannot be changed right now."))
+                                current.appUi
+                        }
+
 confirmChoiceAt :: Int -> EventM Name AppState ()
 confirmChoiceAt index = do
     state <- get
@@ -639,7 +749,7 @@ activateControl = \case
     ComposerModel ->
         handlePromptControlClick ReplChooseModel
     ComposerEffort ->
-        handlePromptControlClick ReplChooseEffort
+        handleEffortControlClick
     ComposerMode ->
         handlePromptControlClick ReplCycleMode
     ChoiceRow index ->
@@ -661,11 +771,10 @@ resolveChoice confirmed = do
     case state.appChoiceReply of
         Nothing -> pure ()
         Just reply ->
-            liftIO $ atomically $
-                putTMVar reply $
-                    if confirmed
-                        then (.choiceIndex) <$> state.appChoice
-                        else Nothing
+            liftIO $ reply $
+                if confirmed
+                    then (.choiceIndex) <$> state.appChoice
+                    else Nothing
     modify' \current ->
         current
             { appChoice = Nothing
@@ -1351,6 +1460,59 @@ choiceRow appState selected index (label, detail) =
             Just attr -> forceAttr attr row
     in clickable name interactive
 
+handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
+handleUiEvents uiEvents = do
+    initial <- get
+    let
+        (final, nativeProgress, shouldFollow, shouldInvalidate) =
+            foldl' applyOne (initial, Nothing, False, False) uiEvents
+    put final
+    case nativeProgress of
+        Nothing -> pure ()
+        Just active ->
+            liftIO (final.appRuntime.runtimeNativeProgress active)
+    when shouldInvalidate invalidateCache
+    when shouldFollow $
+        vScrollToEnd (viewportScroll ConversationViewport)
+    when
+        (all (== UiTick) uiEvents && final.appUi == initial.appUi)
+        continueWithoutRedraw
+  where
+    applyOne
+        (state, previousProgress, followed, invalidated)
+        uiEvent =
+            let
+                next = applyUiEvent uiEvent state
+                progress =
+                    case Bridge.nativeProgressSignal uiEvent next.appUi of
+                        Nothing -> previousProgress
+                        signal -> signal
+                follows =
+                    followed
+                        || (Bridge.eventFollows uiEvent
+                            && next.appUi.uiFollow)
+                invalidates =
+                    invalidated || uiEvent == UiConversationCleared
+            in (next, progress, follows, invalidates)
+
+applyUiEvent :: UiEvent -> AppState -> AppState
+applyUiEvent uiEvent state =
+    state
+        { appUi = reduceUi uiEvent state.appUi
+        , appSlashDismissed = case uiEvent of
+            UiSetDraft _ _ -> False
+            _ -> state.appSlashDismissed
+        , appPasted = case uiEvent of
+            UiSetDraft _ _ -> False
+            _ -> state.appPasted
+        , appHistoryIndex = case uiEvent of
+            UiSetDraft _ _ -> Nothing
+            _ -> state.appHistoryIndex
+        , appHistoryDraft = case uiEvent of
+            UiSetDraft text _ -> text
+            _ -> state.appHistoryDraft
+        }
+
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = case event of
     AppEvent AppStop -> do
@@ -1385,35 +1547,10 @@ handleEvent event = case event of
                     ((length state.appAgentEntries > 1)
                         /= (length entries > 1))
                     invalidateCache
-    AppEvent (AppUi uiEvent) -> do
-        previous <- get
-        modify' \state -> state
-            { appUi = reduceUi uiEvent state.appUi
-            , appSlashDismissed = case uiEvent of
-                UiSetDraft _ _ -> False
-                _ -> state.appSlashDismissed
-            , appPasted = case uiEvent of
-                UiSetDraft _ _ -> False
-                _ -> state.appPasted
-            , appHistoryIndex = case uiEvent of
-                UiSetDraft _ _ -> Nothing
-                _ -> state.appHistoryIndex
-            , appHistoryDraft = case uiEvent of
-                UiSetDraft text _ -> text
-                _ -> state.appHistoryDraft
-            }
-        state <- get
-        case Bridge.nativeProgressSignal uiEvent state.appUi of
-            Nothing -> pure ()
-            Just active ->
-                liftIO (state.appRuntime.runtimeNativeProgress active)
-        case uiEvent of
-            UiConversationCleared -> invalidateCache
-            _ -> pure ()
-        when (Bridge.eventFollows uiEvent && state.appUi.uiFollow) $
-            vScrollToEnd (viewportScroll ConversationViewport)
-        when (uiEvent == UiTick && state.appUi == previous.appUi) $
-            continueWithoutRedraw
+    AppEvent (AppUi uiEvent) ->
+        handleUiEvents (uiEvent :| [])
+    AppEvent (AppUiBatch uiEvents) ->
+        handleUiEvents uiEvents
     AppEvent (AppAskPermission summary reply) ->
         modify' \state ->
             state
@@ -1430,7 +1567,7 @@ handleEvent event = case event of
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
                     }
-                , appChoiceReply = Just reply
+                , appChoiceReply = Just (atomically . putTMVar reply)
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppAskText title body initial reply) -> do

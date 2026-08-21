@@ -19,11 +19,15 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (ToolHandler, typedStreamingTool, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Dangerous (forbiddenRmRfReason, commandLooksLikeRmRf)
-import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
+import Agent.Tools.IO
+    ( CommandResult(..)
+    , resolveUnderCwd
+    , runShellCommandStreaming
+    )
 import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
@@ -112,15 +116,19 @@ shellCommandTool env = jsonTool "shell_command" shellDescription
         "Maximum command runtime. Defaults to 10000 ms."
     ]
     False
-    (typedTool "shell_command" (runShell env))
+    (typedStreamingTool "shell_command" (runShell env))
 
 shellDescription :: Text
 shellDescription =
     "Runs a shell command and returns its output.\n\
     \- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."
 
-runShell :: ToolEnv -> ShellCommandArgs -> IO (Either Text Text)
-runShell env args
+runShell
+    :: ToolEnv
+    -> (Text -> IO ())
+    -> ShellCommandArgs
+    -> IO (Either Text Text)
+runShell env emitOutput args
     | commandLooksLikeRmRf args.command =
         pure (Left (forbiddenRmRfReason args.command))
     | otherwise = do
@@ -131,7 +139,12 @@ runShell env args
         case workdir of
             Left err -> pure (Left err)
             Right dir -> do
-                result <- runShellCommand env dir (Text.unpack args.command) timeoutMs
+                result <- runShellCommandStreaming
+                    env
+                    dir
+                    (Text.unpack args.command)
+                    timeoutMs
+                    (\out err -> emitOutput (commandBody out err))
                 if result.commandCancelled
                     then pure $ Left "Error: Command cancelled"
                     else if result.commandTimedOut
@@ -139,13 +152,17 @@ runShell env args
                         "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
                     else
                         let code = fromMaybe 1 result.commandExitCode
-                            body
-                                | Text.null result.commandStderr = result.commandStdout
-                                | Text.null result.commandStdout = result.commandStderr
-                                | otherwise =
-                                    result.commandStdout <> "\nstderr:\n" <> result.commandStderr
+                            body = commandBody
+                                result.commandStdout
+                                result.commandStderr
                         in pure $ Right $
                             "Exit code: " <> Text.pack (show code) <> "\n" <> body
+
+commandBody :: Text -> Text -> Text
+commandBody out err
+    | Text.null err = out
+    | Text.null out = err
+    | otherwise = out <> "\nstderr:\n" <> err
 
 
 --------------------------------------------------------------------------------

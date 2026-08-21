@@ -180,6 +180,11 @@ renderEventUnlocked config = \case
             if visible
                 then paintThinkingFrame config 0
                 else startThinkingSpinnerUnlocked config
+    -- The append-only renderer cannot safely repaint accumulated snapshots
+    -- without duplicating output in terminal scrollback. The retained TUI
+    -- handles these updates; minimal mode prints the final ToolFinished result.
+    ToolOutputUpdated _callId _output ->
+        pure ()
     ToolFinished result -> do
         calls <- readIORef config.renderToolCalls
         modifyIORef' config.renderToolCalls (Map.delete result.callId)

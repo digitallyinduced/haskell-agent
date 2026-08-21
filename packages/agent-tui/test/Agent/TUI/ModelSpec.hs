@@ -49,6 +49,28 @@ spec = describe "fullscreen UI reducer" do
         state.uiCursor `shouldBe` 20
         state.uiAwaitingInput `shouldBe` True
 
+    it "discards partial output and updates effort when restarting a turn" do
+        let initialPrompt =
+                initialUiState.uiPrompt
+                    { promptEffort = "low"
+                    }
+            state =
+                apply
+                    [ UiSetPrompt initialPrompt
+                    , UiUserSubmitted "try this"
+                    , UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "partial thought")
+                    , UiLoop (TextDelta "partial answer")
+                    , UiSetPromptEffort "high"
+                    , UiTurnRestarted
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["try this"]
+        state.uiPrompt.promptEffort `shouldBe` "high"
+        state.uiRunning `shouldBe` False
+        state.uiActivity `shouldBe` "Restarting…"
+        state.uiNotice `shouldBe` Just "Restarting current turn…"
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
@@ -69,6 +91,78 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
+
+    it "applies tool output snapshots only to the matching running block" do
+        let first = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"first\"}"
+            second = functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"second\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted first)
+                    , UiLoop (ToolStarted second)
+                    , UiLoop (ToolOutputUpdated "c1" "first output")
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["first output", ""]
+        map (.blockState) blocks `shouldBe` [BlockRunning, BlockRunning]
+
+    it "replaces a live snapshot with the final tool result" do
+        let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nfinal output"
+                , callKind = FunctionCallKind
+                }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolOutputUpdated "c1" "partial output")
+                    , UiLoop (ToolFinished result)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` "exit: 0\nfinal output"
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one completed tool block"
+
+    it "ignores tool output snapshots received after completion" do
+        let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nfinal output"
+                , callKind = FunctionCallKind
+                }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    , UiLoop (ToolOutputUpdated "c1" "late output")
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` "exit: 0\nfinal output"
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one completed tool block"
+
+    it "preserves tool folding while live snapshots arrive" do
+        let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
+            started =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            expanded = reduceUi UiToggleSelected started
+            updated =
+                reduceUi
+                    (UiLoop (ToolOutputUpdated "c1" "live output"))
+                    expanded
+        case Foldable.toList updated.uiBlocks of
+            [block] -> do
+                block.blockExpanded `shouldBe` True
+                block.blockBody `shouldBe` "live output"
+            _ -> expectationFailure "expected one running tool block"
 
     it "tracks elapsed tenths only while a turn is running" do
         let idle = apply [UiTick, UiTick]

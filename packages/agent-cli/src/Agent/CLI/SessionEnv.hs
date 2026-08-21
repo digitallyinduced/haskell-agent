@@ -51,6 +51,7 @@ data SessionEnv = SessionEnv
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
+    , sessionRestartEffort :: !(IORef (Maybe Text))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
     , sessionLastAssistant :: !(IORef (Maybe Text))

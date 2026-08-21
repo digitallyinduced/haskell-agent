@@ -2,6 +2,7 @@
 module Agent.CLI.TUI.Bridge
     ( eventFollows
     , historyMove
+    , mergeUiEvents
     , nativeProgressSignal
     , normalizeAgentSelection
     ) where
@@ -20,6 +21,21 @@ eventFollows = \case
     UiErrorMessage _ -> True
     UiConversationCleared -> True
     _ -> False
+
+-- | Merge adjacent high-frequency updates before they reach Brick. Structural
+-- events deliberately return 'Nothing' so turn/tool ordering remains exact.
+mergeUiEvents :: UiEvent -> UiEvent -> Maybe UiEvent
+mergeUiEvents older newer = case (older, newer) of
+    (UiLoop (TextDelta left), UiLoop (TextDelta right)) ->
+        Just (UiLoop (TextDelta (left <> right)))
+    (UiLoop (ReasoningDelta left), UiLoop (ReasoningDelta right)) ->
+        Just (UiLoop (ReasoningDelta (left <> right)))
+    (UiLoop (ActivityUpdated _), UiLoop (ActivityUpdated latest)) ->
+        Just (UiLoop (ActivityUpdated latest))
+    (UiTick, UiTick) ->
+        Just UiTick
+    _ ->
+        Nothing
 
 nativeProgressSignal :: UiEvent -> UiState -> Maybe Bool
 nativeProgressSignal event state = case event of

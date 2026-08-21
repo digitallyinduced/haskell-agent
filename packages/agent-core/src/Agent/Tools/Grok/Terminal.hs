@@ -2,13 +2,13 @@ module Agent.Tools.Grok.Terminal (runTerminalCmdTool) where
 
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch (typedStreamingTool)
 import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
 import Agent.Tools.Grok.Common (jsonTool, optionalTimeout, stripAnsi)
 import Agent.Tools.Grok.Shell
     ( GrokSession
     , hasUnwaitedBackgroundOp
-    , runForeground
+    , runForegroundStreaming
     , startBackground
     )
 import Agent.Tools.IO (CommandResult(..))
@@ -44,7 +44,7 @@ runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
         "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
     ]
     False
-    (typedTool "run_terminal_cmd" (runTerminal session))
+    (typedStreamingTool "run_terminal_cmd" (runTerminal session))
 
 terminalDescription :: Text
 terminalDescription =
@@ -52,8 +52,12 @@ terminalDescription =
     \- Always set a timeout for commands that may hang.\n\
     \- Prefer dedicated tools (read_file, grep, list_dir, search_replace) over shell equivalents when they exist."
 
-runTerminal :: GrokSession -> TerminalArgs -> IO (Either Text Text)
-runTerminal session args
+runTerminal
+    :: GrokSession
+    -> (Text -> IO ())
+    -> TerminalArgs
+    -> IO (Either Text Text)
+runTerminal session emitOutput args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
     | commandLooksLikeRmRf args.command =
@@ -64,7 +68,11 @@ runTerminal session args
     | args.background = startBackground session args.command
     | otherwise = do
         let timeoutMs = min 300000 (max 1 (fromMaybe 120000 args.timeout))
-        result <- runForeground session (Text.unpack args.command) timeoutMs
+        result <- runForegroundStreaming
+            session
+            (Text.unpack args.command)
+            timeoutMs
+            (\out err -> emitOutput (stripAnsi (combinePipes out err)))
         let body = stripAnsi (combinedOutput result)
         if result.commandCancelled
             then pure $ Right $ "exit: cancelled\n" <> body
@@ -75,7 +83,11 @@ runTerminal session args
                     in pure $ Right $ "exit: " <> Text.pack (show code) <> "\n" <> body
 
 combinedOutput :: CommandResult -> Text
-combinedOutput result
-    | Text.null result.commandStderr = result.commandStdout
-    | Text.null result.commandStdout = result.commandStderr
-    | otherwise = result.commandStdout <> "\n" <> result.commandStderr
+combinedOutput result =
+    combinePipes result.commandStdout result.commandStderr
+
+combinePipes :: Text -> Text -> Text
+combinePipes out err
+    | Text.null err = out
+    | Text.null out = err
+    | otherwise = out <> "\n" <> err
