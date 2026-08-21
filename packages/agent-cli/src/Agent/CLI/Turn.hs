@@ -3,6 +3,7 @@ module Agent.CLI.Turn
     ( runOneTurn
     ) where
 
+import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
@@ -101,8 +102,11 @@ runOneTurn env@SessionEnv
     , sessionAbortSubagentTurn = abortSubagentTurn
     , sessionOnPersisted = onPersisted
     } promptText inputs =
-  withTurnCancel interrupt config.loopCancel $
-  withEscCancel config.loopCancel escPaused do
+  -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
+  -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
+  resetCancel config.loopCancel >>
+  (withTurnCancel interrupt config.loopCancel
+    . withEscCancel config.loopCancel escPaused) do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents

@@ -22,7 +22,7 @@ module Agent.Loop
     , runLoopInputs
     ) where
 
-import Agent.Cancel (CancelFlag, isCancelled, resetCancel, waitCancel)
+import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.ToolDispatch
@@ -141,8 +141,9 @@ data LoopConfig = LoopConfig
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
-      -- | Soft-cancel latch. When set, the loop stops after the current tool
-      -- batch instead of asking the model for another step.
+      -- | Soft-cancel latch. The caller owns resetting it before publishing
+      -- the turn to input/interrupt handlers. When set, the loop stops after
+      -- the current tool batch instead of asking the model for another step.
     , loopCancel :: !CancelFlag
     }
 
@@ -197,7 +198,6 @@ runLoopInputs config0 previousResponseId firstInputs = do
     -- Tools run with mapConcurrently. Serialize onEvent so a printer
     -- (hPutStrLn on String is not atomic) cannot interleave characters.
     eventLock <- newMVar ()
-    resetCancel config0.loopCancel
     let config = config0
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event

@@ -2,7 +2,18 @@ module Agent.Transport.WebSocketSpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Transport.WebSocket
-import Control.Concurrent (Chan, forkFinally, newChan, newEmptyMVar, putMVar, readChan, takeMVar, writeChan)
+import Control.Concurrent
+    ( Chan
+    , MVar
+    , forkFinally
+    , killThread
+    , newChan
+    , newEmptyMVar
+    , putMVar
+    , readChan
+    , takeMVar
+    , writeChan
+    )
 import Control.Exception (SomeException, finally, throwIO, toException)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -68,6 +79,9 @@ spec = describe "Agent.Transport.WebSocket" do
                     Left exception -> expectationFailure (show exception)
                     Right bytes -> bytes `shouldBe` "request-data"
 
+    it "poisons a cancelled request instead of exposing queued frames" do
+        withConnectionPair cancelledRequestIsolated
+
 testSessionOptions :: WebSocketSessionOptions
 testSessionOptions = defaultWebSocketSessionOptions
     { clientPingIntervalSeconds = Nothing
@@ -111,3 +125,42 @@ requireWithin message action = do
     case result of
         Just value -> pure value
         Nothing -> expectationFailure message >> fail message
+
+cancelledRequestIsolated :: WS.Connection -> WS.Connection -> IO ()
+cancelledRequestIsolated client server = do
+    firstReceived <- newEmptyMVar
+    never <- newEmptyMVar
+    finished <- newEmptyMVar
+    withWebSocketSession testSessionOptions client \session -> do
+        worker <- forkFinally
+            (cancelledRequest session firstReceived never)
+            (putMVar finished)
+        request <- WS.receiveData server :: IO LBS.ByteString
+        request `shouldBe` "request-data"
+        WS.sendTextData server ("first-frame" :: LBS.ByteString)
+        takeMVar firstReceived `shouldReturn` Right "first-frame"
+        WS.sendTextData server ("stale-frame" :: LBS.ByteString)
+        killThread worker
+        result <- requireWithin
+            "timed out waiting for cancelled request"
+            (takeMVar finished)
+        case result of
+            Left _ -> pure ()
+            Right () -> expectationFailure "cancelled request completed normally"
+        receiveWebSocketData session
+            `shouldReturn` Left
+                (ConnectionError
+                    "WebSocket session invalidated: response consumer interrupted")
+
+cancelledRequest
+    :: WebSocketSession
+    -> MVar (Either ApiError LBS.ByteString)
+    -> MVar ()
+    -> IO ()
+cancelledRequest session firstReceived never =
+    withWebSocketRequest session do
+        sendWebSocketText session "request-data"
+            `shouldReturn` Right ()
+        first <- receiveWebSocketData session
+        putMVar firstReceived first
+        takeMVar never
