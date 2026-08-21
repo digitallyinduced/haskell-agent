@@ -55,6 +55,10 @@ import Agent.CLI.Interrupt
 import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Notification
+    ( AttentionRequest(InputRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Options
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
@@ -891,12 +895,15 @@ finishTurn env exitAfter = \case
         putTrailingNewline env.sessionPrinted
         if exitAfter
             then pure RunQuit
-            else repl env
+            else do
+                notifyAttention stderr InputRequested
+                repl env
     TurnFailed ->
         if exitAfter
             then exitFailure
             else do
                 putTrailingNewline env.sessionPrinted
+                notifyAttention stderr InputRequested
                 repl env
     TurnProviderUnavailable apiError pending ->
         requestAutomaticProviderFallback
@@ -906,7 +913,9 @@ finishTurn env exitAfter = \case
             Nothing ->
                 if exitAfter
                     then exitFailure
-                    else repl env
+                    else do
+                        notifyAttention stderr InputRequested
+                        repl env
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""

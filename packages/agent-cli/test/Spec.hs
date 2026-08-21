@@ -16,6 +16,7 @@ import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
+import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
@@ -50,6 +51,7 @@ main = hspec do
     MarkdownSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
+    NotificationSpec.spec
     OptionsSpec.spec
     PermissionSpec.spec
     PlanSpec.spec

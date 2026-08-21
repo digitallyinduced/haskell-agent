@@ -9,6 +9,10 @@ module Agent.CLI.Permission
     ) where
 
 import Agent.CLI.Input (readApprovalLine)
+import Agent.CLI.Notification
+    ( AttentionRequest(PermissionRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Render (summarizeToolCall)
@@ -17,7 +21,7 @@ import Agent.ToolDispatch (ToolCall)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.IO (hIsTerminalDevice, stdin)
+import System.IO (hIsTerminalDevice, stderr, stdin)
 
 data PermissionChoice
     = PermissionAllowOnce
@@ -95,6 +99,7 @@ promptPermission color call = do
     if not isTty
         then cooked color summary
         else do
+            notifyAttention stderr PermissionRequested
             result <-
                 runOverlay
                     (renderPermissionFrame color)
