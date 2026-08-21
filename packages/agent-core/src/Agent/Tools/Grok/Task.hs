@@ -16,6 +16,7 @@ module Agent.Tools.Grok.Task
     , recordAgentType
     , lookupAgentType
     , lookupAgentModel
+    , lookupAgentReasoningEffort
     ) where
 
 import Agent.InterAgentMessage (plainInterAgentContent)
@@ -66,6 +67,7 @@ knownSubagentTypes = ["general-purpose", "explore", "plan"]
 data GrokSubagentSpec = GrokSubagentSpec
     { agentType :: !Text
     , modelOverride :: !(Maybe Text)
+    , reasoningEffortOverride :: !(Maybe Text)
     } deriving (Eq, Show)
 
 type GrokSubagentSpecs = IORef (Map SubagentId GrokSubagentSpec)
@@ -196,6 +198,7 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
     let spec = GrokSubagentSpec
             { agentType = args.subagentType
             , modelOverride = args.model
+            , reasoningEffortOverride = Nothing
             }
         worktreePath = (.subagentWorktreePath) <$> worktree
     result <- restore
@@ -379,7 +382,10 @@ recordAgentType :: GrokSubagentSpecs -> SubagentId -> Text -> IO ()
 recordAgentType specsRef agentId agentType = do
     specs <- readIORef specsRef
     let model = maybe Nothing (\spec -> spec.modelOverride) (Map.lookup agentId specs)
-    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model)
+        effort =
+            maybe Nothing (\spec -> spec.reasoningEffortOverride)
+                (Map.lookup agentId specs)
+    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model effort)
 
 lookupAgentType :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
 lookupAgentType specsRef agentId = do
@@ -390,6 +396,11 @@ lookupAgentModel :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
 lookupAgentModel specsRef agentId = do
     specs <- readIORef specsRef
     pure (Map.lookup agentId specs >>= \spec -> spec.modelOverride)
+
+lookupAgentReasoningEffort :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
+lookupAgentReasoningEffort specsRef agentId = do
+    specs <- readIORef specsRef
+    pure (Map.lookup agentId specs >>= \spec -> spec.reasoningEffortOverride)
 
 -- | Restrict the child tool surface by subagent type.
 filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]

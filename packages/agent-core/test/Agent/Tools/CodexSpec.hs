@@ -69,6 +69,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiRootTurnId = pure Nothing
                     , multiResumeFromDisk = Nothing
                     , multiCreateWorktree = Nothing
+                    , multiPrepareSpawn = Nothing
                     , multiSendToRoot = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
@@ -167,6 +168,51 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             output `shouldSatisfy` Text.isInfixOf "Failed to find expected lines"
+
+    it "preserves unchanged blank lines in update hunks" do
+        withTempEnv \env -> do
+            Text.writeFile (toFilePath env.toolCwd </> "blank.txt")
+                "before\n\nold\nafter\n"
+            output <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: blank.txt"
+                , "@@"
+                , " before"
+                , " "
+                , "-old"
+                , "+new"
+                , " after"
+                , "*** End Patch"
+                ]
+            output `shouldSatisfy` Text.isInfixOf "M blank.txt"
+            Text.readFile (toFilePath env.toolCwd </> "blank.txt")
+                `shouldReturn` "before\n\nnew\nafter\n"
+
+    it "rejects malformed update lines without recursing forever" do
+        let parsed = parsePatch $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Update File: malformed.txt"
+                , "@@"
+                , " context"
+                , ""
+                , "-old"
+                , "+new"
+                , "*** End Patch"
+                ]
+        parsed `shouldSatisfy` \case
+            Left err -> "Invalid update line" `Text.isInfixOf` err
+            Right _ -> False
+
+    it "preserves trailing whitespace in added lines" do
+        withTempEnv \env -> do
+            _ <- runPatch env $ Text.unlines
+                [ "*** Begin Patch"
+                , "*** Add File: spaces.txt"
+                , "+hello  "
+                , "*** End Patch"
+                ]
+            Text.readFile (toFilePath env.toolCwd </> "spaces.txt")
+                `shouldReturn` "hello  \n"
 
     it "stops applying hunks after the first failure" do
         withTempEnv \env -> do

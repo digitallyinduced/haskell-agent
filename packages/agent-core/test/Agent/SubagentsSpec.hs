@@ -153,7 +153,7 @@ spec = describe "Agent.Subagents" do
         result <- spawnSubagent registry (Just child) 1 "two" Nothing
         result `shouldBe` Left "Agent depth limit reached. Solve the task yourself."
 
-    it "enforces maxConcurrent until agents are closed" do
+    it "releases maxConcurrent capacity when agents finish" do
         gate <- newTVarIO False
         let config = defaultSubagentConfig { maxConcurrent = 1 }
         registry <- newSubagentRegistry config (fromFilePath "/tmp")
@@ -173,12 +173,7 @@ spec = describe "Agent.Subagents" do
             Right _ -> False
         atomically $ writeTVar gate True
         _ <- waitSubagents registry [first] 15000
-        third <- spawnSubagent registry Nothing 0 "c" Nothing
-        third `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
-        _ <- closeSubagent registry first
-        Right _ <- spawnSubagent registry Nothing 0 "d" Nothing
+        Right _ <- spawnSubagent registry Nothing 0 "c" Nothing
         pure ()
 
     it "supports nested spawn when depth is unlimited" do
@@ -341,7 +336,7 @@ spec = describe "Agent.Subagents" do
 
     it "does not leave Running when send_input admission fails" do
         gate <- newTVarIO False
-        let config = defaultSubagentConfig { maxConcurrent = 2 }
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
         registry <- newSubagentRegistry config (fromFilePath "/tmp")
             (\_ _ prompt _ -> case messagePayload prompt of
                 "hold" -> do
@@ -362,18 +357,14 @@ spec = describe "Agent.Subagents" do
         Right idle <- spawnSubagent registry Nothing 0 "idle" Nothing
         _ <- waitSubagents registry [idle] 15000
         Right holder <- spawnSubagent registry Nothing 0 "hold" Nothing
-        -- Free idle's slot, soft-resume without a slot, then fill both slots.
-        _ <- closeSubagent registry idle
-        Right _ <- resumeSubagent registry idle
-        Right filler <- spawnSubagent registry Nothing 0 "filler" Nothing
-        _ <- waitSubagents registry [filler] 15000
-        -- holder + filler occupy both slots; idle is Completed without a slot.
+        -- The completed idle agent no longer owns a slot, while holder owns the
+        -- only active slot.
         result <- sendInput registry idle "follow-up" False
         result `shouldSatisfy` \case
             Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
             Right _ -> False
         status <- getStatus registry idle
-        status `shouldBe` Completed Nothing
+        status `shouldBe` Completed (Just "idle")
         atomically $ writeTVar gate True
         _ <- waitSubagents registry [holder] 15000
         pure ()
@@ -524,7 +515,18 @@ spec = describe "Agent.Subagents" do
             `shouldReturn` Left "Subagent registry is closed."
         sendInput registry agentId "late" False
             `shouldReturn` Left "Subagent registry is closed."
-
+    it "restores persisted lifecycle status and marks abandoned work interrupted" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let interruptedId = SubagentId "agent-restored-running"
+            erroredId = SubagentId "agent-restored-error"
+        Right _ <- restoreSubagentAtStatus registry interruptedId Nothing
+            taskPathRoot 1 Nothing (Just "prev-running") Running
+        getStatus registry interruptedId `shouldReturn` Interrupted
+        Right _ <- restoreSubagentAtStatus registry erroredId Nothing
+            taskPathRoot 1 Nothing (Just "prev-error") (Errored "boom")
+        getStatus registry erroredId `shouldReturn` Errored "boom"
     it "reopens a closed agent via restoreSubagent" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult

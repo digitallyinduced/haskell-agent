@@ -38,7 +38,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -56,7 +56,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (observeSpec typesRef observed)
             (\_ _ -> pure ())
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
@@ -91,7 +91,7 @@ spec = describe "Agent.Tools.Grok.Task" do
                 , subagentWorktreeCleanup = pure (Right ())
                 }
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
-                Nothing (Just createIsolated) Nothing
+                Nothing (Just createIsolated) Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -104,7 +104,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing
+                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
