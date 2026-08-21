@@ -1,7 +1,7 @@
 { mkDerivation, aeson, async, base, bytestring, containers
 , directory, filepath, hspec, lib, process, resourcet, retry
 , safe-exceptions, stm, text, time, transformers, unix, vector
-, websockets
+, websockets, yaml
 }:
 mkDerivation {
   pname = "agent-core";
@@ -10,11 +10,11 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson async base bytestring containers directory filepath process
     resourcet retry safe-exceptions stm text time transformers unix
-    vector websockets
+    vector websockets yaml
   ];
   testHaskellDepends = [
     aeson async base bytestring containers directory filepath hspec
-    safe-exceptions stm text time unix websockets
+    safe-exceptions stm text time unix websockets yaml
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";

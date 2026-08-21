@@ -64,6 +64,38 @@ working-directory updates, inline images, synchronized picker redraws, and
 terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the
 CLI to inspect the detected capabilities.
 
+## Skills
+
+The CLI discovers reusable Agent Skills from `SKILL.md` files. It scans
+`.agents/skills`, `.grok/skills`, and `.codex/skills` in each directory from
+the repository root to the current working directory, plus the matching
+directories under the user home. Repository skills take priority over user
+skills for bare invocation names; colliding definitions remain available
+through qualified names shown by `/skills`.
+
+Each skill is a directory whose `SKILL.md` starts with YAML frontmatter:
+
+```markdown
+---
+name: commit
+description: Create a well-formed commit. Use when the user asks to commit changes.
+---
+
+Review the diff, run relevant checks, and create the commit.
+```
+
+Skill names appear in the interactive slash menu. Invoke one with
+`/commit optional arguments`, mention one in a prompt as `$commit`, or let the
+model select it from its description. `/skills` lists the active catalog and
+`/skills reload` rescans disk. Use `--no-skills` to disable discovery and
+invocation for a session.
+
+Skill scripts, references, and assets remain relative to the skill directory
+and are loaded only when needed. Skill-specific model overrides and
+`allowed-tools` auto-approval are parsed for compatibility but are not applied;
+normal model selection, permissions, and plan-mode restrictions remain in
+force.
+
 Build and run the CLI directly with Nix:
 
 ```console

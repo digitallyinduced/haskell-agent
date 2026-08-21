@@ -14,10 +14,11 @@ import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
     ( ReplAction(..)
+    , SkillCommand
     , SlashMenu(..)
     , SlashSuggestion(..)
-    , parseReplLine
-    , slashMenuFor
+    , parseReplLineWithSkills
+    , slashMenuForWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.ReplMode (replModeLabel)
@@ -76,6 +77,7 @@ data AppEvent
         ![(Text, Text)]
         !(TMVar (Maybe Int))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
+    | AppSetSkillCommands ![SkillCommand]
     | AppStop
 
 data FullscreenRuntime = FullscreenRuntime
@@ -97,6 +99,7 @@ data AppState = AppState
     , appChoiceReply :: !(Maybe (TMVar (Maybe Int)))
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
+    , appSkillCommands :: ![SkillCommand]
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -131,10 +134,12 @@ emitUiEvent runtime = writeBChan runtime.runtimeEvents . AppUi
 
 readFullscreenLine
     :: FullscreenRuntime
+    -> [SkillCommand]
     -> PromptState
     -> Text
     -> IO ReplLine
-readFullscreenLine runtime prompt initial = do
+readFullscreenLine runtime skills prompt initial = do
+    writeBChan runtime.runtimeEvents (AppSetSkillCommands skills)
     emitUiEvent runtime (UiSetPrompt prompt)
     emitUiEvent runtime (UiSetDraft initial (Text.length initial))
     emitUiEvent runtime (UiSetAwaitingInput True)
@@ -186,6 +191,7 @@ runFullscreen runtime workerAction = do
             , appChoiceReply = Nothing
             , appSlashDismissed = False
             , appPasted = False
+            , appSkillCommands = []
             }
     withAsync workerAction \worker ->
         withAsync ticker \_ticker ->
@@ -592,6 +598,12 @@ handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = case event of
     AppEvent AppStop ->
         halt
+    AppEvent (AppSetSkillCommands skills) ->
+        modify' \state -> state
+            { appSkillCommands = skills
+            , appSlashIndex = 0
+            , appSlashDismissed = False
+            }
     AppEvent (AppUi uiEvent) -> do
         modify' \state -> state
             { appUi = reduceUi uiEvent state.appUi
@@ -930,7 +942,7 @@ handleComposerKey event = do
                             else ReplText draft
                 modify' \current ->
                     current
-                        { appUi = if isLocalCommand draft
+                        { appUi = if isLocalCommand state.appSkillCommands draft
                             then reduceUi
                                 (UiSetDraft "" 0)
                                 (reduceUi
@@ -1111,7 +1123,10 @@ currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
     | state.appSlashDismissed = Nothing
     | otherwise =
-        slashMenuFor state.appUi.uiDraft state.appUi.uiCursor
+        slashMenuForWithSkills
+            state.appSkillCommands
+            state.appUi.uiDraft
+            state.appUi.uiCursor
 
 selectedSlashSuggestion
     :: AppState
@@ -1135,8 +1150,8 @@ slashReplacement draft menu suggestion =
         after = Text.drop menu.slashMenuReplaceEnd draft
     in before <> suggestion.slashSuggestionReplacement <> after
 
-isLocalCommand :: Text -> Bool
-isLocalCommand draft = case parseReplLine draft of
+isLocalCommand :: [SkillCommand] -> Text -> Bool
+isLocalCommand skills draft = case parseReplLineWithSkills skills draft of
     ReplPrompt _ -> False
     _ -> True
 

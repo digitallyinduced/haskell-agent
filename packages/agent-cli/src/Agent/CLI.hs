@@ -69,7 +69,11 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLineWithInitial)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , formatPasteChip
+    , readReplLineWithSkills
+    )
 import Agent.CLI.ReplMode
     ( ReplMode(..)
     , replModeFromState
@@ -130,6 +134,13 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Skills
+    ( formatSkillsListing
+    , loadSkillsCatalog
+    , queueSkillCatalogContext
+    , reservedSlashNames
+    , skillInvocationCommand
+    )
 import Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
@@ -215,6 +226,15 @@ import Agent.ProjectInstructions
     , formatAgentsMdForProvider
     , globalAgentsHomeDir
     , loadedInstructionFiles
+    )
+import Agent.Skills
+    ( Skill(..)
+    , SkillCatalog(..)
+    , SkillInvocation(..)
+    , buildSkillInvocations
+    , formatSkillActivation
+    , resolveSkillInvocation
+    , resolveSkillMentions
     )
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
@@ -711,7 +731,13 @@ runAgent options transition = do
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
         setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
-        agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        startupContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        skills <- loadSkillsCatalog options home projectRoot cwd True
+        skillsRef <- newIORef skills
+        skillInvocationsRef <- newIORef
+            (buildSkillInvocations reservedSlashNames skills)
+        when (null initialItems && not (isJust initialPrevious)) $
+            queueSkillCatalogContext startupContext skills
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
         writeIORef persistSlotRef persist
@@ -763,7 +789,7 @@ runAgent options transition = do
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -795,7 +821,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -819,7 +845,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
@@ -940,6 +966,8 @@ runSession
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
+    -> IORef SkillCatalog
+    -> IORef [SkillInvocation]
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
@@ -952,7 +980,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
   withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -1017,8 +1045,21 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext options provider home cwd [] Nothing
+            freshSkills <- loadSkillsCatalog options home projectRoot cwd True
+            writeIORef skillsRef freshSkills
+            writeIORef skillInvocationsRef
+                (buildSkillInvocations reservedSlashNames freshSkills)
+            queueSkillCatalogContext freshAgents freshSkills
             fresh <- readIORef freshAgents
-            writeIORef agentsContext fresh
+            writeIORef startupContext fresh
+        refreshSkills queueContext = do
+            refreshed <- loadSkillsCatalog
+                options home projectRoot cwd queueContext
+            writeIORef skillsRef refreshed
+            writeIORef skillInvocationsRef
+                (buildSkillInvocations reservedSlashNames refreshed)
+            when queueContext $
+                queueSkillCatalogContext startupContext refreshed
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
@@ -1154,7 +1195,10 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionAgentsContext = agentsContext
+            , sessionStartupContext = startupContext
+            , sessionSkills = skillsRef
+            , sessionSkillInvocations = skillInvocationsRef
+            , sessionRefreshSkills = refreshSkills
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
@@ -1176,7 +1220,9 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 runPendingTurn env pending
             Nothing -> case prompt of
                 Just text -> do
-                    result <- runOneTurn env text [UserMessage text]
+                    inputs <- preparePromptSkillInputs env text [UserMessage text]
+                        >>= either (die . Text.unpack) pure
+                    result <- runOneTurn env text inputs
                     finishTurn env True result
                 Nothing ->
                     repl env
@@ -1348,6 +1394,9 @@ replWithDraft env@SessionEnv
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionOpenAiPool = openAiPool
+    , sessionSkills = skillsRef
+    , sessionSkillInvocations = skillInvocationsRef
+    , sessionRefreshSkills = refreshSkills
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -1360,6 +1409,11 @@ replWithDraft env@SessionEnv
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
+    refreshSkills False
+    skillInvocations <- readIORef skillInvocationsRef
+    let skillCommands =
+            map skillInvocationCommand
+                (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -1371,7 +1425,7 @@ replWithDraft env@SessionEnv
     usage <- readIORef usageRef
     mline <- case fullscreen of
         Just runtime ->
-            readFullscreenLine runtime
+            readFullscreenLine runtime skillCommands
                 PromptState
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
@@ -1421,7 +1475,8 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- readReplLineWithInitial interrupt chromePrompt draft
+            result <- readReplLineWithSkills
+                skillCommands interrupt chromePrompt draft
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptEnd
             Text.putStr (endBackground stdoutColor)
@@ -1451,11 +1506,13 @@ replWithDraft env@SessionEnv
                 attachmentsRef previewIdRef stdoutColor errColor
             continueWith keptDraft
         ReplPasted pasted ->
-            submitLine continue stdoutColor True pasted
+            submitLine skillCommands skillInvocations
+                continue stdoutColor True pasted
         ReplText line ->
-            submitLine continue stdoutColor False line
+            submitLine skillCommands skillInvocations
+                continue stdoutColor False line
   where
-    submitLine continue color pasted line =
+    submitLine skillCommands skillInvocations continue color pasted line =
         let stripped = Text.strip line
         in if Text.null stripped
             then continue
@@ -1464,7 +1521,7 @@ replWithDraft env@SessionEnv
                     let chip = formatPasteChip stripped
                     when (chip /= stripped) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLine line of
+                case parseReplLineWithSkills skillCommands line of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -1490,8 +1547,58 @@ replWithDraft env@SessionEnv
                                                     , userImages = pendingImages
                                                     }
                                                 ]
-                                result <- runOneTurn env text turnInputs
+                                preparePromptSkillInputs env text turnInputs >>= \case
+                                    Left err -> do
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                        continue
+                                    Right skillInputs -> do
+                                        result <- runOneTurn env text skillInputs
+                                        finishTurn env False result
+                    ReplInvokeSkill invocationName arguments ->
+                        case resolveSkillInvocation
+                            skillInvocations invocationName of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right invocation -> do
+                                pendingImages <- atomicModifyIORef'
+                                    attachmentsRef \imgs -> ([], imgs)
+                                let userText =
+                                        if Text.null arguments
+                                            then "Use the "
+                                                <> invocation.invocationSkill.skillName
+                                                <> " skill."
+                                            else arguments
+                                    userInput =
+                                        if null pendingImages
+                                            then UserMessage userText
+                                            else UserMultimodal
+                                                { userText = userText
+                                                , userImages = pendingImages
+                                                }
+                                    skillInputs =
+                                        [ UserMessage
+                                            (formatSkillActivation
+                                                invocation arguments)
+                                        , userInput
+                                        ]
+                                writeIORef printed False
+                                fullscreenEvent (UiUserSubmitted line)
+                                result <- runOneTurn env line skillInputs
                                 finishTurn env False result
+                    ReplSkills reloadFirst -> do
+                        when reloadFirst (refreshSkills True)
+                        current <- readIORef skillsRef
+                        invocations <- readIORef skillInvocationsRef
+                        let listing =
+                                formatSkillsListing color current invocations
+                        displayInfo (formatSkillsListing False current invocations) $
+                            Text.putStrLn listing
+                        continue
                     ReplPaste{pasteImmediate, pasteCaption} -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
@@ -1984,9 +2091,12 @@ replWithDraft env@SessionEnv
                         continue
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
-                        displayInfo (formatSlashHelp False maybeName) $
+                        displayInfo
+                            (formatSlashHelpWithSkills
+                                False skillCommands maybeName) $
                             Text.putStrLn
-                                (formatSlashHelp color maybeName)
+                                (formatSlashHelpWithSkills
+                                    color skillCommands maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
@@ -2509,6 +2619,21 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                             <> Text.pack (show (length files))
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
+
+preparePromptSkillInputs
+    :: SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> IO (Either Text [TurnInput])
+preparePromptSkillInputs env prompt inputs = do
+    invocations <- readIORef env.sessionSkillInvocations
+    pure do
+        selected <- resolveSkillMentions invocations prompt
+        let activations =
+                [ UserMessage (formatSkillActivation invocation prompt)
+                | invocation <- selected
+                ]
+        pure (activations <> inputs)
 
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.
