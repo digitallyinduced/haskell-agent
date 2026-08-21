@@ -8,6 +8,7 @@ module Agent.CLI.Project
     , saveProjectAutoApprove
     ) where
 
+import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Exception (try)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
@@ -20,8 +21,6 @@ import System.Directory.OsPath
     ( canonicalizePath
     , createDirectoryIfMissing
     , doesFileExist
-    , removeFile
-    , renameFile
     )
 import System.Exit (ExitCode(..))
 import System.OsPath ((</>))
@@ -83,7 +82,7 @@ loadProjectSettings projectRoot = do
     if not exists
         then pure defaultProjectSettings
         else do
-            result <- try @IOError (LBS.readFile (toFilePath path))
+            result <- try @IOError (retryOnFileBusy (LBS.readFile (toFilePath path)))
             pure $ case result of
                 Left _ -> defaultProjectSettings
                 Right bytes ->
@@ -96,14 +95,10 @@ saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove = do
     let dir = projectRoot </> fromFilePath ".haskell-agent"
         path = projectSettingsPath projectRoot
-        tmp = path <> fromFilePath ".tmp"
         settings = defaultProjectSettings { settingsAutoApprove = autoApprove }
     createDirectoryIfMissing True dir
     _ <- try @IOError (setFileMode (toFilePath dir) 0o700)
-    LBS.writeFile (toFilePath tmp) (Aeson.encode settings)
-    setFileMode (toFilePath tmp) 0o600
-    renameOrReplace tmp path
-    setFileMode (toFilePath path) 0o600
+    writeLazyFileAtomically path 0o600 (Aeson.encode settings)
 
 gitToplevel :: OsPath -> IO (Maybe OsPath)
 gitToplevel dir = do
@@ -118,17 +113,6 @@ gitToplevel dir = do
             let trimmed = trim out
             in if null trimmed then Nothing else Just (fromFilePath trimmed)
         Right _ -> Nothing
-
-renameOrReplace :: OsPath -> OsPath -> IO ()
-renameOrReplace tmp path = do
-    result <- try @IOError (renameFile tmp path)
-    case result of
-        Right () -> pure ()
-        Left _ -> do
-            bytes <- LBS.readFile (toFilePath tmp)
-            LBS.writeFile (toFilePath path) bytes
-            _ <- try @IOError (removeFile tmp)
-            pure ()
 
 trim :: String -> String
 trim = dropWhileEnd isSpace . dropWhile isSpace

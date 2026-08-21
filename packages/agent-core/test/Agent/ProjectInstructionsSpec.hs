@@ -3,6 +3,7 @@ module Agent.ProjectInstructionsSpec (spec) where
 import Agent.ProjectInstructions
 import Agent.OsPath (fromFilePath)
 import Agent.Provider (Provider(..))
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import System.Directory
@@ -11,6 +12,7 @@ import System.Directory
     , removeDirectoryRecursive
     )
 import System.FilePath ((</>))
+import System.IO (IOMode(AppendMode), hClose, openFile)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -36,6 +38,9 @@ spec = describe "Agent.ProjectInstructions" do
                 writeFile (dir </> "AGENTS.override.md") "override\n"
                 loaded <- discoverProjectInstructions defaultDiscoverOptions (fromFilePath dir)
                 map (.instructionContent) loaded.loadedProject `shouldBe` ["override\n"]
+
+        it "waits for a transient lock instead of dropping instructions" do
+            withTempDir checkLockedInstructions
 
         it "loads a global home file before project files" do
             withTempDir \dir -> do
@@ -151,6 +156,18 @@ spec = describe "Agent.ProjectInstructions" do
                 `shouldBe` fromFilePath "/home/u/.grok"
             globalAgentsHomeDir OpenRouterProvider (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.grok"
+
+checkLockedInstructions :: FilePath -> IO ()
+checkLockedInstructions dir = do
+    createDirectoryIfMissing True (dir </> ".git")
+    let path = dir </> "AGENTS.md"
+    writeFile path "locked rules\n"
+    handle <- openFile path AppendMode
+    _ <- forkIO do
+        threadDelay 5000
+        hClose handle
+    loaded <- discoverProjectInstructions defaultDiscoverOptions (fromFilePath dir)
+    map (.instructionContent) loaded.loadedProject `shouldBe` ["locked rules\n"]
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

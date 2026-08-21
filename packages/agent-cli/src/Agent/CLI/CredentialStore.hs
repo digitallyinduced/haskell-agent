@@ -13,6 +13,7 @@ module Agent.CLI.CredentialStore
     , upsertManagedCredential
     ) where
 
+import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
@@ -27,7 +28,6 @@ import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
     , getHomeDirectory
-    , renameFile
     )
 import System.OsPath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
@@ -273,7 +273,7 @@ decodeFileOrEmpty path empty = do
     exists <- doesFileExist path
     if not exists
         then pure (Right empty)
-        else tryIO (LBS.readFile (toFilePath path)) >>= \case
+        else tryIO (retryOnFileBusy (LBS.readFile (toFilePath path))) >>= \case
             Left exception ->
                 pure $ Left
                     ("could not read " <> toText path <> ": "
@@ -297,10 +297,7 @@ writePrivateJson path value =
     action = do
         createDirectoryIfMissing True (takeDirectory path)
         setFileMode (toFilePath (takeDirectory path)) 0o700
-        let temporary = path <> fromFilePath ".tmp"
-        LBS.writeFile (toFilePath temporary) (Aeson.encode value)
-        setFileMode (toFilePath temporary) 0o600
-        renameFile temporary path
+        writeLazyFileAtomically path 0o600 (Aeson.encode value)
 
 upsertBy :: Eq key => (value -> key) -> value -> [value] -> [value]
 upsertBy keyOf value values =

@@ -43,6 +43,7 @@ import Agent.CLI.Style
     , roleSuccess
     , roleWarn
     )
+import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
@@ -571,7 +572,7 @@ discoverOpenAIFile now path = do
     if not exists
         then pure Nothing
         else do
-            bytes <- LBS.readFile (toFilePath path)
+            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
@@ -602,7 +603,7 @@ discoverGrokFile path = do
         then pure Nothing
         else do
             raw <- Text.decodeUtf8 . LBS.toStrict
-                <$> LBS.readFile (toFilePath path)
+                <$> retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 token <- grokCredentialFromAuthJson raw
                 pure (grokAccount token (toText path)
