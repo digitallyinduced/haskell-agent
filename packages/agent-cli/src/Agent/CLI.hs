@@ -1110,6 +1110,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 when terminal.terminalNativeProgress $
                     setNativeProgress stderr active)
             ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
+            (writeIORef selectedAgent)
             useColor
             initialFullscreenState
         else pure Nothing
