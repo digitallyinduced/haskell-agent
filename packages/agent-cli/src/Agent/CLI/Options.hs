@@ -242,6 +242,8 @@ usage = unlines
     , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
+    , "/btw <QUESTION> asks a one-shot side question without changing or"
+    , "persisting the main conversation."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."

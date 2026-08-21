@@ -17,7 +17,12 @@ import Agent.CLI.Approval
     , childApprove
     , toggleAlwaysApprove
     )
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Btw
+    ( BtwBackendFactory
+    , formatBtwError
+    , runBtwWithCancel
+    )
+import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
@@ -45,6 +50,7 @@ import Agent.CLI.Interrupt
     ( InterruptState
     , newInterruptState
     , withCtrlCHandler
+    , withTurnCancel
     )
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models (ModelOption(..))
@@ -64,6 +70,7 @@ import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
+    , renderAssistantText
     , renderEvent
     )
 import Agent.CLI.Session
@@ -506,9 +513,17 @@ runAgent options = do
                                             transcriptRef
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
+                                    btwBackend privateParams privateTranscript =
+                                        lockedOpenAiBackend
+                                            wsLock
+                                            loaded.loadedTokenProvider
+                                            wsHealthy
+                                            conn
+                                            (readIORef privateParams)
+                                            privateTranscript
                                 runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef noticingBackend)
+                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef noticingBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) -> die ("openai auth: " <> show err)
                                 Right result -> pure result
@@ -535,9 +550,12 @@ runAgent options = do
                                 withPendingNotices pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
+                            btwBackend privateParams privateTranscript =
+                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                    (readIORef privateParams) privateTranscript
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -561,9 +579,12 @@ runAgent options = do
                                 withPendingNotices pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
+                            btwBackend privateParams privateTranscript =
+                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                    (readIORef privateParams) privateTranscript
                         runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend
+                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef backend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -670,8 +691,9 @@ runSession
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> Backend
+    -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend = do
+runSession options provider policy tools toolEnv planMode prompt paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -743,6 +765,7 @@ runSession options provider policy tools toolEnv planMode prompt paramsRef trans
             }
         env = SessionEnv
             { sessionLoop = config
+            , sessionBtwBackend = btwBackend
             , sessionRender = render
             , sessionProvider = provider
             , sessionPrevious = previous
@@ -778,7 +801,8 @@ repl env = replWithDraft env ""
 
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
-    { sessionRender = render
+    { sessionBtwBackend = btwBackend
+    , sessionRender = render
     , sessionProvider = provider
     , sessionPrevious = previous
     , sessionPrinted = printed
@@ -792,6 +816,7 @@ replWithDraft env@SessionEnv
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
+    , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionReset = sessionReset
@@ -1062,6 +1087,26 @@ replWithDraft env@SessionEnv
                                 continue
                     ReplPlan maybeDescription -> do
                         enterPlanFromSlash env maybeDescription
+                        continue
+                    ReplBtw question -> do
+                        color <- resolveColor stdout
+                        putTextLn stdout
+                            (roleMuted color (glyphSession <> "btw · asking…"))
+                        result <- runBtwWithCancel
+                            (\cancel action ->
+                                withTurnCancel interrupt cancel $
+                                    withEscCancel cancel escPaused action)
+                            btwBackend
+                            paramsRef
+                            transcriptRef
+                            question
+                        case result of
+                            Left err -> do
+                                errorColor <- resolveColor stderr
+                                putTextLn stderr
+                                    (roleError errorColor (formatBtwError err))
+                            Right answer ->
+                                putTextLn stdout (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
                         handleResume maybeId persist

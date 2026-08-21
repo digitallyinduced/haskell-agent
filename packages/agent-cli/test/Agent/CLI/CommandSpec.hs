@@ -127,6 +127,14 @@ spec = do
             parseReplLine "/plan   keep  spaces"
                 `shouldBe` ReplPlan (Just "keep  spaces")
 
+        it "asks a side question with the full suffix" do
+            parseReplLine "/btw why this file?"
+                `shouldBe` ReplBtw "why this file?"
+            parseReplLine "/BTW   keep  spaces"
+                `shouldBe` ReplBtw "keep  spaces"
+            parseReplLine "/btw"
+                `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
@@ -148,6 +156,7 @@ spec = do
                     , "model"
                     , "effort"
                     , "plan"
+                    , "btw"
                     , "session"
                     , "resume"
                     , "compact"
@@ -167,7 +176,11 @@ spec = do
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
-                `shouldSatisfy` (\xs -> "/help" `elem` xs && "/model" `elem` xs && "/m" `elem` xs)
+                `shouldSatisfy` (\xs ->
+                    "/help" `elem` xs
+                        && "/model" `elem` xs
+                        && "/m" `elem` xs
+                        && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
 
@@ -191,6 +204,7 @@ spec = do
             listing `shouldSatisfy` ("Open the model picker" `isInfixOf`)
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
+            listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
