@@ -169,6 +169,7 @@ test-suite agent-cli-test
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.TUIAppSpec
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec

@@ -10,6 +10,7 @@ import Agent.CLI.Input
     , formatPasteChip
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
+    , isShiftEnterCsiBody
     , parseChoiceKey
     , replHistoryPath
     , terminalTextWidth
@@ -129,3 +130,9 @@ spec = do
             isClipboardPasteCsiBody "99;9u" `shouldBe` False
             isClipboardPasteCsiBody "118;9:3u" `shouldBe` False
             isClipboardPasteCsiBody "not-a-key" `shouldBe` False
+
+    describe "Shift+Enter" do
+        it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do
+            isShiftEnterCsiBody "27;2;13~" `shouldBe` True
+            isShiftEnterCsiBody "13;2u" `shouldBe` True
+            isShiftEnterCsiBody "13u" `shouldBe` False

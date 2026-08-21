@@ -15,6 +15,7 @@ module Agent.CLI.Terminal
     , osc133CommandFinished
     , synchronizedOutputBegin
     , synchronizedOutputEnd
+    , shiftEnterCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPush
     , kittyKeyboardPop
@@ -164,6 +165,17 @@ osc133CommandFinished exitCode =
 synchronizedOutputBegin, synchronizedOutputEnd :: Text
 synchronizedOutputBegin = "\ESC[?2026h"
 synchronizedOutputEnd = "\ESC[?2026l"
+
+-- | CSI bodies used by enhanced-keyboard protocols for Shift+Enter.
+--
+-- Xterm's modifyOtherKeys protocol uses @CSI 27;2;13~@, while Kitty's
+-- keyboard protocol (also implemented by Ghostty and WezTerm) uses
+-- @CSI 13;2u@.
+shiftEnterCsiBodies :: [String]
+shiftEnterCsiBodies =
+    [ "27;2;13~"
+    , "13;2u"
+    ]
 
 -- | Push only Kitty's unambiguous-key flag. This is enough for an inline
 -- editor to receive modified keys such as Cmd+V without also receiving key
