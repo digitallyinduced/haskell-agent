@@ -20,8 +20,8 @@ import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
     ( Credential(..)
@@ -29,7 +29,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -284,10 +284,11 @@ sendWsRequestWithEventsAndOptions options cc request previousResponseId onEvent 
     sendOverWs session = do
         let wsPayload = buildWsPayloadWithOptions options request previousResponseId
             encoded = Aeson.encode wsPayload
-        sendRes <- WebSocket.sendWebSocketText session encoded
-        case sendRes of
-            Left apiError -> pure (Left apiError)
-            Right () -> receiveWsResponse session onEvent
+        WebSocket.withWebSocketRequest session do
+            sendRes <- WebSocket.sendWebSocketText session encoded
+            case sendRes of
+                Left apiError -> pure (Left apiError)
+                Right () -> receiveWsResponse session onEvent
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").
@@ -336,6 +337,8 @@ receiveWsResponse cc onEvent = do
                     Left err -> do
                         let msgPreview = Text.decodeUtf8With Text.lenientDecode (LBS.toStrict msgBytes)
                         logStreamStats "json_decode_error" itemsRef framesRef bytesRef
+                        WebSocket.invalidateWebSocketSession cc
+                            "received a malformed response frame"
                         pure $ Left (JsonDecodeError (Text.pack err) (Text.take 500 msgPreview))
                     Right event -> do
                         onEvent event

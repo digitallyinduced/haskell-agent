@@ -139,6 +139,21 @@ spec = do
                 body `shouldSatisfy` (Text.isInfixOf "Thinking…")
                 body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
 
+        it "shows retry activity on the live thinking status" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config
+                    (ActivityUpdated
+                        "Codex server error; retrying in 5s (attempt 1)…")
+                activity <- readIORef config.renderActivityRef
+                activity `shouldBe`
+                    "Codex server error; retrying in 5s (attempt 1)…"
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy`
+                    Text.isInfixOf
+                        "Codex server error; retrying in 5s (attempt 1)…"
+
         it "buffers reasoning summaries and commits one thinking block" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted

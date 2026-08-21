@@ -12,7 +12,9 @@ module Agent.ToolDispatch
     , functionToolCall
     , customToolCall
     , dispatchToolCall
+    , dispatchToolHandler
     , canonicalToolName
+    , handlerName
     , toolArgumentsValue
     , decodeToolArguments
     ) where
@@ -91,10 +93,20 @@ noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
 
 dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCallResult
-dispatchToolCall config handlers call = do
+dispatchToolCall config handlers call =
+    dispatchToolHandler config (findHandler call.name handlers) call
+
+-- | Dispatch with an already-resolved handler. Registries should prefer this
+-- entry point so canonical-name lookup and uniqueness checks happen once.
+dispatchToolHandler
+    :: ToolDispatchConfig
+    -> Maybe ToolHandler
+    -> ToolCall
+    -> IO ToolCallResult
+dispatchToolHandler config maybeHandler call = do
     let callName = call.name
         input = toolArgumentsValue call.arguments
-        runTool = case findHandler callName handlers of
+        runTool = case maybeHandler of
             Just handler -> runHandler call input handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- tryAny runTool

@@ -296,7 +296,7 @@ loadRecentSessions root metas =
                             { turnAt = meta.metaUpdatedAt
                             , turnUserText = ""
                             , turnAssistantText =
-                                Just ("Transcript unavailable: " <> Text.pack err)
+                                Just ("Transcript unavailable: " <> err)
                             , turnError = Nothing
                             , turnResponseId = Nothing
                             , turnItems = []

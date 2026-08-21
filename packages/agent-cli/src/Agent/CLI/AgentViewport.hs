@@ -17,7 +17,7 @@ module Agent.CLI.AgentViewport
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
 import Data.IORef (IORef)
 import Data.List (findIndex, sortOn)

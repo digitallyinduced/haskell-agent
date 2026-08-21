@@ -1,6 +1,7 @@
 -- | Public types shared by subagent registries and provider runtimes.
 module Agent.Subagents.Types
     ( SubagentId(..)
+    , SubagentIdentity(..)
     , RootTurnId(..)
     , SubagentStatus(..)
     , SubagentConfig(..)
@@ -17,6 +18,7 @@ import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopError, LoopEvent, LoopResult)
 import Agent.OsPath (OsPath)
+import Agent.Subagents.TaskPath (TaskPath)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
 import Data.Word (Word64)
@@ -32,6 +34,13 @@ instance Aeson.ToJSON SubagentId where
 
 instance Aeson.FromJSON SubagentId where
     parseJSON = Aeson.withText "SubagentId" (pure . SubagentId)
+
+data SubagentIdentity = SubagentIdentity
+    { identityParent :: Maybe SubagentId
+    , identityDepth :: Int
+    , identityTaskPath :: TaskPath
+    }
+    deriving (Eq, Show)
 
 data SubagentStatus
     = Pending

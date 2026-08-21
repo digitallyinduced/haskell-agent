@@ -11,7 +11,7 @@ module Agent.OpenRouter.FunctionalSpec (spec) where
 import Agent.OpenRouter.Client
 import Agent.OpenRouter.Credential
 import Agent.OpenRouter.Options
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap

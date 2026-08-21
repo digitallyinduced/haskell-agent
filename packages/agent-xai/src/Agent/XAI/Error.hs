@@ -9,8 +9,8 @@ module Agent.XAI.Error
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
-import Agent.OpenAI.Error (classifyHttpFailure, mkOpenAIError)
-import Agent.OpenAI.Responses.Types (ResponseStreamError(..))
+import Agent.Responses.Error (classifyHttpFailure, mkOpenAIError)
+import Agent.Responses.Types (ResponseStreamError(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 

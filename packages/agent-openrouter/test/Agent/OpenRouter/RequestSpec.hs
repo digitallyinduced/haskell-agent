@@ -1,7 +1,7 @@
 module Agent.OpenRouter.RequestSpec (spec) where
 
 import Agent.Error (ApiError(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request
 import Agent.OpenRouter.Stream

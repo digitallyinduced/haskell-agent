@@ -82,6 +82,7 @@ library
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-responses >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
@@ -94,7 +95,7 @@ library
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
-                    , process
+                    , process >= 1.6.26
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
@@ -157,6 +158,7 @@ test-suite agent-cli-test
     build-depends:    agent-cli
                     , agent-core
                     , agent-openai
+                    , agent-responses
                     , aeson
                     , ansi-terminal
                     , base >= 4.17 && < 5

@@ -13,7 +13,11 @@ import Agent.ToolDispatch
 import Agent.Tools.Grok.Task
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , ToolSchema(..)
+    )
 import Control.Concurrent.MVar
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -111,11 +115,9 @@ fake :: Text -> AppTool
 fake name = AppTool
     { appToolName = name
     , appToolDescription = name
-    , appToolParameters = []
+    , appToolSchema = JsonFunctionSchema []
     , appToolHandler = noArgsTool name (pure (Right "ok"))
-    , appToolKind = JsonFunction
-    , appToolReadOnly = True
-    , appToolIsReadOnlyCall = Nothing
+    , appToolApproval = AlwaysReadOnly
     }
 
 raceArgs :: Text

@@ -17,8 +17,13 @@ import Agent.ToolDispatch
     , dispatchToolCall
     )
 import Agent.Tools.MultiAgents
-import Agent.Tools.Types (AppTool(..), appToolHandlers)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , appToolHandlers
+    )
 import Control.Concurrent.STM
+import Control.Monad (unless)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -30,7 +35,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         let tools = multiAgentTools (rootContext registry Nothing)
-        map (\tool -> (tool.appToolName, tool.appToolReadOnly)) tools
+        map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval)) tools
             `shouldBe`
                 [ ("spawn_agent", True)
                 , ("wait_agent", True)
@@ -65,6 +70,47 @@ spec = describe "Agent.Tools.MultiAgents" do
             EncryptedInterAgentContent "gAAAAA-task"
         closeSubagentRegistry registry
 
+    it "wait_agent excludes the calling child" do
+        parentGate <- newTVarIO False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ message _ ->
+                if message.messageRecipient == "/root/parent"
+                    then do
+                        atomically $ readTVar parentGate >>= \ready -> unless ready retry
+                        pure (resultWithText "parent")
+                    else pure (resultWithText "child"))
+            (\_ _ -> pure ())
+        Right (parent, parentPath) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "parent"
+                (plainInterAgentContent "parent") Nothing
+        Right (child, _) <-
+            spawnSubagentAt registry (Just parent) parentPath 1 "child"
+                (plainInterAgentContent "child") Nothing
+        let context = (rootContext registry Nothing)
+                { multiSelfId = Just parent
+                , multiDepth = 1
+                , multiTaskPath = parentPath
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context))
+            waitCall
+        result.output `shouldSatisfy` Text.isInfixOf child.unSubagentId
+        result.output `shouldNotSatisfy` Text.isInfixOf parent.unSubagentId
+        atomically (writeTVar parentGate True)
+        closeSubagentRegistry registry
+
+    it "propagates restore failures from message tools" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (Left LoopNoResponseId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiResumeFromDisk = Just (\_ -> pure (Left "restore failed")) }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context))
+            sendMissingCall
+        result.output `shouldSatisfy` Text.isInfixOf "restore failed"
+        closeSubagentRegistry registry
+
     it "routes encrypted child messages to the root inbox" do
         rootInbox <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -96,6 +142,10 @@ spec = describe "Agent.Tools.MultiAgents" do
             EncryptedInterAgentContent "gAAAAA-result"
         closeSubagentRegistry registry
 
+isReadOnly :: ApprovalRule -> Bool
+isReadOnly AlwaysReadOnly = True
+isReadOnly _ = False
+
 rootContext
     :: SubagentRegistry
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
@@ -118,6 +168,28 @@ encryptedSpawnCall = ToolCall
     , arguments = "{\"task_name\":\"worker\",\"message\":\"gAAAAA-task\"}"
     , callKind = FunctionCallKind
     , argumentsEncrypted = True
+    }
+
+waitCall :: ToolCall
+waitCall = ToolCall
+    { callId = "wait-call"
+    , name = "collaboration.wait_agent"
+    , arguments = "{\"timeout_ms\":10000}"
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
+    }
+
+sendMissingCall :: ToolCall
+sendMissingCall = ToolCall "send-missing" "collaboration.send_message"
+    "{\"target\":\"agent-missing-1\",\"message\":\"hello\"}"
+    FunctionCallKind False
+
+resultWithText :: Text -> Either LoopError LoopResult
+resultWithText text = Right LoopResult
+    { finalResponseId = text
+    , finalText = Just text
+    , turnsUsed = 1
+    , tokenUsage = emptyTokenUsage
     }
 
 encryptedRootMessageCall :: ToolCall

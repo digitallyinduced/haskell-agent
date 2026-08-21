@@ -1,7 +1,7 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
 import qualified Data.Text as Text

@@ -5,6 +5,12 @@ import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
+import Agent.Tools.Types
+    ( ApprovalRule(..)
+    , ToolRegistry
+    , jsonAppTool
+    , mkToolRegistry
+    )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Data.Aeson (FromJSON(..))
@@ -15,6 +21,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    it "combines TokenUsage component-wise" do
+        TokenUsage 10 4 6 <> TokenUsage 3 2 1
+            `shouldBe` TokenUsage 13 6 7
+
+    it "uses emptyTokenUsage as the TokenUsage monoidal identity" do
+        let usage = TokenUsage 10 4 6
+        (mempty <> usage, usage <> mempty)
+            `shouldBe` (usage, usage)
+
     it "threads previous_response_id and sends only CompletedTool on the follow-up" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -83,7 +98,7 @@ spec = describe "runLoop" do
                 ]
         config0 <- testConfig backend
         let config = config0
-                { loopHandlers = handlers
+                { loopTools = registryFromHandlers handlers
                 , loopOnEvent = onEvent
                 }
         result <- runLoop config Nothing "go"
@@ -118,7 +133,7 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         config0 <- testConfig backend
-        result <- runLoop config0 { loopHandlers = handlers } Nothing "go"
+        result <- runLoop config0 { loopTools = registryFromHandlers handlers } Nothing "go"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "ok"
@@ -171,7 +186,7 @@ spec = describe "runLoop" do
             ]
         let handlers = [noArgsTool "explode" (error "boom")]
         config0 <- testConfig backend
-        result <- runLoop config0 { loopHandlers = handlers } Nothing "go"
+        result <- runLoop config0 { loopTools = registryFromHandlers handlers } Nothing "go"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
             , finalText = Just "survived"
@@ -252,7 +267,7 @@ spec = describe "runLoop" do
                     threadDelay 10000
                     pure (Right "should-not-continue")
                 ]
-            config = config0 { loopHandlers = handlers }
+            config = config0 { loopTools = registryFromHandlers handlers }
         result <- runLoop config Nothing "go"
         case result of
             Left (LoopCancelled results) ->
@@ -272,6 +287,16 @@ spec = describe "runLoop" do
             requestCancel cancel
         result <- runLoop config0 Nothing "go"
         result `shouldBe` Left (LoopCancelled [])
+
+    it "does not clear a cancel requested before the loop starts" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-too-late" [] (Just "too late"))]
+        config <- testConfig backend
+        requestCancel config.loopCancel
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        readIORef submissions `shouldReturn` []
 
     it "sums token usage across model steps in one user turn" do
         submissions <- newIORef []
@@ -307,7 +332,7 @@ testConfig backend = do
     cancel <- newCancelFlag
     pure LoopConfig
         { loopBackend = backend
-        , loopHandlers =
+        , loopTools = registryFromHandlers
             [ typedTool "echo" $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
@@ -317,6 +342,13 @@ testConfig backend = do
         , loopApprove = \_ -> pure (Right True)
         , loopCancel = cancel
         }
+
+registryFromHandlers :: [ToolHandler] -> ToolRegistry
+registryFromHandlers handlers =
+    either (error . Text.unpack) id $ mkToolRegistry
+        [ jsonAppTool (handlerName handler) "" [] AlwaysReadOnly handler
+        | handler <- handlers
+        ]
 
 data EchoArgs = EchoArgs { message :: Text }
 

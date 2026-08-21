@@ -28,7 +28,11 @@ import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (ToolHandler, typedTool)
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -297,15 +301,12 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly handler =
+    jsonAppTool name description parameters approval handler
+  where
+    approval
+        | readOnly = AlwaysReadOnly
+        | otherwise = AlwaysPrompt
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text
@@ -396,7 +397,7 @@ runReadAgentSession
     -> IO (Either Text Text)
 runReadAgentSession env args =
     loadSession env.toolsRoot args.sessionId >>= \case
-        Left err -> pure (Left (Text.pack err))
+        Left err -> pure (Left err)
         Right (meta, turns) -> do
             status <- env.toolsSessionStatus args.sessionId
             let limit = min 100 (max 1 (fromMaybe 20 args.limit))
@@ -440,7 +441,7 @@ runSendAgentSessionMessage env args
         if current == Just args.sessionId
             then pure (Left "cannot message the current agent session")
             else loadSession env.toolsRoot args.sessionId >>= \case
-                Left err -> pure (Left (Text.pack err))
+                Left err -> pure (Left err)
                 Right (meta, _) -> do
                     env.toolsLaunchTurn (sessionHandle env.toolsRoot meta) args.message
                         >>= \case

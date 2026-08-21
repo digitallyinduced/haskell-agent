@@ -9,9 +9,9 @@ module Agent.OpenRouter.Stream
     ) where
 
 import Agent.Error (ApiError(..))
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.Types
 import Agent.OpenRouter.Error (classifyStreamError)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS

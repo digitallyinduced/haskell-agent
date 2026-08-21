@@ -12,7 +12,7 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
-import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.Auth (LoadedAuth(..), loadAuth, probeLoadedAuth)
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentTarget(..)
@@ -94,7 +94,10 @@ import Agent.CLI.Project
     , resolveProjectRoot
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
-import Agent.CLI.ProviderFallback (fallbackCandidates)
+import Agent.CLI.ProviderFallback
+    ( automaticCooldownRetryDelay
+    , fallbackCandidates
+    )
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , ProviderTransition(..)
@@ -148,13 +151,13 @@ import Agent.CLI.Terminal
     , osc133PromptStart
     , reportTerminalCwd
     , resolveColor
-    , notifyTerminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
+    , formatDuration
     , formatUsageReport
     )
 import Agent.CLI.Worktree
@@ -163,8 +166,9 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
+import Agent.Cancel (resetCancel, waitCancel)
 import Agent.Loop
-import Agent.Error (ApiError)
+import Agent.Error (ApiError(..))
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
@@ -182,7 +186,7 @@ import Agent.OpenAI.Compaction
     )
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
@@ -215,10 +219,13 @@ import Agent.Subagents
     , getPreviousResponseId
     , getStatus
     , getSubagentCwd
+    , getSubagentIdentity
     , getTaskPath
     , listAgents
     , newSubagentRegistry
     , restoreSubagent
+    , restoreSubagentAt
+    , restoreSubagentAtWithCwd
     , restoreSubagentWithCwd
     , setPreviousResponseId
     , setSubagentOnComplete
@@ -226,7 +233,6 @@ import Agent.Subagents
     )
 import Agent.Tools
     ( CodingTools(..)
-    , appToolHandlers
     , codingToolsFor
     , codingToolsForWithTypes
     , filterChildGrokTools
@@ -239,7 +245,7 @@ import Agent.Tools.Grok.Task
     , lookupAgentType
     , recordAgentSpec
     )
-import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -249,7 +255,13 @@ import Agent.Tools.PlanMode
     , deactivatePlanMode
     , planFilePath
     )
-import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ToolEnv(..)
+    , ToolRegistry
+    , defaultToolEnv
+    , mkToolRegistry
+    )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath, toText)
@@ -276,7 +288,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
-import Data.Time.Clock (getCurrentTime, utctDay)
+import Data.Time.Clock
+    ( NominalDiffTime
+    , diffUTCTime
+    , getCurrentTime
+    , utctDay
+    )
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
     ( getCurrentDirectory
@@ -290,6 +307,7 @@ import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
+import System.Timeout (timeout)
 
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
@@ -417,7 +435,9 @@ runAgentWithRestarts options = go options Nothing
                             continueAutomaticFallback failed apiError >>= \case
                                 Just next ->
                                     go (applyProviderTransition current next) (Just next)
-                                Nothing -> pure DevQuit
+                                Nothing -> do
+                                    reportProviderUnavailable apiError
+                                    pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload -> pure DevReload
@@ -434,7 +454,7 @@ runShowSession :: Text -> IO ()
 runShowSession sessionId = do
     home <- getHomeDirectory
     loadSession (sessionsRoot home) sessionId >>= \case
-        Left err -> die err
+        Left err -> die (Text.unpack err)
         Right (meta, turns) -> do
             printSessionSummary meta
             putStrLn ""
@@ -473,7 +493,7 @@ runAgent options transition = do
         Nothing -> pure Nothing
         Just sessionId ->
             loadSession root sessionId >>= \case
-                Left err -> die err
+                Left err -> die (Text.unpack err)
                 Right loaded -> pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
@@ -503,7 +523,7 @@ runAgent options transition = do
             Nothing -> case resumed of
                 Just (meta, _) -> Just meta.metaProvider
                 Nothing -> options.optProvider
-    loaded <- loadAuth requestedProvider >>= either die pure
+    loaded <- loadAuth requestedProvider >>= either (die . Text.unpack) pure
     case (transitionTarget, resumed) of
         (Just target, _)
             | loaded.loadedProvider /= target.modelProvider ->
@@ -544,8 +564,7 @@ runAgent options transition = do
     sessionProcessManager <- newSessionProcessManager root
     managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
     activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
-    persistSlotRef <- newIORef
-        (Nothing :: Maybe (IORef (Either SessionCreate SessionHandle)))
+    persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
@@ -585,9 +604,6 @@ runAgent options transition = do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
-                terminal <- detectTerminalCapabilities stderr
-                notifyTerminal terminal stderr
-                    ("Subagent completed: " <> agentId.unSubagentId)
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
@@ -663,14 +679,14 @@ runAgent options transition = do
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
         case persist of
-            Just slotRef -> do
+            PersistenceEnabled slotRef -> do
                 slot <- readIORef slotRef
                 case slot of
-                    Right handle -> do
+                    PersistenceActive handle -> do
                         claimCurrentSession handle
                         noteSessionDir handle.sessionDir
-                    Left _ -> pure ()
-            Nothing -> pure ()
+                    PersistencePending _ -> pure ()
+            PersistenceDisabled -> pure ()
         progName <- getProgName
         withCtrlCHandler interrupt $
             withInterruptResume progName persist RunQuit do
@@ -798,7 +814,7 @@ preparePersistence
     -> Text
     -> Maybe Text
     -> Maybe (SessionMeta, [SessionTurn])
-    -> IO (Maybe (IORef (Either SessionCreate SessionHandle)))
+    -> IO Persistence
 preparePersistence options root provider model cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -814,25 +830,25 @@ preparePersistence options root provider model cwd effort prompt resumed =
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "session: " <> meta.metaId <> " (resumed)"))
-            Just <$> newIORef (Right handle)
+            newActivePersistence handle
         Nothing
             | shouldPersist options ->
                 -- Defer directory creation until the first successful turn so
                 -- an abandoned REPL does not leave empty session folders.
-                Just <$> newIORef (Left SessionCreate
+                newPendingPersistence SessionCreate
                     { createRoot = root
                     , createProvider = provider
                     , createModel = model
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
-                    })
-            | otherwise -> pure Nothing
+                    }
+            | otherwise -> pure PersistenceDisabled
 
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
     :: String
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> a
     -> IO a
     -> IO a
@@ -859,15 +875,15 @@ withInterruptResume progName persist interrupted action =
 
 printResumeHint
     :: String
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO ()
 printResumeHint progName = \case
-    Nothing -> pure ()
-    Just slotRef -> do
+    PersistenceDisabled -> pure ()
+    PersistenceEnabled slotRef -> do
         slot <- readIORef slotRef
         case slot of
-            Left _ -> pure ()
-            Right handle -> do
+            PersistencePending _ -> pure ()
+            PersistenceActive handle -> do
                 -- Drop an in-place "Thinking…" status so the hint is its own line.
                 Text.hPutStr stderr "\r\ESC[K"
                 clearNativeProgress stderr
@@ -877,6 +893,10 @@ printResumeHint progName = \case
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
+
+requireToolRegistry :: [AppTool] -> IO ToolRegistry
+requireToolRegistry tools =
+    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
 
 isJustCwd :: CliOptions -> Bool
 isJustCwd options = case options.optCwd of
@@ -897,7 +917,7 @@ runSession
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
     -> Maybe Text
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> OsPath
     -> OsPath
     -> OsPath
@@ -917,6 +937,7 @@ runSession
     -> BtwBackendFactory
     -> IO RunResult
 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+    toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -1015,7 +1036,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             }
         config = LoopConfig
             { loopBackend = backend
-            , loopHandlers = appToolHandlers tools
+            , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = renderEvent render
@@ -1023,7 +1044,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                 withMVar ioLock \_ ->
                     withStdinPaused escPaused $
                         approveToolDecision
-                            policyRef allowedToolsRef tools planMode call
+                            policyRef allowedToolsRef toolRegistry planMode call
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -1088,17 +1109,33 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                 repl env
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
-runPendingTurn env pending = do
+runPendingTurn = runPendingTurnWithCooldownRetry True
+
+runPendingTurnWithCooldownRetry
+    :: Bool
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
-    finishTurn env pending.pendingExitAfter result
+    finishTurnWithCooldownRetry
+        allowCooldownRetry env pending.pendingExitAfter result
 
 finishTurn
     :: SessionEnv
     -> Bool
     -> TurnResult
     -> IO RunResult
-finishTurn env exitAfter = \case
+finishTurn = finishTurnWithCooldownRetry True
+
+finishTurnWithCooldownRetry
+    :: Bool
+    -> SessionEnv
+    -> Bool
+    -> TurnResult
+    -> IO RunResult
+finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         writeIORef env.sessionUnavailableProviders []
         putTrailingNewline env.sessionPrinted
@@ -1115,16 +1152,70 @@ finishTurn env exitAfter = \case
                 notifyAttention stderr InputRequested
                 repl env
     TurnProviderUnavailable apiError pending ->
-        requestAutomaticProviderFallback
-            env apiError (setPendingExitAfter exitAfter pending) >>= \case
+        let pending' = setPendingExitAfter exitAfter pending
+        in requestAutomaticProviderFallback env apiError pending' >>= \case
             Just providerTransition ->
                 pure (RunSwitchProvider providerTransition)
-            Nothing ->
-                if exitAfter
-                    then exitFailure
-                    else do
-                        notifyAttention stderr InputRequested
-                        repl env
+            Nothing -> do
+                now <- getCurrentTime
+                case automaticCooldownRetryDelay now apiError of
+                    Just delay | allowCooldownRetry ->
+                        waitAndRetryPendingTurn env delay pending'
+                    _ -> do
+                        reportProviderUnavailable apiError
+                        if exitAfter
+                            then exitFailure
+                            else do
+                                notifyAttention stderr InputRequested
+                                replWithDraft env pending.pendingPromptText
+
+waitAndRetryPendingTurn
+    :: SessionEnv
+    -> NominalDiffTime
+    -> PendingTurn
+    -> IO RunResult
+waitAndRetryPendingTurn env delay pending = do
+    color <- resolveColor stderr
+    putTextLn stderr $ roleWarn color $
+        glyphWarn
+            <> "provider credentials temporarily unavailable; retrying this turn in "
+            <> formatDuration delay
+            <> " (Esc to cancel)"
+    let cancel = env.sessionLoop.loopCancel
+        -- Give the provider reset boundary a small margin so the automatic
+        -- retry does not race a rounded server timestamp.
+        waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
+    resetCancel cancel
+    cancelled <-
+        ( withTurnCancel env.sessionInterrupt cancel $
+            withEscCancel cancel env.sessionEscPaused $
+                isJust <$> timeout waitMicros (waitCancel cancel)
+        ) `finally` resetCancel cancel
+    if cancelled
+        then do
+            putTextLn stderr (roleMuted color "automatic retry cancelled")
+            if pending.pendingExitAfter
+                then pure RunQuit
+                else replWithDraft env pending.pendingPromptText
+        else do
+            putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
+            runPendingTurnWithCooldownRetry False env pending
+
+reportProviderUnavailable :: ApiError -> IO ()
+reportProviderUnavailable apiError = do
+    color <- resolveColor stderr
+    now <- getCurrentTime
+    let detail = case apiError of
+            CredentialsExhausted{retryAt} ->
+                let delay = max 0 (diffUTCTime retryAt now)
+                in "all configured accounts are temporarily unavailable"
+                    <> if delay == 0
+                        then "; retry now"
+                        else "; retry in " <> formatDuration delay
+            _ -> Text.pack (show apiError)
+    putTextLn stderr $ roleError color $
+        "provider unavailable; no usable fallback provider account is available: "
+            <> detail
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -1405,18 +1496,18 @@ replWithDraft env@SessionEnv
                         modifyIORef' paramsRef (setReasoningEffort level)
                         Text.putStrLn (roleMuted color (glyphOk <> "effort set to " <> level))
                         case persist of
-                            Nothing -> pure ()
-                            Just slotRef -> do
+                            PersistenceDisabled -> pure ()
+                            PersistenceEnabled slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
-                                    Left pending ->
+                                    PersistencePending pending ->
                                         writeIORef slotRef
-                                            (Left pending { createEffort = level })
-                                    Right handle -> do
+                                            (PersistencePending pending { createEffort = level })
+                                    PersistenceActive handle -> do
                                         let meta = handle.sessionMeta { metaEffort = level }
                                         writeSessionMeta handle.sessionMetaPath meta
                                         writeIORef slotRef
-                                            (Right handle { sessionMeta = meta })
+                                            (PersistenceActive handle { sessionMeta = meta })
                         continue
                     ReplShowModel -> do
                         color <- resolveColor stderr
@@ -1472,8 +1563,8 @@ replWithDraft env@SessionEnv
                                         <> Text.pack (show (length outcome.compactHistory))
                                         <> " items)"
                                 case persist of
-                                    Nothing -> pure ()
-                                    Just slotRef -> do
+                                    PersistenceDisabled -> pure ()
+                                    PersistenceEnabled slotRef -> do
                                         now <- getCurrentTime
                                         handle <- ensureSession slotRef
                                         let turn = SessionTurn
@@ -1492,7 +1583,7 @@ replWithDraft env@SessionEnv
                                                 }
                                         writeSessionMeta handle'.sessionMetaPath meta
                                         writeIORef slotRef
-                                            (Right handle'{sessionMeta = meta})
+                                            (PersistenceActive handle'{sessionMeta = meta})
                                 continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
@@ -1527,17 +1618,17 @@ replWithDraft env@SessionEnv
                         sessionReset
                         color <- resolveColor stderr
                         case persist of
-                            Nothing ->
+                            PersistenceDisabled ->
                                 Text.hPutStrLn stderr
                                     (roleMuted color (glyphOk <> "conversation cleared"))
-                            Just slotRef -> do
+                            PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
                                 slot <- readIORef slotRef
                                 case slot of
-                                    Left _ ->
+                                    PersistencePending _ ->
                                         Text.hPutStrLn stderr
                                             (roleMuted color (glyphOk <> "conversation cleared"))
-                                    Right handle -> do
+                                    PersistenceActive handle -> do
                                         let turn = SessionTurn
                                                 { turnAt = now
                                                 , turnUserText = clearSessionUserText
@@ -1558,7 +1649,7 @@ replWithDraft env@SessionEnv
                                                 }
                                         writeSessionMeta handle'.sessionMetaPath meta
                                         writeIORef slotRef
-                                            (Right handle'{sessionMeta = meta})
+                                            (PersistenceActive handle'{sessionMeta = meta})
                                         Text.hPutStrLn stderr
                                             (roleMuted color
                                                 (glyphOk
@@ -1570,25 +1661,25 @@ replWithDraft env@SessionEnv
                         sessionReset
                         color <- resolveColor stderr
                         case persist of
-                            Nothing -> do
+                            PersistenceDisabled -> do
                                 Text.hPutStrLn stderr
                                     (roleMuted color
                                         (glyphOk <> "started a fresh conversation"))
                                 continue
-                            Just slotRef -> do
+                            PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
                                 params <- readIORef paramsRef
                                 slot <- readIORef slotRef
                                 let model = currentModel params
                                     effort = currentEffort params
                                     create = case slot of
-                                        Left pending ->
+                                        PersistencePending pending ->
                                             pending
                                                 { createModel = model
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
                                                 }
-                                        Right handle ->
+                                        PersistenceActive handle ->
                                             SessionCreate
                                                 { createRoot =
                                                     takeDirectory handle.sessionDir
@@ -1618,7 +1709,7 @@ replWithDraft env@SessionEnv
                                 writeSessionMeta handle'.sessionMetaPath meta
                                 env.sessionOnPersisted handle'
                                 writeIORef slotRef
-                                    (Right handle'{sessionMeta = meta})
+                                    (PersistenceActive handle'{sessionMeta = meta})
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
@@ -1633,16 +1724,16 @@ replWithDraft env@SessionEnv
                     ReplShowSession -> do
                         color <- resolveColor stdout
                         case persist of
-                            Nothing ->
+                            PersistenceDisabled ->
                                 Text.putStrLn (roleMuted color "session: (not persisted)")
-                            Just slotRef -> do
+                            PersistenceEnabled slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
-                                    Left _ ->
+                                    PersistencePending _ ->
                                         Text.putStrLn
                                             (roleMuted color
                                                 "session: (pending until first turn)")
-                                    Right handle ->
+                                    PersistenceActive handle ->
                                         Text.putStrLn
                                             (roleMuted color
                                                 (glyphSession <> "session: " <> handle.sessionMeta.metaId))
@@ -1740,7 +1831,7 @@ applyModelChange
     -> IORef ResponseCreateParams
     -> RenderConfig
     -> IORef (Maybe Text)
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO ()
 applyModelChange provider name paramsRef render previous persist = do
     color <- resolveColor stdout
@@ -1759,22 +1850,22 @@ applyModelChange provider name paramsRef render previous persist = do
         else Text.putStrLn
             (roleMuted color (glyphOk <> "model set to " <> name))
     case persist of
-        Nothing -> pure ()
-        Just slotRef -> do
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
             slot <- readIORef slotRef
             case slot of
-                Left pending ->
+                PersistencePending pending ->
                     writeIORef slotRef
-                        (Left pending { createModel = name })
-                Right handle -> do
+                        (PersistencePending pending { createModel = name })
+                PersistenceActive handle -> do
                     let meta = handle.sessionMeta { metaModel = name }
                     writeSessionMeta handle.sessionMetaPath meta
                     writeIORef slotRef
-                        (Right handle { sessionMeta = meta })
+                        (PersistenceActive handle { sessionMeta = meta })
 
 requestModelProviderSwitch
     :: ModelOption
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO (Either Text RunResult)
 requestModelProviderSwitch choice persist =
     prepareProviderTransition
@@ -1835,12 +1926,7 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
     candidates = fallbackCandidates unavailable0 current apiError
 
     tryCandidates unavailable = \case
-        [] -> do
-            color <- resolveColor stderr
-            putTextLn stderr $ roleError color $
-                "provider unavailable; no other configured provider account is available: "
-                    <> Text.pack (show apiError)
-            pure Nothing
+        [] -> pure Nothing
         choice : rest ->
             validateProviderTarget choice >>= \case
                 Left err -> do
@@ -1858,7 +1944,7 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
                     putTextLn stderr $ roleWarn color $
                         glyphWarn
                             <> providerSlug current
-                            <> " unavailable; switching to "
+                            <> " unavailable; trying this turn with "
                             <> providerSlug choice.modelProvider
                             <> "/"
                             <> choice.modelId
@@ -1875,7 +1961,7 @@ prepareProviderTransition
     -> [Provider]
     -> Maybe PendingTurn
     -> ModelOption
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO (Either Text ProviderTransition)
 prepareProviderTransition cause unavailable pending choice persist =
     validateProviderTarget choice >>= \case
@@ -1897,39 +1983,46 @@ validateProviderTarget choice =
             "cannot switch to "
                 <> providerSlug choice.modelProvider
                 <> ": "
-                <> Text.pack err
-        Right loaded
-            | loaded.loadedProvider /= choice.modelProvider ->
-                pure $ Left $
+                <> err
+        Right loaded ->
+            probeLoadedAuth loaded >>= \case
+                Left err -> pure $ Left $
                     "cannot switch to "
                         <> providerSlug choice.modelProvider
-                        <> ": auth resolved "
-                        <> providerSlug loaded.loadedProvider
-            | otherwise -> pure (Right ())
+                        <> ": credentials unavailable: "
+                        <> Text.pack (show err)
+                Right usable
+                    | usable.loadedProvider /= choice.modelProvider ->
+                        pure $ Left $
+                            "cannot switch to "
+                                <> providerSlug choice.modelProvider
+                                <> ": auth resolved "
+                                <> providerSlug usable.loadedProvider
+                    | otherwise -> pure (Right ())
 
 ensureTransitionSessionId
-    :: Maybe (IORef (Either SessionCreate SessionHandle))
+    :: Persistence
     -> IO (Maybe Text)
-ensureTransitionSessionId Nothing = pure Nothing
-ensureTransitionSessionId (Just slotRef) = do
+ensureTransitionSessionId PersistenceDisabled = pure Nothing
+ensureTransitionSessionId (PersistenceEnabled slotRef) = do
     handle <- ensureSession slotRef
     pure (Just handle.sessionMeta.metaId)
 
 commitProviderTransition
     :: Maybe ProviderTransition
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO ()
 commitProviderTransition Nothing _ = pure ()
-commitProviderTransition _ Nothing = pure ()
-commitProviderTransition (Just transition) (Just slotRef) = do
+commitProviderTransition _ PersistenceDisabled = pure ()
+commitProviderTransition (Just transition) (PersistenceEnabled slotRef) = do
     slot <- readIORef slotRef
     case slot of
-        Left pending ->
-            writeIORef slotRef $ Left pending
+        PersistencePending pending ->
+            writeIORef slotRef $ PersistencePending pending
                 { createProvider = transition.transitionTarget.modelProvider
                 , createModel = transition.transitionTarget.modelId
                 }
-        Right handle -> do
+        PersistenceActive handle -> do
             now <- getCurrentTime
             let meta = handle.sessionMeta
                     { metaProvider = transition.transitionTarget.modelProvider
@@ -1938,11 +2031,11 @@ commitProviderTransition (Just transition) (Just slotRef) = do
                     , metaUpdatedAt = now
                     }
             writeSessionMeta handle.sessionMetaPath meta
-            writeIORef slotRef (Right handle { sessionMeta = meta })
+            writeIORef slotRef (PersistenceActive handle { sessionMeta = meta })
 
 prepareTransitionBackend
     :: Maybe ProviderTransition
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> Backend
     -> IO Backend
 prepareTransitionBackend Nothing _ backend = pure backend
@@ -1957,7 +2050,7 @@ prepareTransitionBackend (Just transition) persist backend
 commitBackendOnSuccess
     :: IORef Bool
     -> ProviderTransition
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> Backend
     -> Backend
 commitBackendOnSuccess committed transition persist (Backend submit) =
@@ -2012,17 +2105,17 @@ reloadAuth provider = \case
 
 
 requestReload
-    :: Maybe (IORef (Either SessionCreate SessionHandle))
+    :: Persistence
     -> IO RunResult
 requestReload persist = do
     home <- getHomeDirectory
     color <- resolveColor stderr
     case persist of
-        Nothing -> do
+        PersistenceDisabled -> do
             putTextLn stderr
                 (roleError color ":reload needs a persisted REPL session")
             pure RunQuit
-        Just slotRef -> do
+        PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
@@ -2035,13 +2128,13 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     case persist of
-        Just slotRef -> do
+        PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "session: " <> handle.sessionMeta.metaId))
-        Nothing -> pure ()
+        PersistenceDisabled -> pure ()
     case maybeDescription of
         Nothing -> do
             writeIORef planMode.planStateRef PlanPending
@@ -2063,7 +2156,9 @@ enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = p
                 TurnProviderUnavailable apiError pending ->
                     requestAutomaticProviderFallback
                         planEnv apiError pending >>= \case
-                            Nothing -> pure Nothing
+                            Nothing -> do
+                                reportProviderUnavailable apiError
+                                pure Nothing
                             Just providerTransition ->
                                 pure (Just providerTransition)
                 _ -> do
@@ -2200,7 +2295,7 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
 
 handleResume
     :: Maybe Text
-    -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> Persistence
     -> IO (Maybe RunResult)
 handleResume maybeId persist = do
     color <- resolveColor stderr
@@ -2217,7 +2312,7 @@ handleResume maybeId persist = do
                 else
                     loadSession root sessionId >>= \case
                         Left err -> do
-                            Text.hPutStrLn stderr (roleError color (Text.pack err))
+                            Text.hPutStrLn stderr (roleError color err)
                             pure Nothing
                         Right _ -> pure (Just (RunResumeSession sessionId))
     case maybeId of
@@ -2229,15 +2324,15 @@ handleResume maybeId persist = do
                 Just sessionId -> resume sessionId
 
 currentSessionId
-    :: Maybe (IORef (Either SessionCreate SessionHandle))
+    :: Persistence
     -> IO (Maybe Text)
 currentSessionId = \case
-    Nothing -> pure Nothing
-    Just slotRef -> do
+    PersistenceDisabled -> pure Nothing
+    PersistenceEnabled slotRef -> do
         slot <- readIORef slotRef
         pure $ case slot of
-            Left _ -> Nothing
-            Right handle -> Just handle.sessionMeta.metaId
+            PersistencePending _ -> Nothing
+            PersistenceActive handle -> Just handle.sessionMeta.metaId
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
@@ -2275,8 +2370,9 @@ persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = d
             agentType <- lookupAgentType typesRef agentId
             agentModel <- lookupAgentModel typesRef agentId
             agentCwd <- getSubagentCwd registry agentId
+            identity <- getSubagentIdentity registry agentId
             _ <- saveSubagentState
-                sessionDir agentId items previous agentType agentModel agentCwd
+                sessionDir agentId items previous agentType agentModel agentCwd identity
             pure ()
 
 flushAllSubagentSnapshots
@@ -2321,7 +2417,7 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                         -- Same-process close with no disk yet: still reopen.
                         reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
-                        result <- reopenInMemory meta.diskPreviousResponseId meta.diskCwd
+                        result <- reopenPersisted meta
                         case result of
                             Left err -> pure (Left err)
                             Right () -> do
@@ -2340,6 +2436,26 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                 atomicModifyIORef' sessionsRef \m ->
                                     (Map.insert agentId session m, ())
                                 pure (Right ())
+    reopenPersisted meta =
+        case meta.diskTaskPath of
+            Nothing ->
+                reopenInMemory meta.diskPreviousResponseId meta.diskCwd
+            Just pathText ->
+                case parseTaskPath pathText of
+                    Left err -> pure (Left err)
+                    Right taskPath -> do
+                        let restoreAt =
+                                case meta.diskCwd of
+                                    Just childCwd ->
+                                        restoreSubagentAtWithCwd
+                                            registry childCwd
+                                    Nothing ->
+                                        restoreSubagentAt registry
+                        restoreAt
+                            agentId meta.diskParentId taskPath
+                            (fromMaybe 1 meta.diskDepth)
+                            Nothing meta.diskPreviousResponseId
+                            >>= pure . fmap (const ())
     reopenInMemory previous requestedCwd = do
         restored <- case requestedCwd of
             Just childCwd ->
@@ -2437,6 +2553,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 tools = coding.codingAppTools
                 childParams = requestParams model instructions
                     (schemasFromAppTools OpenAIProvider tools) effort
+            toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
             let backend =
                     lockedOpenAiBackend wsLock tokenProvider connectionHealthy conn
@@ -2444,11 +2561,11 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                         session.subSessionTranscript
                 config = LoopConfig
                     { loopBackend = backend
-                    , loopHandlers = appToolHandlers tools
+                    , loopTools = toolRegistry
                     , loopDispatch = defaultLoopDispatch
                     , loopMaxTurns = options.optMaxTurns
                     , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy tools call
+                    , loopApprove = \call -> childApprove policy toolRegistry call
                     , loopCancel = env.subCancel
                     }
             result <- runLoopInputs config previous [AgentMessage prompt]
@@ -2509,15 +2626,16 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 tools = filterChildGrokTools agentType coding.codingAppTools
                 childParams = requestParams model instructions
                     (schemasFromAppTools provider tools) effort
+            toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
             let backend = mkBackend childParamsRef session.subSessionTranscript
                 config = LoopConfig
                     { loopBackend = backend
-                    , loopHandlers = appToolHandlers tools
+                    , loopTools = toolRegistry
                     , loopDispatch = defaultLoopDispatch
                     , loopMaxTurns = options.optMaxTurns
                     , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy tools call
+                    , loopApprove = \call -> childApprove policy toolRegistry call
                     , loopCancel = env.subCancel
                     }
             -- XAI/OpenRouter ignore previous_response_id and replay local
