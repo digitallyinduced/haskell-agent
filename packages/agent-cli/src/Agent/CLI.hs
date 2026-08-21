@@ -94,6 +94,7 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , emptyMarkdownStreamState
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -850,6 +851,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
     textBuffer <- newIORef ""
+    markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
@@ -927,6 +929,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
+            , renderMarkdownState = markdownState
             , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout

@@ -1,6 +1,10 @@
 module Agent.CLI.MarkdownSpec (spec) where
 
-import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Markdown
+    ( renderMarkdown
+    , renderMarkdownFragment
+    , splitMarkdownFragment
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -138,3 +142,42 @@ spec = do
             let out = renderMarkdown True "see `file.txt` now"
             -- Nested Reset must re-open Solarized base03 so line painting sticks.
             out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;0;43;54m"
+
+    describe "splitMarkdownFragment" do
+        it "holds a bold span until its closing delimiter arrives" do
+            let (ready1, pending1, context1) =
+                    splitMarkdownFragment Nothing "say **"
+                (ready2, pending2, context2) =
+                    splitMarkdownFragment context1 (pending1 <> "hello")
+                (ready3, pending3, _context3) =
+                    splitMarkdownFragment context2 (pending2 <> "** there")
+                out = renderMarkdownFragment True context2 ready3
+            ready1 `shouldBe` "say "
+            pending1 `shouldBe` "**"
+            ready2 `shouldBe` ""
+            pending2 `shouldBe` "**hello"
+            pending3 `shouldBe` ""
+            stripAnsi out `shouldBe` "hello there"
+
+        it "handles a bold delimiter split one star at a time" do
+            let (ready1, pending1, context1) =
+                    splitMarkdownFragment Nothing "*"
+                (ready2, pending2, context2) =
+                    splitMarkdownFragment context1 (pending1 <> "*a*")
+                (ready3, pending3, _context3) =
+                    splitMarkdownFragment context2 (pending2 <> "*")
+            ready1 `shouldBe` ""
+            ready2 `shouldBe` ""
+            pending3 `shouldBe` ""
+            stripAnsi (renderMarkdownFragment True context2 ready3)
+                `shouldBe` "a"
+
+        it "does not turn a chunked snake_case identifier into emphasis" do
+            let (ready1, pending1, context1) =
+                    splitMarkdownFragment Nothing "snake"
+                (ready2, pending2, _context2) =
+                    splitMarkdownFragment context1 (pending1 <> "_case_name")
+            pending2 `shouldBe` ""
+            renderMarkdownFragment True Nothing ready1
+                <> renderMarkdownFragment True context1 ready2
+                `shouldBe` "snake_case_name"
