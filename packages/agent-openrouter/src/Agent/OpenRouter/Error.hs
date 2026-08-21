@@ -51,6 +51,7 @@ classifyFailure status retryAfterHeader body =
   where
     openRouterEnvelope = decodeOpenRouterError body
     auth = ProviderError AuthenticationError (preview body) Nothing
+    fromOpenRouterEnvelope :: OpenRouterErrorEnvelope -> ApiError
     fromOpenRouterEnvelope envelope =
         ProviderError
             (errorTypeFromOpenRouter status envelope.envelopeCode)
