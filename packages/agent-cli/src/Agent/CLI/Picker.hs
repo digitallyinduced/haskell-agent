@@ -8,6 +8,7 @@ module Agent.CLI.Picker
     , decodeMouseEvent
     , mouseKeysForFrame
     , runOverlay
+    , runOverlayWithUpdates
     , withRawTty
     ) where
 
@@ -19,6 +20,7 @@ import Agent.CLI.Terminal
     , kittyKeyboardPush
     , withSynchronizedOutput
     )
+import Control.Concurrent.Async (race)
 import Control.Exception.Safe (bracket, throwIO, tryIO)
 import Control.Monad (when)
 import Data.Char (isDigit)
@@ -168,7 +170,27 @@ safeLast xs = Just (last xs)
 
 -- | Draw @render@, then feed keys through @step@ until it returns @Left@.
 runOverlay :: (state -> Text) -> (PickerKey -> state -> Either result state) -> state -> IO (Maybe result)
-runOverlay render step state0 =
+runOverlay render step state =
+    fmap (fmap fst) (runOverlayInternal render step Nothing state)
+
+-- | Like 'runOverlay', but also redraw when an external update arrives.
+runOverlayWithUpdates
+    :: (state -> Text)
+    -> (PickerKey -> state -> Either result state)
+    -> IO update
+    -> (update -> state -> state)
+    -> state
+    -> IO (Maybe (result, state))
+runOverlayWithUpdates render step awaitUpdate applyUpdate =
+    runOverlayInternal render step (Just (awaitUpdate, applyUpdate))
+
+runOverlayInternal
+    :: (state -> Text)
+    -> (PickerKey -> state -> Either result state)
+    -> Maybe (IO update, update -> state -> state)
+    -> state
+    -> IO (Maybe (result, state))
+runOverlayInternal render step updates state0 =
     withRawTty do
         terminal <- detectTerminalCapabilities stderr
         let frame0 = render state0
@@ -178,23 +200,35 @@ runOverlay render step state0 =
         loop terminal stderr state0 lines0 frame0 top0
   where
     loop terminal h state drawnLines frame top = do
-        minput <- readPickerInput
-        case minput of
-            Nothing -> do
+        event <- case updates of
+            Nothing -> Left <$> readPickerInput
+            Just (awaitUpdate, _) -> race readPickerInput awaitUpdate
+        case event of
+            Left Nothing -> do
                 withSynchronizedOutput terminal h (clearDrawn h drawnLines)
                 pure Nothing
-            Just raw ->
+            Left (Just raw) ->
                 let keys = case decodeMouseEvent raw of
                         Just mouse -> mouseKeysForFrame top frame mouse
                         Nothing -> maybe [] pure (decodePickerKey raw)
                 in applyKeys terminal h state drawnLines frame top keys
+            Right update -> case updates of
+                Nothing -> loop terminal h state drawnLines frame top
+                Just (_, applyUpdate) -> do
+                    let state' = applyUpdate update state
+                        frame' = render state'
+                        n = frameLineCount frame'
+                    withSynchronizedOutput terminal h
+                        (redraw h drawnLines frame')
+                    top' <- frameTop h n
+                    loop terminal h state' n frame' top'
 
     applyKeys terminal h state drawnLines frame top = \case
         [] -> loop terminal h state drawnLines frame top
         key : keys -> case step key state of
             Left result -> do
                 withSynchronizedOutput terminal h (clearDrawn h drawnLines)
-                pure (Just result)
+                pure (Just (result, state))
             Right state'
                 | null keys -> do
                     let frame' = render state'
