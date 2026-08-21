@@ -34,6 +34,13 @@ classifyFailure status retryAfterHeader body =
             | isOpenRouterSpecificCode envelope.envelopeCode ->
                 fromOpenRouterEnvelope envelope
         _ -> case decodeOpenAIError body of
+            Right (ProviderError ApiErrorType message retryAfter)
+                | isPermanentClientStatus status ->
+                    ProviderError
+                        (errorTypeFromOpenRouter status
+                            (openRouterEnvelope >>= \envelope -> envelope.envelopeCode))
+                        message
+                        (retryAfter `orElse` retryAfterHeader)
             Right (ProviderError errType message retryAfter) ->
                 ProviderError errType message (retryAfter `orElse` retryAfterHeader)
             Right other -> other
@@ -96,7 +103,14 @@ errorTypeFromOpenRouter status code = case Text.toLower <$> code of
         402 -> BillingError
         404 -> NotFoundError
         429 -> RateLimitError
+        _ | status >= 400 && status < 500 -> InvalidRequestError
         _ -> ApiErrorType
+
+isPermanentClientStatus :: Int -> Bool
+isPermanentClientStatus status =
+    status >= 400
+        && status < 500
+        && status `notElem` [408, 409, 425, 429]
 
 isOpenRouterSpecificCode :: Maybe Text -> Bool
 isOpenRouterSpecificCode code =
