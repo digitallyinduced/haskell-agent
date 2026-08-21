@@ -217,6 +217,21 @@ spec = do
             slashCompletionCandidates "" "help" `shouldBe` []
             slashCompletionCandidates (reverse "list the ") "files" `shouldBe` []
 
+        it "opens a live menu on slash and fuzzy-filters command names" do
+            let displays text cursor =
+                    maybe [] (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                        (slashMenuFor text cursor)
+            displays "/" 1 `shouldBe` map (("/" <>) . (.slashName)) slashCommands
+            displays "/mo" 3 `shouldBe` ["/model"]
+            displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
+            displays "look at /mo" 11 `shouldBe` []
+
+        it "offers argument rows" do
+            let menu = slashMenuFor "/effort h" 9
+            fmap (.slashMenuReplaceStart) menu `shouldBe` Just 8
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions)) menu
+                `shouldBe` Just ["high", "xhigh"]
+
         it "renders /help with usage and summary" do
             let listing = Text.unpack (formatSlashHelp False Nothing)
             listing `shouldSatisfy` ("/model [NAME]" `isInfixOf`)

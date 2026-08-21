@@ -1016,8 +1016,8 @@ replWithDraft env@SessionEnv
             selected <- readIORef viewport.viewportSelected
             let tree = renderAgentTree stdoutColor selected entries
             when (not (Text.null tree)) (Text.putStrLn tree)
-    -- Status sits on the line above λ so haskeline can keep the cursor on
-    -- the input. Haskeline cannot park a persistent footer under the draft.
+    -- Status sits on the line above λ; the inline editor owns the prompt and
+    -- any live completion rows below it.
     -- Token totals sit on the right of that line when the TTY width is known.
     termCols <- fmap snd <$> getTerminalSize
     usage <- readIORef usageRef
@@ -1027,8 +1027,8 @@ replWithDraft env@SessionEnv
         idleMode
         usage
     hFlush stdout
-    -- Solarized user wash under the prompt; haskeline redraws it on edit.
-    -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
+    -- Solarized user wash under the prompt; the inline editor redraws it.
+    -- Ctrl+U keeps the familiar kill-to-start behavior.
     let modeTag
             | planActive = roleWarn stdoutColor "[plan] "
             | planPending = roleMuted stdoutColor "[plan…] "
@@ -1056,10 +1056,15 @@ replWithDraft env@SessionEnv
         ReplCycleMode keptDraft -> do
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
-            -- Haskeline already advanced a line; walk back over the
-            -- previous status + prompt so the next chrome replaces them.
+            -- The editor advanced a line; walk back over the previous status
+            -- + prompt so the next chrome replaces them.
             putStr "\ESC[2A\r\ESC[J"
             hFlush stdout
+            continueWith keptDraft
+        ReplClipboardPaste keptDraft -> do
+            errColor <- resolveColor stderr
+            queueClipboardImages
+                attachmentsRef previewIdRef stdoutColor errColor
             continueWith keptDraft
         ReplPasted pasted ->
             submitLine continue stdoutColor True pasted
@@ -1859,6 +1864,38 @@ queueAttachedImages attachmentsRef previewIdRef color images = do
                 <> " — send with next message ("
                 <> Text.pack (show (length pending))
                 <> " queued)"))
+
+queueClipboardImages
+    :: IORef [ImageAttachment]
+    -> IORef Int
+    -> Bool
+    -> Bool
+    -> IO ()
+queueClipboardImages attachmentsRef previewIdRef color errColor = do
+    imagesResult <- readClipboardImages
+    case imagesResult of
+        Right images@(_:_) ->
+            queueAttachedImages attachmentsRef previewIdRef color images
+        Right [] ->
+            Text.hPutStrLn stderr
+                (roleError errColor "no image found on the clipboard")
+        Left err -> reportClipboardImageError err
+  where
+    reportClipboardImageError err =
+        readClipboard >>= \case
+            ClipboardText _ ->
+                Text.hPutStrLn stderr
+                    (roleError errColor
+                        "clipboard has text, not an image (paste text normally into the prompt)")
+            ClipboardPaths paths ->
+                Text.hPutStrLn stderr
+                    (roleError errColor
+                        ("clipboard has file path(s), but no loadable image: "
+                            <> Text.intercalate ", " (map Text.pack paths)))
+            ClipboardEmpty ->
+                Text.hPutStrLn stderr (roleError errColor err)
+            ClipboardImage image ->
+                queueAttachedImages attachmentsRef previewIdRef color [image]
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do
