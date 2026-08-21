@@ -94,6 +94,7 @@ library
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
+                    , transformers
                     , unix
 
 executable agent-cli
@@ -115,6 +116,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.CompactionSpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
