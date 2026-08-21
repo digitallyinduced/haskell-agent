@@ -170,6 +170,7 @@ import Agent.Subagents
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , closeSubagentRegistry
+    , interruptActiveSubagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
@@ -932,6 +933,9 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAgentViewport = Just agentViewport
+            , sessionAbortSubagents = case multiCtx of
+                Just ctx -> interruptActiveSubagents ctx.multiRegistry
+                Nothing -> pure ()
             , sessionReset = sessionReset
             }
     case pendingTurn of

@@ -316,3 +316,34 @@ spec = describe "Agent.Subagents" do
         after `shouldBe` before
         status <- getStatus registry agentId
         status `shouldBe` Completed (Just "one")
+
+    it "interrupts active descendants and keeps the registry reusable" do
+        started <- newEmptyTMVarIO
+        blocker <- newEmptyTMVarIO
+        notices <- newIORef ([] :: [(SubagentId, SubagentStatus)])
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> do
+                atomically $ putTMVar started ()
+                atomically $ takeTMVar blocker
+                pure $ Right LoopResult
+                    { finalResponseId = "late"
+                    , finalText = Just "late"
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId status ->
+            atomicModifyIORef' notices \xs -> (xs <> [(agentId, status)], ())
+        Right active <- spawnSubagent registry Nothing 0 "active" Nothing
+        atomically $ takeTMVar started
+
+        interruptActiveSubagents registry
+
+        getStatus registry active `shouldReturn` Interrupted
+        readIORef notices `shouldReturn` []
+        replacement <- spawnSubagent registry Nothing 0 "replacement" Nothing
+        replacement `shouldSatisfy` \case
+            Right _ -> True
+            Left _ -> False
+        closeSubagentRegistry registry

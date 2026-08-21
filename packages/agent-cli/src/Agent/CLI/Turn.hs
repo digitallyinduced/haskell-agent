@@ -84,6 +84,7 @@ runOneTurn env@SessionEnv
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionAbortSubagents = abortSubagents
     } promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
@@ -147,6 +148,7 @@ runOneTurn env@SessionEnv
                 writeIORef slotRef (Right handle')
     case result of
         Left cancelled@(LoopCancelled _) -> do
+            abortSubagents
             writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color cancelled)
@@ -155,6 +157,7 @@ runOneTurn env@SessionEnv
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
+            abortSubagents
             afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
