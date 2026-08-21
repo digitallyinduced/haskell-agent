@@ -1,4 +1,4 @@
--- | Load ChatGPT, Grok, OpenRouter, or broker credentials for the CLI process.
+-- | Load ChatGPT, Grok, or OpenRouter credentials for the CLI process.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
@@ -11,7 +11,6 @@ module Agent.CLI.Auth
     , xaiOAuthClientId
     ) where
 
-import Agent.Broker (BrokerOptions(..), newBrokerTokenProviderFor)
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
     , ManagedCredential(..)
@@ -37,13 +36,11 @@ import Agent.Provider
 import Agent.OpenRouter.Credential (credentialFromApiKey)
 import Agent.XAI.Auth (accountIdFromAccessToken, emailFromToken)
 import Control.Applicative ((<|>))
-import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
-    ( ExceptT(..)
+    ( ExceptT
     , runExceptT
     , throwE
-    , withExceptT
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -78,15 +75,11 @@ data LoadedAuth = LoadedAuth
 
 loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
 loadAuth requested = runExceptT do
-    brokerUrl <- lift (lookupNonEmpty "AGENT_BROKER_URL")
-    case brokerUrl of
-        Just url -> loadBroker url requested
-        Nothing -> do
-            provider <- detectProvider requested
-            case provider of
-                XAIProvider -> loadXai
-                OpenAIProvider -> loadOpenAi
-                OpenRouterProvider -> loadOpenRouter
+    provider <- detectProvider requested
+    case provider of
+        XAIProvider -> loadXai
+        OpenAIProvider -> loadOpenAi
+        OpenRouterProvider -> loadOpenRouter
 
 -- | Ask the token source whether it has a usable credential now without
 -- making a model request, preserving a successful checkout for later use.
@@ -118,36 +111,6 @@ detectProvider Nothing = do
             else if openrouter
                 then pure OpenRouterProvider
                 else throwE noAuthHint
-
-loadBroker :: Text -> Maybe Provider -> ExceptT Text IO LoadedAuth
-loadBroker url requested = do
-    serviceToken <- lift (lookupNonEmpty "AGENT_BROKER_TOKEN")
-        >>= maybe
-            (throwE "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN")
-            pure
-    let supportedProviders = case requested of
-            Just selected -> [selected]
-            Nothing -> [OpenAIProvider, XAIProvider, OpenRouterProvider]
-    provider <- lift $ newBrokerTokenProviderFor
-        BrokerOptions
-            { baseUrl = Text.unpack url
-            , serviceToken
-            }
-        supportedProviders
-    credential <- withExceptT
-        (\err -> "broker: " <> Text.pack (show err))
-        (ExceptT (getNextToken provider Nothing))
-    let actual = credential.provider
-    when (maybe False (/= actual) requested) $
-        throwE $
-            "broker returned " <> Text.pack (show actual)
-                <> " but --provider asked for a different vendor"
-    seeded <- lift (seedTokenProvider provider credential)
-    pure LoadedAuth
-        { loadedProvider = actual
-        , loadedTokenProvider = seeded
-        , loadedOpenAiPool = Nothing
-        }
 
 loadXai :: ExceptT Text IO LoadedAuth
 loadXai = do
