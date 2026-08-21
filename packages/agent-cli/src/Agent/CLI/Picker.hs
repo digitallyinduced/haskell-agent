@@ -77,6 +77,8 @@ data MouseEvent
 
 decodePickerKey :: String -> Maybe PickerKey
 decodePickerKey = \case
+    sequence_
+        | kittyEvent sequence_ == Just kittyRelease -> Nothing
     "\n" -> Just PickerKeyConfirm
     "\r" -> Just PickerKeyConfirm
     "\ESC" -> Just PickerKeyCancel
@@ -151,6 +153,20 @@ kittyCodepoint sequence_ = do
     case reads (Text.unpack code) of
         [(n, "")] -> Just n
         _ -> Nothing
+
+-- | Kitty's keyboard protocol appends @:event@ to the modifier field when
+-- event reporting is enabled. Releases must not be interpreted as a second
+-- press; repeats remain navigable.
+kittyEvent :: String -> Maybe Int
+kittyEvent sequence_ = do
+    body <- stripPrefix "\ESC[" sequence_
+    (parameters, _) <- unsnoc body
+    modifierField <- listAt 1 (splitOnceOrSingleton ';' parameters)
+    eventField <- listAt 1 (splitOnceOrSingleton ':' modifierField)
+    readDecimal eventField
+
+kittyRelease :: Int
+kittyRelease = 3
 
 codepointKey :: Int -> Maybe PickerKey
 codepointKey = \case
@@ -386,6 +402,19 @@ splitOnce delimiter value =
     case break (== delimiter) value of
         (before, _ : after) -> Just (before, after)
         _ -> Nothing
+
+splitOnceOrSingleton :: Char -> String -> [String]
+splitOnceOrSingleton delimiter value =
+    case break (== delimiter) value of
+        (before, _ : after) -> [before, after]
+        _ -> [value]
+
+listAt :: Int -> [a] -> Maybe a
+listAt index values
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing
 
 unsnoc :: [a] -> Maybe ([a], a)
 unsnoc [] = Nothing
