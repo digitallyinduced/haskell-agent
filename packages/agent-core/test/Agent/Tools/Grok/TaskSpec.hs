@@ -2,6 +2,7 @@ module Agent.Tools.Grok.TaskSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
 import Agent.InterAgentMessage (interAgentMessagePayload)
+import Agent.OsPath (fromFilePath)
 import Agent.Subagents
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -22,7 +23,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Agent.Tools.Grok.Task" do
     it "defaults run_in_background and spawns a background agent" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "c"
                 , finalText = Just ("done:" <> interAgentMessagePayload prompt)
@@ -33,7 +34,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
                 Nothing Nothing Nothing
-            tool = taskTool "/tmp" ctx typesRef
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"hello\",\"description\":\"test task\",\"model\":\"grok-4.5-mini\"}")
@@ -62,14 +63,14 @@ spec = describe "Agent.Tools.Grok.Task" do
         names `shouldBe` ["read_file"]
 
     it "uses the host worktree hook for isolated children" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let createIsolated _ = pure (Right "/tmp")
+        let createIsolated _ = pure (Right (fromFilePath "/tmp"))
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
                 (Just createIsolated) Nothing
-            tool = taskTool "/tmp" ctx typesRef
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"x\",\"description\":\"y\",\"isolation\":\"worktree\"}")

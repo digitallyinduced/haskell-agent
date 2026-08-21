@@ -18,6 +18,7 @@ module Agent.Tools.Grok.Task
     , lookupAgentModel
     ) where
 
+import Agent.OsPath (OsPath, fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
@@ -50,8 +51,8 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesDirectoryExist)
-import System.FilePath (isAbsolute, normalise, (</>))
+import System.Directory.OsPath (doesDirectoryExist)
+import System.OsPath (isAbsolute, normalise, (</>))
 
 defaultSubagentType :: Text
 defaultSubagentType = "general-purpose"
@@ -110,7 +111,7 @@ sanitizeOptional value = value >>= \raw ->
         then Nothing
         else Just stripped
 
-taskTool :: FilePath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
+taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef = AppTool
     { appToolName = "task"
     , appToolDescription = taskDescription
@@ -158,7 +159,7 @@ taskDescription =
     \- Use isolation=\"worktree\" to run the child in an isolated git worktree. The worktree is preserved after completion and its path is returned in the output."
 
 runTask
-    :: FilePath
+    :: OsPath
     -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
@@ -185,8 +186,8 @@ runTask baseCwd ctx typesRef args
             spawnFresh childCwd worktreePath ctx typesRef args
 
 spawnFresh
-    :: FilePath
-    -> Maybe FilePath
+    :: OsPath
+    -> Maybe OsPath
     -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
@@ -215,10 +216,10 @@ spawnFresh childCwd worktreePath ctx typesRef args = do
                         (Map.lookup agentId statuses)
 
 resolveTaskWorkspace
-    :: FilePath
+    :: OsPath
     -> MultiAgentContext
     -> TaskArgs
-    -> IO (Either Text (FilePath, Maybe FilePath))
+    -> IO (Either Text (OsPath, Maybe OsPath))
 resolveTaskWorkspace baseCwd ctx args
     | maybe False isWorktreeIsolation args.isolation =
         case ctx.multiCreateWorktree of
@@ -238,19 +239,19 @@ isWorktreeIsolation isolation =
     Text.toLower (Text.strip isolation)
         `elem` ["worktree", "work_tree", "work-tree"]
 
-resolveTaskCwd :: FilePath -> Maybe Text -> IO (Either Text FilePath)
+resolveTaskCwd :: OsPath -> Maybe Text -> IO (Either Text OsPath)
 resolveTaskCwd baseCwd requested = do
     let path = case requested of
             Nothing -> baseCwd
             Just raw ->
-                let supplied = Text.unpack (Text.strip raw)
+                let supplied = fromText (Text.strip raw)
                 in if isAbsolute supplied
                     then normalise supplied
                     else normalise (baseCwd </> supplied)
     exists <- doesDirectoryExist path
     pure $ if exists
         then Right path
-        else Left ("task cwd is not an existing directory: " <> Text.pack path)
+        else Left ("task cwd is not an existing directory: " <> toText path)
 
 resumeTask
     :: MultiAgentContext
@@ -293,7 +294,7 @@ resumeTask ctx typesRef args resumeId = do
                                     pure $ Right $ formatTaskCompleted agentId args Nothing timedOut
                                         (Map.lookup agentId statuses)
 
-formatTaskStarted :: SubagentId -> TaskArgs -> Maybe FilePath -> Text
+formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
 formatTaskStarted agentId args worktreePath =
     "Subagent started in background.\n\
     \subagent_id: "
@@ -304,7 +305,7 @@ formatTaskStarted agentId args worktreePath =
         <> "\n\
         \description: "
         <> args.description
-        <> maybe "" (\path -> "\nworktree_path: " <> Text.pack path) worktreePath
+        <> maybe "" (\path -> "\nworktree_path: " <> toText path) worktreePath
         <> "\n\n\
         \When you need its result, use get_task_output with task_ids=[\""
         <> agentId.unSubagentId
@@ -313,7 +314,7 @@ formatTaskStarted agentId args worktreePath =
 formatTaskCompleted
     :: SubagentId
     -> TaskArgs
-    -> Maybe FilePath
+    -> Maybe OsPath
     -> Bool
     -> Maybe SubagentStatus
     -> Text
@@ -325,7 +326,7 @@ formatTaskCompleted agentId args worktreePath timedOut mstatus =
                 <> args.subagentType
                 <> "\ndescription: "
                 <> args.description
-                <> maybe "" (\path -> "\nworktree_path: " <> Text.pack path) worktreePath
+                <> maybe "" (\path -> "\nworktree_path: " <> toText path) worktreePath
                 <> "\n"
         body = case mstatus of
             Just (Completed (Just text)) -> "status: completed\nfinal:\n" <> text

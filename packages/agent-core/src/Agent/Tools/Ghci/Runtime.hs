@@ -14,6 +14,7 @@ module Agent.Tools.Ghci.Runtime
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
+import Agent.OsPath (toFilePath)
 import Agent.Tools.Ghci.Classify
     ( GhciClass(..)
     , classifyGhciInput
@@ -391,7 +392,7 @@ ghciArgs =
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
     let spec = (proc "ghci" ghciArgs)
-            { cwd = Just env.toolCwd
+            { cwd = Just (toFilePath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe

@@ -37,6 +37,7 @@ import Agent.InterAgentMessage
     , encryptedInterAgentContent
     , plainInterAgentContent
     )
+import Agent.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
     , optInt
@@ -75,7 +76,7 @@ data MultiAgentContext = MultiAgentContext
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
       -- | Optional host hook for Grok-style isolated worktree children.
-    , multiCreateWorktree :: !(Maybe (FilePath -> IO (Either Text FilePath)))
+    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text OsPath)))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }

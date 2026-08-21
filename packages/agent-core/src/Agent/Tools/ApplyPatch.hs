@@ -10,6 +10,7 @@ module Agent.Tools.ApplyPatch
     , applyPatchGrammar
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath)
 import Agent.Tools.IO
     ( deleteTextFile
     , readTextFile
@@ -20,7 +21,7 @@ import Agent.Tools.Types (ToolEnv)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist)
+import System.Directory.OsPath (doesFileExist)
 
 
 -- | Lark grammar Codex registers for the freeform apply_patch tool.
@@ -218,9 +219,9 @@ applyHunks env hunks = go hunks [] [] []
                                                     Right () ->
                                                         go rest added (dest : modified) deleted
 
-withResolved :: ToolEnv -> FilePath -> (FilePath -> IO (Either Text Text)) -> IO (Either Text Text)
+withResolved :: ToolEnv -> FilePath -> (OsPath -> IO (Either Text Text)) -> IO (Either Text Text)
 withResolved env path action =
-    resolveUnderCwd env path >>= \case
+    resolveUnderCwd env (fromFilePath path) >>= \case
         Left err -> pure (Left err)
         Right resolved -> action resolved
 

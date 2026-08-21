@@ -13,6 +13,7 @@ module Agent.CLI.CredentialStore
     , upsertManagedCredential
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
 import qualified Data.Aeson as Aeson
@@ -22,13 +23,13 @@ import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import System.Directory
+import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
     , getHomeDirectory
     , renameFile
     )
-import System.FilePath (takeDirectory, (</>))
+import System.OsPath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 
 data ManagedAuthKind
@@ -162,13 +163,19 @@ instance Aeson.FromJSON SecretsFile where
             <$> object .:? "version" Aeson..!= 1
             <*> object .:? "secrets" Aeson..!= []
 
-managedCredentialsPath :: FilePath -> FilePath
+managedCredentialsPath :: OsPath -> OsPath
 managedCredentialsPath home =
-    home </> ".haskell-agent" </> "credentials" </> "accounts.json"
+    home
+        </> fromFilePath ".haskell-agent"
+        </> fromFilePath "credentials"
+        </> fromFilePath "accounts.json"
 
-managedSecretsPath :: FilePath -> FilePath
+managedSecretsPath :: OsPath -> OsPath
 managedSecretsPath home =
-    home </> ".haskell-agent" </> "credentials" </> "secrets.json"
+    home
+        </> fromFilePath ".haskell-agent"
+        </> fromFilePath "credentials"
+        </> fromFilePath "secrets.json"
 
 loadManagedCredentials
     :: IO (Either Text [(ManagedCredential, ManagedSecret)])
@@ -261,38 +268,38 @@ mutateStore update = do
                         (managedSecretsPath home)
                         (SecretsFile 1 secrets')
 
-decodeFileOrEmpty :: Aeson.FromJSON value => FilePath -> value -> IO (Either Text value)
+decodeFileOrEmpty :: Aeson.FromJSON value => OsPath -> value -> IO (Either Text value)
 decodeFileOrEmpty path empty = do
     exists <- doesFileExist path
     if not exists
         then pure (Right empty)
-        else tryIO (LBS.readFile path) >>= \case
+        else tryIO (LBS.readFile (toFilePath path)) >>= \case
             Left exception ->
                 pure $ Left
-                    ("could not read " <> Text.pack path <> ": "
+                    ("could not read " <> toText path <> ": "
                         <> Text.pack (show exception))
             Right bytes -> pure case Aeson.eitherDecode bytes of
                 Left err ->
                     Left
-                        ("invalid credential store " <> Text.pack path <> ": "
+                        ("invalid credential store " <> toText path <> ": "
                             <> Text.pack err)
                 Right value -> Right value
 
-writePrivateJson :: Aeson.ToJSON value => FilePath -> value -> IO (Either Text ())
+writePrivateJson :: Aeson.ToJSON value => OsPath -> value -> IO (Either Text ())
 writePrivateJson path value =
     tryIO action >>= \case
         Left exception ->
             pure $ Left
-                ("could not write " <> Text.pack path <> ": "
+                ("could not write " <> toText path <> ": "
                     <> Text.pack (show exception))
         Right () -> pure (Right ())
   where
     action = do
         createDirectoryIfMissing True (takeDirectory path)
-        setFileMode (takeDirectory path) 0o700
-        let temporary = path <> ".tmp"
-        LBS.writeFile temporary (Aeson.encode value)
-        setFileMode temporary 0o600
+        setFileMode (toFilePath (takeDirectory path)) 0o700
+        let temporary = path <> fromFilePath ".tmp"
+        LBS.writeFile (toFilePath temporary) (Aeson.encode value)
+        setFileMode (toFilePath temporary) 0o600
         renameFile temporary path
 
 upsertBy :: Eq key => (value -> key) -> value -> [value] -> [value]

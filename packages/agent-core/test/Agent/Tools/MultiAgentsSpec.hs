@@ -7,6 +7,7 @@ import Agent.Loop
     , defaultLoopDispatch
     , emptyTokenUsage
     )
+import Agent.OsPath (fromFilePath)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
 import Agent.ToolDispatch
@@ -26,7 +27,7 @@ spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
     it "preserves encrypted spawn payloads" do
         spawned <- newEmptyTMVarIO
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ message _ -> do
                 atomically (putTMVar spawned message)
                 pure $ Right LoopResult
@@ -50,7 +51,7 @@ spec = describe "Agent.Tools.MultiAgents" do
 
     it "routes encrypted child messages to the root inbox" do
         rootInbox <- newEmptyTMVarIO
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         Right workerPath <- pure (joinTaskPath taskPathRoot "worker")

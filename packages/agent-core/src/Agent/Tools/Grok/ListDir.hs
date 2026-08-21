@@ -1,5 +1,6 @@
 module Agent.Tools.Grok.ListDir (listDirTool) where
 
+import Agent.OsPath (OsPath, fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -11,8 +12,8 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesDirectoryExist)
-import System.FilePath (takeExtension, (</>))
+import System.Directory.OsPath (doesDirectoryExist)
+import System.OsPath (takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 
@@ -41,7 +42,7 @@ maxListItems :: Int
 maxListItems = 200
 
 runListDir :: ToolEnv -> ListDirArgs -> IO (Either Text Text)
-runListDir env args = resolveUnderCwd env (Text.unpack args.targetDirectory) >>= \case
+runListDir env args = resolveUnderCwd env (fromText args.targetDirectory) >>= \case
     Left err -> pure (Left err)
     Right path -> doesDirectoryExist path >>= \case
         False -> pure $ Left $
@@ -58,11 +59,11 @@ runListDir env args = resolveUnderCwd env (Text.unpack args.targetDirectory) >>=
                 "Directory listing for " <> args.targetDirectory <> ":\n" <> tree <> notice
 
 data DirNode
-    = FileNode FilePath
-    | DirectoryNode FilePath [DirNode]
+    = FileNode OsPath
+    | DirectoryNode OsPath [DirNode]
     deriving (Eq, Show)
 
-collectDir :: FilePath -> FilePath -> IO [DirNode]
+collectDir :: OsPath -> OsPath -> IO [DirNode]
 collectDir cwd path = do
     listed <- listDirectoryEntries path
     case listed of
@@ -71,11 +72,11 @@ collectDir cwd path = do
             let visible = sortOn fst
                     [ (name, isDir)
                     | (name, isDir) <- raw
-                    , not ("." `Text.isPrefixOf` Text.pack name)
+                    , not ("." `Text.isPrefixOf` toText name)
                     ]
             fmap concat $ mapM (toNode cwd path) visible
 
-toNode :: FilePath -> FilePath -> (FilePath, Bool) -> IO [DirNode]
+toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
 toNode cwd parent (name, isDir) = do
     let full = parent </> name
     ignored <- isGitIgnored cwd full
@@ -106,39 +107,40 @@ countNodes = sum . map \case
     FileNode _ -> 1
     DirectoryNode _ children -> 1 + countNodes children
 
-summarizeDir :: FilePath -> [DirNode] -> DirNode
+summarizeDir :: OsPath -> [DirNode] -> DirNode
 summarizeDir name children =
     let files = [file | FileNode file <- children]
         dirs = [dir | dir@DirectoryNode{} <- children]
     in if length files > 20 && null dirs
-        then DirectoryNode (name <> " " <> extensionSummary files) []
+        then DirectoryNode
+            (fromText (toText name <> " " <> extensionSummary files)) []
         else DirectoryNode name children
 
-extensionSummary :: [FilePath] -> String
+extensionSummary :: [OsPath] -> Text
 extensionSummary files =
     let counts = Map.fromListWith (+)
             [ (ext, 1 :: Int)
             | file <- files
             , let ext = case takeExtension file of
-                    "" -> "(no ext)"
+                    e | e == fromText "" -> fromText "(no ext)"
                     e -> e
             ]
         rendered =
-            [ Text.pack (show n) <> " *" <> Text.pack ext
+            [ Text.pack (show n) <> " *" <> toText ext
             | (ext, n) <- sortOn (negate . snd) (Map.toList counts)
             ]
-    in "(" <> show (length files) <> " files: "
-        <> Text.unpack (Text.intercalate ", " (take 4 rendered)) <> ")"
+    in "(" <> Text.pack (show (length files)) <> " files: "
+        <> Text.intercalate ", " (take 4 rendered) <> ")"
 
 renderTree :: Int -> [DirNode] -> Text
 renderTree depth = Text.unlines . map (renderNode depth)
 
 renderNode :: Int -> DirNode -> Text
 renderNode depth = \case
-    FileNode name -> indent <> "- " <> Text.pack name
+    FileNode name -> indent <> "- " <> toText name
     DirectoryNode name children ->
-        let header = indent <> "- " <> Text.pack name
-                <> if "/" `Text.isSuffixOf` Text.pack name || "(" `Text.isInfixOf` Text.pack name
+        let header = indent <> "- " <> toText name
+                <> if "/" `Text.isSuffixOf` toText name || "(" `Text.isInfixOf` toText name
                     then ""
                     else "/"
         in if null children

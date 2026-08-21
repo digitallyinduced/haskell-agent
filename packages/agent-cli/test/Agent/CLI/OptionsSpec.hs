@@ -1,6 +1,7 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
+import Agent.OsPath (fromFilePath)
 import Agent.Provider (Provider(..))
 import Test.Hspec
 
@@ -26,7 +27,7 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optProvider = Just XAIProvider
                     , optModel = Just "grok-4.6"
-                    , optCwd = Just "/tmp/work"
+                    , optCwd = Just (fromFilePath "/tmp/work")
                     , optYolo = True
                     , optMaxTurns = 3
                     , optEffort = Just "high"
@@ -38,7 +39,7 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions { optWorktree = True })
             parseArgs ["--cwd", "/tmp/work", "--worktree", "-p", "hello"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optCwd = Just "/tmp/work"
+                    { optCwd = Just (fromFilePath "/tmp/work")
                     , optWorktree = True
                     , optPrompt = Just "hello"
                     })
@@ -147,7 +148,7 @@ spec = do
         it "is true for -p and --prompt-file" do
             isOneShot defaultCliOptions `shouldBe` False
             isOneShot defaultCliOptions { optPrompt = Just "x" } `shouldBe` True
-            isOneShot defaultCliOptions { optPromptFile = Just "x.md" } `shouldBe` True
+            isOneShot defaultCliOptions { optPromptFile = Just (fromFilePath "x.md") } `shouldBe` True
 
 isLeft :: Either a b -> Bool
 isLeft = \case

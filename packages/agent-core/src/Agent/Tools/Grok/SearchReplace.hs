@@ -1,5 +1,6 @@
 module Agent.Tools.Grok.SearchReplace (searchReplaceTool) where
 
+import Agent.OsPath (OsPath, fromText)
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -18,7 +19,7 @@ import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist)
+import System.Directory.OsPath (doesFileExist)
 
 data SearchReplaceArgs = SearchReplaceArgs
     { filePath :: Text
@@ -63,7 +64,7 @@ runSearchReplace env planMode args = do
         then runSearchReplaceBody env args
         else do
             planPath <- planFilePath planMode
-            resolved <- resolveUnderCwd env (Text.unpack args.filePath)
+            resolved <- resolveUnderCwd env (fromText args.filePath)
             case resolved of
                 Left err -> pure (Left err)
                 Right path
@@ -80,7 +81,7 @@ runSearchReplaceBody env args
     | otherwise = replaceInFile env args
 
 createNewFile :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
-createNewFile env args = resolveUnderCwd env (Text.unpack args.filePath) >>= \case
+createNewFile env args = resolveUnderCwd env (fromText args.filePath) >>= \case
     Left err -> pure (Left err)
     Right path -> gitignoreGuard env path args.filePath >>= \case
         Just err -> pure (Left err)
@@ -99,7 +100,7 @@ createNewFile env args = resolveUnderCwd env (Text.unpack args.filePath) >>= \ca
             "The file " <> args.filePath <> " has been created successfully."
 
 replaceInFile :: ToolEnv -> SearchReplaceArgs -> IO (Either Text Text)
-replaceInFile env args = resolveUnderCwd env (Text.unpack args.filePath) >>= \case
+replaceInFile env args = resolveUnderCwd env (fromText args.filePath) >>= \case
     Left err -> pure (Left err)
     Right path -> gitignoreGuard env path args.filePath >>= \case
         Just err -> pure (Left err)
@@ -127,7 +128,7 @@ replaceInFile env args = resolveUnderCwd env (Text.unpack args.filePath) >>= \ca
                                         else "The file " <> args.filePath
                                             <> " has been updated successfully."
 
-gitignoreGuard :: ToolEnv -> FilePath -> Text -> IO (Maybe Text)
+gitignoreGuard :: ToolEnv -> OsPath -> Text -> IO (Maybe Text)
 gitignoreGuard env path display = do
     ignored <- isGitIgnored env.toolCwd path
     pure $ if ignored

@@ -15,6 +15,7 @@ module Agent.CLI.Options
     , usage
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath)
 import Agent.Provider (Provider(..), parseProvider)
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -55,7 +56,7 @@ parseApprovalAnswer raw = case Text.toLower (Text.strip raw) of
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
-    , optCwd :: !(Maybe FilePath)
+    , optCwd :: !(Maybe OsPath)
     , optWorktree :: !Bool
     , optYolo :: !Bool
     , optNoYolo :: !Bool
@@ -63,7 +64,7 @@ data CliOptions = CliOptions
     , optEffort :: !(Maybe Text)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optPrompt :: !(Maybe Text)
-    , optPromptFile :: !(Maybe FilePath)
+    , optPromptFile :: !(Maybe OsPath)
     , optResume :: !(Maybe Text)
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
@@ -144,7 +145,7 @@ parseOptions options = \case
     "--model" : value : rest ->
         parseOptions options { optModel = Just (Text.pack value) } rest
     "--cwd" : value : rest ->
-        parseOptions options { optCwd = Just value } rest
+        parseOptions options { optCwd = Just (fromFilePath value) } rest
     "--worktree" : rest ->
         parseOptions options { optWorktree = True } rest
     "--yolo" : rest ->
@@ -162,7 +163,7 @@ parseOptions options = \case
     "--prompt" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt-file" : value : rest ->
-        parseOptions options { optPromptFile = Just value } rest
+        parseOptions options { optPromptFile = Just (fromFilePath value) } rest
     "--resume" : value : rest ->
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->

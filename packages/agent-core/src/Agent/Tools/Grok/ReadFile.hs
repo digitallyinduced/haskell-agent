@@ -1,5 +1,6 @@
 module Agent.Tools.Grok.ReadFile (readFileTool) where
 
+import Agent.OsPath (fromText)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -10,7 +11,7 @@ import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist)
+import System.Directory.OsPath (doesFileExist)
 
 data ReadFileArgs = ReadFileArgs
     { targetFile :: Text
@@ -59,7 +60,7 @@ maxReadTokens :: Int
 maxReadTokens = 25000
 
 runReadFile :: ToolEnv -> ReadFileArgs -> IO (Either Text Text)
-runReadFile env args = resolveUnderCwd env (Text.unpack args.targetFile) >>= \case
+runReadFile env args = resolveUnderCwd env (fromText args.targetFile) >>= \case
     Left err -> pure (Left err)
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->

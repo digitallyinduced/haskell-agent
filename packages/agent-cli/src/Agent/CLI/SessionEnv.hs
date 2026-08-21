@@ -11,6 +11,7 @@ import Agent.CLI.Session (SessionCreate, SessionHandle)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.OsPath (OsPath)
 import Agent.Provider (Provider, TokenProvider)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Data.IORef (IORef)
@@ -29,16 +30,16 @@ data SessionEnv = SessionEnv
     , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !(Maybe (IORef (Either SessionCreate SessionHandle)))
     , sessionPlanMode :: !PlanModeEnv
-    , sessionProjectRoot :: !FilePath
-    , sessionCwd :: !FilePath
-    , sessionHome :: !FilePath
+    , sessionProjectRoot :: !OsPath
+    , sessionCwd :: !OsPath
+    , sessionHome :: !OsPath
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionAgentsContext :: !(IORef (Maybe Text))
     , sessionEscPaused :: !(IORef Bool)
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
-    , sessionStoreRoot :: !(IORef (Maybe FilePath))
+    , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
