@@ -5,6 +5,7 @@ module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
     , readReplLineWithInitial
+    , readReplLineWithSkills
     , readApprovalLine
     , readChoiceSelection
     , approvalKeyText
@@ -23,9 +24,10 @@ module Agent.CLI.Input
     ) where
 
 import Agent.CLI.Command
-    ( SlashMenu(..)
+    ( SkillCommand
+    , SlashMenu(..)
     , SlashSuggestion(..)
-    , slashMenuFor
+    , slashMenuForWithSkills
     )
 import Agent.CLI.Interrupt
     ( IdleCtrlCResult(..)
@@ -196,15 +198,30 @@ choiceMoveIndex len idx key
 -- 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
-    readReplLineConfigured False interrupt prompt ""
+    readReplLineConfigured [] False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured True
+    readReplLineConfigured [] True
 
-readReplLineConfigured :: Bool -> InterruptState -> Text -> Text -> IO ReplLine
-readReplLineConfigured slashEnabled interrupt prompt initial = do
+readReplLineWithSkills
+    :: [SkillCommand]
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineWithSkills skills =
+    readReplLineConfigured skills True
+
+readReplLineConfigured
+    :: [SkillCommand]
+    -> Bool
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineConfigured skills slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -212,7 +229,7 @@ readReplLineConfigured slashEnabled interrupt prompt initial = do
             let path = replHistoryPath home
             ensureHistoryParent path
             classifyLine <$>
-                readInlineEditor slashEnabled interrupt path prompt initial
+                readInlineEditor skills slashEnabled interrupt path prompt initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
@@ -235,6 +252,7 @@ data EditorState = EditorState
     , editorPasted :: !Bool
     , editorSlashEnabled :: !Bool
     , editorSlashDismissed :: !Bool
+    , editorSkillCommands :: ![SkillCommand]
     }
 
 data DisplayCell = DisplayCell
@@ -346,13 +364,14 @@ data EditorKey
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: Bool
+    :: [SkillCommand]
+    -> Bool
     -> InterruptState
     -> FilePath
     -> Text
     -> Text
     -> IO ReplLine
-readInlineEditor slashEnabled interrupt historyPath prompt initial = do
+readInlineEditor skills slashEnabled interrupt historyPath prompt initial = do
     withBracketedPaste $
         withEditorRawStdin $
             bracket
@@ -371,6 +390,7 @@ readInlineEditor slashEnabled interrupt historyPath prompt initial = do
                             , editorPasted = False
                             , editorSlashEnabled = slashEnabled
                             , editorSlashDismissed = False
+                            , editorSkillCommands = skills
                             }
                     redrawEditor prompt state
                     editorLoop history entries state
@@ -496,7 +516,11 @@ currentMenu :: EditorState -> Maybe SlashMenu
 currentMenu state
     | not state.editorSlashEnabled = Nothing
     | state.editorSlashDismissed = Nothing
-    | otherwise = slashMenuFor state.editorText state.editorCursor
+    | otherwise =
+        slashMenuForWithSkills
+            state.editorSkillCommands
+            state.editorText
+            state.editorCursor
 
 normalizeSelection :: EditorState -> EditorState
 normalizeSelection state =

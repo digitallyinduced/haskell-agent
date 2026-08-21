@@ -69,6 +69,8 @@ data CliOptions = CliOptions
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
       -- ^ Discover and inject AGENTS.md at session start (default: True).
+    , optSkills :: !Bool
+      -- ^ Discover and expose filesystem skills (default: True).
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -86,6 +88,7 @@ defaultCliOptions = CliOptions
     , optResume = Nothing
     , optSaveSession = False
     , optAgentsMd = True
+    , optSkills = True
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -172,6 +175,10 @@ parseOptions options = \case
         parseOptions options { optAgentsMd = True } rest
     "--no-agents-md" : rest ->
         parseOptions options { optAgentsMd = False } rest
+    "--skills" : rest ->
+        parseOptions options { optSkills = True } rest
+    "--no-skills" : rest ->
+        parseOptions options { optSkills = False } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -226,6 +233,8 @@ usage = unlines
     , "      --save-session      Persist a one-shot (-p) run as a session"
     , "      --agents-md         Discover and inject AGENTS.md (default)"
     , "      --no-agents-md      Skip AGENTS.md discovery"
+    , "      --skills            Discover Agent Skills (default)"
+    , "      --no-skills         Disable skill discovery and invocation"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
@@ -245,6 +254,8 @@ usage = unlines
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
     , "/btw <QUESTION> asks a one-shot side question without changing or"
     , "persisting the main conversation."
+    , "/skills lists discovered SKILL.md workflows; /skills reload rescans."
+    , "Invoke one with /NAME [ARGS] or mention it as $NAME in a prompt."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."

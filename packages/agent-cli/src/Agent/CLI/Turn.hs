@@ -75,7 +75,6 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
@@ -90,7 +89,7 @@ runOneTurn env@SessionEnv
     , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
-    , sessionAgentsContext = agentsContext
+    , sessionStartupContext = startupContext
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
@@ -126,20 +125,28 @@ runOneTurn env@SessionEnv
         PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
-    pendingAgents <- atomicModifyIORef' agentsContext \pendingCtx -> (Nothing, pendingCtx)
+    pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     let planReminder =
             if planActive
                 then Just (planModeReminder planPath)
                 else Nothing
-        baseInputs = case pendingAgents of
-            Just agents | null beforeItems && isNothing prev ->
-                UserMessage agents : inputs
+        baseInputs = case pendingStartup of
+            Just context ->
+                UserMessage context : inputs
             _ -> inputs
         turnInputs0 = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
+        restoreStartupContext =
+            case pendingStartup of
+                Nothing -> pure ()
+                Just context ->
+                    modifyIORef' startupContext \current ->
+                        Just $ case current of
+                            Nothing -> context
+                            Just newer -> context <> "\n\n" <> newer
     turnInputs <- stampTurnInputs turnInputs0
     startedAt <- readIORef render.renderStartedAt
     wallStarted <- getCurrentTime
@@ -147,7 +154,8 @@ runOneTurn env@SessionEnv
         emitTerminalSequence terminal stdout osc133CommandStart
     rootTurnId <- beginSubagentTurn
     result <- runLoopInputs config prev turnInputs
-        `onException` abortSubagentTurn rootTurnId
+        `onException`
+            (restoreStartupContext >> abortSubagentTurn rootTurnId)
     clearThinking render
     finishedAt <- getCurrentTime
     let elapsedDetail extra = case startedAt of
@@ -173,6 +181,7 @@ runOneTurn env@SessionEnv
                 writeIORef slotRef (PersistenceActive handle')
     case result of
         Left cancelled@(LoopCancelled _) -> do
+            restoreStartupContext
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
@@ -183,6 +192,7 @@ runOneTurn env@SessionEnv
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
+            restoreStartupContext
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of

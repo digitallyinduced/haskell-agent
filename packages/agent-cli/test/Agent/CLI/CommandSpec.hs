@@ -213,6 +213,7 @@ spec = do
                     , "copy-session"
                     , "terminal"
                     , "agents"
+                    , "skills"
                     , "always-approve"
                     ]
 
@@ -290,6 +291,36 @@ spec = do
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
+
+    describe "runtime skill commands" do
+        let skills =
+                [ SkillCommand
+                    { skillCommandName = "deploy"
+                    , skillCommandSummary = "Deploy the service"
+                    , skillCommandArgumentHint = Just "<environment>"
+                    , skillCommandSource = "repo · agents"
+                    }
+                ]
+
+        it "parses a skill invocation and preserves arguments" do
+            parseReplLineWithSkills skills "/deploy production now"
+                `shouldBe` ReplInvokeSkill "deploy" "production now"
+
+        it "parses the skills listing and reload commands" do
+            parseReplLine "/skills" `shouldBe` ReplSkills False
+            parseReplLine "/skills reload" `shouldBe` ReplSkills True
+            parseReplLine "/skills nope"
+                `shouldBe` ReplCommandError "usage: /skills [reload]"
+
+        it "adds skills to completion, the live menu, and help" do
+            slashCompletionCandidatesWithSkills skills "" "/de"
+                `shouldBe` ["/deploy"]
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithSkills skills "/dep" 4)
+                `shouldBe` Just ["/deploy"]
+            let help = formatSlashHelpWithSkills False skills (Just "deploy")
+            Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
+            Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

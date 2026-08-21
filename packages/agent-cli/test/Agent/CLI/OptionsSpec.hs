@@ -106,6 +106,18 @@ spec = do
                     , optAgentsMd = True
                     })
 
+        it "parses --skills and --no-skills" do
+            parseArgs ["--no-skills", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optSkills = False
+                    })
+            parseArgs ["--no-skills", "--skills", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optSkills = True
+                    })
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False False
