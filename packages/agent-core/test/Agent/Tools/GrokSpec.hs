@@ -7,6 +7,7 @@ import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
@@ -19,6 +20,7 @@ import Control.Concurrent (threadDelay)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (bracket, finally)
 import Data.Text (Text)
@@ -57,7 +59,7 @@ spec = describe "Agent.Tools.Grok" do
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
             let outputSchemas =
-                    [ tool.appToolParameters
+                    [ fromMaybe [] (jsonToolParameters tool)
                     | tool <- grokTools session ghci plan Nothing typesRef
                     , tool.appToolName == "get_task_output"
                     ]

@@ -71,9 +71,19 @@ spec = do
             body `shouldSatisfy` Text.isInfixOf "API credits"
             body `shouldSatisfy` Text.isInfixOf "environment"
 
+        it "shows the OpenAI account email in the account label" do
+            let body = renderLoginFrame False $
+                    initialLoginState
+                        [openai { loginLabel = "person@example.com" }]
+            body `shouldSatisfy` Text.isInfixOf "person@example.com"
+
         it "does not render access tokens" do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` (not . Text.isInfixOf "secret-openai")
+
+        it "shows unchecked usage as an in-progress refresh" do
+            renderLoginFrame False (initialLoginState [openai])
+                `shouldSatisfy` Text.isInfixOf "checking usage"
 
 openai :: LoginAccount
 openai = LoginAccount

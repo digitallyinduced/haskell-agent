@@ -36,8 +36,9 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.Types
-    ( AppTool(..)
-    , AppToolKind(..)
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
@@ -177,15 +178,9 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly =
+    jsonAppTool name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
 
 data EnterPlanArgs = EnterPlanArgs
     { explanation :: Maybe Text

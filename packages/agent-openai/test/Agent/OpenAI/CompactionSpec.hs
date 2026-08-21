@@ -1,7 +1,7 @@
 module Agent.OpenAI.CompactionSpec (spec) where
 
 import Agent.OpenAI.Compaction
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import Test.Hspec

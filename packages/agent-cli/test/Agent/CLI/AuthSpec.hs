@@ -9,6 +9,7 @@ import Agent.Provider
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
+    , TokenProvider(..)
     , getNextToken
     )
 import qualified Agent.XAI.Auth as XAIAuth
@@ -22,7 +23,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), addUTCTime, getCurrentTime)
+import Data.Time.Clock
+    ( UTCTime(..)
+    , addUTCTime
+    , diffUTCTime
+    , getCurrentTime
+    )
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
@@ -46,6 +52,20 @@ spec = do
                                 "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN"
                         Right _ ->
                             expectationFailure "expected broker configuration failure"
+
+    describe "probeLoadedAuth" do
+        it "rejects auth whose accounts are currently cooling down" do
+            let retryAt = UTCTime (fromGregorian 2026 8 21) 3600
+                exhausted = LoadedAuth
+                    { loadedProvider = XAIProvider
+                    , loadedTokenProvider = TokenProvider \_ ->
+                        pure (Left (CredentialsExhausted retryAt))
+                    , loadedOpenAiPool = Nothing
+                    }
+            result <- probeLoadedAuth exhausted
+            case result of
+                Left err -> err `shouldBe` CredentialsExhausted retryAt
+                Right _ -> expectationFailure "expected exhausted auth"
 
     describe "openAIOAuthClientId" do
         it "uses the Codex public client id by default" do
@@ -187,6 +207,21 @@ spec = do
                 getNextToken provider Nothing `shouldReturn`
                     Right adoptedManagedGrok
                 readIORef refreshes `shouldReturn` 0
+
+    describe "staticCredentialProvider" do
+        it "preserves rate-limit cooldowns for managed bearer tokens" do
+            before <- getCurrentTime
+            result <- getNextToken
+                (staticCredentialProvider staleGrok)
+                (Just
+                    (FailedCredential staleGrok
+                        (AccountRateLimited (Just 7))))
+            case result of
+                Left CredentialsExhausted{retryAt} ->
+                    diffUTCTime retryAt before `shouldSatisfy` (>= 7)
+                other ->
+                    expectationFailure
+                        ("expected CredentialsExhausted, got " <> show other)
 
     describe "reloadableFileCredentialProvider" do
         it "returns the cached credential without reloading" do

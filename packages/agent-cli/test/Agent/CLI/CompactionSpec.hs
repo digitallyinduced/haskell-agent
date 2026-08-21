@@ -1,7 +1,7 @@
 module Agent.CLI.CompactionSpec (spec) where
 
 import Agent.CLI.Compaction (runProviderCompact)
-import Agent.OpenAI.Responses.Types (defaultResponseCreateParams)
+import Agent.Responses.Types (defaultResponseCreateParams)
 import Agent.Provider (Provider(..), TokenProvider(..))
 import Data.IORef (newIORef)
 import Test.Hspec

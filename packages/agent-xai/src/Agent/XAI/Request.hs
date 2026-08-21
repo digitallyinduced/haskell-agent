@@ -5,7 +5,7 @@ module Agent.XAI.Request
     , buildRequest
     ) where
 
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Maybe as Maybe

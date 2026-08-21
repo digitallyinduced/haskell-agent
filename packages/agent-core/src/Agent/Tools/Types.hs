@@ -1,8 +1,17 @@
 module Agent.Tools.Types
     ( AppTool(..)
-    , AppToolKind(..)
+    , ToolSchema(..)
+    , ApprovalRule(..)
+    , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
+    , jsonAppTool
+    , freeformApplyPatchAppTool
+    , mkToolRegistry
+    , toolRegistryTools
+    , lookupRegisteredTool
+    , dispatchRegisteredToolCall
+    , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
     ) where
@@ -10,25 +19,47 @@ module Agent.Tools.Types
 import Agent.Cancel (CancelFlag, newCancelFlag)
 import Agent.OsPath (OsPath)
 import Agent.ToolDSL (PropertySchema)
-import Agent.ToolDispatch (ToolCall, ToolHandler)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallResult
+    , ToolDispatchConfig
+    , ToolHandler
+    , canonicalToolName
+    , dispatchToolHandler
+    , handlerName
+    )
+import Control.Monad (foldM)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as Text
 import System.OsPath (dropTrailingPathSeparator)
 
-data AppToolKind
-    = JsonFunction
-    | FreeformApplyPatch
+-- | Provider-facing schema. The sum prevents freeform tools from carrying
+-- meaningless JSON parameters.
+data ToolSchema
+    = JsonFunctionSchema ![PropertySchema]
+    | FreeformApplyPatchSchema
     deriving (Eq, Show)
+
+-- | Whether a call may run without generic user approval.
+data ApprovalRule
+    = AlwaysReadOnly
+    | AlwaysPrompt
+    | ClassifyReadOnly !(ToolCall -> IO Bool)
 
 data AppTool = AppTool
     { appToolName :: !Text
     , appToolDescription :: !Text
-    , appToolParameters :: ![PropertySchema]
+    , appToolSchema :: !ToolSchema
     , appToolHandler :: !ToolHandler
-    , appToolKind :: !AppToolKind
-    , appToolReadOnly :: !Bool
-    -- | Optional per-call override. When present, it decides whether this
-    -- specific invocation is treated as read-only for approval.
-    , appToolIsReadOnlyCall :: !(Maybe (ToolCall -> IO Bool))
+    , appToolApproval :: !ApprovalRule
+    }
+
+-- | Registration order is retained for stable provider schemas while lookup is
+-- canonical and validated once at construction.
+data ToolRegistry = ToolRegistry
+    { registryTools :: ![AppTool]
+    , registryByName :: !(Map.Map Text AppTool)
     }
 
 data ToolEnv = ToolEnv
@@ -47,11 +78,88 @@ defaultToolEnv cwd = do
         , toolCancel = cancel
         }
 
+jsonAppTool
+    :: Text
+    -> Text
+    -> [PropertySchema]
+    -> ApprovalRule
+    -> ToolHandler
+    -> AppTool
+jsonAppTool name description parameters approval handler = AppTool
+    { appToolName = name
+    , appToolDescription = description
+    , appToolSchema = JsonFunctionSchema parameters
+    , appToolHandler = handler
+    , appToolApproval = approval
+    }
+
+freeformApplyPatchAppTool
+    :: Text
+    -> Text
+    -> ApprovalRule
+    -> ToolHandler
+    -> AppTool
+freeformApplyPatchAppTool name description approval handler = AppTool
+    { appToolName = name
+    , appToolDescription = description
+    , appToolSchema = FreeformApplyPatchSchema
+    , appToolHandler = handler
+    , appToolApproval = approval
+    }
+
+mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
+mkToolRegistry tools = do
+    byName <- foldM insertTool Map.empty tools
+    pure ToolRegistry
+        { registryTools = tools
+        , registryByName = byName
+        }
+  where
+    insertTool :: Map.Map Text AppTool -> AppTool -> Either Text (Map.Map Text AppTool)
+    insertTool current tool
+        | Text.null (Text.strip tool.appToolName) =
+            Left "tool name must not be empty"
+        | handlerName tool.appToolHandler /= tool.appToolName =
+            Left $
+                "tool handler name "
+                    <> handlerName tool.appToolHandler
+                    <> " does not match registered name "
+                    <> tool.appToolName
+        | Map.member key current =
+            Left ("duplicate canonical tool name: " <> key)
+        | otherwise = Right (Map.insert key tool current)
+      where
+        key = canonicalToolName tool.appToolName
+
+toolRegistryTools :: ToolRegistry -> [AppTool]
+toolRegistryTools = (.registryTools)
+
+lookupRegisteredTool :: Text -> ToolRegistry -> Maybe AppTool
+lookupRegisteredTool name registry =
+    Map.lookup (canonicalToolName name) registry.registryByName
+
+dispatchRegisteredToolCall
+    :: ToolDispatchConfig
+    -> ToolRegistry
+    -> ToolCall
+    -> IO ToolCallResult
+dispatchRegisteredToolCall config registry call =
+    dispatchToolHandler config
+        ((.appToolHandler) <$> lookupRegisteredTool call.name registry)
+        call
+
+jsonToolParameters :: AppTool -> Maybe [PropertySchema]
+jsonToolParameters tool = case tool.appToolSchema of
+    JsonFunctionSchema parameters -> Just parameters
+    FreeformApplyPatchSchema -> Nothing
+
+-- | Compatibility helper for direct handler consumers. New dispatch paths
+-- should retain and use 'ToolRegistry' instead.
 appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)
 
--- | Static read-only flag, or a dynamic per-call classifier when registered.
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
-toolAllowsWithoutPrompt tool call = case tool.appToolIsReadOnlyCall of
-    Just classify -> classify call
-    Nothing -> pure tool.appToolReadOnly
+toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
+    AlwaysReadOnly -> pure True
+    AlwaysPrompt -> pure False
+    ClassifyReadOnly classify -> classify call

@@ -40,11 +40,13 @@ module Agent.OpenAI.Auth
     , parseJwtExp
     , needsRefresh
     , deriveAccountId
+    , deriveEmail
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Auth.JWT
     ( deriveAccountId
+    , deriveEmail
     , needsRefresh
     , parseJwtExp
     )

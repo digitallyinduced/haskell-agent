@@ -2,7 +2,7 @@ module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
 import Agent.Loop (TokenUsage(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
@@ -182,11 +182,11 @@ spec = describe "Agent.CLI.Session" do
 
         it "creates a pending session only when ensureSession runs" $
             withTempDir "agent-sessions-" \root -> do
-                slot <- newIORef (Left (testCreate root))
+                PersistenceEnabled slot <- newPendingPersistence (testCreate root)
                 listDirectory root `shouldReturn` []
                 handle <- ensureSession slot
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
-                Right again <- readIORef slot
+                PersistenceActive again <- readIORef slot
                 again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
 
     describe "json codec" do

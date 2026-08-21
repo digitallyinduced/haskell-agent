@@ -14,7 +14,7 @@ import Agent.Error
     , ErrorType(..)
     , isInlineRetryableProviderError
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenRouter.Error (classifyFailure)
 import Agent.OpenRouter.Options

@@ -3,6 +3,7 @@ module Agent.CLI.Turn
     ( runOneTurn
     ) where
 
+import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
@@ -24,6 +25,8 @@ import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , Persistence(..)
+    , PersistenceState(..)
     , appendTurn
     , ensureSession
     )
@@ -99,15 +102,18 @@ runOneTurn env@SessionEnv
     , sessionAbortSubagentTurn = abortSubagentTurn
     , sessionOnPersisted = onPersisted
     } promptText inputs =
-  withTurnCancel interrupt config.loopCancel $
-  withEscCancel config.loopCancel escPaused do
+  -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
+  -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
+  resetCancel config.loopCancel >>
+  (withTurnCancel interrupt config.loopCancel
+    . withEscCancel config.loopCancel escPaused) do
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents
     -- can persist under agents/<id>/ as they complete.
     case persist of
-        Just slotRef -> do
-            created <- isLeftSlot <$> readIORef slotRef
+        PersistenceEnabled slotRef -> do
+            created <- isPendingPersistence <$> readIORef slotRef
             handle <- ensureSession slotRef
             onPersisted handle
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
@@ -117,7 +123,7 @@ runOneTurn env@SessionEnv
                 putTextLn stderr
                     (roleMuted color
                         (glyphSession <> "session: " <> handle.sessionMeta.metaId))
-        Nothing -> pure ()
+        PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
     pendingAgents <- atomicModifyIORef' agentsContext \pendingCtx -> (Nothing, pendingCtx)
@@ -148,8 +154,8 @@ runOneTurn env@SessionEnv
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
         persistIncomplete errorText = case persist of
-            Nothing -> pure ()
-            Just slotRef -> do
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
                 handle <- ensureSession slotRef
                 writeIORef planMode.planSessionDir (Just handle.sessionDir)
@@ -164,7 +170,7 @@ runOneTurn env@SessionEnv
                         , turnUsage = Nothing
                         }
                 handle' <- appendTurn handle turn
-                writeIORef slotRef (Right handle')
+                writeIORef slotRef (PersistenceActive handle')
     case result of
         Left cancelled@(LoopCancelled _) -> do
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
@@ -231,8 +237,8 @@ runOneTurn env@SessionEnv
             afterItems <- readIORef transcriptRef
             let newItems = drop (length beforeItems) afterItems
             case persist of
-                Nothing -> pure ()
-                Just slotRef -> do
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef -> do
                     now <- getCurrentTime
                     handle <- ensureSession slotRef
                     writeIORef planMode.planSessionDir (Just handle.sessionDir)
@@ -247,7 +253,7 @@ runOneTurn env@SessionEnv
                             , turnUsage = Just loopResult.tokenUsage
                             }
                     handle' <- appendTurn handle turn
-                    writeIORef slotRef (Right handle')
+                    writeIORef slotRef (PersistenceActive handle')
                     when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
                         tty <- hIsTerminalDevice stdout
                         setCliWindowTitle tty stdout
@@ -259,10 +265,10 @@ runOneTurn env@SessionEnv
                     writeIORef printed False
                     runOneTurn env notes [UserMessage notes]
 
-isLeftSlot :: Either a b -> Bool
-isLeftSlot = \case
-    Left _ -> True
-    Right _ -> False
+isPendingPersistence :: PersistenceState -> Bool
+isPendingPersistence = \case
+    PersistencePending _ -> True
+    PersistenceActive _ -> False
 
 finishTerminal
     :: TerminalCapabilities

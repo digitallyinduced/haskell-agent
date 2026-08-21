@@ -28,7 +28,11 @@ import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (ToolHandler, typedTool)
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -306,15 +310,12 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly handler =
+    jsonAppTool name description parameters approval handler
+  where
+    approval
+        | readOnly = AlwaysReadOnly
+        | otherwise = AlwaysPrompt
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text

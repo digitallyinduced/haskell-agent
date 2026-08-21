@@ -15,11 +15,11 @@ import Agent.OpenAI.Compaction
     , summarizationPrompt
     , userTextItem
     )
-import Agent.OpenAI.LoopBackend
+import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , withRequestInput
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Provider
     ( Credential
     , Provider(..)
