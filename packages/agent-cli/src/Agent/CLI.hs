@@ -152,9 +152,11 @@ import Agent.Subagents
     , formatCompletionNotice
     , getPreviousResponseId
     , getStatus
+    , getSubagentCwd
     , getTaskPath
     , newSubagentRegistry
     , restoreSubagent
+    , restoreSubagentWithCwd
     , setSubagentOnComplete
     , setSubagentRunner
     )
@@ -165,7 +167,14 @@ import Agent.Tools
     , codingToolsForWithTypes
     , filterChildGrokTools
     )
-import Agent.Tools.Grok.Task (defaultSubagentType, lookupAgentType, recordAgentType)
+import Agent.Tools.Grok.Task
+    ( GrokSubagentSpec(..)
+    , GrokSubagentSpecs
+    , defaultSubagentType
+    , lookupAgentModel
+    , lookupAgentType
+    , recordAgentSpec
+    )
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
@@ -439,6 +448,10 @@ runAgent options transition = do
             , multiTaskPath = taskPathRoot
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
+            , multiCreateWorktree = Just \source ->
+                createWorktree source (worktreeRoot home) >>= \case
+                    Left err -> pure (Left (Text.pack err))
+                    Right path -> pure (Right path)
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
@@ -1782,7 +1795,7 @@ syncStoreRootFromPlan storeRootRef planMode = do
 persistSubagentSnapshot
     :: SubagentStoreRoot
     -> SubagentRegistry
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> SubagentId
     -> IORef [ResponseItem]
     -> IO ()
@@ -1794,14 +1807,17 @@ persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = d
             items <- readIORef transcriptRef
             previous <- getPreviousResponseId registry agentId
             agentType <- lookupAgentType typesRef agentId
-            _ <- saveSubagentState sessionDir agentId items previous agentType
+            agentModel <- lookupAgentModel typesRef agentId
+            agentCwd <- getSubagentCwd registry agentId
+            _ <- saveSubagentState
+                sessionDir agentId items previous agentType agentModel agentCwd
             pure ()
 
 flushAllSubagentSnapshots
     :: SubagentStoreRoot
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> IO ()
 flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
     sessions <- readIORef sessionsRef
@@ -1817,7 +1833,7 @@ restoreAgentFromDisk
     :: SubagentStoreRoot
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> SubagentId
     -> IO (Either Text ())
 restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
@@ -1837,15 +1853,18 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                     Left err -> pure (Left err)
                     Right Nothing ->
                         -- Same-process close with no disk yet: still reopen.
-                        reopenInMemory Nothing
+                        reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
-                        result <- reopenInMemory meta.diskPreviousResponseId
+                        result <- reopenInMemory meta.diskPreviousResponseId meta.diskCwd
                         case result of
                             Left err -> pure (Left err)
                             Right () -> do
                                 case meta.diskAgentType of
                                     Just agentType ->
-                                        recordAgentType typesRef agentId agentType
+                                        recordAgentSpec typesRef agentId GrokSubagentSpec
+                                            { agentType
+                                            , modelOverride = meta.diskAgentModel
+                                            }
                                     Nothing -> pure ()
                                 transcript <- newIORef items
                                 let session =
@@ -1855,8 +1874,13 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                                 atomicModifyIORef' sessionsRef \m ->
                                     (Map.insert agentId session m, ())
                                 pure (Right ())
-    reopenInMemory previous = do
-        restored <- restoreSubagent registry agentId Nothing 1 Nothing previous
+    reopenInMemory previous requestedCwd = do
+        restored <- case requestedCwd of
+            Just childCwd ->
+                restoreSubagentWithCwd
+                    registry childCwd agentId Nothing 1 Nothing previous
+            Nothing ->
+                restoreSubagent registry agentId Nothing 1 Nothing previous
         pure $ case restored of
             Left err -> Left err
             Right _ -> Right ()
@@ -1900,7 +1924,7 @@ runCodexSubagent
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> RunSubagent
 runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef =
     \env previous prompt onEvent -> do
@@ -1915,6 +1939,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
+                , multiCreateWorktree = Nothing
                 }
         -- Child tools create their own PlanModeEnv; sync store root from parent
         -- params is handled by noteSessionDir on the parent path. If the parent
@@ -1970,7 +1995,7 @@ runHttpSubagent
     -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> SubagentStoreRoot
     -> RunSubagent
 runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef storeRootRef =
@@ -1985,20 +2010,21 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
+                , multiCreateWorktree = Nothing
                 }
         session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
+        childModel <- lookupAgentModel typesRef env.subId
         coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
-            let model = fromMaybe (defaultModelFor provider) parentParams.model
+            let model = fromMaybe
+                    (fromMaybe (defaultModelFor provider) parentParams.model)
+                    childModel
                 effort = case parentParams.reasoning of
                     Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
                     Nothing -> defaultEffortFor provider
-                baseInstructions =
-                    fromMaybe
-                        (systemPrompt provider env.subCwd today True)
-                        parentParams.instructions
+                baseInstructions = systemPrompt provider env.subCwd today True
                 instructions =
                     baseInstructions
                         <> "\n\n"
@@ -2026,26 +2052,31 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
 
 grokSubagentSuffix :: Text -> SubagentId -> Text
 grokSubagentSuffix agentType agentId =
-    "You are a Grok Build subagent (type: "
+    "You are a Grok Build subagent — a focused worker delegated a specific task.\n\
+    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
+    \Report blocked or unverified work explicitly.\n\n\
+    \Subagent type: "
         <> agentType
-        <> "). Your agent id is "
+        <> "\nAgent id: "
         <> agentId.unSubagentId
-        <> ". Complete the assigned task directly and report results clearly."
         <> case agentType of
             "explore" ->
                 "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete files. Use run_terminal_cmd only \
-                \for read-only commands (ls, git status, git log, git diff, find, cat, head, tail)."
+                \You have no file editing or command execution tools. Search broadly, narrow down, \
+                \and return absolute file paths and relevant findings."
             "plan" ->
                 "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete files except plan.md while in plan mode. \
-                \Use run_terminal_cmd only for read-only commands."
-            _ -> ""
+                \Do not create, modify, or delete implementation files. Explore the codebase, \
+                \consider trade-offs, and produce a concrete implementation strategy. End with \
+                \a Critical Files for Implementation section listing 3-5 files."
+            _ ->
+                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
+                \Never create documentation files unless explicitly requested."
 
 lookupOrCreateSubagentSession
     :: IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> SubagentId
     -> IO SubagentSession
 lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
@@ -2063,8 +2094,10 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
             transcript <- newIORef items
             case meta >>= (.diskAgentType) of
                 Just agentType ->
-                    atomicModifyIORef' typesRef \m ->
-                        (Map.insertWith (\_ new -> new) agentId agentType m, ())
+                    recordAgentSpec typesRef agentId GrokSubagentSpec
+                        { agentType
+                        , modelOverride = meta >>= (.diskAgentModel)
+                        }
                 Nothing -> pure ()
             let session = SubagentSession { subSessionTranscript = transcript }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
