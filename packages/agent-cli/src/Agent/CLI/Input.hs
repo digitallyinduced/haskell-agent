@@ -17,6 +17,8 @@ module Agent.CLI.Input
     , formatPasteChip
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
+    , appendReplHistory
+    , readReplHistory
     , replHistoryPath
     , terminalTextWidth
     , truncateDisplayText
@@ -158,6 +160,25 @@ isPasteSentinel char =
 -- | @~/.haskell-agent/history@ given the user's home directory.
 replHistoryPath :: FilePath -> FilePath
 replHistoryPath home = home </> ".haskell-agent" </> "history"
+
+readReplHistory :: IO [Text]
+readReplHistory = do
+    home <- getHomeDirectory
+    let path = replHistoryPath home
+    ensureHistoryParent path
+    history <- readHistory path `catchIO` \_ -> pure emptyHistory
+    pure (map Text.pack (historyLines history))
+
+appendReplHistory :: Text -> IO ()
+appendReplHistory text
+    | Text.all isSpace text = pure ()
+    | otherwise = do
+        home <- getHomeDirectory
+        let path = replHistoryPath home
+        ensureHistoryParent path
+        history <- readHistory path `catchIO` \_ -> pure emptyHistory
+        writeHistory path (addHistory (Text.unpack text) history)
+            `catchIO` \_ -> pure ()
 
 -- | Keys understood by the multiple-choice TTY picker.
 data ChoiceKey

@@ -22,7 +22,10 @@ module Agent.CLI.UI.Model
     ) where
 
 import Agent.CLI.ReplMode (ReplMode(..))
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render
+    ( formatSearchReplaceDiff
+    , summarizeToolCall
+    )
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage
@@ -110,6 +113,7 @@ data UiState = UiState
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe Text)
     , uiFrame :: !Int
+    , uiElapsedTenths :: !Int
     , uiTurnStartBlock :: !Int
     }
     deriving (Eq, Show)
@@ -162,6 +166,7 @@ initialUiState = UiState
     , uiPermission = Nothing
     , uiNotice = Nothing
     , uiFrame = 0
+    , uiElapsedTenths = 0
     , uiTurnStartBlock = 0
     }
 
@@ -246,7 +251,13 @@ reduceUi event state = case event of
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
     UiTick ->
-        state { uiFrame = (state.uiFrame + 1) `mod` 10 }
+        state
+            { uiFrame = (state.uiFrame + 1) `mod` 10
+            , uiElapsedTenths =
+                if state.uiRunning
+                    then state.uiElapsedTenths + 1
+                    else state.uiElapsedTenths
+            }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -256,6 +267,7 @@ reduceLoop event state = case event of
             , uiAwaitingInput = False
             , uiActivity = "Thinking…"
             , uiNotice = Nothing
+            , uiElapsedTenths = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
             }
     ReasoningDelta delta ->
@@ -267,8 +279,13 @@ reduceLoop event state = case event of
     ActivityUpdated activity ->
         state { uiActivity = activity }
     ToolStarted call ->
-        let kind = toolBlockKind call.name
-        in appendBlock kind (summarizeToolCall call) "" ""
+        let
+            kind = toolBlockKind call.name
+            body = case call.name of
+                "search_replace" ->
+                    formatSearchReplaceDiff False call.arguments
+                _ -> ""
+        in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)
             state { uiActivity = summarizeToolCall call }
     ToolFinished result ->

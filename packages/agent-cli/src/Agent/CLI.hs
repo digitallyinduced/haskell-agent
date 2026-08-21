@@ -323,7 +323,7 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -1086,6 +1086,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             (\active ->
                 when terminal.terminalNativeProgress $
                     setNativeProgress stderr active)
+            useColor
             initialFullscreenState
         else pure Nothing
     writeIORef uiRuntimeRef fullscreen
@@ -1483,9 +1484,21 @@ replWithDraft env@SessionEnv
                     hFlush stdout
             continueWith keptDraft
         ReplClipboardPaste keptDraft -> do
-            errColor <- resolveColor stderr
             queueClipboardImages
-                attachmentsRef previewIdRef stdoutColor errColor
+                attachmentsRef
+                previewIdRef
+                stdoutColor
+                (isNothing fullscreen)
+                >>= \case
+                    Left err ->
+                        displayError err do
+                            errColor <- resolveColor stderr
+                            Text.hPutStrLn stderr (roleError errColor err)
+                    Right message ->
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted stdoutColor
+                                    (glyphOk <> message))
             continueWith keptDraft
         ReplPasted pasted ->
             submitLine continue stdoutColor True pasted
@@ -1499,7 +1512,7 @@ replWithDraft env@SessionEnv
             else do
                 when pasted do
                     let chip = formatPasteChip stripped
-                    when (chip /= stripped) do
+                    when (chip /= stripped && isNothing fullscreen) do
                         Text.putStrLn (roleMuted color chip)
                 case parseReplLine line of
                     ReplQuit -> pure RunQuit
@@ -1512,8 +1525,16 @@ replWithDraft env@SessionEnv
                         pastedImages <- loadImagesFromPastedText text
                         case pastedImages of
                             Just images@(_:_) -> do
-                                queueAttachedImages
-                                    attachmentsRef previewIdRef color images
+                                message <- queueAttachedImages
+                                    attachmentsRef
+                                    previewIdRef
+                                    color
+                                    (isNothing fullscreen)
+                                    images
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            (glyphOk <> message))
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
@@ -1537,22 +1558,44 @@ replWithDraft env@SessionEnv
                             Left err -> do
                                 -- Fall back to a richer clipboard sniff for better errors.
                                 content <- readClipboard
+                                let
+                                    message = case content of
+                                        ClipboardText _ ->
+                                            "clipboard has text, not an image \
+                                            \(paste text normally into the prompt)"
+                                        ClipboardPaths paths ->
+                                            "clipboard has file path(s), \
+                                            \but no loadable image: "
+                                                <> Text.intercalate
+                                                    ", " (map Text.pack paths)
+                                        ClipboardEmpty ->
+                                            err
+                                        ClipboardImage image ->
+                                            -- Shouldn't happen if readClipboardImages failed, but be safe.
+                                            "attached "
+                                                <> image.imageMime
                                 case content of
-                                    ClipboardText _ ->
-                                        Text.hPutStrLn stderr (roleError errColor
-                                            "clipboard has text, not an image (paste text normally into the prompt)")
-                                    ClipboardPaths paths ->
-                                        Text.hPutStrLn stderr (roleError errColor
-                                            ("clipboard has file path(s), but no loadable image: "
-                                                <> Text.intercalate ", " (map Text.pack paths)))
-                                    ClipboardEmpty ->
-                                        Text.hPutStrLn stderr (roleError errColor err)
-                                    ClipboardImage image ->
-                                        -- Shouldn't happen if readClipboardImages failed, but be safe.
-                                        modifyIORef' attachmentsRef (<> [image])
+                                    ClipboardImage image -> do
+                                        attachMessage <- queueAttachedImages
+                                            attachmentsRef
+                                            previewIdRef
+                                            color
+                                            (isNothing fullscreen)
+                                            [image]
+                                        displayInfo attachMessage $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> attachMessage))
+                                    _ ->
+                                        displayError message $
+                                            Text.hPutStrLn stderr
+                                                (roleError errColor message)
                                 continue
                             Right [] -> do
-                                Text.hPutStrLn stderr (roleError errColor "no image found on the clipboard")
+                                displayError "no image found on the clipboard" $
+                                    Text.hPutStrLn stderr
+                                        (roleError errColor
+                                            "no image found on the clipboard")
                                 continue
                             Right images -> do
                                 let sizes =
@@ -1566,9 +1609,12 @@ replWithDraft env@SessionEnv
                                                 if Text.null pasteCaption
                                                     then "See attached image."
                                                     else pasteCaption
-                                        putImagePreview previewIdRef color images
-                                        Text.putStrLn
-                                            (roleMuted color (glyphOk <> "pasted " <> sizes))
+                                        when (isNothing fullscreen) $
+                                            putImagePreview previewIdRef color images
+                                        displayInfo ("pasted " <> sizes) $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
                                         fullscreenEvent
                                             (UiUserSubmitted promptText)
@@ -1581,8 +1627,16 @@ replWithDraft env@SessionEnv
                                         result <- runOneTurn env promptText turnInputs
                                         finishTurn env False result
                                     else do
-                                        queueAttachedImages
-                                            attachmentsRef previewIdRef color images
+                                        message <- queueAttachedImages
+                                            attachmentsRef
+                                            previewIdRef
+                                            color
+                                            (isNothing fullscreen)
+                                            images
+                                        displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> message))
                                         continue
                     ReplShowAttachments -> do
                         pending <- readIORef attachmentsRef
@@ -1618,40 +1672,63 @@ replWithDraft env@SessionEnv
                                 entries <- viewport.viewportEntries
                                 selected <- readIORef viewport.viewportSelected
                                 color <- resolveColor stderr
-                                legacy
-                                    (pickAgentViewport color selected entries) >>= \case
+                                agentChoice
+                                    fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
-                                    Just target ->
+                                    Just target -> do
                                         writeIORef viewport.viewportSelected target
+                                        case
+                                            [ entry
+                                            | entry <- entries
+                                            , entry.agentTarget == target
+                                            ] of
+                                            entry : _ ->
+                                                fullscreenEvent $
+                                                    UiSystemMessage $
+                                                        "agent "
+                                                            <> entry.agentPath
+                                                            <> " · "
+                                                            <> entry.agentStatus
+                                                            <> "\n"
+                                                            <> Text.unlines
+                                                                entry.agentTranscript
+                                            [] -> pure ()
                                 continue
 
                     ReplCopyLast -> do
                         answer <- readIORef lastAssistantRef
-                        maybe (copyMissing "no assistant response to copy")
-                            (copyValue terminal "last response") answer
+                        copyCommand
+                            "last response"
+                            "no assistant response to copy"
+                            answer
                         continue
                     ReplCopyCode index -> do
                         answer <- readIORef lastAssistantRef
-                        case answer >>= fencedCodeBlock index of
-                            Nothing -> copyMissing
-                                ("code block " <> Text.pack (show index) <> " was not found")
-                            Just block -> copyValue terminal
-                                ("code block " <> Text.pack (show index)) block
+                        let label =
+                                "code block " <> Text.pack (show index)
+                        copyCommand
+                            label
+                            (label <> " was not found")
+                            (answer >>= fencedCodeBlock index)
                         continue
                     ReplCopyDiff -> do
                         answer <- readIORef lastAssistantRef
-                        case answer >>= lastDiffBlock of
-                            Nothing -> copyMissing "no diff block was found"
-                            Just block -> copyValue terminal "diff block" block
+                        copyCommand
+                            "diff block"
+                            "no diff block was found"
+                            (answer >>= lastDiffBlock)
                         continue
                     ReplCopyPath -> do
-                        copyValue terminal "worktree path" (toText cwd)
+                        copyCommand
+                            "worktree path"
+                            "worktree path is unavailable"
+                            (Just (toText cwd))
                         continue
                     ReplCopySession -> do
                         sessionId <- currentSessionId persist
-                        maybe
-                            (copyMissing "this session has no persisted id yet")
-                            (copyValue terminal "session id")
+                        copyCommand
+                            "session id"
+                            "this session has no persisted id yet"
                             sessionId
                         continue
                     ReplShowTerminal -> do
@@ -1697,37 +1774,53 @@ replWithDraft env@SessionEnv
                             Just choice
                                 | choice.modelProvider == provider
                                 , choice.modelId == current -> do
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            (glyphSession
-                                                <> "model: "
+                                    let message =
+                                            "model: "
                                                 <> providerSlug provider
                                                 <> "/"
-                                                <> choice.modelId))
+                                                <> choice.modelId
+                                    displayInfo message $
+                                        Text.putStrLn
+                                            (roleMuted color
+                                                (glyphSession <> message))
                                     continue
                                 | choice.modelProvider == provider -> do
-                                    applyModelChange
+                                    message <- applyModelChange
                                         provider choice.modelId paramsRef render previous persist
+                                    displayInfo message $
+                                        Text.putStrLn
+                                            (roleMuted color
+                                                (glyphOk <> message))
                                     continue
                                 | otherwise ->
                                     requestModelProviderSwitch choice persist >>= \case
                                         Left err -> do
-                                            Text.hPutStrLn stderr (roleError color err)
+                                            displayError err $
+                                                Text.hPutStrLn stderr
+                                                    (roleError color err)
                                             continue
                                         Right result -> pure result
                     ReplSetModel name -> do
-                        applyModelChange
+                        color <- resolveColor stdout
+                        message <- applyModelChange
                             provider name paramsRef render previous persist
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplToggleAlwaysApprove -> do
-                        toggleAlwaysApprove policyRef projectRoot
+                        message <- toggleAlwaysApprove policyRef projectRoot
+                        color <- resolveColor stderr
+                        displayInfo message $
+                            putTextLn stderr (roleMuted color message)
                         continue
                     ReplCompact focus -> do
                         color <- resolveColor stderr
                         result <- runProviderCompact provider tokenProvider paramsRef transcriptRef focus
                         case result of
                             Left err -> do
-                                Text.hPutStrLn stderr (roleError color err)
+                                displayError err $
+                                    Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
                                 writeIORef transcriptRef outcome.compactHistory
@@ -1735,15 +1828,21 @@ replWithDraft env@SessionEnv
                                 fullscreenEvent UiConversationCleared
                                 fullscreenEvent
                                     (UiSystemMessage outcome.compactSummary)
-                                Text.hPutStrLn stderr $ roleMuted color $
-                                    glyphSession
-                                        <> "compacted "
-                                        <> Text.pack (show outcome.compactBeforeTokens)
-                                        <> " → "
-                                        <> Text.pack (show outcome.compactAfterTokens)
-                                        <> " tokens ("
-                                        <> Text.pack (show (length outcome.compactHistory))
-                                        <> " items)"
+                                let message =
+                                        "compacted "
+                                            <> Text.pack
+                                                (show outcome.compactBeforeTokens)
+                                            <> " → "
+                                            <> Text.pack
+                                                (show outcome.compactAfterTokens)
+                                            <> " tokens ("
+                                            <> Text.pack
+                                                (show (length outcome.compactHistory))
+                                            <> " items)"
+                                displayInfo message $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> message))
                                 case persist of
                                     PersistenceDisabled -> pure ()
                                     PersistenceEnabled slotRef -> do
@@ -1774,13 +1873,17 @@ replWithDraft env@SessionEnv
                             Nothing -> continue
                     ReplBtw question -> do
                         color <- resolveColor stdout
-                        putTextLn stdout
-                            (roleMuted color (glyphSession <> "btw · asking…"))
-                        result <- legacy $
+                        fullscreenEvent
+                            (UiSetNotice (Just "btw · asking…"))
+                        result <-
                             runBtwWithCancel
                                 (\cancel action ->
                                     withTurnCancel interrupt cancel $
-                                        withEscCancel cancel escPaused action)
+                                        case fullscreen of
+                                            Nothing ->
+                                                withEscCancel
+                                                    cancel escPaused action
+                                            Just _ -> action)
                                 btwBackend
                                 paramsRef
                                 transcriptRef
@@ -1788,10 +1891,18 @@ replWithDraft env@SessionEnv
                         case result of
                             Left err -> do
                                 errorColor <- resolveColor stderr
-                                putTextLn stderr
-                                    (roleError errorColor (formatBtwError err))
+                                let message = formatBtwError err
+                                displayError message $
+                                    putTextLn stderr
+                                        (roleError errorColor message)
                             Right answer ->
-                                putTextLn stdout (renderAssistantText color answer)
+                                case fullscreen of
+                                    Just runtime ->
+                                        emitUiEvent runtime
+                                            (UiAssistantHistory answer)
+                                    Nothing ->
+                                        putTextLn stdout
+                                            (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
                         legacy (handleResume maybeId persist) >>= \case
@@ -1801,17 +1912,15 @@ replWithDraft env@SessionEnv
                         sessionReset
                         fullscreenEvent UiConversationCleared
                         color <- resolveColor stderr
-                        case persist of
+                        message <- case persist of
                             PersistenceDisabled ->
-                                Text.hPutStrLn stderr
-                                    (roleMuted color (glyphOk <> "conversation cleared"))
+                                pure "conversation cleared"
                             PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
                                 slot <- readIORef slotRef
                                 case slot of
                                     PersistencePending _ ->
-                                        Text.hPutStrLn stderr
-                                            (roleMuted color (glyphOk <> "conversation cleared"))
+                                        pure "conversation cleared"
                                     PersistenceActive handle -> do
                                         let turn = SessionTurn
                                                 { turnAt = now
@@ -1834,12 +1943,13 @@ replWithDraft env@SessionEnv
                                         writeSessionMeta handle'.sessionMetaPath meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
-                                        Text.hPutStrLn stderr
-                                            (roleMuted color
-                                                (glyphOk
-                                                    <> "conversation cleared (session "
-                                                    <> meta.metaId
-                                                    <> ")"))
+                                        pure
+                                            ("conversation cleared (session "
+                                                <> meta.metaId
+                                                <> ")")
+                        displayInfo message $
+                            Text.hPutStrLn stderr
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplNew -> do
                         sessionReset
@@ -1847,9 +1957,11 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled -> do
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        (glyphOk <> "started a fresh conversation"))
+                                displayInfo "started a fresh conversation" $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphOk
+                                                <> "started a fresh conversation"))
                                 continue
                             PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
@@ -1905,9 +2017,11 @@ replWithDraft env@SessionEnv
                                 setCliWindowTitle tty stdout
                                     (cliWindowTitle meta.metaCwd
                                         (Just meta.metaTitle))
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        (glyphOk <> "new session: " <> meta.metaId))
+                                let message = "new session: " <> meta.metaId
+                                displayInfo message $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphOk <> message))
                                 continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
@@ -1939,9 +2053,11 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled ->
-                                putTextLn stderr
-                                    (roleError color
-                                        "cannot rename a session that is not persisted")
+                                displayError
+                                    "cannot rename a session that is not persisted" $
+                                    putTextLn stderr
+                                        (roleError color
+                                            "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
                                 readIORef slotRef >>= \case
                                     PersistencePending pending -> do
@@ -1949,9 +2065,11 @@ replWithDraft env@SessionEnv
                                             { createTitleHint = Just title
                                             , createTitleIsManual = True
                                             })
-                                        putTextLn stderr
-                                            (roleMuted color
-                                                (glyphOk <> "session title: " <> title))
+                                        let message = "session title: " <> title
+                                        displayInfo message $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk <> message))
                                     PersistenceActive handle -> do
                                         invalidateSessionTitles
                                             env.sessionTitleManager
@@ -1962,18 +2080,23 @@ replWithDraft env@SessionEnv
                                         setCliWindowTitle tty stdout
                                             (cliWindowTitle updated.sessionMeta.metaCwd
                                                 (Just updated.sessionMeta.metaTitle))
-                                        putTextLn stderr
-                                            (roleMuted color
-                                                (glyphOk <> "session title: "
-                                                    <> updated.sessionMeta.metaTitle))
+                                        let message =
+                                                "session title: "
+                                                    <> updated.sessionMeta.metaTitle
+                                        displayInfo message $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk <> message))
                         continue
                     ReplRenameAuto -> do
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled ->
-                                putTextLn stderr
-                                    (roleError color
-                                        "cannot rename a session that is not persisted")
+                                displayError
+                                    "cannot rename a session that is not persisted" $
+                                    putTextLn stderr
+                                        (roleError color
+                                            "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
                                 readIORef slotRef >>= \case
                                     PersistencePending pending -> do
@@ -1981,9 +2104,12 @@ replWithDraft env@SessionEnv
                                             { createTitleHint = Nothing
                                             , createTitleIsManual = False
                                             })
-                                        putTextLn stderr
-                                            (roleMuted color
-                                                (glyphOk <> "automatic session titles enabled"))
+                                        displayInfo
+                                            "automatic session titles enabled" $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk
+                                                        <> "automatic session titles enabled"))
                                     PersistenceActive handle -> do
                                         invalidateSessionTitles
                                             env.sessionTitleManager
@@ -2003,21 +2129,33 @@ replWithDraft env@SessionEnv
                                                         updated.sessionMeta.metaId
                                                         1
                                                         source
-                                        putTextLn stderr
-                                            (roleMuted color
-                                                (glyphOk <> "automatic session titles enabled"))
+                                        displayInfo
+                                            "automatic session titles enabled" $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk
+                                                        <> "automatic session titles enabled"))
                         continue
                     ReplLogin -> do
                         color <- resolveColor stderr
                         legacy (runLoginManager color)
                         continue
                     ReplUsage -> do
-                        legacy
-                            (showAccountUsage
-                                provider tokenProvider openAiPool)
+                        report <-
+                            showAccountUsage
+                                provider tokenProvider openAiPool
+                        displayInfo report (Text.putStrLn report)
                         continue
                     ReplReloadAuth -> do
-                        reloadAuth provider tokenProvider
+                        reloadResult <- reloadAuth provider tokenProvider
+                        color <- resolveColor stderr
+                        case reloadResult of
+                            Left err ->
+                                displayError err $
+                                    putTextLn stderr (roleError color err)
+                            Right message ->
+                                displayInfo message $
+                                    putTextLn stderr (roleMuted color message)
                         continue
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
@@ -2045,6 +2183,26 @@ replWithDraft env@SessionEnv
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    copyCommand label missing payload = case payload of
+        Nothing ->
+            displayError missing do
+                color <- resolveColor stderr
+                Text.hPutStrLn stderr (roleError color missing)
+        Just value -> do
+            copied <- copyTerminalClipboard terminal stdout value
+            if copied
+                then
+                    let message = "copied " <> label
+                    in displayInfo message do
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr
+                            (roleSuccess color (glyphOk <> message))
+                else
+                    displayError "terminal clipboard is unavailable" do
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr
+                            (roleError color
+                                "terminal clipboard is unavailable")
 
 modelChoice
     :: Maybe FullscreenRuntime
@@ -2077,6 +2235,38 @@ modelChoice fullscreen color provider current = case fullscreen of
                         pure (Just (options !! index))
                 _ -> pure Nothing
 
+agentChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> AgentTarget
+    -> [AgentEntry]
+    -> IO (Maybe AgentTarget)
+agentChoice fullscreen color selected entries = case fullscreen of
+    Nothing -> pickAgentViewport color selected entries
+    Just runtime -> do
+        let initial =
+                fromMaybe 0 $
+                    lookup selected
+                        [ (entry.agentTarget, index)
+                        | (index, entry) <- zip [0 ..] entries
+                        ]
+            rows =
+                [ (entry.agentPath <> " · " <> entry.agentStatus, preview entry)
+                | entry <- entries
+                ]
+            preview entry =
+                fromMaybe "(no transcript)" $
+                    case filter (not . Text.null . Text.strip)
+                        entry.agentTranscript of
+                        line : _ -> Just line
+                        [] -> Nothing
+        requestFullscreenChoice runtime "Agents" initial rows >>= \case
+            Just index
+                | index >= 0
+                , index < length entries ->
+                    pure (Just (entries !! index).agentTarget)
+            _ -> pure Nothing
+
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
     -> PlanModeHooks
@@ -2107,9 +2297,8 @@ showAccountUsage
     :: Provider
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
-    -> IO ()
+    -> IO Text
 showAccountUsage provider tokenProvider openAiPool = do
-    color <- resolveColor stdout
     now <- getCurrentTime
     case provider of
         OpenAIProvider ->
@@ -2117,20 +2306,19 @@ showAccountUsage provider tokenProvider openAiPool = do
                 Just pool -> do
                     snapshots <- OpenAI.snapshotAccounts pool
                     lines_ <- mapM fetchSnapshot snapshots
-                    Text.putStrLn (formatUsageReport color now lines_)
+                    pure (formatUsageReport False now lines_)
                 Nothing ->
                     case tokenProvider of
                         Just provider_ ->
                             getNextToken provider_ Nothing >>= \case
                                 Left err ->
-                                    Text.putStrLn
-                                        (roleError color
-                                            ("usage: " <> Text.pack (show err)))
+                                    pure
+                                        ("usage: " <> Text.pack (show err))
                                 Right credential -> do
                                     result <- fetchUsage
                                         credential.accessToken credential.accountId
-                                    Text.putStrLn $
-                                        formatUsageReport color now
+                                    pure $
+                                        formatUsageReport False now
                                             [ AccountUsageLine
                                                 { usageAccountId = credential.accountId
                                                 , usageCooldownUntil = Nothing
@@ -2138,12 +2326,11 @@ showAccountUsage provider tokenProvider openAiPool = do
                                                 }
                                             ]
                         Nothing ->
-                            Text.putStrLn
-                                (roleMuted color "usage: no OpenAI credentials loaded")
+                            pure "usage: no OpenAI credentials loaded"
         _ ->
-            Text.putStrLn $
-                roleMuted color
-                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
+            pure
+                "usage: ChatGPT Codex windows only \
+                \(xAI/OpenRouter have no account usage API here)"
 
 fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
 fetchSnapshot snapshot = do
@@ -2155,19 +2342,6 @@ fetchSnapshot snapshot = do
         , usageCooldownUntil = snapshot.snapshotCooldownUntil
         , usageResult = result
         }
-copyMissing :: Text -> IO ()
-copyMissing message = do
-    color <- resolveColor stderr
-    Text.hPutStrLn stderr (roleError color message)
-
-copyValue :: TerminalCapabilities -> Text -> Text -> IO ()
-copyValue terminal label payload = do
-    copied <- copyTerminalClipboard terminal stdout payload
-    color <- resolveColor stderr
-    Text.hPutStrLn stderr $
-        if copied
-            then roleSuccess color (glyphOk <> "copied " <> label)
-            else roleError color "terminal clipboard is unavailable"
 applyModelChange
     :: Provider
     -> Text
@@ -2175,9 +2349,8 @@ applyModelChange
     -> RenderConfig
     -> IORef (Maybe Text)
     -> Persistence
-    -> IO ()
+    -> IO Text
 applyModelChange provider name paramsRef render previous persist = do
-    color <- resolveColor stdout
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
     clearedChain <- case provider of
@@ -2185,13 +2358,6 @@ applyModelChange provider name paramsRef render previous persist = do
             atomicModifyIORef' previous \prev ->
                 (Nothing, isJust prev)
         _ -> pure False
-    if clearedChain
-        then Text.putStrLn
-            (roleMuted color
-                (glyphOk <> "model set to " <> name
-                    <> " (conversation continued locally)"))
-        else Text.putStrLn
-            (roleMuted color (glyphOk <> "model set to " <> name))
     case persist of
         PersistenceDisabled -> pure ()
         PersistenceEnabled slotRef -> do
@@ -2205,6 +2371,12 @@ applyModelChange provider name paramsRef render previous persist = do
                     writeSessionMeta handle.sessionMetaPath meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
+    pure $
+        "model set to "
+            <> name
+            <> if clearedChain
+                then " (conversation continued locally)"
+                else ""
 
 requestModelProviderSwitch
     :: ModelOption
@@ -2413,11 +2585,10 @@ markUnavailable provider unavailable
     | provider `elem` unavailable = unavailable
     | otherwise = unavailable <> [provider]
 
-reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
+reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
 reloadAuth provider = \case
-    Nothing -> do
-        color <- resolveColor stderr
-        putTextLn stderr $ roleMuted color $
+    Nothing ->
+        pure $ Right $
             "reload-auth: OpenAI WebSocket auth is fixed for this process; "
                 <> "restart after refreshing ~/.codex/auth.json "
                 <> "(OAuth pools already rotate on handshake failure)"
@@ -2433,13 +2604,11 @@ reloadAuth provider = \case
                 }
             , failure = AccountAuthenticationRejected
             }) >>= \case
-            Left err -> do
-                color <- resolveColor stderr
-                putTextLn stderr $ roleError color $
+            Left err ->
+                pure $ Left $
                     "reload-auth failed: " <> Text.pack (show err)
-            Right credential -> do
-                color <- resolveColor stdout
-                Text.putStrLn $ roleSuccess color $
+            Right credential ->
+                pure $ Right $
                     "auth reloaded ("
                         <> providerSlug provider
                         <> " account "
@@ -2475,27 +2644,30 @@ enterPlanFromSlash env@SessionEnv
     } maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
+    let report message minimal = case fullscreen of
+            Nothing -> putTextLn stderr (roleMuted color minimal)
+            Just runtime -> emitUiEvent runtime (UiSystemMessage message)
     case persist of
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+            report
+                ("session: " <> handle.sessionMeta.metaId)
+                (glyphSession <> "session: " <> handle.sessionMeta.metaId)
         PersistenceDisabled -> pure ()
     case maybeDescription of
         Nothing -> do
             writeIORef planMode.planStateRef PlanPending
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession
-                        <> "plan mode armed; send a prompt to activate (or /plan <description>)"))
+            let message =
+                    "plan mode armed; send a prompt to activate \
+                    \(or /plan <description>)"
+            report message (glyphSession <> message)
             pure Nothing
         Just description -> do
             activatePlanMode planMode
             path <- planFilePath planMode
-            putTextLn stderr
-                (roleMuted color (glyphSession <> "plan mode on (" <> toText path <> ")"))
+            let message = "plan mode on (" <> toText path <> ")"
+            report message (glyphSession <> message)
             writeIORef printed False
             case fullscreen of
                 Nothing -> pure ()
@@ -2572,9 +2744,10 @@ queueAttachedImages
     :: IORef [ImageAttachment]
     -> IORef Int
     -> Bool
+    -> Bool
     -> [ImageAttachment]
-    -> IO ()
-queueAttachedImages attachmentsRef previewIdRef color images = do
+    -> IO Text
+queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
     modifyIORef' attachmentsRef (<> images)
     pending <- readIORef attachmentsRef
     let sizes =
@@ -2582,47 +2755,49 @@ queueAttachedImages attachmentsRef previewIdRef color images = do
                 [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
                 | img <- images
                 ]
-    putImagePreview previewIdRef color images
-    Text.putStrLn
-        (roleMuted color
-            (glyphOk
-                <> "attached "
-                <> sizes
-                <> " — send with next message ("
-                <> Text.pack (show (length pending))
-                <> " queued)"))
+    when showPreview (putImagePreview previewIdRef color images)
+    pure $
+        "attached "
+            <> sizes
+            <> " — send with next message ("
+            <> Text.pack (show (length pending))
+            <> " queued)"
 
 queueClipboardImages
     :: IORef [ImageAttachment]
     -> IORef Int
     -> Bool
     -> Bool
-    -> IO ()
-queueClipboardImages attachmentsRef previewIdRef color errColor = do
+    -> IO (Either Text Text)
+queueClipboardImages
+    attachmentsRef
+    previewIdRef
+    color
+    showPreview = do
     imagesResult <- readClipboardImages
     case imagesResult of
         Right images@(_:_) ->
-            queueAttachedImages attachmentsRef previewIdRef color images
+            Right <$> queueAttachedImages
+                attachmentsRef previewIdRef color showPreview images
         Right [] ->
-            Text.hPutStrLn stderr
-                (roleError errColor "no image found on the clipboard")
+            pure (Left "no image found on the clipboard")
         Left err -> reportClipboardImageError err
   where
     reportClipboardImageError err =
         readClipboard >>= \case
             ClipboardText _ ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        "clipboard has text, not an image (paste text normally into the prompt)")
+                pure $ Left
+                    "clipboard has text, not an image \
+                    \(paste text normally into the prompt)"
             ClipboardPaths paths ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        ("clipboard has file path(s), but no loadable image: "
-                            <> Text.intercalate ", " (map Text.pack paths)))
+                pure $ Left
+                    ("clipboard has file path(s), but no loadable image: "
+                        <> Text.intercalate ", " (map Text.pack paths))
             ClipboardEmpty ->
-                Text.hPutStrLn stderr (roleError errColor err)
+                pure (Left err)
             ClipboardImage image ->
-                queueAttachedImages attachmentsRef previewIdRef color [image]
+                Right <$> queueAttachedImages
+                    attachmentsRef previewIdRef color showPreview [image]
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do
