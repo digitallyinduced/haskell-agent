@@ -134,6 +134,32 @@ spec = describe "fullscreen UI reducer" do
             block : _ -> block.blockExpanded `shouldBe` False
             [] -> expectationFailure "expected selected blocks"
 
+    it "selects a clicked block and follows only at the tail" do
+        let populated =
+                apply
+                    [ UiUserSubmitted "one"
+                    , UiUserSubmitted "two"
+                    , UiUserSubmitted "three"
+                    ]
+            blocks = Foldable.toList populated.uiBlocks
+        case blocks of
+            first : _ : lastBlock : [] -> do
+                let firstSelected =
+                        reduceUi (UiSelectBlock first.blockId) populated
+                    lastSelected =
+                        reduceUi (UiSelectBlock lastBlock.blockId) firstSelected
+                firstSelected.uiSelectedBlock
+                    `shouldBe` Just first.blockId
+                firstSelected.uiFollow `shouldBe` False
+                lastSelected.uiSelectedBlock
+                    `shouldBe` Just lastBlock.blockId
+                lastSelected.uiFollow `shouldBe` True
+                let resumed = reduceUi (UiSetFollow True) firstSelected
+                resumed.uiSelectedBlock
+                    `shouldBe` Just lastBlock.blockId
+                resumed.uiFollow `shouldBe` True
+            _ -> expectationFailure "expected three blocks"
+
     it "deletes the previous word for command/option-backspace" do
         deleteWordBefore "hello brave world" 17
             `shouldBe` ("hello brave ", 12)
