@@ -66,6 +66,7 @@ library
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
+                    , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
