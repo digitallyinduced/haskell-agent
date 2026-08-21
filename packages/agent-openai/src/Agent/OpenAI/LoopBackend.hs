@@ -29,7 +29,7 @@ import Agent.OpenAI.WebSocketClient
     , sendWsRequestWithEvents
     , withCodexWsRetrying
     )
-import Agent.Provider (TokenProvider)
+import Agent.Provider (TokenProvider, accountFailureFromApiError)
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseToTurnOutput
@@ -41,6 +41,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Control.Concurrent (threadDelay)
+import Control.Exception.Safe (onException)
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -117,13 +118,15 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
         emittedLoopEvent <- newIORef False
         result <- sendCurrent request previousResponseId
             (trackOutput emittedLoopEvent onEvent)
+            `onException` writeIORef connectionHealthy False
         case result of
-            Left ConnectionError {} -> do
-                writeIORef connectionHealthy False
-                emitted <- readIORef emittedLoopEvent
-                if emitted
-                    then pure result
-                    else sendFresh request previousResponseId onEvent
+            Left err
+                | isDeadConnectionOrAccount err -> do
+                    writeIORef connectionHealthy False
+                    emitted <- readIORef emittedLoopEvent
+                    if emitted
+                        then pure result
+                        else sendFresh request previousResponseId onEvent
             _ -> pure result
 
     trackOutput emittedLoopEvent onEvent event = do
@@ -131,6 +134,10 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
             then writeIORef emittedLoopEvent True
             else pure ()
         onEvent event
+
+    isDeadConnectionOrAccount = \case
+        ConnectionError {} -> True
+        err -> isJust (accountFailureFromApiError err)
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
 openAiBackendWith

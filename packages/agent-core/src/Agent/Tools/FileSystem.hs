@@ -11,7 +11,7 @@ module Agent.Tools.FileSystem
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Exception.Safe (SomeException, try)
+import Control.Exception.Safe (SomeException, try, tryIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -23,19 +23,20 @@ import System.Directory.OsPath
     , doesDirectoryExist
     , doesPathExist
     , listDirectory
+    , pathIsSymbolicLink
     , removeFile
     , renameFile
     )
 import System.OsPath
     ( equalFilePath
     , isAbsolute
-    , joinPath
     , makeRelative
     , splitDirectories
     , takeDirectory
     , takeFileName
     , (</>)
     )
+import System.IO.Error (isDoesNotExistError)
 
 -- | Resolve a model-supplied path against the tool cwd and reject anything
 -- that canonicalizes outside that tree, including via symlinks.
@@ -46,36 +47,36 @@ resolveUnderCwd env requested = do
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
     exists <- doesPathExist combined
-    resolved <- if exists
-        then canonicalizePath combined
+    resolvedResult <- if exists
+        then Right <$> canonicalizePath combined
         else resolveMissing combined
-    if isInside absCwd resolved
-        then pure (Right resolved)
-        else pure $ Left $
-            "Path escapes the working directory: " <> toText requested
+    pure $ case resolvedResult of
+        Left err -> Left err
+        Right resolved
+            | isInside absCwd resolved -> Right resolved
+            | otherwise -> Left $
+                "Path escapes the working directory: " <> toText requested
 
-resolveMissing :: OsPath -> IO OsPath
-resolveMissing combined = do
-    let parent = takeDirectory combined
-    parentExists <- doesDirectoryExist parent
-    if parentExists
-        then (</> takeFileName combined) <$> canonicalizePath parent
-        else pure (collapseDots combined)
-
-collapseDots :: OsPath -> OsPath
-collapseDots path = joinPath (go [] (splitDirectories path))
-  where
-    go acc [] = reverse acc
-    go acc (part : xs)
-        | part == dot = go acc xs
-        | part == dotDot = case acc of
-            [] -> go acc xs
-            (root : _) | root == slash -> go acc xs
-            (_ : rest) -> go rest xs
-        | otherwise = go (part : acc) xs
-    dot = fromFilePath "."
-    dotDot = fromFilePath ".."
-    slash = fromFilePath "/"
+resolveMissing :: OsPath -> IO (Either Text OsPath)
+resolveMissing path = do
+    tryIO (pathIsSymbolicLink path) >>= \case
+        Right True ->
+            try @_ @SomeException (canonicalizePath path) >>= \case
+                Left err -> pure $ Left $
+                    "Cannot resolve symbolic link: " <> Text.pack (show err)
+                Right resolved -> pure (Right resolved)
+        Left err
+            | not (isDoesNotExistError err) ->
+                pure $ Left ("Cannot inspect path: " <> Text.pack (show err))
+        _ -> do
+            exists <- doesPathExist path
+            if exists
+                then Right <$> canonicalizePath path
+                else do
+                    let parent = takeDirectory path
+                    if equalFilePath parent path
+                        then pure (Right path)
+                        else fmap (</> takeFileName path) <$> resolveMissing parent
 
 isInside :: OsPath -> OsPath -> Bool
 isInside root path

@@ -202,7 +202,6 @@ spec = describe "Agent.Tools.Codex" do
         parsed `shouldSatisfy` \case
             Left err -> "Invalid update line" `Text.isInfixOf` err
             Right _ -> False
-
     it "preserves trailing whitespace in added lines" do
         withTempEnv \env -> do
             _ <- runPatch env $ Text.unlines

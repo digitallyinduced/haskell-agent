@@ -105,7 +105,8 @@ resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
 resolveApprovalPolicy options isTty projectAutoApprove
     | options.optYolo && not options.optNoYolo = ApproveAll
     | options.optNoYolo && not isTty = DenyMutating
-    | not isTty = ApproveAll
+    | not isTty && isOneShot options = ApproveAll
+    | not isTty = DenyMutating
     | options.optNoYolo = PromptMutating
     | projectAutoApprove = ApproveAll
     | otherwise = PromptMutating

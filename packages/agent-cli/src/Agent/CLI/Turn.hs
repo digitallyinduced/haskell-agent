@@ -67,6 +67,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Exception.Safe (onException)
 import Data.IORef
@@ -133,10 +134,16 @@ runOneTurn env@SessionEnv
             if planActive
                 then Just (planModeReminder planPath)
                 else Nothing
-        baseInputs = case pendingAgents of
+        agentsInput = case pendingAgents of
             Just agents | null beforeItems && isNothing prev ->
-                UserMessage agents : inputs
-            _ -> inputs
+                Just (UserMessage agents)
+            _ -> Nothing
+        baseInputs = maybe inputs (: inputs) agentsInput
+        restoreAgentsInput = case agentsInput of
+            Just (UserMessage agents) ->
+                atomicModifyIORef' agentsContext \current ->
+                    (current <|> Just agents, ())
+            _ -> pure ()
         turnInputs0 = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
@@ -173,6 +180,7 @@ runOneTurn env@SessionEnv
                 writeIORef slotRef (PersistenceActive handle')
     case result of
         Left cancelled@(LoopCancelled _) -> do
+            restoreAgentsInput
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
@@ -183,6 +191,7 @@ runOneTurn env@SessionEnv
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
+            restoreAgentsInput
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of

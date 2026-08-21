@@ -360,9 +360,14 @@ receiveWsResponse cc onEvent = do
                                 logStreamStats "completed" itemsRef framesRef bytesRef
                                 parseCompletedResponse items (Aeson.toJSON response)
 
+                            ResponseIncompleteEvent { response } -> do
+                                items <- reverse <$> readIORef itemsRef
+                                logStreamStats "incomplete" itemsRef framesRef bytesRef
+                                parseCompletedResponse items (Aeson.toJSON response)
+
                             ResponseFailedEvent { response } -> do
                                 logStreamStats "response_failed" itemsRef framesRef bytesRef
-                                pure $ Left (ConnectionError (failedResponseMessage response))
+                                pure $ Left (failedResponseError response)
 
                             -- Ignore other event variants (created, added,
                             -- content deltas, and future event types).
@@ -393,6 +398,15 @@ receiveWsResponse cc onEvent = do
             Nothing -> case response.incompleteDetails of
                 Just details -> "response.failed: " <> details.reason
                 Nothing -> "response.failed (no details)"
+
+    failedResponseError response = case response.error of
+        Just responseError ->
+            mkOpenAIError
+                (errorTypeFromText responseError.code)
+                responseError.message
+                (Just responseError.code)
+                Nothing
+        Nothing -> ConnectionError (failedResponseMessage response)
 
 -- | Parse a server @type: error@ event into a structured 'ApiError'.
 --

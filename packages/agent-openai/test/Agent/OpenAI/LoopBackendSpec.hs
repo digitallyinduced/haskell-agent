@@ -452,6 +452,24 @@ spec = do
             readIORef healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 
+        it "reacquires a credential after an in-band usage-limit error" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent =
+                    pure $ Left $ ProviderError UsageLimitReached
+                        "usage limit reached" (Just 120)
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 1
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------

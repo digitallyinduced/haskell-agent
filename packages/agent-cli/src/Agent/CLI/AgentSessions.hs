@@ -38,7 +38,6 @@ import Control.Concurrent.MVar
     , modifyMVar
     , modifyMVar_
     , newMVar
-    , readMVar
     )
 import Control.Exception.Safe (SomeException, try)
 import Control.Monad (forM_)
@@ -72,9 +71,7 @@ import System.Process
     , StdStream(..)
     , createProcess
     , getProcessExitCode
-    , interruptProcessGroupOf
     , proc
-    , terminateProcess
     , waitForProcess
     )
 
@@ -216,42 +213,36 @@ launchSessionTurn manager background policy handle message =
                                                     <> Text.pack (show code)))
 
 sessionProcessStatus :: SessionProcessManager -> Text -> IO Text
-sessionProcessStatus manager sessionId = do
-    processes <- readMVar manager.managedProcesses
-    case Map.lookup sessionId processes of
-        Nothing -> do
-            locked <- doesDirectoryExist
-                (sessionLockPath manager sessionId)
-            pure (if locked then "running" else "idle")
-        Just process ->
-            getProcessExitCode process.managedHandle >>= \case
-                Nothing -> pure "running"
-                Just ExitSuccess -> do
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
-                    pure "completed"
-                Just (ExitFailure code) ->
-                    removePrivateFile process.managedPromptPath >>
-                    releaseSessionLock process.managedLockPath >>
-                    pure ("failed (" <> Text.pack (show code) <> ")")
+sessionProcessStatus manager sessionId =
+    modifyMVar manager.managedProcesses \processes ->
+        case Map.lookup sessionId processes of
+            Nothing -> do
+                locked <- doesDirectoryExist
+                    (sessionLockPath manager sessionId)
+                pure (processes, if locked then "running" else "idle")
+            Just process ->
+                getProcessExitCode process.managedHandle >>= \case
+                    Nothing -> pure (processes, "running")
+                    Just ExitSuccess ->
+                        pure (Map.delete sessionId processes, "completed")
+                    Just (ExitFailure code) ->
+                        pure
+                            ( Map.delete sessionId processes
+                            , "failed (" <> Text.pack (show code) <> ")"
+                            )
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager =
     modifyMVar_ manager.managedProcesses \processes -> do
+        -- Running sessions intentionally outlive the caller. The child
+        -- wrapper owns prompt and lock cleanup.
         forM_ (Map.elems processes) \process -> do
             getProcessExitCode process.managedHandle >>= \case
                 Just _ -> do
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
-                Nothing -> do
-                    _ <- try @_ @SomeException
-                        (interruptProcessGroupOf process.managedHandle)
-                    _ <- try @_ @SomeException
-                        (terminateProcess process.managedHandle)
                     _ <- try @_ @SomeException
                         (waitForProcess process.managedHandle)
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
+                    pure ()
+                Nothing -> pure ()
         pure Map.empty
 
 acquireSessionLock :: SessionHandle -> IO (Either Text FilePath)
