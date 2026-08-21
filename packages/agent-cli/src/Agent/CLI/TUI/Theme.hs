@@ -22,7 +22,7 @@ module Agent.CLI.TUI.Theme
     , thinkingAttr
     , toolAttr
     , userAttr
-    , userCornerAttr
+    , userBorderAttr
     , monochrome
     , solarizedDark
     ) where
@@ -32,7 +32,7 @@ import Data.Bits ((.|.))
 import qualified Graphics.Vty as V
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
-userAttr, userCornerAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
+userAttr, userBorderAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
@@ -41,7 +41,7 @@ headerAttr = attrName "header"
 footerAttr = attrName "footer"
 mutedAttr = attrName "muted"
 userAttr = attrName "user"
-userCornerAttr = attrName "user-corner"
+userBorderAttr = attrName "user-border"
 assistantAttr = attrName "assistant"
 thinkingAttr = attrName "thinking"
 toolAttr = attrName "tool"
@@ -81,7 +81,7 @@ solarizedDark =
         , (userAttr, V.defAttr
             `V.withForeColor` rgb 147 161 161
             `V.withBackColor` rgb 7 54 66)
-        , (userCornerAttr, V.defAttr
+        , (userBorderAttr, V.defAttr
             `V.withForeColor` rgb 7 54 66
             `V.withBackColor` rgb 0 43 54)
         , (assistantAttr, V.defAttr
@@ -152,7 +152,7 @@ monochrome =
         , (footerAttr, V.defAttr)
         , (mutedAttr, V.defAttr)
         , (userAttr, V.defAttr `V.withStyle` V.bold)
-        , (userCornerAttr, V.defAttr)
+        , (userBorderAttr, V.defAttr)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, V.defAttr)
         , (toolAttr, V.defAttr)

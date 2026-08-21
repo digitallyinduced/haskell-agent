@@ -56,7 +56,8 @@ import Brick.BChan
     , newBChan
     , writeBChan
     )
-import Brick.Widgets.Border (borderWithLabel)
+import Brick.Widgets.Border (border, borderWithLabel)
+import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (centerLayer)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
@@ -1055,7 +1056,7 @@ drawBlock color state block =
                 if color
                     then roundedFill
                         Theme.userAttr
-                        Theme.userCornerAttr
+                        Theme.userBorderAttr
                         (txtWrap block.blockBody)
                     else
                         withAttr Theme.userAttr $
@@ -1101,20 +1102,11 @@ drawBlock color state block =
         else rendered
 
 roundedFill :: AttrName -> AttrName -> Widget Name -> Widget Name
-roundedFill fillAttr cornerAttr body =
-    vBox
-        [ roundedRow '▗' '▖'
-        , withAttr fillAttr (padLeftRight 1 body)
-        , roundedRow '▝' '▘'
-        ]
-  where
-    roundedRow left right =
-        vLimit 1 $
-            hBox
-                [ withAttr cornerAttr (txt (Text.singleton left))
-                , withAttr fillAttr (fill ' ')
-                , withAttr cornerAttr (txt (Text.singleton right))
-                ]
+roundedFill fillAttr userBorderAttr body =
+    overrideAttr Border.borderAttr userBorderAttr $
+        withBorderStyle unicodeRounded $
+            border $
+                withAttr fillAttr (padLeftRight 1 body)
 
 cacheableBlock :: UiBlock -> Bool
 cacheableBlock block =
