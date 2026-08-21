@@ -16,7 +16,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.TUI.App
     ( emitUiEvent
     )
-import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
+import Agent.TUI.Model (BlockState(..), UiEvent(..))
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking

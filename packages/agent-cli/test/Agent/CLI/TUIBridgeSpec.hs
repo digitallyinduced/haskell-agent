@@ -2,7 +2,7 @@ module Agent.CLI.TUIBridgeSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.TUI.Bridge
-import Agent.CLI.UI.Model
+import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)

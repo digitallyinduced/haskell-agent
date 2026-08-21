@@ -1,0 +1,152 @@
+-- | Presentation-neutral formatting shared by retained UI state.
+module Agent.TUI.Presentation
+    ( formatSearchReplaceDiff
+    , formatToolOutput
+    , summarizeToolCall
+    ) where
+
+import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , canonicalToolName
+    )
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Foldable as Foldable
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+
+summarizeToolCall :: ToolCall -> Text
+summarizeToolCall call =
+    let verb = toolVerb call.name
+        detail = toolDetail call
+    in if Text.null detail then verb else verb <> " " <> detail
+
+formatSearchReplaceDiff :: Text -> Text
+formatSearchReplaceDiff arguments =
+    let path = jsonTextFieldDefault "file_path" arguments
+        oldText = jsonTextFieldDefault "old_string" arguments
+        newText = jsonTextFieldDefault "new_string" arguments
+        header = case (Text.null oldText, Text.null newText) of
+            (True, False) -> "  create " <> path
+            (False, True) -> "  delete " <> path
+            _ -> ""
+        raw =
+            map ("  -" <>) (Text.lines oldText)
+                <> map ("  +" <>) (Text.lines newText)
+        (shown, hidden)
+            | length raw <= 20 = (raw, 0)
+            | otherwise = (take 20 raw, length raw - 20)
+        more
+            | hidden == 0 = []
+            | otherwise = ["  … " <> Text.pack (show hidden) <> " more"]
+    in Text.intercalate "\n" (filter (not . Text.null) (header : shown <> more))
+
+formatToolOutput :: ToolCall -> Text -> Text
+formatToolOutput call output = case canonicalToolName call.name of
+    "spawn_agent" ->
+        maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
+    "wait_agent" ->
+        fromMaybe output (nonEmptyJsonText "message" output)
+    "list_agents" ->
+        fromMaybe output (formatAgentList output)
+    "interrupt_agent" ->
+        maybe output ("Previous status: " <>)
+            (nonEmptyJsonText "previous_status" output)
+    _ -> output
+
+toolVerb :: Text -> Text
+toolVerb name = case canonicalToolName name of
+    "read_file" -> "Read"
+    "list_dir" -> "Listed"
+    "grep" -> "Searched"
+    "search_replace" -> "Edited"
+    "apply_patch" -> "Edited"
+    "run_terminal_cmd" -> "$"
+    "shell_command" -> "$"
+    "run_ghci" -> "$"
+    "get_task_output" -> "Read"
+    "kill_task" -> "Killed"
+    "task" -> "Ran"
+    "spawn_agent" -> "Spawned agent"
+    "wait_agent" -> "Waited for agent updates"
+    "send_message" -> "Sent message to"
+    "followup_task" -> "Followed up with"
+    "list_agents" -> "Listed agents"
+    "interrupt_agent" -> "Interrupted"
+    "update_plan" -> "Updated"
+    "enter_plan_mode" -> "Entered"
+    "exit_plan_mode" -> "Exited"
+    "ask_user_question" -> "Asked"
+    other -> other
+
+toolDetail :: ToolCall -> Text
+toolDetail call = case canonicalToolName call.name of
+    "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+    "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
+    "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
+    "grep" -> jsonTextFieldDefault "pattern" call.arguments
+    "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
+    "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
+    "update_plan" -> "plan"
+    "enter_plan_mode" -> "enter"
+    "exit_plan_mode" -> "exit"
+    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
+    "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
+    "send_message" -> jsonTextFieldDefault "target" call.arguments
+    "followup_task" -> jsonTextFieldDefault "target" call.arguments
+    "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
+    "list_agents" ->
+        maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
+    _ -> ""
+
+nonEmptyJsonText :: Text -> Text -> Maybe Text
+nonEmptyJsonText key input = jsonTextField key input >>= \value ->
+    let stripped = Text.strip value
+    in if Text.null stripped then Nothing else Just stripped
+
+formatAgentList :: Text -> Maybe Text
+formatAgentList output = do
+    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
+    Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
+    let rows = foldr agentRow [] (Foldable.toList agents)
+    pure $ case rows of
+        [] -> "(no live agents)"
+        _ -> Text.intercalate "\n" rows
+  where
+    agentRow value rest = case value of
+        Aeson.Object agent ->
+            case
+                ( jsonObjectText "agent_name" agent
+                , jsonObjectText "agent_status" agent
+                ) of
+                (Just name, Just status) -> (name <> " · " <> status) : rest
+                (Just name, Nothing) -> name : rest
+                _ -> rest
+        _ -> rest
+
+jsonObjectText :: Text -> Aeson.Object -> Maybe Text
+jsonObjectText key object =
+    case KeyMap.lookup (Key.fromText key) object of
+        Just (Aeson.String value)
+            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
+        _ -> Nothing
+
+firstPatchPath :: Text -> Maybe Text
+firstPatchPath patch =
+    case
+        [ Text.drop (Text.length prefix) line
+        | line <- Text.lines patch
+        , prefix <- ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
+        , prefix `Text.isPrefixOf` line
+        ] of
+        path : _ | not (Text.null path) -> Just path
+        _ -> Nothing
+
+firstLine :: Text -> Text
+firstLine = Text.takeWhile (/= '\n')

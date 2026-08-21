@@ -1,6 +1,6 @@
-module Agent.CLI.TUIMarkdownSpec (spec) where
+module Agent.TUI.MarkdownSpec (spec) where
 
-import Agent.CLI.TUI.Markdown
+import Agent.TUI.Markdown
 import qualified Data.Text as Text
 import Test.Hspec
 

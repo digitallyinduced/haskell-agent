@@ -41,6 +41,7 @@ nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
   agent-core:lib:agent-core \
+  agent-tui:lib:agent-tui \
   agent-responses:lib:agent-responses \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
@@ -72,7 +73,9 @@ If you are only editing `packages/agent-cli/src`:
 cabal repl agent-cli
 ```
 
-Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are linked as built libraries here, so changes in `agent-core` / providers need a repl restart or the multi-package command above.
+Same `withArgs ... run` / `:q` / `:r` loop. Dependency packages are
+linked as built libraries here, so changes in `agent-core` / `agent-tui` /
+providers need a repl restart or the multi-package command above.
 
 ### CLI UI changes
 

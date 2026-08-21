@@ -1,5 +1,5 @@
 -- | Semantic attributes for the retained fullscreen interface.
-module Agent.CLI.TUI.Theme
+module Agent.TUI.Theme
     ( assistantAttr
     , baseAttr
     , borderActiveAttr

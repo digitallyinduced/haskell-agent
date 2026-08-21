@@ -40,13 +40,12 @@ import Agent.CLI.Command
     , slashMenuForWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
-import Agent.CLI.ReplMode (replModeLabel)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
-import qualified Agent.CLI.TUI.Theme as Theme
+import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
-import Agent.CLI.TUI.Markdown (markdownWidget)
-import Agent.CLI.UI.Model
+import Agent.TUI.Markdown (markdownWidget)
+import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -1108,7 +1107,7 @@ drawComposer :: AppState -> Widget Name
 drawComposer appState =
     let focused = state.uiFocus == FocusComposer
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
-        mode = replModeLabel state.uiPrompt.promptMode
+        mode = state.uiPrompt.promptMode
         usage = formatTokenUsage state.uiPrompt.promptUsage
         leading =
             filter (not . Text.null)

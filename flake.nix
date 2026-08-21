@@ -34,6 +34,17 @@
                     ];
                 };
 
+                agentTuiSource = nix-filter.lib {
+                    root = ./packages/agent-tui;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-tui.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentCoreSource = nix-filter.lib {
                     root = ./packages/agent-core;
                     include = [
@@ -113,6 +124,9 @@
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         };
+                        agent-tui = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-tui/package.nix { }) {
+                            src = agentTuiSource;
+                        };
                         agent-cli = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
@@ -126,6 +140,7 @@
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
+                agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
@@ -155,7 +170,7 @@
                       set timeout -1
                       set cabal $env(AGENT_REPL_CABAL)
                       set script $env(AGENT_REPL_SCRIPT)
-                      spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script
+                      spawn -noecho $cabal repl lib:agent-cli lib:agent-tui --repl-options=-ghci-script=$script
                       expect {
                         -re {Ok, [0-9]+ modules? loaded\.} {}
                         eof {
@@ -174,6 +189,7 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-tui = agentTuiPackage;
                 packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
@@ -193,6 +209,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-tui
                         packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
@@ -222,6 +239,7 @@
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-tui = agentTuiPackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
