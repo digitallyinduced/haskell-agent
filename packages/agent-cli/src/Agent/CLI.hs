@@ -436,7 +436,7 @@ runShowSession :: Text -> IO ()
 runShowSession sessionId = do
     home <- getHomeDirectory
     loadSession (sessionsRoot home) sessionId >>= \case
-        Left err -> die err
+        Left err -> die (Text.unpack err)
         Right (meta, turns) -> do
             printSessionSummary meta
             putStrLn ""
@@ -475,7 +475,7 @@ runAgent options transition = do
         Nothing -> pure Nothing
         Just sessionId ->
             loadSession root sessionId >>= \case
-                Left err -> die err
+                Left err -> die (Text.unpack err)
                 Right loaded -> pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
@@ -2210,7 +2210,7 @@ handleResume maybeId persist = do
                 else
                     loadSession root sessionId >>= \case
                         Left err -> do
-                            Text.hPutStrLn stderr (roleError color (Text.pack err))
+                            Text.hPutStrLn stderr (roleError color err)
                             pure Nothing
                         Right _ -> pure (Just (RunResumeSession sessionId))
     case maybeId of
