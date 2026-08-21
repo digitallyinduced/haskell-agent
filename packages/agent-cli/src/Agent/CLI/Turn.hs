@@ -13,6 +13,12 @@ import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
     )
+import Agent.CLI.TUI.App
+    ( FullscreenRuntime
+    , emitUiEvent
+    , withFullscreenSuspended
+    )
+import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
@@ -87,7 +93,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
@@ -110,16 +116,19 @@ runOneTurn env@SessionEnv
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
+    , sessionFullscreen = fullscreen
     , sessionBeginSubagentTurn = beginSubagentTurn
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
     , sessionOnPersisted = onPersisted
-    } promptText inputs =
+    } promptText inputs = do
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
   -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
-  resetCancel config.loopCancel >>
-  (withTurnCancel interrupt config.loopCancel
-    . withEscCancel config.loopCancel escPaused) do
+  resetCancel config.loopCancel
+  withTurnCancel interrupt config.loopCancel $
+    (if isJust fullscreen
+        then id
+        else withEscCancel config.loopCancel escPaused) do
     applyPendingSessionTitles env
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
@@ -133,10 +142,17 @@ runOneTurn env@SessionEnv
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
             writeIORef storeRoot (Just handle.sessionDir)
             when created do
-                color <- resolveColor stderr
-                putTextLn stderr
-                    (roleMuted color
-                        (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+                case fullscreen of
+                    Just runtime ->
+                        emitUiEvent runtime
+                            (UiSystemMessage
+                                ("session: " <> handle.sessionMeta.metaId))
+                    Nothing -> do
+                        color <- resolveColor stderr
+                        putTextLn stderr
+                            (roleMuted color
+                                (glyphSession <> "session: "
+                                    <> handle.sessionMeta.metaId))
             titleTurns <- readIORef env.sessionTitleTurnCount
             when
                 ( titleTurns == 0
@@ -205,10 +221,19 @@ runOneTurn env@SessionEnv
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
-            color <- resolveColor stderr
-            putTextLn stderr (formatLoopErrorColored color cancelled)
             model <- readIORef render.renderModelRef
-            putTextLn stderr (formatTurnStatus color "cancelled" (elapsedDetail model))
+            case fullscreen of
+                Just runtime -> do
+                    emitUiEvent runtime
+                        (UiTurnEnded BlockCancelled)
+                    emitUiEvent runtime
+                        (UiSystemMessage
+                            ("cancelled · " <> elapsedDetail model))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr (formatLoopErrorColored color cancelled)
+                    putTextLn stderr
+                        (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
@@ -219,6 +244,11 @@ runOneTurn env@SessionEnv
                 LoopTransport apiError
                     | length afterItems == length beforeItems
                     , isProviderUnavailable apiError -> do
+                        case fullscreen of
+                            Nothing -> pure ()
+                            Just runtime ->
+                                emitUiEvent runtime
+                                    (UiTurnEnded BlockFailed)
                         finishTerminal terminal wallStarted finishedAt 1
                             "Agent provider unavailable"
                         planState <- readIORef planMode.planStateRef
@@ -231,10 +261,22 @@ runOneTurn env@SessionEnv
                 _ -> do
                     finishTerminal terminal wallStarted finishedAt 1 "Agent turn failed"
                     writeIORef transcriptRef beforeItems
-                    color <- resolveColor stderr
-                    putTextLn stderr (formatLoopErrorColored color err)
                     model <- readIORef render.renderModelRef
-                    putTextLn stderr (formatTurnStatus color "error" (elapsedDetail model))
+                    case fullscreen of
+                        Just runtime ->
+                            do
+                                emitUiEvent runtime
+                                    (UiTurnEnded BlockFailed)
+                                emitUiEvent runtime
+                                    (UiErrorMessage
+                                        (Text.pack (show err)
+                                            <> "\n"
+                                            <> elapsedDetail model))
+                        Nothing -> do
+                            color <- resolveColor stderr
+                            putTextLn stderr (formatLoopErrorColored color err)
+                            putTextLn stderr
+                                (formatTurnStatus color "error" (elapsedDetail model))
                     persistIncomplete (Text.pack (show err))
                     pure TurnFailed
         Right loopResult -> do
@@ -243,7 +285,6 @@ runOneTurn env@SessionEnv
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
             do
-                color <- resolveColor stderr
                 model <- readIORef render.renderModelRef
                 let turns = Text.pack (show loopResult.turnsUsed)
                     unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
@@ -252,15 +293,22 @@ runOneTurn env@SessionEnv
                         if Text.null usageDetail
                             then model <> " · " <> turns <> unit
                             else model <> " · " <> turns <> unit <> " · " <> usageDetail
-                putTextLn stderr
-                    (formatTurnStatus color "ok" (elapsedDetail extra))
-            followUp <- handleProposedPlan planMode loopResult.finalText
+                    detail = elapsedDetail extra
+                case fullscreen of
+                    Just runtime ->
+                        emitUiEvent runtime (UiSetNotice (Just detail))
+                    Nothing -> do
+                        color <- resolveColor stderr
+                        putTextLn stderr
+                            (formatTurnStatus color "ok" detail)
+            followUp <- handleProposedPlan fullscreen planMode loopResult.finalText
             printedText <- readIORef printed
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
             writeIORef lastAssistantRef assistantText
-            case (printedText, assistantText) of
-                (False, Just text) | not (Text.null (Text.strip text)) -> do
+            case (fullscreen, printedText, assistantText) of
+                (Just _, _, _) -> pure ()
+                (Nothing, False, Just text) | not (Text.null (Text.strip text)) -> do
                     useColor <- resolveColor stdout
                     putTextLn stdout (renderAssistantText useColor text)
                 _ -> pure ()
@@ -366,8 +414,12 @@ finishTerminal terminal started finished exitCode message = do
     when (exitCode /= 0 || seconds >= 10) $
         notifyTerminal terminal stdout message
 
-handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
-handleProposedPlan planMode = \case
+handleProposedPlan
+    :: Maybe FullscreenRuntime
+    -> PlanModeEnv
+    -> Maybe Text
+    -> IO (Maybe Text)
+handleProposedPlan fullscreen planMode = \case
     Nothing -> pure Nothing
     Just text -> do
         active <- isPlanModeActive planMode
@@ -375,7 +427,10 @@ handleProposedPlan planMode = \case
             (True, Just planBody) -> do
                 _ <- writePlanMarkdown planMode planBody
                 let PlanModeHooks{ planDecideExit = decideExit } = planMode.planHooks
-                decision <- decideExit planBody
+                decision <- case fullscreen of
+                    Nothing -> decideExit planBody
+                    Just runtime ->
+                        withFullscreenSuspended runtime (decideExit planBody)
                 case decision of
                     PlanApprove -> do
                         deactivatePlanMode planMode

@@ -12,6 +12,7 @@ module Agent.CLI.Interrupt
     , withTurnCancel
     , noteIdleCtrlC
     , isWrappedUserInterrupt
+    , noteFullscreenCtrlC
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel)
@@ -122,8 +123,31 @@ noteIdleCtrlC state = do
             writeIORef state.interruptLastWarn Nothing
             pure QuitProcess
         SoftCancel ->
-            -- Idle context never decides SoftCancel; keep the match total.
             pure ContinuePrompt
+
+-- | Apply the same double-Ctrl-C policy when a retained TUI owns stdin.
+-- The caller renders the returned decision in its own UI.
+noteFullscreenCtrlC :: InterruptState -> IO CtrlCDecision
+noteFullscreenCtrlC state = do
+    now <- getCurrentTime
+    mCancel <- readIORef state.interruptActiveCancel
+    withinWindow <- isWithinWarnWindow state now
+    context <- case mCancel of
+        Nothing -> pure Idle
+        Just cancel ->
+            TurnActive <$> isCancelled cancel
+    let decision = decideCtrlC context withinWindow
+    case decision of
+        SoftCancel -> do
+            case mCancel of
+                Just cancel -> requestCancel cancel
+                Nothing -> pure ()
+            writeIORef state.interruptLastWarn (Just now)
+        WarnExit ->
+            writeIORef state.interruptLastWarn (Just now)
+        ForceExit ->
+            writeIORef state.interruptLastWarn Nothing
+    pure decision
 
 onSigInt :: ThreadId -> InterruptState -> IO ()
 onSigInt mainTid state = do
