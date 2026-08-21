@@ -1516,22 +1516,35 @@ replWithDraft env@SessionEnv
                     putStr "\ESC[2A\r\ESC[J"
                     hFlush stdout
             continueWith keptDraft
-        ReplClipboardPaste keptDraft -> do
-            queueClipboardImages
-                attachmentsRef
-                previewIdRef
-                stdoutColor
-                (isNothing fullscreen)
-                >>= \case
-                    Left err ->
-                        displayError err do
-                            errColor <- resolveColor stderr
-                            Text.hPutStrLn stderr (roleError errColor err)
-                    Right message ->
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted stdoutColor
-                                    (glyphOk <> message))
+        ReplClipboardPaste keptDraft clipboardPasteImages -> do
+            case clipboardPasteImages of
+                Just images@(_:_) -> do
+                    message <- queueAttachedImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        images
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted stdoutColor
+                                (glyphOk <> message))
+                _ ->
+                    queueClipboardImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        >>= \case
+                            Left err ->
+                                displayError err do
+                                    errColor <- resolveColor stderr
+                                    Text.hPutStrLn stderr (roleError errColor err)
+                            Right message ->
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted stdoutColor
+                                            (glyphOk <> message))
             continueWith keptDraft
         ReplChooseModel keptDraft ->
             chooseModel (continueWith keptDraft)
@@ -2925,8 +2938,8 @@ setNativeProgress handle active = do
         Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
--- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
--- (Kitty graphics or iTerm2 OSC 1337, matching Grok Build).
+-- | Queue clipboard / Finder-paste images and optionally draw an in-terminal
+-- thumbnail. The caller reports the returned message through the active UI.
 queueAttachedImages
     :: IORef [ImageAttachment]
     -> IORef Int

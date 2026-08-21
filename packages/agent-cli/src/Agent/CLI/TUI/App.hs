@@ -12,6 +12,10 @@ module Agent.CLI.TUI.App
     , withFullscreenSuspended
     ) where
 
+import Agent.CLI.Clipboard
+    ( nonEmptyClipboardImages
+    , readClipboardImages
+    )
 import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
@@ -246,6 +250,12 @@ runFullscreen runtime workerAction = do
         buildVty = do
             vty <- Vty.mkVty vtyConfig
             let output = V.outputIface vty
+            -- Without this mode terminals paste image clipboard fallbacks
+            -- (paths, URLs, or other text representations) as ordinary key
+            -- events, so the composer renders them as text. Vty turns the
+            -- bracketed sequence into one EvPaste that we can classify.
+            when (V.supportsMode output V.BracketedPaste) $
+                V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
             pure vty
@@ -673,7 +683,7 @@ drawComposer state =
         leading =
             filter (not . Text.null)
                 [ if state.uiPrompt.promptAttachments > 0
-                    then "📎 "
+                    then "image "
                         <> Text.pack
                             (show state.uiPrompt.promptAttachments)
                     else ""
@@ -1242,8 +1252,9 @@ handleComposerKey event = do
             | V.MCtrl `elem` modifiers ->
                 moveCursor 1
         V.EvKey (V.KChar 'v') modifiers
-            | V.MCtrl `elem` modifiers ->
-                submitRaw (ReplClipboardPaste ui.uiDraft)
+            | V.MCtrl `elem` modifiers
+                || V.MMeta `elem` modifiers ->
+                submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
         V.EvKey V.KDel [] ->
             deleteAfter
         V.EvKey V.KLeft modifiers
@@ -1269,8 +1280,15 @@ handleComposerKey event = do
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
-            insertText (decodePaste bytes)
-            modify' \current -> current { appPasted = True }
+            images <- liftIO $
+                nonEmptyClipboardImages <$> readClipboardImages
+            case images of
+                Just attached ->
+                    submitRaw
+                        (ReplClipboardPaste ui.uiDraft (Just attached))
+                Nothing -> do
+                    insertText (decodePaste bytes)
+                    modify' \current -> current { appPasted = True }
         _ -> pure ()
   where
     submitRaw replLine = do

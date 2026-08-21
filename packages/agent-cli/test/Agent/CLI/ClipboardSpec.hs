@@ -38,6 +38,16 @@ spec = do
                     else result `shouldBe`
                         Left "clipboard images are not supported on this platform yet"
 
+    describe "nonEmptyClipboardImages" do
+        it "keeps only successful non-empty image reads" do
+            let image = ImageAttachment "image/png" "png-bytes"
+            nonEmptyClipboardImages (Right [image])
+                `shouldBe` Just [image]
+            nonEmptyClipboardImages (Right [])
+                `shouldBe` Nothing
+            nonEmptyClipboardImages (Left "not an image")
+                `shouldBe` Nothing
+
     describe "loadImagesFromPastedText" do
         it "returns Nothing for ordinary prompt text" do
             result <- loadImagesFromPastedText "fix the bug in Main.hs"
