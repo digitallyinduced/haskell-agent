@@ -43,12 +43,27 @@ module Agent.Subagents
 
 import Agent.Cancel (CancelFlag, newCancelFlag, requestCancel)
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
+import Agent.Subagents.Format
+    ( encodeStatus
+    , formatCompletionNotice
+    , isFinalStatus
+    )
+import Agent.Subagents.Types
+    ( RunSubagent
+    , SubagentConfig(..)
+    , SubagentId(..)
+    , SubagentSpawnEnv(..)
+    , SubagentStatus(..)
+    , defaultMaxConcurrent
+    , defaultSubagentConfig
+    , defaultWaitTimeoutMs
+    , maxWaitTimeoutMs
+    , minWaitTimeoutMs
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
 import Control.Exception.Safe (SomeException, tryAny)
-import Data.Aeson ((.=), object)
-import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Map.Strict (Map)
@@ -68,67 +83,6 @@ import Agent.Subagents.TaskPath
     , validateTaskName
     )
 import System.IO.Unsafe (unsafePerformIO)
-
-newtype SubagentId = SubagentId { unSubagentId :: Text }
-    deriving (Eq, Ord, Show)
-
-instance Aeson.ToJSON SubagentId where
-    toJSON (SubagentId text) = Aeson.String text
-
-instance Aeson.FromJSON SubagentId where
-    parseJSON = Aeson.withText "SubagentId" (pure . SubagentId)
-
-data SubagentStatus
-    = Pending
-    | Running
-    | Completed !(Maybe Text)
-    | Errored !Text
-    | Interrupted
-    | Closed
-    | NotFound
-    deriving (Eq, Show)
-
-data SubagentConfig = SubagentConfig
-    { maxConcurrent :: !Int
-      -- | 'Nothing' means unlimited nesting depth.
-    , maxDepth :: !(Maybe Int)
-    } deriving (Eq, Show)
-
-defaultMaxConcurrent :: Int
-defaultMaxConcurrent = 6
-
-defaultSubagentConfig :: SubagentConfig
-defaultSubagentConfig = SubagentConfig
-    { maxConcurrent = defaultMaxConcurrent
-    , maxDepth = Nothing
-    }
-
-minWaitTimeoutMs :: Int
-minWaitTimeoutMs = 10000
-
-maxWaitTimeoutMs :: Int
-maxWaitTimeoutMs = 3600 * 1000
-
-defaultWaitTimeoutMs :: Int
-defaultWaitTimeoutMs = 30000
-
-data SubagentSpawnEnv = SubagentSpawnEnv
-    { subId :: !SubagentId
-    , subDepth :: !Int
-    , subParentId :: !(Maybe SubagentId)
-    , subCwd :: !FilePath
-    , subCancel :: !CancelFlag
-    }
-
--- | CLI/provider callback that runs one child agent loop for a prompt.
--- The 'Maybe Text' is the child's previous response id from an earlier turn
--- (so 'send_input' continues the same conversation).
-type RunSubagent =
-    SubagentSpawnEnv
-    -> Maybe Text
-    -> Text
-    -> (LoopEvent -> IO ())
-    -> IO (Either LoopError LoopResult)
 
 data SubagentRecord = SubagentRecord
     { recordId :: !SubagentId
@@ -607,47 +561,6 @@ listLive registry = atomically do
             status <- readTVar record.recordStatus
             pure (record.recordId, status))
         (Map.elems agents)
-
-isFinalStatus :: SubagentStatus -> Bool
-isFinalStatus = \case
-    Completed _ -> True
-    Errored _ -> True
-    Interrupted -> True
-    Closed -> True
-    NotFound -> True
-    Pending -> False
-    Running -> False
-
-encodeStatus :: SubagentStatus -> Aeson.Value
-encodeStatus = \case
-    Pending -> Aeson.String "pending_init"
-    Running -> Aeson.String "running"
-    Interrupted -> Aeson.String "interrupted"
-    Closed -> Aeson.String "shutdown"
-    NotFound -> Aeson.String "not_found"
-    Completed text -> object ["completed" .= text]
-    Errored err -> object ["errored" .= err]
-
--- | Parent-facing notice when a child finishes without an active wait_agent.
-formatCompletionNotice :: SubagentId -> SubagentStatus -> Text
-formatCompletionNotice agentId status =
-    "<subagent_notification>\n"
-        <> "agent_id: "
-        <> agentId.unSubagentId
-        <> "\nstatus: "
-        <> statusSummary status
-        <> "\n</subagent_notification>"
-
-statusSummary :: SubagentStatus -> Text
-statusSummary = \case
-    Completed (Just text) -> "completed\nfinal: " <> text
-    Completed Nothing -> "completed"
-    Errored err -> "errored\nerror: " <> err
-    Interrupted -> "interrupted"
-    Closed -> "shutdown"
-    Pending -> "pending_init"
-    Running -> "running"
-    NotFound -> "not_found"
 
 newSubagentId :: IO SubagentId
 newSubagentId = do

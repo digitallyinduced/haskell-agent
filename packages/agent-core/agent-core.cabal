@@ -40,7 +40,9 @@ library
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.Subagents
+                    , Agent.Subagents.Format
                     , Agent.Subagents.TaskPath
+                    , Agent.Subagents.Types
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
