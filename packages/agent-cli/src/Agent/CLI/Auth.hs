@@ -5,6 +5,7 @@ module Agent.CLI.Auth
     , loadAuth
     , openAIOAuthClientId
     , openaiAuthStateFromJson
+    , probeLoadedAuth
     , reloadableFileCredentialProvider
     , xaiOAuthClientId
     ) where
@@ -85,6 +86,23 @@ loadAuth requested = runExceptT do
                 XAIProvider -> loadXai
                 OpenAIProvider -> loadOpenAi
                 OpenRouterProvider -> loadOpenRouter
+
+-- | Ask the token source whether it has a usable credential now without
+-- making a model request, preserving a successful checkout for later use.
+probeLoadedAuth :: LoadedAuth -> IO (Either ApiError LoadedAuth)
+probeLoadedAuth loaded = do
+    result <- getNextToken loaded.loadedTokenProvider Nothing
+    case result of
+        Left err -> pure (Left err)
+        Right credential
+            | credential.provider /= loaded.loadedProvider ->
+                pure $ Left $ ProviderError AuthenticationError
+                    "credential provider does not match loaded auth"
+                    Nothing
+            | otherwise -> do
+                tokenProvider <-
+                    seedTokenProvider loaded.loadedTokenProvider credential
+                pure $ Right loaded { loadedTokenProvider = tokenProvider }
 
 detectProvider :: Maybe Provider -> ExceptT Text IO Provider
 detectProvider (Just provider) = pure provider

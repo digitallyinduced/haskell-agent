@@ -8,6 +8,7 @@ import Agent.Provider
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
+    , TokenProvider(..)
     , getNextToken
     )
 import Control.Exception.Safe (bracket)
@@ -35,6 +36,20 @@ spec = do
                                 "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN"
                         Right _ ->
                             expectationFailure "expected broker configuration failure"
+
+    describe "probeLoadedAuth" do
+        it "rejects auth whose accounts are currently cooling down" do
+            let retryAt = UTCTime (fromGregorian 2026 8 21) 3600
+                exhausted = LoadedAuth
+                    { loadedProvider = XAIProvider
+                    , loadedTokenProvider = TokenProvider \_ ->
+                        pure (Left (CredentialsExhausted retryAt))
+                    , loadedOpenAiPool = Nothing
+                    }
+            result <- probeLoadedAuth exhausted
+            case result of
+                Left err -> err `shouldBe` CredentialsExhausted retryAt
+                Right _ -> expectationFailure "expected exhausted auth"
 
     describe "openAIOAuthClientId" do
         it "uses the Codex public client id by default" do
