@@ -83,6 +83,8 @@ data Name
     | ComposerCursor
     | ComposerModel
     | ComposerEffort
+    | ComposerMode
+    | ChoiceRow !Int
     | OverlayCursor
     deriving (Eq, Ord, Show)
 
@@ -349,10 +351,10 @@ handleChoiceKey = \case
                         <$> state.appChoice
                 }
 
-handleStatusClick
+handlePromptControlClick
     :: (Text -> ReplLine)
     -> EventM Name AppState ()
-handleStatusClick choice = do
+handlePromptControlClick choice = do
     state <- get
     let ui = state.appUi
         overlayOpen =
@@ -377,9 +379,25 @@ handleStatusClick choice = do
                     { appUi =
                         reduceUi
                             (UiSetNotice
-                                (Just "Model and reasoning settings can be changed at the prompt."))
+                                (Just "Prompt settings can be changed when input is ready."))
                             current.appUi
                     }
+
+confirmChoiceAt :: Int -> EventM Name AppState ()
+confirmChoiceAt index = do
+    state <- get
+    case state.appChoice of
+        Just choice
+            | index >= 0
+            , index < length choice.choiceRows -> do
+                modify' \current ->
+                    current
+                        { appChoice =
+                            (\overlay -> overlay { choiceIndex = index })
+                                <$> current.appChoice
+                        }
+                resolveChoice True
+        _ -> pure ()
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -786,7 +804,7 @@ drawComposer state =
         labelWidgets =
             map txt leading
                 <> modelAndEffort
-                <> [txt mode | not (Text.null mode)]
+                <> [clickable ComposerMode (txt mode) | not (Text.null mode)]
         label =
             if null labelWidgets
                 then txt " "
@@ -951,9 +969,11 @@ choiceRow selected index (label, detail) =
                 , vLimit 1 (fill ' ')
                 , withAttr Theme.mutedAttr (txt detail)
                 ]
-    in if selected == index
-        then withAttr Theme.selectedAttr row
-        else row
+        styled =
+            if selected == index
+                then withAttr Theme.selectedAttr row
+                else row
+    in clickable (ChoiceRow index) styled
 
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = case event of
@@ -1041,10 +1061,17 @@ handleEvent event = case event of
             (Nothing, Nothing, Nothing) ->
                 case (name, button) of
                     (ComposerModel, V.BLeft) ->
-                        handleStatusClick ReplChooseModel
+                        handlePromptControlClick ReplChooseModel
                     (ComposerEffort, V.BLeft) ->
-                        handleStatusClick ReplChooseEffort
+                        handlePromptControlClick ReplChooseEffort
+                    (ComposerMode, V.BLeft) ->
+                        handlePromptControlClick ReplCycleMode
                     _ -> handleMouseDown name button
+            (Nothing, Just _, _) ->
+                case (name, button) of
+                    (ChoiceRow index, V.BLeft) ->
+                        confirmChoiceAt index
+                    _ -> pure ()
             _ -> pure ()
     VtyEvent vtyEvent -> do
         state <- get
