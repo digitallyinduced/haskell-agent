@@ -224,7 +224,7 @@ readChangeNotes interrupt color = do
         ReplQuitInterrupt -> throwIO UserInterrupt
         ReplPasted text ->
             if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
-        ReplClipboardPaste text ->
+        ReplClipboardPaste text _ ->
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
@@ -258,7 +258,7 @@ askQuestion interrupt resolveColor question options = do
                             if Text.null (Text.strip text)
                                 then pure Nothing
                                 else pure (Just (Text.strip text))
-                        ReplClipboardPaste text ->
+                        ReplClipboardPaste text _ ->
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))

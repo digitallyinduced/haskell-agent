@@ -1440,10 +1440,15 @@ replWithDraft env@SessionEnv
                     putStr "\ESC[2A\r\ESC[J"
                     hFlush stdout
             continueWith keptDraft
-        ReplClipboardPaste keptDraft -> do
+        ReplClipboardPaste keptDraft clipboardPasteImages -> do
             errColor <- resolveColor stderr
-            queueClipboardImages
-                attachmentsRef previewIdRef stdoutColor errColor
+            case clipboardPasteImages of
+                Just images@(_:_) ->
+                    queueAttachedImages
+                        fullscreen attachmentsRef previewIdRef stdoutColor images
+                _ ->
+                    queueClipboardImages
+                        fullscreen attachmentsRef previewIdRef stdoutColor errColor
             continueWith keptDraft
         ReplPasted pasted ->
             submitLine continue stdoutColor True pasted
@@ -1471,7 +1476,7 @@ replWithDraft env@SessionEnv
                         case pastedImages of
                             Just images@(_:_) -> do
                                 queueAttachedImages
-                                    attachmentsRef previewIdRef color images
+                                    fullscreen attachmentsRef previewIdRef color images
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
@@ -1524,9 +1529,19 @@ replWithDraft env@SessionEnv
                                                 if Text.null pasteCaption
                                                     then "See attached image."
                                                     else pasteCaption
-                                        putImagePreview previewIdRef color images
-                                        Text.putStrLn
-                                            (roleMuted color (glyphOk <> "pasted " <> sizes))
+                                        case fullscreen of
+                                            Nothing -> do
+                                                putImagePreview previewIdRef color images
+                                                Text.putStrLn
+                                                    (roleMuted color
+                                                        (glyphOk <> "pasted " <> sizes))
+                                            Just runtime ->
+                                                emitUiEvent runtime
+                                                    (UiSetNotice
+                                                        (Just
+                                                            ("Pasted "
+                                                                <> sizes
+                                                                <> " and sending.")))
                                         writeIORef printed False
                                         fullscreenEvent
                                             (UiUserSubmitted promptText)
@@ -1540,7 +1555,7 @@ replWithDraft env@SessionEnv
                                         finishTurn env False result
                                     else do
                                         queueAttachedImages
-                                            attachmentsRef previewIdRef color images
+                                            fullscreen attachmentsRef previewIdRef color images
                                         continue
                     ReplShowAttachments -> do
                         pending <- readIORef attachmentsRef
@@ -2524,15 +2539,16 @@ setNativeProgress handle active = do
         Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
--- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
--- (Kitty graphics or iTerm2 OSC 1337, matching Grok Build).
+-- | Queue clipboard / Finder-paste images. Minimal mode draws an in-terminal
+-- thumbnail; fullscreen mode reports the attachment through retained UI state.
 queueAttachedImages
-    :: IORef [ImageAttachment]
+    :: Maybe FullscreenRuntime
+    -> IORef [ImageAttachment]
     -> IORef Int
     -> Bool
     -> [ImageAttachment]
     -> IO ()
-queueAttachedImages attachmentsRef previewIdRef color images = do
+queueAttachedImages fullscreen attachmentsRef previewIdRef color images = do
     modifyIORef' attachmentsRef (<> images)
     pending <- readIORef attachmentsRef
     let sizes =
@@ -2540,47 +2556,57 @@ queueAttachedImages attachmentsRef previewIdRef color images = do
                 [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
                 | img <- images
                 ]
-    putImagePreview previewIdRef color images
-    Text.putStrLn
-        (roleMuted color
-            (glyphOk
-                <> "attached "
+        message =
+            "Attached "
                 <> sizes
                 <> " — send with next message ("
                 <> Text.pack (show (length pending))
-                <> " queued)"))
+                <> " queued)"
+    case fullscreen of
+        Nothing -> do
+            putImagePreview previewIdRef color images
+            Text.putStrLn (roleMuted color (glyphOk <> message))
+        Just runtime ->
+            emitUiEvent runtime
+                (UiSetNotice (Just message))
 
 queueClipboardImages
-    :: IORef [ImageAttachment]
+    :: Maybe FullscreenRuntime
+    -> IORef [ImageAttachment]
     -> IORef Int
     -> Bool
     -> Bool
     -> IO ()
-queueClipboardImages attachmentsRef previewIdRef color errColor = do
+queueClipboardImages fullscreen attachmentsRef previewIdRef color errColor = do
     imagesResult <- readClipboardImages
     case imagesResult of
         Right images@(_:_) ->
-            queueAttachedImages attachmentsRef previewIdRef color images
+            queueAttachedImages
+                fullscreen attachmentsRef previewIdRef color images
         Right [] ->
-            Text.hPutStrLn stderr
-                (roleError errColor "no image found on the clipboard")
+            reportError "no image found on the clipboard"
         Left err -> reportClipboardImageError err
   where
+    reportError message = case fullscreen of
+        Nothing ->
+            Text.hPutStrLn stderr (roleError errColor message)
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice (Just message))
+
     reportClipboardImageError err =
         readClipboard >>= \case
             ClipboardText _ ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        "clipboard has text, not an image (paste text normally into the prompt)")
+                reportError
+                    "clipboard has text, not an image (paste text normally into the prompt)"
             ClipboardPaths paths ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        ("clipboard has file path(s), but no loadable image: "
-                            <> Text.intercalate ", " (map Text.pack paths)))
+                reportError
+                    ("clipboard has file path(s), but no loadable image: "
+                        <> Text.intercalate ", " (map Text.pack paths))
             ClipboardEmpty ->
-                Text.hPutStrLn stderr (roleError errColor err)
+                reportError err
             ClipboardImage image ->
-                queueAttachedImages attachmentsRef previewIdRef color [image]
+                queueAttachedImages
+                    fullscreen attachmentsRef previewIdRef color [image]
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do

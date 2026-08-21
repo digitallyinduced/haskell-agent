@@ -23,6 +23,10 @@ module Agent.CLI.Input
     , visibleEditorText
     ) where
 
+import Agent.CLI.Clipboard
+    ( nonEmptyClipboardImages
+    , readClipboardImages
+    )
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
@@ -40,6 +44,7 @@ import Agent.CLI.Terminal
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     )
+import Agent.Loop (ImageAttachment)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
 import Data.Bits ((.&.))
@@ -114,7 +119,7 @@ data ReplLine
     -- paste wrappers stripped.
     | ReplPasted Text
     -- | Attach a native clipboard image while keeping the current draft.
-    | ReplClipboardPaste Text
+    | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
@@ -346,7 +351,7 @@ data EditorKey
     | EditorYank
     | EditorClearScreen
     | EditorCycleMode
-    | EditorClipboardPaste
+    | EditorClipboardPaste !(Maybe [ImageAttachment])
     | EditorPaste !Text
     | EditorInputError !Text
     | EditorIgnore
@@ -402,9 +407,9 @@ readInlineEditor slashEnabled interrupt historyPath prompt initial = do
             EditorCycleMode -> do
                 finishEditorLine prompt state
                 pure (ReplCycleMode state.editorText)
-            EditorClipboardPaste -> do
+            EditorClipboardPaste images -> do
                 finishEditorLine prompt state
-                pure (ReplClipboardPaste state.editorText)
+                pure (ReplClipboardPaste state.editorText images)
             EditorInterrupt ->
                 noteIdleCtrlC interrupt >>= \case
                     ContinuePrompt -> do
@@ -694,7 +699,7 @@ readEditorKey = do
             | isEOFError err -> pure EditorEof
             | otherwise -> throwIO err
         Right char
-            | isClipboardPasteKey char -> pure EditorClipboardPaste
+            | isClipboardPasteKey char -> pure (EditorClipboardPaste Nothing)
             | otherwise -> case char of
                 '\n' -> pure EditorEnter
                 '\r' -> pure EditorEnter
@@ -781,7 +786,13 @@ readCsiKey =
                 "200~" ->
                     readBracketedPaste >>= \case
                         Left err -> pure (EditorInputError err)
-                        Right pasted -> pure (EditorPaste pasted)
+                        Right pasted -> do
+                            images <-
+                                nonEmptyClipboardImages <$> readClipboardImages
+                            pure $ case images of
+                                Just attached ->
+                                    EditorClipboardPaste (Just attached)
+                                Nothing -> EditorPaste pasted
                 _ -> pure EditorIgnore
 
 data KittyKey = KittyKey
@@ -1303,7 +1314,8 @@ parseKittyKeyFields raw = do
 
 decodeKittyEditorKey :: String -> Maybe EditorKey
 decodeKittyEditorKey body
-    | isClipboardPasteCsiBody body = Just EditorClipboardPaste
+    | isClipboardPasteCsiBody body =
+        Just (EditorClipboardPaste Nothing)
     | otherwise = do
         KittyKey{kittyCodepoint, kittyModifiers, kittyEvent} <- parseKittyKey body
         if kittyEvent == kittyRelease
