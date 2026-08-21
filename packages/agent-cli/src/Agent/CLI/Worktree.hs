@@ -1,12 +1,14 @@
 -- | Create isolated git worktrees under @~/.haskell-agent/worktrees@.
 module Agent.CLI.Worktree
     ( createWorktree
+    , removeWorktree
     , isUnderWorktreeRoot
     , worktreePath
     , worktreeRoot
     ) where
 
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import Control.Exception.Safe (mask, onException, tryAny)
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
 import Data.Time.Calendar (Day)
@@ -14,7 +16,11 @@ import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Numeric (showHex)
-import System.Directory.OsPath (createDirectoryIfMissing, doesPathExist)
+import System.Directory.OsPath
+    ( createDirectoryIfMissing
+    , doesPathExist
+    , removePathForcibly
+    )
 import System.Exit (ExitCode(..))
 import System.OsPath
     ( equalFilePath
@@ -55,6 +61,18 @@ createWorktree source root = do
             createDirectoryIfMissing True (root </> repoName)
             addUnique repo root repoName day start 0
 
+-- | Remove a managed worktree and the branch created for it.
+removeWorktree :: OsPath -> OsPath -> IO (Either String ())
+removeWorktree source path = do
+    gitToplevel source >>= \case
+        Left err -> pure (Left err)
+        Right repo ->
+            git repo ["worktree", "remove", "--force", toFilePath path] >>= \case
+                Left err -> pure (Left err)
+                Right _ ->
+                    fmap (fmap (const ())) $
+                        git repo ["branch", "-D", toFilePath (takeFileName path)]
+
 addUnique
     :: OsPath
     -> OsPath
@@ -71,12 +89,23 @@ addUnique repo root repoName day start attempt
         exists <- doesPathExist path
         if exists
             then addUnique repo root repoName day start (attempt + 1)
-            else git repo ["worktree", "add", toFilePath path] >>= \case
-                Left err
-                    | branchTaken err ->
-                        addUnique repo root repoName day start (attempt + 1)
-                    | otherwise -> pure (Left err)
-                Right _ -> pure (Right path)
+            else mask \restore -> do
+                added <- restore (git repo ["worktree", "add", toFilePath path])
+                    `onException` cleanupWorktreeCandidate repo path
+                case added of
+                    Left err
+                        | branchTaken err ->
+                            addUnique repo root repoName day start (attempt + 1)
+                        | otherwise -> pure (Left err)
+                    Right _ -> pure (Right path)
+
+cleanupWorktreeCandidate :: OsPath -> OsPath -> IO ()
+cleanupWorktreeCandidate repo path = do
+    _ <- git repo ["worktree", "remove", "--force", toFilePath path]
+    _ <- tryAny (removePathForcibly path)
+    _ <- git repo ["worktree", "prune"]
+    _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
+    pure ()
 
 gitToplevel :: OsPath -> IO (Either String OsPath)
 gitToplevel source = git source ["rev-parse", "--show-toplevel"] >>= \case

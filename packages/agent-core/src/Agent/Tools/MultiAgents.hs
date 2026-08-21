@@ -4,6 +4,7 @@
 -- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
+    , SubagentWorktree(..)
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
@@ -66,6 +67,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
+data SubagentWorktree = SubagentWorktree
+    { subagentWorktreePath :: !OsPath
+    , subagentWorktreeCleanup :: !(IO (Either Text ()))
+    }
+
 -- | Per-agent identity for nesting depth / parent linkage / task path.
 data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
@@ -76,7 +82,7 @@ data MultiAgentContext = MultiAgentContext
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
       -- | Optional host hook for Grok-style isolated worktree children.
-    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text OsPath)))
+    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }
