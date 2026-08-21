@@ -25,6 +25,8 @@ module Agent.OpenAI.Auth
       -- * Inspection and manual refresh
     , allAccountIds
     , readAccountState
+    , AccountSnapshot(..)
+    , snapshotAccounts
     , forceRefresh
 
       -- * State
@@ -425,6 +427,25 @@ readAccountState pool targetAccountId = do
     case found of
         Nothing -> pure Nothing
         Just entry -> Just <$> readIORef entry.entryAuthRef
+
+-- | One pool account plus its local cooldown, used by @/usage@.
+data AccountSnapshot = AccountSnapshot
+    { snapshotAuth :: !AuthState
+    , snapshotCooldownUntil :: !(Maybe UTCTime)
+    }
+    deriving (Show)
+
+-- | Snapshot every account currently in the pool, in load order.
+snapshotAccounts :: Pool -> IO [AccountSnapshot]
+snapshotAccounts pool = do
+    entries <- readIORef pool.poolEntries
+    forM entries \entry -> do
+        auth <- readIORef entry.entryAuthRef
+        cooldown <- readIORef entry.entryCooldownUntil
+        pure AccountSnapshot
+            { snapshotAuth = auth
+            , snapshotCooldownUntil = cooldown
+            }
 
 -- | Force a refresh of the given account, regardless of JWT expiry. Useful
 -- for scheduled refresh jobs that rotate ahead of the natural expiry window.

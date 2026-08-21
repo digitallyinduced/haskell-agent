@@ -82,9 +82,15 @@ detectImagePreviewProtocol handle = do
 -- | Kitty graphics transmit-and-display. @f=100@ is PNG; Kitty has no JPEG
 -- format code (24/32 are raw RGB/RGBA). We always send 100 and let the
 -- terminal sniff, matching Grok Build's overlay path for PNG screenshots.
+--
+-- Only @r@ is specified for the placement. Per the Kitty graphics protocol,
+-- omitting @c@ makes the terminal derive the width from the source image and
+-- cell dimensions, preserving the original aspect ratio. Supplying both
+-- dimensions would stretch every image into the same cell rectangle.
+--
 -- Chunked at 4096 encoded bytes (Kitty's documented payload limit).
 kittyImageSequence :: Int -> Int -> Int -> Text -> ByteString -> Text
-kittyImageSequence imageId columns rows mime bytes =
+kittyImageSequence imageId _columns rows mime bytes =
     let fmt = kittyFormat mime
         chunks = chunkBytes 4096 (Base64.encode bytes)
         total = length chunks
@@ -94,9 +100,7 @@ kittyImageSequence imageId columns rows mime bytes =
                     | n == 0 =
                         ",f="
                             <> Text.pack (show fmt)
-                            <> ",t=d,c="
-                            <> Text.pack (show columns)
-                            <> ",r="
+                            <> ",t=d,r="
                             <> Text.pack (show rows)
                             <> ",C=1"
                     | otherwise = ""
@@ -111,8 +115,6 @@ kittyImageSequence imageId columns rows mime bytes =
         display =
             "\ESC_Ga=p,i="
                 <> Text.pack (show imageId)
-                <> ",c="
-                <> Text.pack (show columns)
                 <> ",r="
                 <> Text.pack (show rows)
                 <> ",C=1,q=2\ESC\\"

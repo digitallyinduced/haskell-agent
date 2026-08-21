@@ -10,8 +10,13 @@ module Agent.Tools.FileSystem
 
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (SomeException, catchIO, throwIO, try)
+import Control.Exception.Safe (SomeException, throwIO, try, tryIO)
+import Control.Retry
+    ( RetryPolicyM
+    , exponentialBackoff
+    , limitRetries
+    , retrying
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -88,18 +93,15 @@ isInside root path
                 (first : _) | first == fromFilePath ".." -> False
                 _ -> True
 
-lockRetryDelaysUs :: [Int]
-lockRetryDelaysUs = [1000, 2000, 4000, 8000, 16000]
+lockRetryPolicy :: RetryPolicyM IO
+lockRetryPolicy = exponentialBackoff 1000 <> limitRetries 5
 
 retryOnBusy :: IO a -> IO a
-retryOnBusy action = go lockRetryDelaysUs
+retryOnBusy action = do
+    result <- retrying lockRetryPolicy shouldRetry (const (tryIO action))
+    either throwIO pure result
   where
-    go [] = action
-    go (delayUs : rest) =
-        catchIO action \err ->
-            if isAlreadyInUseError err
-                then threadDelay delayUs >> go rest
-                else throwIO err
+    shouldRetry _ = pure . either isAlreadyInUseError (const False)
 
 readTextFile :: OsPath -> IO (Either Text Text)
 readTextFile path =

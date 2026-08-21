@@ -5,7 +5,7 @@ module Agent.CLI.Turn
 
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
-import Agent.CLI.Plan (extractProposedPlan)
+import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
@@ -35,7 +35,14 @@ import Agent.CLI.Style
     , roleMuted
     , setCliWindowTitle
     )
-import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , emitTerminalSequence
+    , notifyTerminal
+    , osc133CommandFinished
+    , osc133CommandStart
+    , resolveColor
+    )
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.Loop
     ( LoopConfig(..)
@@ -67,7 +74,7 @@ import Data.IORef
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.IO (hIsTerminalDevice, stderr, stdout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
@@ -84,6 +91,8 @@ runOneTurn env@SessionEnv
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionLastAssistant = lastAssistantRef
+    , sessionTerminal = terminal
     , sessionAbortSubagents = abortSubagents
     , sessionOnPersisted = onPersisted
     } promptText inputs =
@@ -124,6 +133,9 @@ runOneTurn env@SessionEnv
             Nothing -> baseInputs
     turnInputs <- stampTurnInputs turnInputs0
     startedAt <- readIORef render.renderStartedAt
+    wallStarted <- getCurrentTime
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout osc133CommandStart
     result <- runLoopInputs config prev turnInputs
     clearThinking render
     finishedAt <- getCurrentTime
@@ -150,6 +162,7 @@ runOneTurn env@SessionEnv
                 writeIORef slotRef (Right handle')
     case result of
         Left cancelled@(LoopCancelled _) -> do
+            finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagents
             writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
@@ -165,6 +178,8 @@ runOneTurn env@SessionEnv
                 LoopTransport apiError
                     | length afterItems == length beforeItems
                     , isProviderUnavailable apiError -> do
+                        finishTerminal terminal wallStarted finishedAt 1
+                            "Agent provider unavailable"
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
@@ -173,6 +188,7 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    finishTerminal terminal wallStarted finishedAt 1 "Agent turn failed"
                     writeIORef transcriptRef beforeItems
                     color <- resolveColor stderr
                     putTextLn stderr (formatLoopErrorColored color err)
@@ -181,6 +197,7 @@ runOneTurn env@SessionEnv
                     persistIncomplete (Text.pack (show err))
                     pure TurnFailed
         Right loopResult -> do
+            finishTerminal terminal wallStarted finishedAt 0 "Agent finished"
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
             do
@@ -199,6 +216,7 @@ runOneTurn env@SessionEnv
             printedText <- readIORef printed
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
+            writeIORef lastAssistantRef assistantText
             case (printedText, assistantText) of
                 (False, Just text) | not (Text.null (Text.strip text)) -> do
                     useColor <- resolveColor stdout
@@ -240,6 +258,21 @@ isLeftSlot = \case
     Left _ -> True
     Right _ -> False
 
+finishTerminal
+    :: TerminalCapabilities
+    -> UTCTime
+    -> UTCTime
+    -> Int
+    -> Text
+    -> IO ()
+finishTerminal terminal started finished exitCode message = do
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout
+            (osc133CommandFinished (Just exitCode))
+    let seconds = realToFrac (diffUTCTime finished started) :: Double
+    when (exitCode /= 0 || seconds >= 10) $
+        notifyTerminal terminal stdout message
+
 handleProposedPlan :: PlanModeEnv -> Maybe Text -> IO (Maybe Text)
 handleProposedPlan planMode = \case
     Nothing -> pure Nothing
@@ -253,13 +286,10 @@ handleProposedPlan planMode = \case
                 case decision of
                     PlanApprove -> do
                         deactivatePlanMode planMode
-                        pure Nothing
+                        pure (planDecisionFollowUp decision)
                     PlanCancel -> do
                         deactivatePlanMode planMode
                         pure Nothing
-                    PlanRequestChanges notes ->
-                        pure $ Just $
-                            "The user requested changes to the plan. Stay in plan mode and revise.\n\
-                            \Feedback:\n"
-                                <> notes
+                    PlanRequestChanges _ ->
+                        pure (planDecisionFollowUp decision)
             _ -> pure Nothing

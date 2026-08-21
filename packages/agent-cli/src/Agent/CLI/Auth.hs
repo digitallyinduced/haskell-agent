@@ -3,8 +3,10 @@ module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
     , loadAuth
+    , openAIOAuthClientId
     , openaiAuthStateFromJson
     , reloadableFileCredentialProvider
+    , xaiOAuthClientId
     ) where
 
 import Agent.Broker (BrokerOptions(..), newBrokerTokenProviderFor)
@@ -47,9 +49,19 @@ import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.OsPath ((</>))
 
+openAIOAuthClientId :: Maybe Text -> Text
+openAIOAuthClientId =
+    fromMaybe "app_EMoamEEZ73f0CkXaXp7hrann"
+
+xaiOAuthClientId :: Maybe Text -> Text
+xaiOAuthClientId =
+    fromMaybe "b1a00492-073a-47ea-816f-4c329264a828"
+
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
+    -- | Live OpenAI OAuth pool, when authentication uses one.
+    , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
 
 loadAuth :: Maybe Provider -> IO (Either String LoadedAuth)
@@ -108,6 +120,7 @@ loadBroker url requested = do
                             pure $ Right LoadedAuth
                                 { loadedProvider = actual
                                 , loadedTokenProvider = seeded
+                                , loadedOpenAiPool = Nothing
                                 }
 
 loadXai :: IO (Either String LoadedAuth)
@@ -121,6 +134,7 @@ loadXai = do
             pure $ Right LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadXaiCredential :: IO (Maybe Credential)
@@ -150,6 +164,7 @@ loadOpenRouter = do
             pure $ Right LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
+                , loadedOpenAiPool = Nothing
                 }
 
 loadOpenAi :: IO (Either String LoadedAuth)
@@ -180,6 +195,7 @@ loadOpenAi = do
                             , leaseId = Nothing
                             , provider = OpenAIProvider
                             }
+                        , loadedOpenAiPool = Nothing
                         }
                 Nothing -> case envOrFileState now fromEnvJson fileBytes of
                     Nothing -> pure (Left noAuthHint)
@@ -200,32 +216,30 @@ loadManagedOpenAI now metadata secret =
                     pure $ Left
                         "managed OpenAI OAuth credential contains invalid auth JSON"
                 Just state -> do
-                    clientId <- lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-                    let refresh stale = case clientId of
-                            Nothing ->
-                                pure $ Left $ ProviderError AuthenticationError
-                                    "OPENAI_OAUTH_CLIENT_ID is required to refresh ChatGPT OAuth"
-                                    Nothing
-                            Just oauthClientId ->
-                                OpenAI.refreshAccessTokenHTTP oauthClientId stale >>= \case
-                                    Left err -> pure (Left err)
-                                    Right newState -> do
-                                        stamped <- authStateToJson newState <$> getCurrentTime
-                                        let payload =
-                                                TextEncoding.decodeUtf8
-                                                    (LBS.toStrict (Aeson.encode stamped))
-                                        upsertManagedCredential
-                                            metadata
-                                            secret { secretPayload = payload }
-                                            >>= \case
-                                                Left err ->
-                                                    pure $ Left $ ConnectionError err
-                                                Right () -> pure (Right newState)
+                    clientId <-
+                        openAIOAuthClientId
+                            <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+                    let refresh stale =
+                            OpenAI.refreshAccessTokenHTTP clientId stale >>= \case
+                                Left err -> pure (Left err)
+                                Right newState -> do
+                                    stamped <- authStateToJson newState <$> getCurrentTime
+                                    let payload =
+                                            TextEncoding.decodeUtf8
+                                                (LBS.toStrict (Aeson.encode stamped))
+                                    upsertManagedCredential
+                                        metadata
+                                        secret { secretPayload = payload }
+                                        >>= \case
+                                            Left err ->
+                                                pure $ Left $ ConnectionError err
+                                            Right () -> pure (Right newState)
                     pool <- OpenAI.newPool [state] refresh
                     tokenProvider <- OpenAICredential.poolTokenProvider pool
                     pure $ Right LoadedAuth
                         { loadedProvider = OpenAIProvider
                         , loadedTokenProvider = tokenProvider
+                        , loadedOpenAiPool = Just pool
                         }
         _ ->
             pure $ Right LoadedAuth
@@ -237,6 +251,7 @@ loadManagedOpenAI now metadata secret =
                         , leaseId = Nothing
                         , provider = OpenAIProvider
                         }
+                , loadedOpenAiPool = Nothing
                 }
 
 openAiPoolAuth
@@ -245,25 +260,23 @@ openAiPoolAuth
     -> OpenAI.AuthState
     -> IO (Either String LoadedAuth)
 openAiPoolAuth persistRefresh filePath state = do
-    clientId <- lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-    let refresh stale = case clientId of
-            Nothing -> pure $ Left $ ProviderError AuthenticationError
-                "OPENAI_OAUTH_CLIENT_ID is required to refresh ChatGPT OAuth"
-                Nothing
-            Just oauthClientId ->
-                OpenAI.refreshAccessTokenHTTP oauthClientId stale >>= \case
-                    Left err -> pure (Left err)
-                    Right newState
-                        | persistRefresh -> do
-                            stamped <- authStateToJson newState <$> getCurrentTime
-                            OpenAILogin.writeAuthFile filePath stamped
-                            pure (Right newState)
-                        | otherwise -> pure (Right newState)
+    clientId <-
+        openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    let refresh stale =
+            OpenAI.refreshAccessTokenHTTP clientId stale >>= \case
+                Left err -> pure (Left err)
+                Right newState
+                    | persistRefresh -> do
+                        stamped <- authStateToJson newState <$> getCurrentTime
+                        OpenAILogin.writeAuthFile filePath stamped
+                        pure (Right newState)
+                    | otherwise -> pure (Right newState)
     pool <- OpenAI.newPool [state] refresh
     tokenProvider <- OpenAICredential.poolTokenProvider pool
     pure $ Right LoadedAuth
         { loadedProvider = OpenAIProvider
         , loadedTokenProvider = tokenProvider
+        , loadedOpenAiPool = Just pool
         }
 
 loadManagedCredential
