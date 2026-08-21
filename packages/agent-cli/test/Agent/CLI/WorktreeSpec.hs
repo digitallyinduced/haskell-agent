@@ -9,7 +9,7 @@ import qualified System.Directory as Directory
 import System.Directory.OsPath (doesDirectoryExist)
 import System.Exit (ExitCode(..))
 import qualified System.FilePath as FilePath
-import System.OsPath (takeFileName, (</>))
+import System.OsPath (addTrailingPathSeparator, takeFileName, (</>))
 import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 import Test.Hspec
@@ -35,6 +35,11 @@ spec = describe "Agent.CLI.Worktree" do
             let root = fromFilePath "/home/marc/.haskell-agent/worktrees"
             isUnderWorktreeRoot root root `shouldBe` True
             isUnderWorktreeRoot root
+                (root </> fromFilePath "haskell-agent"
+                    </> fromFilePath "2026-08-20-abcd")
+                `shouldBe` True
+            isUnderWorktreeRoot
+                (addTrailingPathSeparator root)
                 (root </> fromFilePath "haskell-agent"
                     </> fromFilePath "2026-08-20-abcd")
                 `shouldBe` True

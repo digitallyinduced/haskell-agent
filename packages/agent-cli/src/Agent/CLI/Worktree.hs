@@ -17,8 +17,7 @@ import Numeric (showHex)
 import System.Directory.OsPath (createDirectoryIfMissing, doesPathExist)
 import System.Exit (ExitCode(..))
 import System.OsPath
-    ( addTrailingPathSeparator
-    , equalFilePath
+    ( equalFilePath
     , splitDirectories
     , takeFileName
     , (</>)
@@ -35,8 +34,7 @@ worktreeRoot home =
 isUnderWorktreeRoot :: OsPath -> OsPath -> Bool
 isUnderWorktreeRoot root path =
     equalFilePath root path
-        || splitDirectories (addTrailingPathSeparator root)
-            `isPrefixOf` splitDirectories path
+        || splitDirectories root `isPrefixOf` splitDirectories path
 
 -- | @root/repo/YYYY-MM-DD-\<hex8\>@.
 worktreePath :: OsPath -> OsPath -> Day -> String -> OsPath
