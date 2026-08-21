@@ -40,6 +40,20 @@ spec = do
             summarizeToolCall (customToolCall "c4" "apply_patch" patch)
                 `shouldBe` "Edited src/Foo.hs"
 
+        it "renders namespaced collaboration tools with useful details" do
+            summarizeToolCall
+                (functionToolCall "c5" "collaboration.spawn_agent"
+                    "{\"task_name\":\"reviewer\",\"message\":\"review this\"}")
+                `shouldBe` "Spawned agent reviewer"
+            summarizeToolCall
+                (functionToolCall "c6" "collaboration.send_message"
+                    "{\"target\":\"reviewer\",\"message\":\"status?\"}")
+                `shouldBe` "Sent message to reviewer"
+            summarizeToolCall
+                (functionToolCall "c7" "collaboration.wait_agent"
+                    "{\"timeout_ms\":30000}")
+                `shouldBe` "Waited for agent updates"
+
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do
             truncateToolOutput "Exit code: 0\nhello"
@@ -50,6 +64,26 @@ spec = do
         it "caps long multi-line output" do
             let out = Text.unlines (map (Text.pack . show) [1 :: Int .. 12])
             truncateToolOutput out `shouldSatisfy` Text.isInfixOf "… 4 more"
+
+    describe "formatToolOutput" do
+        it "renders structured collaboration results as readable text" do
+            let spawn = functionToolCall "c1" "collaboration.spawn_agent" "{}"
+                wait = functionToolCall "c2" "collaboration.wait_agent" "{}"
+                agents = functionToolCall "c3" "collaboration.list_agents" "{}"
+            formatToolOutput spawn
+                "{\"nickname\":null,\"task_name\":\"/root/reviewer\"}"
+                `shouldBe` "Agent: /root/reviewer"
+            formatToolOutput wait
+                "{\"message\":\"agent updates: reviewer=completed\",\"timed_out\":false}"
+                `shouldBe` "agent updates: reviewer=completed"
+            formatToolOutput agents
+                "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\
+                \\"agent_id\":\"agent-1\",\"agent_status\":\"running\"}]}"
+                `shouldBe` "/root/reviewer · running"
+
+        it "falls back to the original output when JSON is malformed" do
+            let call = functionToolCall "c1" "collaboration.spawn_agent" "{}"
+            formatToolOutput call "not json" `shouldBe` "not json"
 
     describe "formatElapsed" do
         it "formats seconds and minutes" do
@@ -377,6 +411,7 @@ withRenderConfigNative showThinking color native action = do
     textBuffer <- newIORef ""
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
+    toolCalls <- newIORef mempty
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
     (path, handle) <- openTempFile tmp "agent-render-spec"
@@ -398,6 +433,7 @@ withRenderConfigNative showThinking color native action = do
                 , renderModelRef = modelRef
                 , renderActivityRef = activityRef
                 , renderStartedAt = startedAt
+                , renderToolCalls = toolCalls
                 , renderNativeProgress = native
                 }
         action config handle path
