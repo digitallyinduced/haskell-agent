@@ -140,11 +140,11 @@ spec = describe "Agent.CLI.Session" do
 
         it "creates a pending session only when ensureSession runs" $
             withTempDir "agent-sessions-" \root -> do
-                slot <- newIORef (Left (testCreate root))
+                PersistenceEnabled slot <- newPendingPersistence (testCreate root)
                 listDirectory root `shouldReturn` []
                 handle <- ensureSession slot
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
-                Right again <- readIORef slot
+                PersistenceActive again <- readIORef slot
                 again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
 
     describe "json codec" do

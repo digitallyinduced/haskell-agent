@@ -29,9 +29,8 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
-    , ToolHandler
-    , dispatchToolCall
     )
+import Agent.Tools.Types (ToolRegistry, dispatchRegisteredToolCall)
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
@@ -64,6 +63,12 @@ data TokenUsage = TokenUsage
     , outputTokens :: !Int
     , cachedTokens :: !Int
     } deriving (Eq, Show)
+
+instance Semigroup TokenUsage where
+    left <> right = addTokenUsage left right
+
+instance Monoid TokenUsage where
+    mempty = emptyTokenUsage
 
 emptyTokenUsage :: TokenUsage
 emptyTokenUsage = TokenUsage
@@ -127,7 +132,7 @@ data LoopEvent
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
-    , loopHandlers :: ![ToolHandler]
+    , loopTools :: !ToolRegistry
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
@@ -263,6 +268,6 @@ runOne config call = do
                 , callKind = call.callKind
                 }
         Right True ->
-            dispatchToolCall config.loopDispatch config.loopHandlers call
+            dispatchRegisteredToolCall config.loopDispatch config.loopTools call
     config.loopOnEvent (ToolFinished result)
     pure result

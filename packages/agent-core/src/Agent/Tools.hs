@@ -6,9 +6,17 @@
 -- 'Agent.Tools.Ghci'.
 module Agent.Tools
     ( AppTool(..)
-    , AppToolKind(..)
+    , ToolSchema(..)
+    , ApprovalRule(..)
+    , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
+    , jsonAppTool
+    , freeformApplyPatchAppTool
+    , mkToolRegistry
+    , toolRegistryTools
+    , lookupRegisteredTool
+    , dispatchRegisteredToolCall
     , appToolHandlers
     , CodingTools(..)
     , codingToolsFor

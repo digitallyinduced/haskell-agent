@@ -8,11 +8,14 @@ module Agent.CLI.Tools
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.Provider (Provider(..))
-import Agent.ToolDSL (parametersObjectLoose)
+import Agent.ToolDSL (PropertySchema, parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ToolSchema(..)
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
@@ -47,14 +50,14 @@ isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Provider -> AppTool -> ResponseTool
-schemaFromAppTool provider tool = case tool.appToolKind of
-    JsonFunction ->
+schemaFromAppTool provider tool = case tool.appToolSchema of
+    JsonFunctionSchema parameters ->
         let build = case provider of
                 XAIProvider -> buildGrokTool
                 OpenRouterProvider -> buildGrokTool
                 OpenAIProvider -> buildTool
-        in build tool.appToolName tool.appToolDescription tool.appToolParameters
-    FreeformApplyPatch ->
+        in build tool.appToolName tool.appToolDescription parameters
+    FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
 
 -- | Codex collaboration namespace: nested non-strict function tools.
@@ -74,7 +77,7 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
         , "name" .= tool.appToolName
         , "description" .= tool.appToolDescription
         , "strict" .= False
-        , "parameters" .= namespaceParameters tool.appToolParameters
+        , "parameters" .= namespaceParameters (appToolJsonParameters tool)
         ]
 
     namespaceParameters parameters = case parametersObjectLoose parameters of
@@ -82,6 +85,11 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
             | Just (Aeson.Array required) <- KeyMap.lookup "required" schema
             , null required -> Aeson.Object (KeyMap.delete "required" schema)
         schema -> schema
+
+appToolJsonParameters :: AppTool -> [PropertySchema]
+appToolJsonParameters tool = case tool.appToolSchema of
+    JsonFunctionSchema parameters -> parameters
+    FreeformApplyPatchSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

@@ -51,8 +51,9 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCall)
 import Agent.Tools.Types
-    ( AppTool(..)
-    , AppToolKind(..)
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -111,15 +112,9 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly =
+    jsonAppTool name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
 
 --------------------------------------------------------------------------------
 -- spawn_agent

@@ -14,6 +14,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Read as TextRead
 import Test.Hspec
 
 messagePayload :: InterAgentMessage -> Text
@@ -113,6 +114,32 @@ spec = describe "Agent.Subagents" do
             Just (Completed (Just text)) ->
                 text `shouldSatisfy` Text.isPrefixOf "parent-of-agent-"
             other -> expectationFailure ("unexpected status: " <> show other)
+
+    it "derives nested parent path and depth from the registry" do
+        seen <- newIORef ([] :: [(Text, Int, Maybe SubagentId)])
+        let config = defaultSubagentConfig { maxDepth = Just 2 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\env _ prompt _ -> do
+                atomicModifyIORef' seen \xs ->
+                    (xs <> [(messagePayload prompt, env.subDepth, env.subParentId)], ())
+                pure $ Right LoopResult
+                    { finalResponseId = "done"
+                    , finalText = Just (messagePayload prompt)
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        Right parent <- spawnSubagent registry Nothing 0 "parent" Nothing
+        _ <- waitSubagents registry [parent] 15000
+        Just parentPath <- getTaskPath registry parent
+        Right (child, childPath) <-
+            spawnSubagentAt registry (Just parent) taskPathRoot 99 "nested"
+                (plainInterAgentContent "child") Nothing
+        _ <- waitSubagents registry [child] 15000
+        taskPathText childPath
+            `shouldBe` taskPathText parentPath <> "/nested"
+        observations <- readIORef seen
+        observations `shouldContain` [("child", 2, Just parent)]
 
     it "waitSubagents returns when any target finishes" do
         gate <- newTVarIO False
@@ -255,6 +282,49 @@ spec = describe "Agent.Subagents" do
         (statuses, timedOut) <- waitSubagents registry [agentId] 15000
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "follow"))
+
+    it "indexes restored paths and advances the restored id index" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "restored"
+                , finalText = Just (messagePayload prompt)
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                })
+            (\_ _ -> pure ())
+        let restored = SubagentId "agent-restored-1000000"
+        Right _ <- restoreSubagent registry restored Nothing 1 Nothing Nothing
+        Just restoredPath <- getTaskPath registry restored
+        taskPathText restoredPath `shouldBe` "/root/aagentrestored1000000"
+        resolveAgentTarget registry taskPathRoot "aagentrestored1000000"
+            `shouldReturn` Right restored
+        Right spawned <- spawnSubagent registry Nothing 0 "next" Nothing
+        let suffix = snd (Text.breakOnEnd "-" spawned.unSubagentId)
+        case TextRead.decimal suffix of
+            Right (index, rest) -> do
+                rest `shouldBe` ""
+                index `shouldSatisfy` (> (1000000 :: Int))
+            Left err -> expectationFailure err
+
+    it "does not reopen an agent after the registry is closed" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "closed"
+                , finalText = Just (messagePayload prompt)
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        closeSubagentRegistry registry
+        restored <- restoreSubagent registry agentId Nothing 1 Nothing Nothing
+        restored `shouldBe` Left "Subagent registry is closed."
+        getStatus registry agentId `shouldReturn` Closed
+        queueMessage registry agentId "late"
+            `shouldReturn` Left "Subagent registry is closed."
+        sendInput registry agentId "late" False
+            `shouldReturn` Left "Subagent registry is closed."
 
     it "reopens a closed agent via restoreSubagent" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

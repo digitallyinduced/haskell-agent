@@ -42,6 +42,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.OpenAI.Responses.Types
                     , Agent.OpenAI.Responses.Codec
+                    , Agent.OpenAI.Responses.StatelessBackend
                     , Agent.OpenAI.Error
                     , Agent.OpenAI.Http
                     , Agent.OpenAI.Auth

@@ -42,7 +42,8 @@ import Agent.ToolDispatch (typedTool)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool(..)
-    , AppToolKind(..)
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Data.Aeson (FromJSON(..))
 import Data.IORef
@@ -112,10 +113,8 @@ sanitizeOptional value = value >>= \raw ->
         else Just stripped
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
-taskTool baseCwd ctx specsRef = AppTool
-    { appToolName = "task"
-    , appToolDescription = taskDescription
-    , appToolParameters =
+taskTool baseCwd ctx specsRef =
+    jsonAppTool "task" taskDescription
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -133,11 +132,8 @@ taskTool baseCwd ctx specsRef = AppTool
         , PropertySchema "isolation" PropertyString False $ Just
             "Isolation mode: \"none\" (default) or \"worktree\". Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
-    , appToolHandler = typedTool "task" (runTask baseCwd ctx specsRef)
-    , appToolKind = JsonFunction
-    , appToolReadOnly = False
-    , appToolIsReadOnlyCall = Nothing
-    }
+        AlwaysPrompt
+        (typedTool "task" (runTask baseCwd ctx specsRef))
 
 taskDescription :: Text
 taskDescription =
@@ -371,11 +367,13 @@ filterGrokToolsForType agentType tools = case agentType of
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
     _ -> filter ((/= "task") . (.appToolName)) tools
   where
+    exploreNames :: [Text]
     exploreNames =
         [ "read_file"
         , "list_dir"
         , "grep"
         ]
+    planNames :: [Text]
     planNames =
         [ "read_file"
         , "list_dir"
