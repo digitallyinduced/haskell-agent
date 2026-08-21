@@ -48,6 +48,7 @@ library
                     , bytestring
                     , aeson                 >= 2.0
                     , http-client
+                    , http-client-tls
                     , http-conduit
                     , http-types
                     , safe-exceptions

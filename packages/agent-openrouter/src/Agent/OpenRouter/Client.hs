@@ -13,9 +13,15 @@ import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenRouter.Error (classifyFailure)
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request (buildRequest)
-import Agent.OpenRouter.Stream (buildResponse, parseSseEvents)
+import Agent.OpenRouter.Stream
+    ( buildResponse
+    , feedSseDecoder
+    , finishSseDecoder
+    , newSseDecoder
+    )
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -23,6 +29,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import qualified Network.HTTP.Client as HttpClient
+import qualified Network.HTTP.Client.TLS as HttpTls
 import Network.HTTP.Simple hiding (Response)
 import Network.HTTP.Types (HeaderName)
 
@@ -43,9 +50,8 @@ createResponseWith
 createResponseWith options credential request =
     createResponseWithEvents options credential request (const (pure ()))
 
--- | Send one request and deliver every decoded typed Responses event before
--- returning the assembled terminal response. The current HTTP backend buffers
--- the response body, so callbacks run in wire order after the body completes.
+-- | Send one request and deliver decoded typed Responses events incrementally
+-- in wire order before returning the assembled terminal response.
 createResponseWithEvents
     :: ClientOptions
     -> Credential
@@ -59,12 +65,13 @@ createResponseWithEvents options credential request onEvent
     | otherwise = tryAny performRequest >>= \case
         Left exception -> pure $ Left $ ConnectionError
             ("OpenRouter request failed: " <> Text.pack (show exception))
-        Right response -> handleResponse response
+        Right result -> pure result
   where
     performRequest = do
         httpRequest <- parseRequest ("POST " <> trimTrailingSlash options.baseUrl <> "/responses")
-        httpLBS
-            $ setRequestBodyLBS (Aeson.encode (buildRequest options request))
+        manager <- HttpTls.getGlobalManager
+        HttpClient.withResponse
+            ( setRequestBodyLBS (Aeson.encode (buildRequest options request))
             $ setRequestHeader "Authorization"
                 ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             $ setRequestHeader "Content-Type" ["application/json"]
@@ -73,6 +80,9 @@ createResponseWithEvents options credential request onEvent
             $ optionalHeader "HTTP-Referer" options.httpReferer
             $ optionalHeader "X-Title" options.appTitle
             $ withTimeout httpRequest
+            )
+            manager
+            handleResponse
 
     withTimeout httpRequest = httpRequest
         { HttpClient.responseTimeout =
@@ -81,15 +91,48 @@ createResponseWithEvents options credential request onEvent
 
     handleResponse response = do
         let status = getResponseStatusCode response
-            bodyText = Text.decodeUtf8With Text.lenientDecode
-                (LBS.toStrict (getResponseBody response))
         if status >= 200 && status < 300
-            then case parseSseEvents bodyText of
-                Left err -> pure (Left err)
-                Right events -> do
-                    mapM_ onEvent events
-                    pure (buildResponse events)
-            else pure $ Left $ classifyFailure status (retryAfterSeconds response) bodyText
+            then consumeSse (HttpClient.responseBody response)
+            else do
+                body <- consumeBody (HttpClient.responseBody response)
+                let bodyText = Text.decodeUtf8With Text.lenientDecode
+                        (LBS.toStrict body)
+                pure $ Left $
+                    classifyFailure status (retryAfterSeconds response) bodyText
+
+    consumeSse body = go newSseDecoder []
+      where
+        go decoder reversedEvents = do
+            chunk <- HttpClient.brRead body
+            if BS.null chunk
+                then case finishSseDecoder decoder of
+                    Left err -> pure (Left err)
+                    Right trailing -> do
+                        mapM_ onEvent trailing
+                        pure $ buildResponse
+                            (reverse reversedEvents <> trailing)
+                else case feedSseDecoder decoder chunk of
+                    Left err -> pure (Left err)
+                    Right (nextDecoder, events) -> do
+                        mapM_ onEvent events
+                        let retained = filter retainForResponse events
+                        go nextDecoder (reverse retained <> reversedEvents)
+
+    consumeBody body = LBS.fromChunks <$> readChunks []
+      where
+        readChunks reversedChunks = do
+            chunk <- HttpClient.brRead body
+            if BS.null chunk
+                then pure (reverse reversedChunks)
+                else readChunks (chunk : reversedChunks)
+
+    retainForResponse = \case
+        ResponseOutputItemDoneEvent {} -> True
+        ResponseCompletedEvent {} -> True
+        ResponseErrorEvent {} -> True
+        ResponseNestedErrorEvent {} -> True
+        ResponseFailedEvent {} -> True
+        _ -> False
 
     retryAfterSeconds response = case getResponseHeader "Retry-After" response of
         (value : _) -> case reads (BS8.unpack value) of

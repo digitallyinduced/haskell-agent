@@ -8,9 +8,11 @@ import Agent.OpenRouter.Stream
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
 
 spec :: Spec
@@ -95,6 +97,13 @@ spec = do
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"created_at\":0,\"model\":\"openai/gpt-5.1\",\"status\":\"completed\"}}\n\n"
             map responseStreamEventType events `shouldBe` [EventResponseCompleted]
 
+        it "accepts a final event without a trailing blank line" do
+            events <- expectRight $ parseSseEvents finalEventWithoutBlankLine
+            map responseStreamEventType events `shouldBe` [EventResponseCompleted]
+
+        it "decodes arbitrary HTTP chunk boundaries" do
+            mapM_ checkSplit [0 .. BS.length splitBytes]
+
         it "maps response.failed and missing completion to transport-level errors" do
             failedEvents <- expectRight $ parseSseEvents $ sseBlock "response.failed"
                 "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp-f\",\"created_at\":0,\"model\":\"openai/gpt-5.1\",\"status\":\"failed\",\"incomplete_details\":{\"reason\":\"overloaded\"}}}"
@@ -174,3 +183,32 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+finalEventWithoutBlankLine :: Text
+finalEventWithoutBlankLine = Text.dropEnd 2 completedBlock
+
+completedBlock :: Text
+completedBlock = sseBlock "response.completed" completedJson
+
+completedJson :: Text
+completedJson = "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-final\",\"created_at\":0,\"model\":\"openai/gpt-5.1\",\"status\":\"completed\"}}"
+
+splitBytes :: BS.ByteString
+splitBytes = TextEncoding.encodeUtf8 (itemBlock <> completedBlock)
+
+itemBlock :: Text
+itemBlock = sseBlock "response.output_item.done" itemJson
+
+itemJson :: Text
+itemJson = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"héllo\"}]}}"
+
+checkSplit :: Int -> IO ()
+checkSplit offset = do
+    let (first, second) = BS.splitAt offset splitBytes
+    (decoder, firstEvents) <- expectRight
+        (feedSseDecoder newSseDecoder first)
+    (finalDecoder, secondEvents) <- expectRight
+        (feedSseDecoder decoder second)
+    trailing <- expectRight (finishSseDecoder finalDecoder)
+    map responseStreamEventType (firstEvents <> secondEvents <> trailing)
+        `shouldBe` [EventOutputItemDone, EventResponseCompleted]
