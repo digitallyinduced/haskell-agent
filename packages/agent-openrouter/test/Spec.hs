@@ -8,6 +8,7 @@ import qualified Agent.OpenRouter.ErrorSpec as ErrorSpec
 import qualified Agent.OpenRouter.FunctionalSpec as FunctionalSpec
 import qualified Agent.OpenRouter.LoopBackendSpec as LoopBackendSpec
 import qualified Agent.OpenRouter.RequestSpec as RequestSpec
+import qualified Agent.OpenRouter.UsageSpec as UsageSpec
 
 main :: IO ()
 main = hspec do
@@ -17,3 +18,4 @@ main = hspec do
     ClientSpec.spec
     LoopBackendSpec.spec
     FunctionalSpec.spec
+    UsageSpec.spec

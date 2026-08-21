@@ -42,9 +42,11 @@ library
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
                     , Agent.CLI.Command
+                    , Agent.CLI.CredentialStore
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
                     , Agent.CLI.Interrupt
+                    , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
@@ -108,9 +110,11 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
+                    , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelsSpec
@@ -145,6 +149,7 @@ test-suite agent-cli-test
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
                     , process
+                    , safe-exceptions
                     , text
                     , time
                     , unix
