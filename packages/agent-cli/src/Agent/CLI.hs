@@ -1375,7 +1375,10 @@ replWithDraft env@SessionEnv
                     , promptAttachments = length pendingAttachments
                     }
                 draft
-        Nothing -> do
+        Nothing -> withMVar render.renderLock \_ -> do
+            -- The inline editor redraws its ANSI frame with several writes.
+            -- Keep the renderer out for the complete prompt lifetime so a
+            -- late tool event cannot be spliced into the composer row.
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptStart
             termCols <- fmap snd <$> getTerminalSize
