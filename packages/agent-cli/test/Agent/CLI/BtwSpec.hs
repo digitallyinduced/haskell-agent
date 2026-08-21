@@ -94,6 +94,8 @@ spec = do
             fmap (.tools) captured `shouldBe` Just (Just [tool])
             fmap (.input) captured `shouldBe` Just Nothing
             fmap (.previousResponseId) captured `shouldBe` Just Nothing
+            fmap (.toolChoice) captured
+                `shouldBe` Just (Just (ToolChoiceMode ToolChoiceNone))
 
         it "rejects tool calls without a follow-up submission" do
             params <- newIORef defaultResponseCreateParams

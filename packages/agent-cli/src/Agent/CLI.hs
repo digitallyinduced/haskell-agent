@@ -131,11 +131,12 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
-import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
+import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
+    , withCodexWsRetrying
     , withCodexWsWithProvider
     )
 import Agent.Provider
@@ -549,11 +550,8 @@ runAgent options transition = do
                                     noticingBackend =
                                         withPendingNotices pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
-                                        lockedOpenAiBackend
-                                            wsLock
+                                        freshOpenAiBackend
                                             loaded.loadedTokenProvider
-                                            wsHealthy
-                                            conn
                                             (readIORef privateParams)
                                             privateTranscript
                                 activeBackend <-
@@ -1921,6 +1919,18 @@ lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript 
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
     in Backend \previous inputs onEvent ->
         withMVar wsLock \_ -> submit previous inputs onEvent
+
+-- | Use a disposable WebSocket for side questions so cancellation cannot
+-- leave abandoned response frames queued on the main conversation connection.
+freshOpenAiBackend
+    :: TokenProvider
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEvent ->
+    withCodexWsRetrying provider \conn _credential ->
+        let Backend submit = openAiBackend conn getParams transcript
+        in submit previous inputs onEvent
 
 -- | Prepend drained subagent completion notices to the next parent turn.
 withPendingNotices :: IORef [Text] -> Backend -> Backend

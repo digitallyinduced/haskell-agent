@@ -18,6 +18,8 @@ import Agent.OpenAI.Responses.Types
     , FunctionCallOutput(..)
     , ResponseCreateParams(..)
     , ResponseItem(..)
+    , ToolChoice(..)
+    , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (race)
 import Data.IORef (IORef, newIORef, readIORef)
@@ -134,6 +136,7 @@ clearTurnSpecificParams ResponseCreateParams{..} =
     ResponseCreateParams
         { input = Nothing
         , previousResponseId = Nothing
+        , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
         , ..
         }
 
