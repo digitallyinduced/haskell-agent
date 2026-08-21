@@ -73,6 +73,8 @@ import qualified Graphics.Vty.CrossPlatform as Vty
 data Name
     = ConversationViewport
     | OverlayViewport
+    | ConversationBlock !BlockId
+    | ComposerArea
     | ComposerCursor
     | ComposerModel
     | ComposerEffort
@@ -239,7 +241,9 @@ runFullscreen runtime workerAction = do
                 }
         buildVty = do
             vty <- Vty.mkVty vtyConfig
-            V.setMode (V.outputIface vty) V.Mouse True
+            let output = V.outputIface vty
+            when (V.supportsMode output V.Mouse) $
+                V.setMode output V.Mouse True
             pure vty
     initialVty <- buildVty
     let
@@ -563,7 +567,8 @@ drawBlock state block =
             if selected && state.uiFocus == FocusScrollback
                 then withAttr Theme.selectedAttr content
                 else content
-    in padBottom (Pad 1) framed
+    in clickable (ConversationBlock block.blockId) $
+        padBottom (Pad 1) framed
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
@@ -701,10 +706,11 @@ drawComposer state =
                     , renderDraft focused state
                     , vLimit 1 (fill ' ')
                     ]
-    in withAttr attr $
-        withBorderStyle unicodeRounded $
-            borderWithLabel (withAttr Theme.footerAttr label) $
-                editor
+    in clickable ComposerArea $
+        withAttr attr $
+            withBorderStyle unicodeRounded $
+                borderWithLabel (withAttr Theme.footerAttr label) $
+                    editor
 
 renderDraft :: Bool -> UiState -> Widget Name
 renderDraft focused state =
@@ -741,12 +747,12 @@ drawFooter state =
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
                     FocusScrollback ->
-                        "↑↓ blocks  │  ←→ fold  │  PgUp/PgDn scroll  │  Tab/Space prompt"
+                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | state.appUi.uiRunning ->
-                            "Esc/Ctrl+C cancel  │  Tab scrollback"
+                            "Esc/Ctrl+C cancel  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
                         | otherwise ->
-                            "Enter send  │  Shift+Enter newline  │  Shift+Tab mode  │  Tab scrollback"
+                            "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
 
 drawPermission :: PermissionOverlay -> Widget Name
 drawPermission permission =
@@ -926,10 +932,20 @@ handleEvent event = case event of
             result <- tryAny action
             atomically (putTMVar reply result)
             pure state
-    MouseDown ComposerModel V.BLeft _ _ ->
-        handleStatusClick ReplChooseModel
-    MouseDown ComposerEffort V.BLeft _ _ ->
-        handleStatusClick ReplChooseEffort
+    MouseDown name button _ _ -> do
+        state <- get
+        case ( state.appTextPrompt
+             , state.appChoice
+             , state.appUi.uiPermission
+             ) of
+            (Nothing, Nothing, Nothing) ->
+                case (name, button) of
+                    (ComposerModel, V.BLeft) ->
+                        handleStatusClick ReplChooseModel
+                    (ComposerEffort, V.BLeft) ->
+                        handleStatusClick ReplChooseEffort
+                    _ -> handleMouseDown name button
+            _ -> pure ()
     VtyEvent vtyEvent -> do
         state <- get
         case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
@@ -1034,18 +1050,60 @@ handleCtrlC = do
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
 handleNormalKey event = do
-    state <- get
-    case state.appUi.uiFocus of
-        FocusScrollback -> handleScrollbackKey event
-        FocusComposer -> handleComposerKey event
-        FocusPermission -> pure ()
+    case event of
+        V.EvMouseDown _ _ V.BScrollUp _ ->
+            scrollConversationBy (-mouseScrollLines)
+        V.EvMouseDown _ _ V.BScrollDown _ ->
+            scrollConversationBy mouseScrollLines
+        _ -> do
+            state <- get
+            case state.appUi.uiFocus of
+                FocusScrollback -> handleScrollbackKey event
+                FocusComposer -> handleComposerKey event
+                FocusPermission -> pure ()
+
+handleMouseDown :: Name -> V.Button -> EventM Name AppState ()
+handleMouseDown name button =
+    case button of
+        V.BScrollUp -> scrollConversationBy (-mouseScrollLines)
+        V.BScrollDown -> scrollConversationBy mouseScrollLines
+        V.BLeft -> case name of
+            ConversationBlock ident ->
+                modify' \state ->
+                    state
+                        { appUi =
+                            reduceUi
+                                (UiFocusChanged FocusScrollback)
+                                (reduceUi (UiSelectBlock ident) state.appUi)
+                        }
+            ComposerArea ->
+                modify' \state ->
+                    state
+                        { appUi =
+                            reduceUi
+                                (UiFocusChanged FocusComposer)
+                                state.appUi
+                        }
+            _ -> pure ()
+        _ -> pure ()
+
+mouseScrollLines :: Int
+mouseScrollLines = 3
 
 handleScrollbackKey :: V.Event -> EventM Name AppState ()
 handleScrollbackKey = \case
-    V.EvKey V.KUp [] -> moveBlock (-1) >> vScrollBy scroll (-2)
-    V.EvKey V.KDown [] -> moveBlock 1 >> vScrollBy scroll 2
-    V.EvKey V.KPageUp [] -> leaveFollow >> vScrollPage scroll Up
-    V.EvKey V.KPageDown [] -> leaveFollow >> vScrollPage scroll Down
+    V.EvKey V.KUp [] -> moveBlock (-1)
+    V.EvKey V.KDown [] -> moveBlock 1
+    V.EvKey V.KPageUp [] -> scrollConversationPage Up
+    V.EvKey V.KPageDown [] -> scrollConversationPage Down
+    V.EvKey (V.KChar 'k') modifiers
+        | V.MCtrl `elem` modifiers -> scrollConversationBy (-1)
+    V.EvKey (V.KChar 'j') modifiers
+        | V.MCtrl `elem` modifiers -> scrollConversationBy 1
+    V.EvKey (V.KChar 'u') modifiers
+        | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Up
+    V.EvKey (V.KChar 'd') modifiers
+        | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Down
     V.EvKey V.KHome [] -> leaveFollow >> vScrollToBeginning scroll
     V.EvKey V.KEnd [] -> resumeFollow
     V.EvKey (V.KChar 'g') [] -> leaveFollow >> vScrollToBeginning scroll
@@ -1060,9 +1118,13 @@ handleScrollbackKey = \case
     _ -> pure ()
   where
     scroll = viewportScroll ConversationViewport
-    moveBlock delta =
+    moveBlock delta = do
         modify' \state ->
             state { appUi = reduceUi (UiMoveSelection delta) state.appUi }
+        state <- get
+        case state.appUi.uiSelectedBlock of
+            Just ident -> makeVisible (ConversationBlock ident)
+            Nothing -> pure ()
     toggle =
         modify' \state ->
             state { appUi = reduceUi UiToggleSelected state.appUi }
@@ -1207,9 +1269,9 @@ handleComposerKey event = do
         V.EvKey V.KEnd [] ->
             setCursor (lineEndCursor ui.uiDraft ui.uiCursor)
         V.EvKey V.KPageUp [] ->
-            vScrollPage (viewportScroll ConversationViewport) Up
+            scrollConversationPage Up
         V.EvKey V.KPageDown [] ->
-            vScrollPage (viewportScroll ConversationViewport) Down
+            scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
@@ -1466,6 +1528,52 @@ handleComposerKey event = do
                 menu.slashMenuReplaceStart
                     + Text.length suggestion.slashSuggestionReplacement
         modifyUiResetSlash (UiSetDraft next cursor)
+
+scrollConversationPage :: Direction -> EventM Name AppState ()
+scrollConversationPage direction = do
+    height <- conversationViewportHeight
+    scrollConversationBy $
+        case direction of
+            Up -> negate height
+            Down -> height
+
+scrollConversationHalfPage :: Direction -> EventM Name AppState ()
+scrollConversationHalfPage direction = do
+    height <- conversationViewportHeight
+    let amount = max 1 (height `div` 2)
+    scrollConversationBy $
+        case direction of
+            Up -> negate amount
+            Down -> amount
+
+conversationViewportHeight :: EventM Name AppState Int
+conversationViewportHeight =
+    lookupViewport ConversationViewport >>= \case
+        Just (VP _ _ (_, height) _) -> pure (max 1 height)
+        Nothing -> pure 1
+
+scrollConversationBy :: Int -> EventM Name AppState ()
+scrollConversationBy amount
+    | amount == 0 = pure ()
+    | amount < 0 = do
+        setConversationFollow False
+        vScrollBy scroll amount
+    | otherwise =
+        lookupViewport ConversationViewport >>= \case
+            Just (VP _ top (_, height) (_, contentHeight))
+                | top + height + amount >= contentHeight -> do
+                    setConversationFollow True
+                    vScrollToEnd scroll
+            _ -> do
+                setConversationFollow False
+                vScrollBy scroll amount
+  where
+    scroll = viewportScroll ConversationViewport
+
+setConversationFollow :: Bool -> EventM Name AppState ()
+setConversationFollow follow =
+    modify' \state ->
+        state { appUi = reduceUi (UiSetFollow follow) state.appUi }
 
 decodePaste :: ByteString -> Text
 decodePaste =

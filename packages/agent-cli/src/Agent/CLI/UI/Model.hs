@@ -130,6 +130,7 @@ data UiEvent
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe Text)
     | UiMoveSelection !Int
+    | UiSelectBlock !BlockId
     | UiToggleSelected
     | UiFocusChanged !Focus
     | UiPermissionShown !Text
@@ -205,6 +206,8 @@ reduceUi event state = case event of
         state { uiNotice = notice }
     UiMoveSelection delta ->
         moveSelection delta state
+    UiSelectBlock ident ->
+        selectBlock ident state
     UiToggleSelected ->
         toggleSelected state
     UiFocusChanged focus ->
@@ -251,7 +254,15 @@ reduceUi event state = case event of
             , uiTurnStartBlock = 0
             }
     UiSetFollow follow ->
-        state { uiFollow = follow }
+        state
+            { uiFollow = follow
+            , uiSelectedBlock =
+                if follow
+                    then (.blockId) <$> Seq.lookup
+                        (Seq.length state.uiBlocks - 1)
+                        state.uiBlocks
+                    else state.uiSelectedBlock
+            }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
     UiTick ->
@@ -434,6 +445,16 @@ moveSelection delta state =
             in state
                 { uiSelectedBlock = Just (blocks !! next).blockId
                 , uiFollow = next == length blocks - 1
+                }
+
+selectBlock :: BlockId -> UiState -> UiState
+selectBlock ident state =
+    case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
+        Nothing -> state
+        Just index ->
+            state
+                { uiSelectedBlock = Just ident
+                , uiFollow = index == Seq.length state.uiBlocks - 1
                 }
 
 selectedBlockIndex :: UiState -> Int
