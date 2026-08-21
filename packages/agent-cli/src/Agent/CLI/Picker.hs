@@ -11,6 +11,14 @@ module Agent.CLI.Picker
     , withRawTty
     ) where
 
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , emitTerminalSequence
+    , kittyKeyboardPop
+    , kittyKeyboardPush
+    , withSynchronizedOutput
+    )
 import Control.Exception.Safe (bracket, throwIO, tryIO)
 import Control.Monad (when)
 import Data.Char (isDigit)
@@ -82,6 +90,16 @@ decodePickerKey = \case
     "\ESC[OB" -> Just PickerKeyDown
     "\DEL" -> Just PickerKeyBackspace
     "\b" -> Just PickerKeyBackspace
+    sequence_
+        | Just codepoint <- kittyCodepoint sequence_ ->
+            codepointKey codepoint
+    sequence_
+        | "\ESC[" `Text.isPrefixOf` Text.pack sequence_
+        , Just final <- safeLast sequence_ ->
+            case final of
+                'A' -> Just PickerKeyUp
+                'B' -> Just PickerKeyDown
+                _ -> Nothing
     [c] -> Just (PickerKeyChar c)
     _ -> Nothing
 
@@ -123,56 +141,88 @@ mouseKeysForFrame frameTop frame = \case
               where
                 clicked = row - 1 - top
 
+kittyCodepoint :: String -> Maybe Int
+kittyCodepoint sequence_ = do
+    body <- Text.stripPrefix "\ESC[" (Text.pack sequence_)
+    raw <- Text.stripSuffix "u" body
+    let code = Text.takeWhile (/= ';') raw
+    case reads (Text.unpack code) of
+        [(n, "")] -> Just n
+        _ -> Nothing
+
+codepointKey :: Int -> Maybe PickerKey
+codepointKey = \case
+    13 -> Just PickerKeyConfirm
+    27 -> Just PickerKeyCancel
+    8 -> Just PickerKeyBackspace
+    127 -> Just PickerKeyBackspace
+    n
+        | n >= 0
+        , n <= fromEnum (maxBound :: Char) ->
+            Just (PickerKeyChar (toEnum n))
+    _ -> Nothing
+
+safeLast :: [a] -> Maybe a
+safeLast [] = Nothing
+safeLast xs = Just (last xs)
+
 -- | Draw @render@, then feed keys through @step@ until it returns @Left@.
 runOverlay :: (state -> Text) -> (PickerKey -> state -> Either result state) -> state -> IO (Maybe result)
 runOverlay render step state0 =
     withRawTty do
+        terminal <- detectTerminalCapabilities stderr
         let frame0 = render state0
             lines0 = frameLineCount frame0
-        drawFrame stderr frame0
+        withSynchronizedOutput terminal stderr (drawFrame stderr frame0)
         top0 <- frameTop stderr lines0
-        loop stderr state0 lines0 frame0 top0
+        loop terminal stderr state0 lines0 frame0 top0
   where
-    loop h state drawnLines frame top = do
+    loop terminal h state drawnLines frame top = do
         minput <- readPickerInput
         case minput of
             Nothing -> do
-                clearDrawn h drawnLines
+                withSynchronizedOutput terminal h (clearDrawn h drawnLines)
                 pure Nothing
             Just raw ->
                 let keys = case decodeMouseEvent raw of
                         Just mouse -> mouseKeysForFrame top frame mouse
                         Nothing -> maybe [] pure (decodePickerKey raw)
-                in applyKeys h state drawnLines frame top keys
+                in applyKeys terminal h state drawnLines frame top keys
 
-    applyKeys h state drawnLines frame top = \case
-        [] -> loop h state drawnLines frame top
+    applyKeys terminal h state drawnLines frame top = \case
+        [] -> loop terminal h state drawnLines frame top
         key : keys -> case step key state of
             Left result -> do
-                clearDrawn h drawnLines
+                withSynchronizedOutput terminal h (clearDrawn h drawnLines)
                 pure (Just result)
             Right state'
                 | null keys -> do
                     let frame' = render state'
                         n = frameLineCount frame'
-                    redraw h drawnLines frame'
+                    withSynchronizedOutput terminal h
+                        (redraw h drawnLines frame')
                     top' <- frameTop h n
-                    loop h state' n frame' top'
+                    loop terminal h state' n frame' top'
                 | otherwise ->
-                    applyKeys h state' drawnLines frame top keys
+                    applyKeys terminal h state' drawnLines frame top keys
 
 withRawTty :: IO a -> IO a
 withRawTty action = do
     oldTerm <- getTerminalAttributes stdInput
     oldBuf <- hGetBuffering stdin
+    terminal <- detectTerminalCapabilities stderr
     let enter = do
             setTerminalAttributes stdInput (rawAttrs oldTerm) Immediately
             hSetBuffering stdin NoBuffering
             hHideCursor stderr
+            when terminal.terminalKittyKeyboard $
+                emitTerminalSequence terminal stderr kittyKeyboardPush
             hPutStr stderr enableMouse
             hFlush stderr
         restore = do
             hPutStr stderr disableMouse
+            when terminal.terminalKittyKeyboard $
+                emitTerminalSequence terminal stderr kittyKeyboardPop
             hShowCursor stderr
             hFlush stderr
             setTerminalAttributes stdInput oldTerm Immediately
@@ -232,22 +282,22 @@ readPickerInput = do
                 else do
                     c2 <- hGetChar stdin
                     case c2 of
-                        '[' -> Just . ("\ESC[" <>) <$> readCsi
+                        '[' -> Just . ("\ESC[" <>) <$> readCsiTail
                         'O' -> do
                             c3 <- hGetChar stdin
                             pure (Just ['\ESC', 'O', c3])
                         _ -> pure (Just ['\ESC', c2])
         Right c -> pure (Just [c])
 
-readCsi :: IO String
-readCsi = go []
+readCsiTail :: IO String
+readCsiTail = go []
   where
     go reversed = do
-        c <- hGetChar stdin
-        let reversed' = c : reversed
-        if c >= '@' && c <= '~'
-            then pure (reverse reversed')
-            else go reversed'
+        char <- hGetChar stdin
+        let accumulated = char : reversed
+        if char >= '@' && char <= '~'
+            then pure (reverse accumulated)
+            else go accumulated
 
 rawAttrs :: TerminalAttributes -> TerminalAttributes
 rawAttrs oldTerm =

@@ -12,6 +12,7 @@ module Agent.CLI.Input
     , parseChoiceKey
     , choiceMoveIndex
     , classifyPastedText
+    , decodeBracketedPastePayload
     , displayEditorText
     , formatPasteChip
     , isClipboardPasteKey
@@ -40,6 +41,7 @@ import Data.Char
     , isSpace
     , ord
     )
+import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -337,6 +339,7 @@ data EditorKey
     | EditorCycleMode
     | EditorClipboardPaste
     | EditorPaste !Text
+    | EditorInputError !Text
     | EditorIgnore
     deriving (Eq, Show)
 
@@ -461,6 +464,11 @@ readInlineEditor slashEnabled interrupt historyPath prompt initial = do
             EditorPaste pasted ->
                 continue history entries
                     (insertText pasted state) { editorPasted = True }
+            EditorInputError message -> do
+                finishEditorLine prompt state
+                Text.putStrLn ("input ignored: " <> message)
+                redrawEditor prompt state
+                editorLoop history entries state
             EditorChar char ->
                 continue history entries (insertText (Text.singleton char) state)
             EditorIgnore -> editorLoop history entries state
@@ -709,61 +717,155 @@ readEscapeKey = do
     ready <- hWaitForInput stdin 25
     if not ready
         then pure EditorEscape
-        else do
-            second <- hGetChar stdin
-            case second of
+        else readTimedChar escapeSequenceTimeoutMs >>= \case
+            TimedOut -> pure (EditorInputError "escape sequence timed out")
+            TimedEof -> pure (EditorInputError "input ended during escape sequence")
+            TimedChar second -> case second of
                 '[' -> readCsiKey
-                'O' -> do
-                    third <- hGetChar stdin
-                    pure $ case third of
-                        'A' -> EditorUp
-                        'B' -> EditorDown
-                        'C' -> EditorRight
-                        'D' -> EditorLeft
-                        'H' -> EditorHome
-                        'F' -> EditorEnd
-                        'Z' -> EditorCycleMode
-                        _ -> EditorIgnore
+                'O' ->
+                    readTimedChar escapeSequenceTimeoutMs >>= \case
+                        TimedOut -> pure (EditorInputError "SS3 sequence timed out")
+                        TimedEof -> pure (EditorInputError "input ended during SS3 sequence")
+                        TimedChar third ->
+                            pure $ case third of
+                                'A' -> EditorUp
+                                'B' -> EditorDown
+                                'C' -> EditorRight
+                                'D' -> EditorLeft
+                                'H' -> EditorHome
+                                'F' -> EditorEnd
+                                'Z' -> EditorCycleMode
+                                _ -> EditorIgnore
                 '\n' -> pure (EditorChar '\n')
                 '\r' -> pure (EditorChar '\n')
                 _ -> pure EditorIgnore
 
 readCsiKey :: IO EditorKey
-readCsiKey = do
-    body <- readCsiBody ""
-    case body of
-        "A" -> pure EditorUp
-        "B" -> pure EditorDown
-        "C" -> pure EditorRight
-        "D" -> pure EditorLeft
-        "H" -> pure EditorHome
-        "F" -> pure EditorEnd
-        "Z" -> pure EditorCycleMode
-        "1~" -> pure EditorHome
-        "4~" -> pure EditorEnd
-        "3~" -> pure EditorDelete
-        "1;2Z" -> pure EditorCycleMode
-        "200~" -> EditorPaste <$> readBracketedPaste
-        _ -> pure EditorIgnore
+readCsiKey =
+    readCsiBody >>= \case
+        Left err -> pure (EditorInputError err)
+        Right body -> case body of
+            "A" -> pure EditorUp
+            "B" -> pure EditorDown
+            "C" -> pure EditorRight
+            "D" -> pure EditorLeft
+            "H" -> pure EditorHome
+            "F" -> pure EditorEnd
+            "Z" -> pure EditorCycleMode
+            "1~" -> pure EditorHome
+            "4~" -> pure EditorEnd
+            "3~" -> pure EditorDelete
+            "1;2Z" -> pure EditorCycleMode
+            "200~" ->
+                readBracketedPaste >>= \case
+                    Left err -> pure (EditorInputError err)
+                    Right pasted -> pure (EditorPaste pasted)
+            _ -> pure EditorIgnore
 
-readCsiBody :: String -> IO String
-readCsiBody reversed = do
-    char <- hGetChar stdin
-    let next = char : reversed
-    if char >= '@' && char <= '~'
-        then pure (reverse next)
-        else readCsiBody next
-
-readBracketedPaste :: IO Text
-readBracketedPaste = go ""
+readCsiBody :: IO (Either Text String)
+readCsiBody = go 0 []
   where
-    end = "\ESC[201~"
-    go acc = do
-        char <- hGetChar stdin
-        let next = Text.snoc acc char
-        if end `Text.isSuffixOf` next
-            then pure (Text.dropEnd (Text.length end) next)
-            else go next
+    go count reversed
+        | count >= maxCsiBodyLength = do
+            drainCsiBody
+            pure (Left "CSI sequence exceeded 32 bytes")
+        | otherwise =
+            readTimedChar escapeSequenceTimeoutMs >>= \case
+                TimedOut -> pure (Left "CSI sequence timed out")
+                TimedEof -> pure (Left "input ended during CSI sequence")
+                TimedChar char ->
+                    let next = char : reversed
+                    in if char >= '@' && char <= '~'
+                        then pure (Right (reverse next))
+                        else go (count + 1) next
+
+    drainCsiBody :: IO ()
+    drainCsiBody =
+        readTimedChar escapeSequenceTimeoutMs >>= \case
+            TimedChar char
+                | char >= '@' && char <= '~' -> pure ()
+                | otherwise -> drainCsiBody
+            TimedOut -> pure ()
+            TimedEof -> pure ()
+
+readBracketedPaste :: IO (Either Text Text)
+readBracketedPaste = go 0 []
+  where
+    markerLength = length bracketedPasteEnd
+    markerReversed = reverse bracketedPasteEnd
+    maximumBuffered = maxBracketedPasteChars + markerLength
+
+    go count reversed =
+        readTimedChar pasteIdleTimeoutMs >>= \case
+            TimedOut ->
+                pure (Left "bracketed paste timed out before its end marker")
+            TimedEof ->
+                pure (Left "input ended during bracketed paste")
+            TimedChar char -> do
+                let next = char : reversed
+                    count' = count + 1
+                if markerReversed `isPrefixOf` next
+                    then pure $
+                        decodeBracketedPastePayload
+                            maxBracketedPasteChars
+                            (Text.pack (reverse next))
+                    else if count' > maximumBuffered
+                        then do
+                            drainBracketedPaste (take (markerLength - 1) next)
+                            pure (Left "bracketed paste exceeded 8 million characters")
+                        else go count' next
+
+    drainBracketedPaste recentReversed =
+        readTimedChar pasteIdleTimeoutMs >>= \case
+            TimedChar char ->
+                let next = char : recentReversed
+                in unless (markerReversed `isPrefixOf` next) $
+                    drainBracketedPaste (take (markerLength - 1) next)
+            TimedOut -> pure ()
+            TimedEof -> pure ()
+
+-- | Validate input captured after a bracketed-paste start marker. The input
+-- must contain an end marker, and the payload must fit the supplied limit.
+decodeBracketedPastePayload :: Int -> Text -> Either Text Text
+decodeBracketedPastePayload limit input =
+    let (payload, rest) = Text.breakOn (Text.pack bracketedPasteEnd) input
+    in if Text.null rest
+        then Left "bracketed paste is missing its end marker"
+        else if Text.length payload > max 0 limit
+            then Left "bracketed paste exceeds the size limit"
+            else Right payload
+
+data TimedRead
+    = TimedChar !Char
+    | TimedOut
+    | TimedEof
+
+readTimedChar :: Int -> IO TimedRead
+readTimedChar timeoutMs = do
+    ready <- hWaitForInput stdin timeoutMs
+    if not ready
+        then pure TimedOut
+        else
+            tryIO (hGetChar stdin) >>= \case
+                Left err
+                    | isEOFError err -> pure TimedEof
+                    | otherwise -> throwIO err
+                Right char -> pure (TimedChar char)
+
+maxCsiBodyLength :: Int
+maxCsiBodyLength = 32
+
+escapeSequenceTimeoutMs :: Int
+escapeSequenceTimeoutMs = 100
+
+pasteIdleTimeoutMs :: Int
+pasteIdleTimeoutMs = 2000
+
+maxBracketedPasteChars :: Int
+maxBracketedPasteChars = 8 * 1024 * 1024
+
+bracketedPasteEnd :: String
+bracketedPasteEnd = "\ESC[201~"
 
 withEditorRawStdin :: IO a -> IO a
 withEditorRawStdin action = do

@@ -5,6 +5,7 @@ import Agent.CLI.Input
     , approvalKeyText
     , choiceMoveIndex
     , classifyPastedText
+    , decodeBracketedPastePayload
     , displayEditorText
     , formatPasteChip
     , isClipboardPasteKey
@@ -14,6 +15,7 @@ import Agent.CLI.Input
     , truncateDisplayText
     , visibleEditorText
     )
+import Data.Either (isLeft)
 import qualified Data.Text as Text
 import System.FilePath ((</>))
 import Test.Hspec
@@ -80,6 +82,21 @@ spec = do
             formatPasteChip "one line" `shouldBe` "one line"
             formatPasteChip (Text.unlines ["a", "b", "c", "d"])
                 `shouldBe` "[Pasted: 4 lines]"
+
+    describe "decodeBracketedPastePayload" do
+        it "extracts a payload through the first end marker" do
+            decodeBracketedPastePayload 20 "hello\ESC[201~ignored"
+                `shouldBe` Right "hello"
+
+        it "rejects incomplete and oversized pastes" do
+            decodeBracketedPastePayload 20 "no end marker"
+                `shouldSatisfy` isLeft
+            decodeBracketedPastePayload 4 "hello\ESC[201~"
+                `shouldSatisfy` isLeft
+
+        it "accepts a payload exactly at the configured limit" do
+            decodeBracketedPastePayload 5 "hello\ESC[201~"
+                `shouldBe` Right "hello"
 
     describe "safe editor rendering" do
         it "renders pasted terminal controls as visible characters" do

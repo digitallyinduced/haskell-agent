@@ -18,14 +18,15 @@ module Agent.Tools.Grok.Task
     , lookupAgentModel
     ) where
 
+import Agent.InterAgentMessage (plainInterAgentContent)
 import Agent.OsPath (OsPath, fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , getStatus
-    , sendInput
-    , spawnSubagentWithCwd
+    , sendInputMessageForTurn
+    , spawnSubagentWithCwdPreparedForTurn
     , waitSubagents
     )
 import Agent.ToolArgs
@@ -39,11 +40,12 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
     )
+import Control.Exception.Safe (mask, onException)
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -180,33 +182,40 @@ runTask baseCwd ctx typesRef args
     , Just iso <- args.isolation
     , isWorktreeIsolation iso =
         pure (Left "cwd and isolation are mutually exclusive.")
-    | otherwise = resolveTaskWorkspace baseCwd ctx args >>= \case
-        Left err -> pure (Left err)
-        Right (childCwd, worktreePath) ->
-            spawnFresh childCwd worktreePath ctx typesRef args
+    | otherwise = mask \restore ->
+        resolveTaskWorkspace baseCwd ctx args >>= \case
+            Left err -> pure (Left err)
+            Right (childCwd, worktree) ->
+                restore (spawnFresh childCwd worktree ctx typesRef args)
 
 spawnFresh
     :: OsPath
-    -> Maybe OsPath
+    -> Maybe SubagentWorktree
     -> MultiAgentContext
     -> GrokSubagentSpecs
     -> TaskArgs
     -> IO (Either Text Text)
-spawnFresh childCwd worktreePath ctx typesRef args = do
-    result <- spawnSubagentWithCwd
-        ctx.multiRegistry
-        childCwd
-        ctx.multiSelfId
-        ctx.multiDepth
-        args.prompt
-        (Just args.description)
+spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
+    rootTurnId <- ctx.multiRootTurnId
+    let spec = GrokSubagentSpec
+            { agentType = args.subagentType
+            , modelOverride = args.model
+            }
+        worktreePath = (.subagentWorktreePath) <$> worktree
+    result <- restore
+        (spawnSubagentWithCwdPreparedForTurn
+            ctx.multiRegistry
+            rootTurnId
+            childCwd
+            (\agentId -> recordAgentSpec typesRef agentId spec)
+            ctx.multiSelfId
+            ctx.multiDepth
+            args.prompt
+            (Just args.description))
+        `onException` cleanupWorktreeQuietly worktree
     case result of
-        Left err -> pure (Left err)
-        Right agentId -> do
-            recordAgentSpec typesRef agentId GrokSubagentSpec
-                { agentType = args.subagentType
-                , modelOverride = args.model
-                }
+        Left err -> cleanupFailedWorktree worktree err
+        Right agentId -> restore do
             if args.runInBackground
                 then pure $ Right $ formatTaskStarted agentId args worktreePath
                 else do
@@ -215,11 +224,29 @@ spawnFresh childCwd worktreePath ctx typesRef args = do
                     pure $ Right $ formatTaskCompleted agentId args worktreePath timedOut
                         (Map.lookup agentId statuses)
 
+cleanupWorktreeQuietly :: Maybe SubagentWorktree -> IO ()
+cleanupWorktreeQuietly Nothing = pure ()
+cleanupWorktreeQuietly (Just worktree) = do
+    _ <- worktree.subagentWorktreeCleanup
+    pure ()
+
+cleanupFailedWorktree
+    :: Maybe SubagentWorktree
+    -> Text
+    -> IO (Either Text Text)
+cleanupFailedWorktree Nothing spawnError = pure (Left spawnError)
+cleanupFailedWorktree (Just worktree) spawnError =
+    worktree.subagentWorktreeCleanup >>= \case
+        Right () -> pure (Left spawnError)
+        Left cleanupError ->
+            pure $ Left $
+                spawnError <> "\nAdditionally, worktree cleanup failed: " <> cleanupError
+
 resolveTaskWorkspace
     :: OsPath
     -> MultiAgentContext
     -> TaskArgs
-    -> IO (Either Text (OsPath, Maybe OsPath))
+    -> IO (Either Text (OsPath, Maybe SubagentWorktree))
 resolveTaskWorkspace baseCwd ctx args
     | maybe False isWorktreeIsolation args.isolation =
         case ctx.multiCreateWorktree of
@@ -227,7 +254,8 @@ resolveTaskWorkspace baseCwd ctx args
             Just create ->
                 create baseCwd >>= \case
                     Left err -> pure (Left err)
-                    Right path -> pure (Right (path, Just path))
+                    Right worktree ->
+                        pure (Right (worktree.subagentWorktreePath, Just worktree))
     | otherwise = do
         resolved <- resolveTaskCwd baseCwd args.cwd
         pure $ case resolved of
@@ -282,7 +310,10 @@ resumeTask ctx typesRef args resumeId = do
                                 <> args.subagentType
                 _ -> do
                     recordAgentType typesRef agentId args.subagentType
-                    sent <- sendInput ctx.multiRegistry agentId args.prompt False
+                    rootTurnId <- ctx.multiRootTurnId
+                    sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
+                        ctx.multiTaskPath agentId
+                        (plainInterAgentContent args.prompt) False
                     case sent of
                         Left err -> pure (Left err)
                         Right _ ->

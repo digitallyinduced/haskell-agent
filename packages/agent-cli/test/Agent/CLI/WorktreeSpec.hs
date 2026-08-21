@@ -79,6 +79,16 @@ spec = describe "Agent.CLI.Worktree" do
                 doesDirectoryExist first `shouldReturn` True
                 doesDirectoryExist second `shouldReturn` True
 
+        it "removes the worktree and its generated branch" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                path <- expectRight =<< createWorktree repo (worktreeRoot home)
+                let branch = toFilePath (takeFileName path)
+                removeWorktree repo path `shouldReturn` Right ()
+                doesDirectoryExist path `shouldReturn` False
+                branches <- git repo ["branch", "--list", branch]
+                branches `shouldBe` ""
+
 expectRight :: Either String OsPath -> IO OsPath
 expectRight = \case
     Right path -> pure path

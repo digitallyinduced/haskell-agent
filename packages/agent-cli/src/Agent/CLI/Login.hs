@@ -17,7 +17,9 @@ module Agent.CLI.Login
 
 import Agent.CLI.Auth
     ( grokCredentialFromAuthJson
+    , openAIOAuthClientId
     , openaiAuthStateFromJson
+    , xaiOAuthClientId
     )
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
@@ -41,6 +43,7 @@ import Agent.CLI.Style
     , roleSuccess
     , roleWarn
     )
+import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
@@ -396,79 +399,73 @@ pickConnectProvider color =
         _ -> Right index
 
 connectOpenAI :: Bool -> IO ()
-connectOpenAI color =
-    lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID" >>= \case
-        Nothing ->
-            printLoginMessage color False
-                "set OPENAI_OAUTH_CLIENT_ID before connecting a ChatGPT account"
-        Just clientId -> do
-            let options = OpenAILogin.defaultLoginOptions clientId
-            OpenAILogin.requestDeviceCode options >>= \case
+connectOpenAI color = do
+    clientId <-
+        openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    let options = OpenAILogin.defaultLoginOptions clientId
+    OpenAILogin.requestDeviceCode options >>= \case
+        Left err -> printLoginMessage color False err
+        Right device -> do
+            Text.hPutStrLn stderr $
+                roleMuted color "Open "
+                    <> rolePrompt color (Text.pack device.verificationUrl)
+            Text.hPutStrLn stderr $
+                roleMuted color "Enter code "
+                    <> rolePrompt color device.userCode
+            hFlush stderr
+            OpenAILogin.completeDeviceCodeLogin options device >>= \case
                 Left err -> printLoginMessage color False err
-                Right device -> do
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Open "
-                            <> rolePrompt color (Text.pack device.verificationUrl)
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Enter code "
-                            <> rolePrompt color device.userCode
-                    hFlush stderr
-                    OpenAILogin.completeDeviceCodeLogin options device >>= \case
-                        Left err -> printLoginMessage color False err
-                        Right authJson -> do
-                            now <- getCurrentTime
-                            case openaiAuthStateFromJson now (Aeson.encode authJson) of
-                                Nothing ->
-                                    printLoginMessage color False
-                                        "OpenAI login returned invalid account data"
-                                Just auth ->
-                                    storeConnectedCredential color
-                                        OpenAIProvider
-                                        auth.accountId
-                                        "ChatGPT"
-                                        ManagedSubscription
-                                        ManagedOpenAIAuthJson
-                                        (Text.decodeUtf8
-                                            (LBS.toStrict (Aeson.encode authJson)))
-
-connectXAI :: Bool -> IO ()
-connectXAI color =
-    lookupNonEmpty "XAI_OAUTH_CLIENT_ID" >>= \case
-        Nothing ->
-            printLoginMessage color False
-                "set XAI_OAUTH_CLIENT_ID before connecting a Grok account"
-        Just clientId -> do
-            let options = XAIAuth.defaultOAuthOptions clientId
-            XAIAuth.requestDeviceAuthorization options >>= \case
-                Left err -> printLoginMessage color False err
-                Right device -> do
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Open "
-                            <> rolePrompt color device.verificationUrl
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Enter code "
-                            <> rolePrompt color device.userCode
-                    hFlush stderr
-                    XAIAuth.completeDeviceAuthorization options device >>= \case
-                        Left err -> printLoginMessage color False err
-                        Right tokens -> do
-                            let accountId =
-                                    fromMaybe "grok"
-                                        (XAIAuth.accountIdFromAccessToken
-                                            tokens.accessToken)
-                                authJson = Aeson.object
-                                    [ "access_token" .= tokens.accessToken
-                                    , "refresh_token" .= tokens.refreshToken
-                                    , "id_token" .= tokens.idToken
-                                    ]
+                Right authJson -> do
+                    now <- getCurrentTime
+                    case openaiAuthStateFromJson now (Aeson.encode authJson) of
+                        Nothing ->
+                            printLoginMessage color False
+                                "OpenAI login returned invalid account data"
+                        Just auth ->
                             storeConnectedCredential color
-                                XAIProvider
-                                accountId
-                                "Grok"
+                                OpenAIProvider
+                                auth.accountId
+                                "ChatGPT"
                                 ManagedSubscription
-                                ManagedGrokAuthJson
+                                ManagedOpenAIAuthJson
                                 (Text.decodeUtf8
                                     (LBS.toStrict (Aeson.encode authJson)))
+
+connectXAI :: Bool -> IO ()
+connectXAI color = do
+    clientId <-
+        xaiOAuthClientId <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
+    let options = XAIAuth.defaultOAuthOptions clientId
+    XAIAuth.requestDeviceAuthorization options >>= \case
+        Left err -> printLoginMessage color False err
+        Right device -> do
+            Text.hPutStrLn stderr $
+                roleMuted color "Open "
+                    <> rolePrompt color device.verificationUrl
+            Text.hPutStrLn stderr $
+                roleMuted color "Enter code "
+                    <> rolePrompt color device.userCode
+            hFlush stderr
+            XAIAuth.completeDeviceAuthorization options device >>= \case
+                Left err -> printLoginMessage color False err
+                Right tokens -> do
+                    let accountId =
+                            fromMaybe "grok"
+                                (XAIAuth.accountIdFromAccessToken
+                                    tokens.accessToken)
+                        authJson = Aeson.object
+                            [ "access_token" .= tokens.accessToken
+                            , "refresh_token" .= tokens.refreshToken
+                            , "id_token" .= tokens.idToken
+                            ]
+                    storeConnectedCredential color
+                        XAIProvider
+                        accountId
+                        "Grok"
+                        ManagedSubscription
+                        ManagedGrokAuthJson
+                        (Text.decodeUtf8
+                            (LBS.toStrict (Aeson.encode authJson)))
 
 connectOpenRouter :: Bool -> IO ()
 connectOpenRouter color =
@@ -575,7 +572,7 @@ discoverOpenAIFile now path = do
     if not exists
         then pure Nothing
         else do
-            bytes <- LBS.readFile (toFilePath path)
+            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
@@ -606,7 +603,7 @@ discoverGrokFile path = do
         then pure Nothing
         else do
             raw <- Text.decodeUtf8 . LBS.toStrict
-                <$> LBS.readFile (toFilePath path)
+                <$> retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 token <- grokCredentialFromAuthJson raw
                 pure (grokAccount token (toText path)

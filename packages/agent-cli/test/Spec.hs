@@ -2,8 +2,9 @@ module Main (main) where
 
 import Test.Hspec (hspec)
 
-import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
+import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
+import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
@@ -36,13 +37,16 @@ import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
+import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
+import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
 main :: IO ()
 main = hspec do
     AgentViewportSpec.spec
     ApprovalSpec.spec
+    ArtifactSpec.spec
     AuthSpec.spec
     BtwSpec.spec
     CancelWatchSpec.spec
@@ -73,7 +77,9 @@ main = hspec do
     ResumeSpec.spec
     StyleSpec.spec
     TimestampSpec.spec
+    TerminalSpec.spec
     SessionSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
+    UsageSpec.spec
     WorktreeSpec.spec

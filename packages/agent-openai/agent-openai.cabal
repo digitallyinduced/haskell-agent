@@ -75,7 +75,7 @@ library
                     , websockets
                     , wuss
                     , base64-bytestring
-                    , retry
+                    , retry >= 0.9.3.1 && < 0.10
                     , exceptions
                     , safe-exceptions
                     , containers
@@ -122,7 +122,7 @@ test-suite agent-openai-test
                     , agent-openai
                     , hspec
                     , aeson
-                    , retry
+                    , retry >= 0.9.3.1 && < 0.10
                     , text
                     , bytestring
                     , base64-bytestring

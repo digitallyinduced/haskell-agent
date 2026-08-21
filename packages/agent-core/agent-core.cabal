@@ -33,6 +33,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Cancel
                     , Agent.Error
+                    , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Broker
@@ -84,6 +85,7 @@ library
                     , filepath
                     , http-conduit
                     , process
+                    , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , stm
                     , text

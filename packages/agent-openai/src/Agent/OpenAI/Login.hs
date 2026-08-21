@@ -9,9 +9,10 @@ module Agent.OpenAI.Login
     , writeAuthFile
     ) where
 
+import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.OpenAI.Auth (deriveAccountId)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import Agent.OsPath (OsPath)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (unless)
@@ -19,15 +20,13 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Aeson.Key as Key
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Simple
-import System.Directory.OsPath (createDirectoryIfMissing, renameFile)
-import System.OsPath ((<.>), takeDirectory)
-import System.Posix.Files (setFileMode)
+import System.Directory.OsPath (createDirectoryIfMissing)
+import System.OsPath (takeDirectory)
 
 data LoginOptions = LoginOptions
     { issuer :: !String
@@ -150,10 +149,7 @@ pollOnce options deviceCode = do
 writeAuthFile :: OsPath -> Aeson.Value -> IO ()
 writeAuthFile path value = do
     createDirectoryIfMissing True (takeDirectory path)
-    let temporary = path <.> fromFilePath "tmp"
-    LBS.writeFile (toFilePath temporary) (Aeson.encode value)
-    setFileMode (toFilePath temporary) 0o600
-    renameFile temporary path
+    writeLazyFileAtomically path 0o600 (Aeson.encode value)
 
 safely :: IO a -> IO (Either Text a)
 safely action = tryAny action >>= \case

@@ -64,6 +64,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiSelfId = Nothing
                     , multiDepth = 0
                     , multiTaskPath = taskPathRoot
+                    , multiRootTurnId = pure Nothing
                     , multiResumeFromDisk = Nothing
                     , multiCreateWorktree = Nothing
                     , multiSendToRoot = Nothing
