@@ -58,6 +58,7 @@ import Agent.CLI.ReplMode
     )
 import Agent.CLI.Interrupt
     ( InterruptState
+    , isWrappedUserInterrupt
     , newInterruptState
     , withCtrlCHandler
     , withTurnCancel
@@ -246,7 +247,14 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException(UserInterrupt))
-import Control.Exception.Safe (catchAsync, finally, throwIO, try)
+import Control.Exception.Safe
+    ( SomeException
+    , catchAny
+    , catchAsync
+    , finally
+    , throwIO
+    , try
+    )
 import Control.Monad (when)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -618,7 +626,7 @@ runAgent options transition = do
             Nothing -> pure ()
         progName <- getProgName
         withCtrlCHandler interrupt $
-            withInterruptResume progName persist do
+            withInterruptResume progName persist RunQuit do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
@@ -778,15 +786,29 @@ preparePersistence options root provider model cwd effort prompt resumed =
 withInterruptResume
     :: String
     -> Maybe (IORef (Either SessionCreate SessionHandle))
+    -> a
     -> IO a
     -> IO a
-withInterruptResume progName persist action =
-    action `catchAsync` \(e :: AsyncException) ->
+withInterruptResume progName persist interrupted action =
+    (action `catchAny` handleSyncException) `catchAsync` handleInterrupt
+  where
+    -- UserInterrupt can arrive asynchronously from the installed SIGINT
+    -- handler or wrapped as a synchronous exception by safe-exceptions when
+    -- the inline editor's double-Ctrl-C path calls throwIO.
+    handleInterrupt (e :: AsyncException) =
         case e of
-            UserInterrupt -> do
-                printResumeHint progName persist
-                throwIO e
+            UserInterrupt -> finishInterrupt
             _ -> throwIO e
+    handleSyncException (e :: SomeException)
+        | isWrappedUserInterrupt e = finishInterrupt
+        | otherwise = throwIO e
+    finishInterrupt = do
+        printResumeHint progName persist
+        -- The interrupt is the requested, graceful end of the CLI session.
+        -- Returning lets the surrounding brackets restore the SIGINT handler
+        -- and close tools without GHC's top-level exception handler printing
+        -- "user interrupt" and a backtrace.
+        pure interrupted
 
 printResumeHint
     :: String

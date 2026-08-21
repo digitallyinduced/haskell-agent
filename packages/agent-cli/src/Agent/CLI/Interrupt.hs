@@ -11,12 +11,23 @@ module Agent.CLI.Interrupt
     , withCtrlCHandler
     , withTurnCancel
     , noteIdleCtrlC
+    , isWrappedUserInterrupt
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel)
 import Control.Concurrent (ThreadId, myThreadId, throwTo)
-import Control.Exception (AsyncException(UserInterrupt))
-import Control.Exception.Safe (bracket, bracket_, catchIO)
+import Control.Exception
+    ( AsyncException(UserInterrupt)
+    , fromException
+    , toException
+    )
+import Control.Exception.Safe
+    ( SomeException
+    , SyncExceptionWrapper(..)
+    , bracket
+    , bracket_
+    , catchIO
+    )
 import Control.Monad (void)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -149,3 +160,13 @@ notify :: InterruptState -> Text -> IO ()
 notify state msg =
     -- Best-effort: never let printing from the signal thread fail the handler.
     state.interruptOnMessage msg `catchIO` \_ -> pure ()
+
+-- | Recognize a 'UserInterrupt' thrown with safe-exceptions' 'throwIO'.
+isWrappedUserInterrupt :: SomeException -> Bool
+isWrappedUserInterrupt e =
+    case fromException e of
+        Just (SyncExceptionWrapper wrapped) ->
+            case fromException (toException wrapped) of
+                Just UserInterrupt -> True
+                _ -> False
+        Nothing -> False
