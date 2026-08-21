@@ -21,6 +21,11 @@ module Agent.CLI.Session
     , sessionUsageFromTurns
     ) where
 
+import Agent.FileRetry
+    ( appendLazyFileRetryingOpen
+    , retryOnFileBusy
+    , writeLazyFileAtomically
+    )
 import Agent.Loop (TokenUsage(..))
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.OpenAI.Responses.Types (ResponseItem)
@@ -49,7 +54,6 @@ import System.Directory.OsPath
     , doesFileExist
     , listDirectory
     , removeFile
-    , renameFile
     )
 import System.OsPath ((</>))
 import System.Posix.Files (setFileMode)
@@ -72,8 +76,10 @@ writeDevResumePointer home sessionId = do
     let root = home </> fromFilePath ".haskell-agent"
         path = devResumePointerPath home
     ensurePrivateDir root
-    Text.writeFile (toFilePath path) (sessionId <> "\n")
-    setFileMode (toFilePath path) 0o600
+    writeLazyFileAtomically
+        path
+        0o600
+        (LBS.fromStrict (Text.encodeUtf8 (sessionId <> "\n")))
 
 readDevResumePointer :: OsPath -> IO (Maybe Text)
 readDevResumePointer home = do
@@ -82,7 +88,7 @@ readDevResumePointer home = do
     if not exists
         then pure Nothing
         else do
-            raw <- Text.strip <$> Text.readFile (toFilePath path)
+            raw <- Text.strip <$> retryOnFileBusy (Text.readFile (toFilePath path))
             pure (if Text.null raw then Nothing else Just raw)
 
 clearDevResumePointer :: OsPath -> IO ()
@@ -241,7 +247,7 @@ appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurn handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
-    LBS.appendFile (toFilePath path) (Aeson.encode turn <> "\n")
+    appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
     if existed then pure () else setFileMode (toFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
@@ -268,7 +274,7 @@ appendTurnKeepTitle :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurnKeepTitle handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
-    LBS.appendFile (toFilePath path) (Aeson.encode turn <> "\n")
+    appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
     if existed then pure () else setFileMode (toFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
@@ -315,12 +321,8 @@ listSessions root = do
             pure (sortOn (Down . (.metaUpdatedAt)) (catMaybes metas))
 
 writeSessionMeta :: OsPath -> SessionMeta -> IO ()
-writeSessionMeta path meta = do
-    let tmp = path <> fromFilePath ".tmp"
-    LBS.writeFile (toFilePath tmp) (Aeson.encode meta)
-    setFileMode (toFilePath tmp) 0o600
-    renameOrReplace tmp path
-    setFileMode (toFilePath path) 0o600
+writeSessionMeta path meta =
+    writeLazyFileAtomically path 0o600 (Aeson.encode meta)
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
@@ -389,7 +391,7 @@ loadTranscript path = do
     if not exists
         then pure (Right [])
         else do
-            raw <- Text.readFile (toFilePath path)
+            raw <- retryOnFileBusy (Text.readFile (toFilePath path))
             let linesOf = filter (not . Text.null) (Text.lines raw)
             pure (mapM decodeTurnLine linesOf)
 
@@ -405,7 +407,7 @@ decodeFileEither path = do
     if not exists
         then pure (Left ("missing file: " <> toFilePath path))
         else do
-            bytes <- LBS.readFile (toFilePath path)
+            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
             pure (case Aeson.eitherDecode' bytes of
                 Left err -> Left (toFilePath path <> ": " <> err)
                 Right value -> Right value)
@@ -420,14 +422,3 @@ readMetaQuiet root name = do
         Right (Right meta)
             | meta.metaVersion == sessionSchemaVersion -> Just meta
             | otherwise -> Nothing
-
-renameOrReplace :: OsPath -> OsPath -> IO ()
-renameOrReplace tmp path = do
-    result <- try @IOError (renameFile tmp path)
-    case result of
-        Right () -> pure ()
-        Left _ -> do
-            bytes <- LBS.readFile (toFilePath tmp)
-            LBS.writeFile (toFilePath path) bytes
-            _ <- try @IOError (removeFile tmp)
-            pure ()

@@ -33,6 +33,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Cancel
                     , Agent.Error
+                    , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Broker

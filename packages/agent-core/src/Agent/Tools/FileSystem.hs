@@ -8,15 +8,10 @@ module Agent.Tools.FileSystem
     , writeTextFile
     ) where
 
+import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Exception.Safe (SomeException, throwIO, try, tryIO)
-import Control.Retry
-    ( RetryPolicyM
-    , exponentialBackoff
-    , limitRetries
-    , retrying
-    )
+import Control.Exception.Safe (SomeException, try)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -41,7 +36,6 @@ import System.OsPath
     , takeFileName
     , (</>)
     )
-import System.IO.Error (isAlreadyInUseError)
 
 -- | Resolve a model-supplied path against the tool cwd and reject anything
 -- that canonicalizes outside that tree, including via symlinks.
@@ -93,19 +87,9 @@ isInside root path
                 (first : _) | first == fromFilePath ".." -> False
                 _ -> True
 
-lockRetryPolicy :: RetryPolicyM IO
-lockRetryPolicy = exponentialBackoff 1000 <> limitRetries 5
-
-retryOnBusy :: IO a -> IO a
-retryOnBusy action = do
-    result <- retrying lockRetryPolicy shouldRetry (const (tryIO action))
-    either throwIO pure result
-  where
-    shouldRetry _ = pure . either isAlreadyInUseError (const False)
-
 readTextFile :: OsPath -> IO (Either Text Text)
 readTextFile path =
-    try @_ @SomeException (retryOnBusy (BS.readFile (toFilePath path))) >>= \case
+    try @_ @SomeException (retryOnFileBusy (BS.readFile (toFilePath path))) >>= \case
     Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
     Right bytes
         | BS.elem 0 (BS.take 8192 bytes) ->
@@ -117,7 +101,7 @@ writeTextFile :: OsPath -> Text -> IO (Either Text ())
 writeTextFile path content = do
     createDirectoryIfMissing True (takeDirectory path)
     try @_ @SomeException
-        (retryOnBusy (BS.writeFile (toFilePath path) (encodeUtf8 content))) >>= \case
+        (retryOnFileBusy (BS.writeFile (toFilePath path) (encodeUtf8 content))) >>= \case
         Left err -> pure $ Left $ "Failed to write file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
@@ -130,7 +114,7 @@ deleteTextFile path =
 renameTextFile :: OsPath -> OsPath -> IO (Either Text ())
 renameTextFile from to = do
     createDirectoryIfMissing True (takeDirectory to)
-    try @_ @SomeException (renameFile from to) >>= \case
+    try @_ @SomeException (retryOnFileBusy (renameFile from to)) >>= \case
         Left err -> pure $ Left $ "Failed to move file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 

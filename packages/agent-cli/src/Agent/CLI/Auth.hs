@@ -18,6 +18,7 @@ import Agent.CLI.CredentialStore
     , upsertManagedCredential
     )
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
@@ -177,7 +178,7 @@ loadOpenAi = do
             home </> fromFilePath ".codex" </> fromFilePath "auth.json"
     fileExists <- doesFileExist filePath
     fileBytes <- if fileExists
-        then Just <$> LBS.readFile (toFilePath filePath)
+        then Just <$> retryOnFileBusy (LBS.readFile (toFilePath filePath))
         else pure Nothing
     now <- getCurrentTime
     case managed of
@@ -369,7 +370,7 @@ loadGrokCredential = do
     fileExists <- doesFileExist filePath
     fileJson <- if fileExists
         then Just . TextEncoding.decodeUtf8 . LBS.toStrict
-            <$> LBS.readFile (toFilePath filePath)
+            <$> retryOnFileBusy (LBS.readFile (toFilePath filePath))
         else pure Nothing
     let token =
             (fromJson >>= grokCredentialFromAuthJson)
