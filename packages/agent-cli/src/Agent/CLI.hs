@@ -1010,6 +1010,11 @@ replWithDraft env@SessionEnv
             putStr "\ESC[2A\r\ESC[J"
             hFlush stdout
             continueWith keptDraft
+        ReplClipboardPaste keptDraft -> do
+            errColor <- resolveColor stderr
+            queueClipboardImages
+                attachmentsRef previewIdRef stdoutColor errColor
+            continueWith keptDraft
         ReplPasted pasted ->
             submitLine continue stdoutColor True pasted
         ReplText line ->
@@ -1796,6 +1801,38 @@ queueAttachedImages attachmentsRef previewIdRef color images = do
                 <> " — send with next message ("
                 <> Text.pack (show (length pending))
                 <> " queued)"))
+
+queueClipboardImages
+    :: IORef [ImageAttachment]
+    -> IORef Int
+    -> Bool
+    -> Bool
+    -> IO ()
+queueClipboardImages attachmentsRef previewIdRef color errColor = do
+    imagesResult <- readClipboardImages
+    case imagesResult of
+        Right images@(_:_) ->
+            queueAttachedImages attachmentsRef previewIdRef color images
+        Right [] ->
+            Text.hPutStrLn stderr
+                (roleError errColor "no image found on the clipboard")
+        Left err -> reportClipboardImageError err
+  where
+    reportClipboardImageError err =
+        readClipboard >>= \case
+            ClipboardText _ ->
+                Text.hPutStrLn stderr
+                    (roleError errColor
+                        "clipboard has text, not an image (paste text normally into the prompt)")
+            ClipboardPaths paths ->
+                Text.hPutStrLn stderr
+                    (roleError errColor
+                        ("clipboard has file path(s), but no loadable image: "
+                            <> Text.intercalate ", " (map Text.pack paths)))
+            ClipboardEmpty ->
+                Text.hPutStrLn stderr (roleError errColor err)
+            ClipboardImage image ->
+                queueAttachedImages attachmentsRef previewIdRef color [image]
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do

@@ -7,6 +7,7 @@ import Agent.CLI.Input
     , classifyPastedText
     , displayEditorText
     , formatPasteChip
+    , isClipboardPasteKey
     , parseChoiceKey
     , replHistoryPath
     , terminalTextWidth
@@ -93,3 +94,8 @@ spec = do
             let truncated = truncateDisplayText 5 "/always-approve"
             truncated `shouldBe` "/alw…"
             terminalTextWidth truncated `shouldBe` 5
+
+    describe "clipboard image paste key" do
+        it "recognizes Ctrl+V without treating ordinary v as paste" do
+            isClipboardPasteKey '\SYN' `shouldBe` True
+            isClipboardPasteKey 'v' `shouldBe` False

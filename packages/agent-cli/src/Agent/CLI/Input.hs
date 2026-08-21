@@ -14,6 +14,7 @@ module Agent.CLI.Input
     , classifyPastedText
     , displayEditorText
     , formatPasteChip
+    , isClipboardPasteKey
     , replHistoryPath
     , terminalTextWidth
     , truncateDisplayText
@@ -101,6 +102,8 @@ data ReplLine
     -- multi-line / burst heuristic). @replText@ is the payload with CSI
     -- paste wrappers stripped.
     | ReplPasted Text
+    -- | Attach a native clipboard image while keeping the current draft.
+    | ReplClipboardPaste Text
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
@@ -327,6 +330,7 @@ data EditorKey
     | EditorYank
     | EditorClearScreen
     | EditorCycleMode
+    | EditorClipboardPaste
     | EditorPaste !Text
     | EditorIgnore
     deriving (Eq, Show)
@@ -378,6 +382,9 @@ readInlineEditor interrupt historyPath prompt initial = do
             EditorCycleMode -> do
                 finishEditorLine prompt state
                 pure (ReplCycleMode state.editorText)
+            EditorClipboardPaste -> do
+                finishEditorLine prompt state
+                pure (ReplClipboardPaste state.editorText)
             EditorInterrupt ->
                 noteIdleCtrlC interrupt >>= \case
                     ContinuePrompt -> do
@@ -668,29 +675,34 @@ readEditorKey = do
         Left err
             | isEOFError err -> pure EditorEof
             | otherwise -> throwIO err
-        Right char -> case char of
-            '\n' -> pure EditorEnter
-            '\r' -> pure EditorEnter
-            '\DEL' -> pure EditorBackspace
-            '\BS' -> pure EditorBackspace
-            '\t' -> pure EditorTab
-            '\ESC' -> readEscapeKey
-            '\ETX' -> pure EditorInterrupt
-            '\EOT' -> pure EditorEof
-            '\SOH' -> pure EditorHome
-            '\ENQ' -> pure EditorEnd
-            '\STX' -> pure EditorLeft
-            '\ACK' -> pure EditorRight
-            '\DLE' -> pure EditorUp
-            '\SO' -> pure EditorDown
-            '\NAK' -> pure EditorKillStart
-            '\VT' -> pure EditorKillEnd
-            '\ETB' -> pure EditorKillWord
-            '\EM' -> pure EditorYank
-            '\FF' -> pure EditorClearScreen
-            _
-                | char >= ' ' -> pure (EditorChar char)
-                | otherwise -> pure EditorIgnore
+        Right char
+            | isClipboardPasteKey char -> pure EditorClipboardPaste
+            | otherwise -> case char of
+                '\n' -> pure EditorEnter
+                '\r' -> pure EditorEnter
+                '\DEL' -> pure EditorBackspace
+                '\BS' -> pure EditorBackspace
+                '\t' -> pure EditorTab
+                '\ESC' -> readEscapeKey
+                '\ETX' -> pure EditorInterrupt
+                '\EOT' -> pure EditorEof
+                '\SOH' -> pure EditorHome
+                '\ENQ' -> pure EditorEnd
+                '\STX' -> pure EditorLeft
+                '\ACK' -> pure EditorRight
+                '\DLE' -> pure EditorUp
+                '\SO' -> pure EditorDown
+                '\NAK' -> pure EditorKillStart
+                '\VT' -> pure EditorKillEnd
+                '\ETB' -> pure EditorKillWord
+                '\EM' -> pure EditorYank
+                '\FF' -> pure EditorClearScreen
+                _
+                    | char >= ' ' -> pure (EditorChar char)
+                    | otherwise -> pure EditorIgnore
+
+isClipboardPasteKey :: Char -> Bool
+isClipboardPasteKey = (== '\SYN')
 
 readEscapeKey :: IO EditorKey
 readEscapeKey = do
@@ -763,6 +775,7 @@ withEditorRawStdin action = do
                         . flip withTime 0
                         . flip withoutMode EnableEcho
                         . flip withoutMode ProcessInput
+                        . flip withoutMode ExtendedFunctions
                         . flip withoutMode KeyboardInterrupts
                         $ oldTerm
             setTerminalAttributes stdInput raw Immediately
