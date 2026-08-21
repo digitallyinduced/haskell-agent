@@ -18,6 +18,7 @@ module Agent.CLI.Input
     , replHistoryPath
     , shiftTabPrefsText
     , pastePrefsText
+    , clipboardPastePrefsText
     ) where
 
 import Agent.CLI.Command (slashCompletionCandidates)
@@ -106,6 +107,8 @@ data ReplLine
     -- multi-line / burst heuristic). @replText@ is the payload with CSI
     -- paste wrappers stripped.
     | ReplPasted Text
+    -- | Attach a native clipboard image while keeping the current draft.
+    | ReplClipboardPaste Text
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
@@ -476,6 +479,15 @@ pastePrefsText =
         , "bind: f22 " <> Text.singleton pasteEndSentinel
         ]
 
+clipboardPastePrefsText :: Text
+clipboardPastePrefsText =
+    "bind: ctrl-v "
+        <> Text.singleton clipboardPasteSentinel
+        <> " Return\n"
+
+clipboardPasteSentinel :: Char
+clipboardPasteSentinel = '\x2800'
+
 loadReplPrefs :: IO Prefs
 loadReplPrefs = do
     home <- getHomeDirectory
@@ -490,13 +502,14 @@ loadReplPrefs = do
         Text.hPutStr handle "\n"
     Text.hPutStr handle shiftTabPrefsText
     Text.hPutStr handle pastePrefsText
+    Text.hPutStr handle clipboardPastePrefsText
     hClose handle
     readPrefs path `finally` (removeFile path `catchIO` \_ -> pure ())
 
 readEditedLine :: InterruptState -> Settings IO -> Text -> Text -> IO ReplLine
 readEditedLine interrupt settings prompt initial = do
     prefs <- loadReplPrefs
-    withBracketedPaste (go prefs)
+    withLiteralNextDisabled (withBracketedPaste (go prefs))
   where
     go prefs =
         -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
@@ -532,6 +545,10 @@ readEditedLine interrupt settings prompt initial = do
             -- Leave history unchanged; the REPL restores @draft@ on the next
             -- prompt.
             pure (ReplCycleMode (dropCycleModeSentinel packed))
+        | Text.any (== clipboardPasteSentinel) packed =
+            pure
+                (ReplClipboardPaste
+                    (Text.filter (/= clipboardPasteSentinel) packed))
         | otherwise = do
             let (historyText, _) = classifyPastedText packed
             unless (Text.all (== ' ') historyText) do
@@ -559,6 +576,17 @@ withBracketedPaste action = do
     disable _ = do
         Text.hPutStr stdout "\ESC[?2004l"
         hFlush stdout
+
+-- macOS otherwise consumes Ctrl+V as the tty's literal-next character before
+-- Haskeline can apply the clipboard-image binding.
+withLiteralNextDisabled :: IO a -> IO a
+withLiteralNextDisabled action = do
+    old <- getTerminalAttributes stdInput
+    bracket
+        (setTerminalAttributes stdInput
+            (withoutMode old ExtendedFunctions) Immediately)
+        (\_ -> setTerminalAttributes stdInput old Immediately)
+        (\_ -> action)
 
 -- | Tab-complete slash command names and a few known argument tokens.
 completeSlash :: CompletionFunc IO

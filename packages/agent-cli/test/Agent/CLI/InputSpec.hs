@@ -5,6 +5,7 @@ import Agent.CLI.Input
     , approvalKeyText
     , choiceMoveIndex
     , classifyPastedText
+    , clipboardPastePrefsText
     , dropCycleModeSentinel
     , formatPasteChip
     , isCycleModeSentinel
@@ -117,3 +118,14 @@ spec = do
                     show prefs `shouldSatisfy` ("f23" `Text.isInfixOf`) . Text.pack
                     show prefs `shouldSatisfy`
                         ("\\ESC[200~" `Text.isInfixOf`) . Text.pack
+
+        it "parses the Ctrl+V clipboard-image binding" $ do
+            tmp <- getTemporaryDirectory
+            bracket
+                (openTempFile tmp "haskeline-clipboard-paste")
+                (\(path, _) -> removeFile path)
+                \(path, handle) -> do
+                    Text.hPutStr handle clipboardPastePrefsText
+                    hClose handle
+                    prefs <- readPrefs path
+                    show prefs `shouldSatisfy` ("ctrl-v" `Text.isInfixOf`) . Text.pack
