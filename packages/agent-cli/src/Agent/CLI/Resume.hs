@@ -193,7 +193,8 @@ renderResumeFrameFor color terminalRows terminalCols state =
                 rightRows
     footer =
         roleMuted color $
-            fitCell cols "↑↓/jk select · enter resume · esc/q cancel · type to filter"
+            fitCell cols
+                "↑↓/jk or scroll · click/enter resume · esc/q cancel · type to filter"
 
 sessionWindow :: Int -> Int -> [a] -> [(Int, a)]
 sessionWindow count selected xs =

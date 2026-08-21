@@ -65,6 +65,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Control.Monad (when)
+import Control.Exception.Safe (onException)
 import Data.IORef
     ( atomicModifyIORef'
     , modifyIORef'
@@ -93,7 +94,9 @@ runOneTurn env@SessionEnv
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
-    , sessionAbortSubagents = abortSubagents
+    , sessionBeginSubagentTurn = beginSubagentTurn
+    , sessionFinishSubagentTurn = finishSubagentTurn
+    , sessionAbortSubagentTurn = abortSubagentTurn
     } promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
@@ -134,7 +137,9 @@ runOneTurn env@SessionEnv
     wallStarted <- getCurrentTime
     when terminal.terminalSemanticPrompts $
         emitTerminalSequence terminal stdout osc133CommandStart
+    rootTurnId <- beginSubagentTurn
     result <- runLoopInputs config prev turnInputs
+        `onException` abortSubagentTurn rootTurnId
     clearThinking render
     finishedAt <- getCurrentTime
     let elapsedDetail extra = case startedAt of
@@ -161,7 +166,7 @@ runOneTurn env@SessionEnv
     case result of
         Left cancelled@(LoopCancelled _) -> do
             finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
-            abortSubagents
+            abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
             color <- resolveColor stderr
             putTextLn stderr (formatLoopErrorColored color cancelled)
@@ -170,7 +175,7 @@ runOneTurn env@SessionEnv
             persistIncomplete "cancelled"
             pure TurnSucceeded
         Left err -> do
-            abortSubagents
+            abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
@@ -196,6 +201,7 @@ runOneTurn env@SessionEnv
                     pure TurnFailed
         Right loopResult -> do
             finishTerminal terminal wallStarted finishedAt 0 "Agent finished"
+            finishSubagentTurn rootTurnId
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
             do

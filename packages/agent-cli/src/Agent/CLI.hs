@@ -94,6 +94,7 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , emptyMarkdownStreamState
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -145,7 +146,12 @@ import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatUsageReport
     )
-import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
+import Agent.CLI.Worktree
+    ( createWorktree
+    , isUnderWorktreeRoot
+    , removeWorktree
+    , worktreeRoot
+    )
 import Agent.Loop
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
@@ -184,12 +190,14 @@ import Agent.Provider
     )
 import Agent.Subagents
     ( RunSubagent
+    , RootTurnId
     , SubagentId(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
+    , abortRootTurn
+    , beginRootTurn
     , closeSubagentRegistry
-    , interruptActiveSubagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
@@ -224,7 +232,7 @@ import Agent.Tools.Grok.Task
     , recordAgentSpec
     )
 import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeHooks
@@ -514,6 +522,7 @@ runAgent options transition = do
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
+    rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
     let sendToRoot message = do
             atomicModifyIORef' pendingNotices \xs ->
@@ -524,12 +533,19 @@ runAgent options transition = do
             , multiSelfId = Nothing
             , multiDepth = 0
             , multiTaskPath = taskPathRoot
+            , multiRootTurnId = readIORef rootTurnRef
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
                     Left err -> pure (Left (Text.pack err))
-                    Right path -> pure (Right path)
+                    Right path -> pure $ Right SubagentWorktree
+                        { subagentWorktreePath = path
+                        , subagentWorktreeCleanup =
+                            removeWorktree source path >>= \case
+                                Left err -> pure (Left (Text.pack err))
+                                Right () -> pure (Right ())
+                        }
             , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
@@ -649,7 +665,7 @@ runAgent options transition = do
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -688,7 +704,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -719,7 +735,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -825,6 +841,7 @@ runSession
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
+    -> IORef (Maybe RootTurnId)
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [TurnInput]
     -> SubagentStoreRoot
@@ -832,11 +849,12 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
     textBuffer <- newIORef ""
+    markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
@@ -914,6 +932,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
+            , renderMarkdownState = markdownState
             , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout
@@ -940,6 +959,23 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                             policyRef allowedToolsRef tools planMode call
             , loopCancel = toolEnv.toolCancel
             }
+        beginSubagentTurn = do
+            case multiCtx of
+                Nothing -> pure Nothing
+                Just ctx -> do
+                    rootTurnId <- beginRootTurn ctx.multiRegistry
+                    writeIORef rootTurnRef (Just rootTurnId)
+                    pure (Just rootTurnId)
+        finishSubagentTurn rootTurnId =
+            atomicModifyIORef' rootTurnRef \current ->
+                (if current == rootTurnId then Nothing else current, ())
+        abortSubagentTurn rootTurnId = do
+            case rootTurnId of
+                Just owned -> case multiCtx of
+                    Just ctx -> abortRootTurn ctx.multiRegistry owned
+                    Nothing -> pure ()
+                Nothing -> pure ()
+            finishSubagentTurn rootTurnId
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -968,9 +1004,9 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionAgentViewport = Just agentViewport
-            , sessionAbortSubagents = case multiCtx of
-                Just ctx -> interruptActiveSubagents ctx.multiRegistry
-                Nothing -> pure ()
+            , sessionBeginSubagentTurn = beginSubagentTurn
+            , sessionFinishSubagentTurn = finishSubagentTurn
+            , sessionAbortSubagentTurn = abortSubagentTurn
             , sessionReset = sessionReset
             }
     case pendingTurn of
@@ -2322,6 +2358,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
+                , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
                 , multiSendToRoot = sendToRoot
@@ -2398,6 +2435,7 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
+                , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
                 , multiSendToRoot = Nothing

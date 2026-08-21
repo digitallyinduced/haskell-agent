@@ -6,6 +6,7 @@ import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.Responses.Types
 import Agent.ToolDispatch
+import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -243,6 +244,48 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "retries transient Codex server errors before visible output" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let serverError = ProviderError ApiErrorType
+                    "An error occurred while processing your request. (code: server_error)"
+                    Nothing
+                send _request _previous _onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    pure if attempt < 3
+                        then Left serverError
+                        else Right (testResponse "resp-retried" [assistantItem "ok"])
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+                    transcript
+            result <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-retried" [] (Just "ok"))
+            readIORef attempts `shouldReturn` 3
+
+        it "does not retry after visible output was streamed" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let serverError = ProviderError ApiErrorType "server error" Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    onEvent (deltaEvent EventOutputTextDelta "partial")
+                    pure (Left serverError)
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+                    transcript
+            result <- backend.submitTurn Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Left serverError
+            readIORef attempts `shouldReturn` 1
+            observedEvents <- readIORef events
+            reverse observedEvents `shouldBe` [TextDelta "partial"]
+
     describe "openAiBackendWithConnectionRecovery" do
         it "replays on a fresh connection when the reusable socket dies before output" do
             currentCalls <- newIORef (0 :: Int)
@@ -291,7 +334,7 @@ spec = do
             healthy <- newIORef True
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent =
-                    pure $ Left $ ProviderError OverloadedError "busy" Nothing
+                    pure $ Left $ ProviderError InvalidRequestError "bad request" Nothing
                 sendFresh _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
@@ -299,7 +342,7 @@ spec = do
                     healthy sendCurrent sendFresh (pure baseParams) transcript
             result <- providerErrorBackend.submitTurn Nothing
                 [UserMessage "one"] (const (pure ()))
-            result `shouldBe` Left (ProviderError OverloadedError "busy" Nothing)
+            result `shouldBe` Left (ProviderError InvalidRequestError "bad request" Nothing)
             readIORef healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 

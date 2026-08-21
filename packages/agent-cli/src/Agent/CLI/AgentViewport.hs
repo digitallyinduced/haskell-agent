@@ -141,7 +141,7 @@ renderAgentViewportFrameFor color terminalRows terminalCols state =
         color
         (max 1 (terminalRows - 4))
         terminalCols
-        "↑↓/jk switch viewport · enter keep · esc/q cancel"
+        "↑↓/jk or scroll · click/enter keep · esc/q cancel"
         state
 
 renderAgentViewportPanelFor

@@ -2,6 +2,7 @@
 module Agent.Subagents.Types
     ( SubagentId(..)
     , SubagentIdentity(..)
+    , RootTurnId(..)
     , SubagentStatus(..)
     , SubagentConfig(..)
     , SubagentSpawnEnv(..)
@@ -20,8 +21,12 @@ import Agent.OsPath (OsPath)
 import Agent.Subagents.TaskPath (TaskPath)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
+import Data.Word (Word64)
 
 newtype SubagentId = SubagentId { unSubagentId :: Text }
+    deriving (Eq, Ord, Show)
+
+newtype RootTurnId = RootTurnId { unRootTurnId :: Word64 }
     deriving (Eq, Ord, Show)
 
 instance Aeson.ToJSON SubagentId where
@@ -77,6 +82,7 @@ data SubagentSpawnEnv = SubagentSpawnEnv
     , subParentId :: !(Maybe SubagentId)
     , subCwd :: !OsPath
     , subCancel :: !CancelFlag
+    , subRootTurnId :: !(Maybe RootTurnId)
     }
 
 -- | CLI/provider callback that runs one child agent loop for a prompt.

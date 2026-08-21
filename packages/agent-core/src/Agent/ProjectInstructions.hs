@@ -18,6 +18,7 @@ module Agent.ProjectInstructions
     , globalAgentsHomeDir
     ) where
 
+import Agent.FileRetry (retryOnFileBusy)
 import Agent.Provider (Provider(..))
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Control.Exception.Safe (tryAny)
@@ -121,7 +122,7 @@ readAgentsFile path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
-        else tryAny (Text.readFile (toFilePath path)) >>= \case
+        else tryAny (retryOnFileBusy (Text.readFile (toFilePath path))) >>= \case
             Left _ -> pure Nothing
             Right text ->
                 if Text.null (Text.strip text)

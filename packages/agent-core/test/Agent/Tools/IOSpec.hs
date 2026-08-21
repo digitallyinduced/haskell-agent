@@ -1,6 +1,11 @@
 module Agent.Tools.IOSpec (spec) where
 
 import Agent.Cancel (requestCancel)
+import Agent.FileRetry
+    ( appendLazyFileRetryingOpen
+    , retryOnFileBusy
+    , writeLazyFileAtomically
+    )
 import Agent.OsPath (fromFilePath)
 import Agent.Tools.IO
     ( CommandResult(..)
@@ -13,18 +18,48 @@ import Agent.Tools.IO
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, tryIO)
 import Control.Monad (replicateM)
-import Data.Either (isLeft)
+import qualified Data.ByteString.Lazy.Char8 as LBS8
+import Data.Either (isLeft, isRight)
+import Data.IORef
+import Data.List (sort)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory (getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.IO (IOMode(..), hClose, openFile)
+import System.IO.Error (alreadyInUseErrorType, mkIOError)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Tools.IO" do
+    it "retries only resource-busy IO exceptions" do
+        attempts <- newIORef (0 :: Int)
+        retryOnFileBusy do
+            attempt <- atomicModifyIORef' attempts \current ->
+                let next = current + 1
+                in (next, next)
+            if attempt < 3
+                then ioError (mkIOError alreadyInUseErrorType "busy" Nothing Nothing)
+                else pure ()
+        readIORef attempts `shouldReturn` 3
+
+    it "does not retry unrelated IO exceptions" do
+        attempts <- newIORef (0 :: Int)
+        result <- tryIO do
+            retryOnFileBusy do
+                modifyIORef' attempts (+ 1)
+                ioError (userError "not retryable") :: IO ()
+        result `shouldSatisfy` isLeft
+        readIORef attempts `shouldReturn` 1
+
+    it "atomically replaces a file from concurrent writers" do
+        withTempDir checkConcurrentAtomicWrites
+
+    it "appends each concurrent payload exactly once" do
+        withTempDir checkConcurrentAppends
+
     it "retries a write after a transient GHC file lock" do
         withTempDir \dir -> do
             let path = dir </> "held.txt"
@@ -93,6 +128,41 @@ checkBackgroundOutput dir = do
     result.commandExitCode `shouldBe` Just 0
     result.commandStdout `shouldBe` "stdout"
     result.commandStderr `shouldBe` "stderr"
+
+checkConcurrentAtomicWrites :: FilePath -> IO ()
+checkConcurrentAtomicWrites dir = do
+    let path = fromFilePath (dir </> "state.json")
+        payloads = map (LBS8.pack . show) [1 :: Int .. 16]
+    vars <- replicateM (length payloads) newEmptyMVar
+    mapM_ (startAtomicWrite path) (zip payloads vars)
+    results <- mapM takeMVar vars
+    results `shouldSatisfy` all isRight
+    final <- LBS8.readFile (dir </> "state.json")
+    final `shouldSatisfy` (`elem` payloads)
+    leftovers <- filter (Text.isInfixOf ".tmp" . Text.pack)
+        <$> listDirectory dir
+    leftovers `shouldBe` []
+
+startAtomicWrite path (payload, var) =
+    forkIO $
+        tryIO (writeLazyFileAtomically path 0o600 payload) >>= putMVar var
+
+checkConcurrentAppends :: FilePath -> IO ()
+checkConcurrentAppends dir = do
+    let file = dir </> "transcript.jsonl"
+        path = fromFilePath file
+        payloads = map (LBS8.pack . (<> "\n") . show) [1 :: Int .. 16]
+    writeFile file ""
+    vars <- replicateM (length payloads) newEmptyMVar
+    mapM_ (startAppend path) (zip payloads vars)
+    results <- mapM takeMVar vars
+    results `shouldSatisfy` all isRight
+    linesWritten <- sort . LBS8.lines <$> LBS8.readFile file
+    linesWritten `shouldBe` sort (map LBS8.init payloads)
+
+startAppend path (payload, var) =
+    forkIO $
+        tryIO (appendLazyFileRetryingOpen path payload) >>= putMVar var
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

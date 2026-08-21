@@ -19,6 +19,7 @@ import Agent.CLI.Auth
     ( grokCredentialFromAuthJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
+    , xaiOAuthClientId
     )
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
@@ -42,6 +43,7 @@ import Agent.CLI.Style
     , roleSuccess
     , roleWarn
     )
+import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
@@ -386,7 +388,7 @@ pickConnectProvider color =
                             <> roleMuted color (providerSlug provider))
                     [0 ..]
                     providers
-                <> [roleMuted color "↑↓/jk · enter · esc/q"]
+                <> [roleMuted color "↑↓/jk or scroll · click/enter · esc/q"]
     step key index = case key of
         PickerKeyCancel -> Left Nothing
         PickerKeyConfirm -> Left (accountAt index providers)
@@ -430,43 +432,40 @@ connectOpenAI color = do
                                     (LBS.toStrict (Aeson.encode authJson)))
 
 connectXAI :: Bool -> IO ()
-connectXAI color =
-    lookupNonEmpty "XAI_OAUTH_CLIENT_ID" >>= \case
-        Nothing ->
-            printLoginMessage color False
-                "set XAI_OAUTH_CLIENT_ID before connecting a Grok account"
-        Just clientId -> do
-            let options = XAIAuth.defaultOAuthOptions clientId
-            XAIAuth.requestDeviceAuthorization options >>= \case
+connectXAI color = do
+    clientId <-
+        xaiOAuthClientId <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
+    let options = XAIAuth.defaultOAuthOptions clientId
+    XAIAuth.requestDeviceAuthorization options >>= \case
+        Left err -> printLoginMessage color False err
+        Right device -> do
+            Text.hPutStrLn stderr $
+                roleMuted color "Open "
+                    <> rolePrompt color device.verificationUrl
+            Text.hPutStrLn stderr $
+                roleMuted color "Enter code "
+                    <> rolePrompt color device.userCode
+            hFlush stderr
+            XAIAuth.completeDeviceAuthorization options device >>= \case
                 Left err -> printLoginMessage color False err
-                Right device -> do
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Open "
-                            <> rolePrompt color device.verificationUrl
-                    Text.hPutStrLn stderr $
-                        roleMuted color "Enter code "
-                            <> rolePrompt color device.userCode
-                    hFlush stderr
-                    XAIAuth.completeDeviceAuthorization options device >>= \case
-                        Left err -> printLoginMessage color False err
-                        Right tokens -> do
-                            let accountId =
-                                    fromMaybe "grok"
-                                        (XAIAuth.accountIdFromAccessToken
-                                            tokens.accessToken)
-                                authJson = Aeson.object
-                                    [ "access_token" .= tokens.accessToken
-                                    , "refresh_token" .= tokens.refreshToken
-                                    , "id_token" .= tokens.idToken
-                                    ]
-                            storeConnectedCredential color
-                                XAIProvider
-                                accountId
-                                "Grok"
-                                ManagedSubscription
-                                ManagedGrokAuthJson
-                                (Text.decodeUtf8
-                                    (LBS.toStrict (Aeson.encode authJson)))
+                Right tokens -> do
+                    let accountId =
+                            fromMaybe "grok"
+                                (XAIAuth.accountIdFromAccessToken
+                                    tokens.accessToken)
+                        authJson = Aeson.object
+                            [ "access_token" .= tokens.accessToken
+                            , "refresh_token" .= tokens.refreshToken
+                            , "id_token" .= tokens.idToken
+                            ]
+                    storeConnectedCredential color
+                        XAIProvider
+                        accountId
+                        "Grok"
+                        ManagedSubscription
+                        ManagedGrokAuthJson
+                        (Text.decodeUtf8
+                            (LBS.toStrict (Aeson.encode authJson)))
 
 connectOpenRouter :: Bool -> IO ()
 connectOpenRouter color =
@@ -573,7 +572,7 @@ discoverOpenAIFile now path = do
     if not exists
         then pure Nothing
         else do
-            bytes <- LBS.readFile (toFilePath path)
+            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
@@ -604,7 +603,7 @@ discoverGrokFile path = do
         then pure Nothing
         else do
             raw <- Text.decodeUtf8 . LBS.toStrict
-                <$> LBS.readFile (toFilePath path)
+                <$> retryOnFileBusy (LBS.readFile (toFilePath path))
             pure $ do
                 token <- grokCredentialFromAuthJson raw
                 pure (grokAccount token (toText path)
@@ -798,7 +797,7 @@ renderLoginFrame color state =
         ]
             <> body
             <> [ roleMuted color
-                    "↑↓/jk · r refresh · a add · i import · e enable/disable · d disconnect · esc/q"
+                    "↑↓/jk or scroll · click/enter refresh · a add · i import · e enable/disable · d disconnect · esc/q"
                ]
   where
     body

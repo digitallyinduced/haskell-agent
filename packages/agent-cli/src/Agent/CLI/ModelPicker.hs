@@ -109,7 +109,8 @@ renderPickerFrame color state =
                     [0 ..]
                     opts
         footer =
-            roleMuted color "↑↓/jk · enter · esc/q · type to filter"
+            roleMuted color
+                "↑↓/jk or scroll · click/enter · esc/q · type to filter"
     in Text.intercalate "\n" (header : filterLine : body <> [footer])
 
 renderRow :: Bool -> Bool -> Provider -> Text -> ModelOption -> Text

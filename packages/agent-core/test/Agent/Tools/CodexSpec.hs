@@ -14,7 +14,7 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
-import Agent.Tools.ApplyPatch (parsePatch)
+import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
@@ -64,6 +64,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiSelfId = Nothing
                     , multiDepth = 0
                     , multiTaskPath = taskPathRoot
+                    , multiRootTurnId = pure Nothing
                     , multiResumeFromDisk = Nothing
                     , multiCreateWorktree = Nothing
                     , multiSendToRoot = Nothing
@@ -164,6 +165,31 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             output `shouldSatisfy` Text.isInfixOf "Failed to find expected lines"
+
+    it "stops applying hunks after the first failure" do
+        withTempEnv \env -> do
+            let beginPatch = "*** Begin " <> "Patch"
+                endPatch = "*** End " <> "Patch"
+                patch = Text.unlines
+                    [ beginPatch
+                    , "*** Add File: before.txt"
+                    , "+written"
+                    , "*** Update File: missing.txt"
+                    , "@@"
+                    , "-old"
+                    , "+new"
+                    , "*** Add File: after.txt"
+                    , "+not written"
+                    , endPatch
+                    ]
+            result <- applyPatch env patch
+            result `shouldSatisfy` \case
+                Left err -> "Failed to read file" `Text.isInfixOf` err
+                Right _ -> False
+            Text.readFile (toFilePath env.toolCwd </> "before.txt")
+                `shouldReturn` "written\n"
+            doesFileExist (toFilePath env.toolCwd </> "after.txt")
+                `shouldReturn` False
 
     it "parses add/update/delete hunks" do
         let parsed = parsePatch $ Text.unlines
