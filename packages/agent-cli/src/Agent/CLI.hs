@@ -158,6 +158,7 @@ import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
+    , formatDuration
     , formatUsageReport
     )
 import Agent.CLI.Worktree
@@ -1139,16 +1140,15 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                 notifyAttention stderr InputRequested
                 repl env
     TurnProviderUnavailable apiError pending ->
-        requestAutomaticProviderFallback
-            env apiError (setPendingExitAfter exitAfter pending) >>= \case
+        let pending' = setPendingExitAfter exitAfter pending
+        in requestAutomaticProviderFallback env apiError pending' >>= \case
             Just providerTransition ->
                 pure (RunSwitchProvider providerTransition)
             Nothing -> do
                 now <- getCurrentTime
                 case automaticCooldownRetryDelay now apiError of
                     Just delay | allowCooldownRetry ->
-                        waitAndRetryPendingTurn
-                            env delay (setPendingExitAfter exitAfter pending)
+                        waitAndRetryPendingTurn env delay pending'
                     _ -> do
                         reportProviderUnavailable apiError
                         if exitAfter
@@ -1164,11 +1164,10 @@ waitAndRetryPendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
     color <- resolveColor stderr
-    let seconds = max 0 (ceiling delay :: Int)
     putTextLn stderr $ roleWarn color $
         glyphWarn
             <> "provider credentials temporarily unavailable; retrying this turn in "
-            <> formatRetryDelay seconds
+            <> formatDuration delay
             <> " (Esc to cancel)"
     let cancel = env.sessionLoop.loopCancel
         -- Give the provider reset boundary a small margin so the automatic
@@ -1190,29 +1189,17 @@ waitAndRetryPendingTurn env delay pending = do
             putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
             runPendingTurnWithCooldownRetry False env pending
 
-formatRetryDelay :: Int -> Text
-formatRetryDelay totalSeconds
-    | totalSeconds < 60 =
-        Text.pack (show totalSeconds) <> "s"
-    | otherwise =
-        let (minutes, seconds) = totalSeconds `divMod` 60
-        in Text.pack (show minutes)
-            <> "m"
-            <> if seconds == 0
-                then ""
-                else " " <> Text.pack (show seconds) <> "s"
-
 reportProviderUnavailable :: ApiError -> IO ()
 reportProviderUnavailable apiError = do
     color <- resolveColor stderr
     now <- getCurrentTime
     let detail = case apiError of
             CredentialsExhausted{retryAt} ->
-                let seconds = max 0 (ceiling (diffUTCTime retryAt now) :: Int)
+                let delay = max 0 (diffUTCTime retryAt now)
                 in "all configured accounts are temporarily unavailable"
-                    <> if seconds == 0
+                    <> if delay == 0
                         then "; retry now"
-                        else "; retry in " <> formatRetryDelay seconds
+                        else "; retry in " <> formatDuration delay
             _ -> Text.pack (show apiError)
     putTextLn stderr $ roleError color $
         "provider unavailable; no usable fallback provider account is available: "

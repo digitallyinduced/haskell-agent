@@ -4,7 +4,6 @@ module Agent.CLI.ProviderFallback
     , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
-    , maxAutomaticCooldownWait
     , rankedModels
     ) where
 

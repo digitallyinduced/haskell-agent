@@ -21,6 +21,7 @@ module Agent.OpenAI.Auth
     , reportRateLimit
     , reportAuthBroken
     , refreshAfterAuthFailure
+    , authFailureRetrySeconds
 
       -- * Inspection and manual refresh
     , allAccountIds
@@ -107,11 +108,11 @@ data Pool = Pool
 rateLimitCooldownSeconds :: Int
 rateLimitCooldownSeconds = 60
 
--- | Cooldown duration when an account returns 401/403 from Agent.OpenAI.
+-- | Retry window when an account returns 401/403 from Agent.OpenAI.
 -- Authentication recovery already forces an immediate refresh; if that still
 -- fails, retry soon instead of black-holing the only configured account.
-authBrokenCooldownSeconds :: Int
-authBrokenCooldownSeconds = 60
+authFailureRetrySeconds :: Int
+authFailureRetrySeconds = 60
 
 --------------------------------------------------------------------------------
 -- Construction
@@ -361,11 +362,11 @@ reportRateLimit pool limitedAccountId retryAfter = do
 
 -- | Mark the account with the given OpenAI @accountId@ as auth-broken
 -- (401/403 from Codex). Uses the same cooldown mechanism as
--- 'reportRateLimit' with 'authBrokenCooldownSeconds'.
+-- 'reportRateLimit' with 'authFailureRetrySeconds'.
 reportAuthBroken :: Pool -> Text -> IO ()
 reportAuthBroken pool brokenAccountId = do
     now <- getCurrentTime
-    let until_ = addUTCTime (fromIntegral authBrokenCooldownSeconds) now
+    let until_ = addUTCTime (fromIntegral authFailureRetrySeconds) now
     setCooldown pool brokenAccountId until_
 
 -- | Force-rotate an access token that Codex has rejected with HTTP 401/403,

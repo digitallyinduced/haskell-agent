@@ -38,9 +38,6 @@ poolTokenProvider pool = do
                                 Auth.reportAuthBroken pool credential.accountId
                                 acquireFromPool pool
 
-authRecoveryGuardSeconds :: Int
-authRecoveryGuardSeconds = 60
-
 takeAuthRecoverySlot
     :: IORef (Map.Map Text UTCTime)
     -> Text
@@ -50,11 +47,11 @@ takeAuthRecoverySlot attempts accountId = do
     atomicModifyIORef' attempts \current ->
         let recent = case Map.lookup accountId current of
                 Just attemptedAt -> diffUTCTime now attemptedAt
-                    < fromIntegral authRecoveryGuardSeconds
+                    < fromIntegral Auth.authFailureRetrySeconds
                 Nothing -> False
             pruned = Map.filter
                 (\attemptedAt -> diffUTCTime now attemptedAt
-                    < fromIntegral authRecoveryGuardSeconds)
+                    < fromIntegral Auth.authFailureRetrySeconds)
                 current
         in if recent
             then (pruned, False)
