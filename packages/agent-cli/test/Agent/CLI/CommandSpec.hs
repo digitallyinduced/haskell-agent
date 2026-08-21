@@ -114,6 +114,12 @@ spec = do
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
+        it "opens the agent hierarchy" do
+            parseReplLine "/agents" `shouldBe` ReplAgents
+            parseReplLine "/a" `shouldBe` ReplAgents
+            parseReplLine "/agents now"
+                `shouldBe` ReplCommandError "usage: /agents"
+
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing
             parseReplLine "/help model" `shouldBe` ReplHelp (Just "model")
@@ -173,6 +179,7 @@ spec = do
                     , "paste"
                     , "attachments"
                     , "clear-attachments"
+                    , "agents"
                     , "always-approve"
                     ]
 
@@ -182,6 +189,8 @@ spec = do
                 `shouldBe` Just "always-approve"
             fmap (.slashName) (lookupSlashCommand "/accounts")
                 `shouldBe` Just "login"
+            fmap (.slashName) (lookupSlashCommand "/a")
+                `shouldBe` Just "agents"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -189,6 +198,7 @@ spec = do
                     "/help" `elem` xs
                         && "/model" `elem` xs
                         && "/m" `elem` xs
+                        && "/agents" `elem` xs
                         && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
@@ -229,6 +239,7 @@ spec = do
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
+            listing `shouldSatisfy` ("/agents" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)

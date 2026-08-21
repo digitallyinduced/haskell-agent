@@ -12,6 +12,15 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentTarget(..)
+    , AgentViewportEnv(..)
+    , formatAgentStatus
+    , pickAgentViewport
+    , renderAgentViewportPanelFor
+    , responseItemLines
+    )
 import Agent.CLI.Approval
     ( approveToolDecision
     , childApprove
@@ -168,6 +177,7 @@ import Agent.Subagents
     , getStatus
     , getSubagentCwd
     , getTaskPath
+    , listAgents
     , newSubagentRegistry
     , restoreSubagent
     , restoreSubagentWithCwd
@@ -190,7 +200,7 @@ import Agent.Tools.Grok.Task
     , lookupAgentType
     , recordAgentSpec
     )
-import Agent.Subagents.TaskPath (taskPathRoot)
+import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -811,11 +821,43 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     unavailableProvidersRef <- newIORef unavailableProviders
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
+    selectedAgent <- newIORef AgentRoot
+    let loadAgentEntries = do
+            rootItems <- readIORef transcriptRef
+            agents <- case multiCtx of
+                Nothing -> pure []
+                Just ctx -> listAgents ctx.multiRegistry Nothing
+            let rootEntry = AgentEntry
+                    { agentTarget = AgentRoot
+                    , agentPath = "/root"
+                    , agentStatus = "active"
+                    , agentTranscript = responseItemLines rootItems
+                    }
+            children <- mapM materializeChild agents
+            pure (rootEntry : children)
+          where
+            materializeChild (path, agentId, status) = do
+                sessions <- readIORef subagentSessions
+                transcript <- case Map.lookup agentId sessions of
+                    Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
+                    Just session ->
+                        responseItemLines <$> readIORef session.subSessionTranscript
+                pure AgentEntry
+                    { agentTarget = AgentChild agentId
+                    , agentPath = taskPathText path
+                    , agentStatus = formatAgentStatus status
+                    , agentTranscript = transcript
+                    }
+        agentViewport = AgentViewportEnv
+            { viewportSelected = selectedAgent
+            , viewportEntries = loadAgentEntries
+            }
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
+            writeIORef selectedAgent AgentRoot
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
@@ -889,6 +931,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionInterrupt = interrupt
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
+            , sessionAgentViewport = Just agentViewport
             , sessionReset = sessionReset
             }
     case pendingTurn of
@@ -963,6 +1006,7 @@ replWithDraft env@SessionEnv
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
     stdoutColor <- resolveColor stdout
@@ -972,10 +1016,22 @@ replWithDraft env@SessionEnv
     params <- readIORef paramsRef
     policy <- readIORef policyRef
     let idleMode = replModeFromState planState policy
+    termCols <- fmap snd <$> getTerminalSize
+    case agentViewport of
+        Nothing -> pure ()
+        Just viewport -> do
+            entries <- viewport.viewportEntries
+            selected <- readIORef viewport.viewportSelected
+            let panel =
+                    renderAgentViewportPanelFor
+                        stdoutColor
+                        (fromMaybe 100 termCols)
+                        selected
+                        entries
+            when (not (Text.null panel)) (Text.putStrLn panel)
     -- Status sits on the line above λ; the inline editor owns the prompt and
     -- any live completion rows below it.
     -- Token totals sit on the right of that line when the TTY width is known.
-    termCols <- fmap snd <$> getTerminalSize
     usage <- readIORef usageRef
     Text.putStrLn $ formatReplStatusLine stdoutColor termCols
         (currentModel params)
@@ -1135,6 +1191,18 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stdout
                         Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
                         continue
+                    ReplAgents -> do
+                        case agentViewport of
+                            Nothing -> continue
+                            Just viewport -> do
+                                entries <- viewport.viewportEntries
+                                selected <- readIORef viewport.viewportSelected
+                                color <- resolveColor stderr
+                                pickAgentViewport color selected entries >>= \case
+                                    Nothing -> pure ()
+                                    Just target ->
+                                        writeIORef viewport.viewportSelected target
+                                continue
 
                     ReplShowEffort -> do
                         color <- resolveColor stdout
