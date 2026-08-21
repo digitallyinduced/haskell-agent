@@ -45,6 +45,9 @@ library
                     , Agent.OpenAI.Error
                     , Agent.OpenAI.Http
                     , Agent.OpenAI.Auth
+                    , Agent.OpenAI.Auth.JWT
+                    , Agent.OpenAI.Auth.Refresh
+                    , Agent.OpenAI.Auth.Types
                     , Agent.OpenAI.Credential
                     , Agent.OpenAI.Login
                     , Agent.OpenAI.Usage
