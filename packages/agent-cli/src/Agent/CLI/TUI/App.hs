@@ -62,7 +62,7 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
 import Data.Foldable (toList)
-import Data.List (find)
+import Data.List (find, intersperse)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -74,6 +74,8 @@ data Name
     = ConversationViewport
     | OverlayViewport
     | ComposerCursor
+    | ComposerModel
+    | ComposerEffort
     | OverlayCursor
     deriving (Eq, Ord, Show)
 
@@ -235,7 +237,10 @@ runFullscreen runtime workerAction = do
             V.defaultConfig
                 { V.configPreferredColorMode = Just V.FullColor
                 }
-        buildVty = Vty.mkVty vtyConfig
+        buildVty = do
+            vty <- Vty.mkVty vtyConfig
+            V.setMode (V.outputIface vty) V.Mouse True
+            pure vty
     initialVty <- buildVty
     let
         initialState = AppState
@@ -306,6 +311,38 @@ handleChoiceKey = \case
                                 })
                         <$> state.appChoice
                 }
+
+handleStatusClick
+    :: (Text -> ReplLine)
+    -> EventM Name AppState ()
+handleStatusClick choice = do
+    state <- get
+    let ui = state.appUi
+        overlayOpen =
+            maybe False (const True) state.appTextPrompt
+                || maybe False (const True) state.appChoice
+                || maybe False (const True) ui.uiPermission
+    if ui.uiAwaitingInput && not overlayOpen
+        then do
+            liftIO $ atomically $
+                writeTQueue state.appRuntime.runtimeInput
+                    (choice ui.uiDraft)
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetAwaitingInput False)
+                            current.appUi
+                    }
+        else
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetNotice
+                                (Just "Model and reasoning settings can be changed at the prompt."))
+                            current.appUi
+                    }
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -624,22 +661,39 @@ drawComposer state =
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
         mode = replModeLabel state.uiPrompt.promptMode
         usage = formatTokenUsage state.uiPrompt.promptUsage
-        status =
-            Text.intercalate " · " $
-                filter (not . Text.null)
-                    [ if state.uiPrompt.promptAttachments > 0
-                        then "📎 "
-                            <> Text.pack
-                                (show state.uiPrompt.promptAttachments)
-                        else ""
-                    , usage
-                    , state.uiPrompt.promptModel
-                        <> if Text.null state.uiPrompt.promptEffort
-                            then ""
-                            else " (" <> state.uiPrompt.promptEffort <> ")"
-                    , mode
-                    ]
-        label = if Text.null status then " " else " " <> status <> " "
+        leading =
+            filter (not . Text.null)
+                [ if state.uiPrompt.promptAttachments > 0
+                    then "📎 "
+                        <> Text.pack
+                            (show state.uiPrompt.promptAttachments)
+                    else ""
+                , usage
+                ]
+        modelControl
+            | Text.null state.uiPrompt.promptModel = []
+            | otherwise =
+                [ clickable ComposerModel $
+                    txt state.uiPrompt.promptModel
+                ]
+        effortControl
+            | Text.null state.uiPrompt.promptEffort = []
+            | otherwise =
+                [ clickable ComposerEffort $
+                    txt (" (" <> state.uiPrompt.promptEffort <> ")")
+                ]
+        modelAndEffort = case modelControl <> effortControl of
+            [] -> []
+            controls -> [hBox controls]
+        labelWidgets =
+            map txt leading
+                <> modelAndEffort
+                <> [txt mode | not (Text.null mode)]
+        label =
+            if null labelWidgets
+                then txt " "
+                else hBox
+                    (txt " " : intersperse (txt " · ") labelWidgets <> [txt " "])
         editor =
             padLeftRight 1 $
                 hBox
@@ -649,7 +703,7 @@ drawComposer state =
                     ]
     in withAttr attr $
         withBorderStyle unicodeRounded $
-            borderWithLabel (withAttr Theme.footerAttr (txt label)) $
+            borderWithLabel (withAttr Theme.footerAttr label) $
                 editor
 
 renderDraft :: Bool -> UiState -> Widget Name
@@ -872,6 +926,10 @@ handleEvent event = case event of
             result <- tryAny action
             atomically (putTMVar reply result)
             pure state
+    MouseDown ComposerModel V.BLeft _ _ ->
+        handleStatusClick ReplChooseModel
+    MouseDown ComposerEffort V.BLeft _ _ ->
+        handleStatusClick ReplChooseEffort
     VtyEvent vtyEvent -> do
         state <- get
         case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
