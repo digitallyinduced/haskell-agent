@@ -1,13 +1,13 @@
 module Agent.Tools.GhciSpec (spec) where
 
+import Agent.Cancel (requestCancel, resetCancel)
 import Agent.Loop (defaultLoopDispatch)
-import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Provider (Provider(..))
+import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
-import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
-import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Ghci
     ( GhciClass(..)
+    , GhciOutcome(..)
     , GhciResult(..)
     , GhciSession
     , classifyGhci
@@ -18,14 +18,18 @@ import Agent.Tools.Ghci
     , newGhciSession
     , typeLooksEffectful
     )
+import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, wait)
 import Control.Exception.Safe (bracket)
+import Data.IORef
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
-import Data.IORef
-import qualified Data.Map.Strict as Map
 import Test.Hspec
 
 spec :: Spec
@@ -69,6 +73,17 @@ spec = describe "Agent.Tools.Ghci" do
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
 
+    it "supports multiline bindings and do blocks" do
+        withTempGhci \ghci -> do
+            bind <- evalGhci ghci "let addOne x =\n  x + 1" 10000
+            bind.ghciOk `shouldBe` True
+            value <- evalGhci ghci "addOne 41" 10000
+            value.ghciOk `shouldBe` True
+            value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+            action <- evalGhci ghci "do\n  let x = 1\n  print (x + 1)" 10000
+            action.ghciOk `shouldBe` True
+            action.ghciOutput `shouldSatisfy` Text.isInfixOf "2"
+
     it "evaluates OverloadedStrings and LambdaCase without LANGUAGE pragmas" do
         withTempGhci \ghci -> do
             str <- evalGhci ghci "\"hello\"" 10000
@@ -82,6 +97,20 @@ spec = describe "Agent.Tools.Ghci" do
             mapM_
                 (\ext -> shown.ghciOutput `shouldSatisfy` Text.isInfixOf (Text.pack ext))
                 defaultGhciExtensions
+
+    it "does not mistake ordinary output for diagnostics" do
+        withTempGhci \ghci -> do
+            result <- evalGhci ghci "\"error: Exception: <interactive>:\"" 10000
+            result.ghciOk `shouldBe` True
+            result.ghciStdout
+                `shouldSatisfy` Text.isInfixOf "error: Exception: <interactive>:"
+            result.ghciStderr `shouldBe` ""
+
+    it "captures runtime exceptions from stderr" do
+        withTempGhci \ghci -> do
+            result <- evalGhci ghci "error \"boom\"" 10000
+            result.ghciOk `shouldBe` False
+            result.ghciStderr `shouldSatisfy` Text.isInfixOf "*** Exception: boom"
 
     it "classifies putStrLn as effectful and 1+1 as pure" do
         withTempGhci \ghci -> do
@@ -97,6 +126,64 @@ spec = describe "Agent.Tools.Ghci" do
             recovered.ghciOk `shouldBe` True
             recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "4"
 
+    it "honors cancellation and recovers the persistent process" do
+        withTempEnv \env ->
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                running <- async (evalGhci ghci "last [1..]" 10000)
+                threadDelay 100000
+                requestCancel env.toolCancel
+                cancelled <- wait running
+                cancelled.ghciOutcome `shouldBe` GhciCancelled
+                resetCancel env.toolCancel
+                recovered <- evalGhci ghci "2 + 3" 10000
+                recovered.ghciOk `shouldBe` True
+                recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "5"
+
+    it "caps retained output and reports truncation" do
+        withTempEnv \baseEnv -> do
+            let env = baseEnv { toolStdoutCap = 32 }
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci "replicate 200 'x'" 10000
+                result.ghciOk `shouldBe` True
+                result.ghciTruncated `shouldBe` True
+                result.ghciOutput `shouldSatisfy` Text.isInfixOf "[truncated"
+                Text.length result.ghciStdout `shouldSatisfy` (< 100)
+
+    it "ignores repository .ghci files" do
+        withTempEnv \env -> do
+            writeFile (env.toolCwd </> ".ghci")
+                "let injectedByDotGhci = (99 :: Int)\n"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci "injectedByDotGhci" 10000
+                result.ghciOk `shouldBe` False
+                result.ghciOutput
+                    `shouldSatisfy` Text.isInfixOf "Variable not in scope"
+
+    it "keeps its framing working after NoImplicitPrelude" do
+        withTempGhci \ghci -> do
+            changed <- evalGhci ghci ":set -XNoImplicitPrelude" 10000
+            changed.ghciOk `shouldBe` True
+            result <- evalGhci ghci "1 + 1" 10000
+            result.ghciOk `shouldBe` True
+            result.ghciOutput `shouldSatisfy` Text.isInfixOf "2"
+
+    it "restarts after the evaluated command exits GHCi" do
+        withTempGhci \ghci -> do
+            exited <- evalGhci ghci ":quit" 10000
+            exited.ghciOutcome `shouldBe` GhciProcessFailed
+            recovered <- evalGhci ghci "6 * 7" 10000
+            recovered.ghciOk `shouldBe` True
+            recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "is terminal and idempotent after close" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            closeGhciSession ghci
+            closeGhciSession ghci
+            result <- evalGhci ghci "1 + 1" 10000
+            result.ghciOutcome `shouldBe` GhciProcessFailed
+            result.ghciOutput `shouldSatisfy` Text.isInfixOf "closed"
+
     it "exposes run_ghci through grokTools dispatch" do
         withTempTools \tools -> do
             let handlers = appToolHandlers tools
@@ -107,7 +194,6 @@ spec = describe "Agent.Tools.Ghci" do
             result.output `shouldSatisfy` Text.isInfixOf "7"
             let names = map (.appToolName) tools
             names `shouldContain` ["run_ghci"]
-
 
     it "is registered for OpenAI via codingToolsFor" do
         withTempEnv \env -> do

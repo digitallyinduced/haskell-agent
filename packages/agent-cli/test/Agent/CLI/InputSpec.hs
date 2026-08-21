@@ -5,22 +5,17 @@ import Agent.CLI.Input
     , approvalKeyText
     , choiceMoveIndex
     , classifyPastedText
-    , clipboardPastePrefsText
-    , dropCycleModeSentinel
+    , displayEditorText
     , formatPasteChip
-    , isCycleModeSentinel
-    , pastePrefsText
+    , isClipboardPasteKey
     , parseChoiceKey
     , replHistoryPath
-    , shiftTabPrefsText
+    , terminalTextWidth
+    , truncateDisplayText
+    , visibleEditorText
     )
-import Control.Exception (bracket)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
-import System.Console.Haskeline (readPrefs)
-import System.Directory (getTemporaryDirectory, removeFile)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
 import Test.Hspec
 
 spec :: Spec
@@ -70,7 +65,7 @@ spec = do
             classifyPastedText wrapped `shouldBe` (payload, True)
             classifyPastedText payload `shouldBe` (payload, False)
 
-        it "detects the sentinels inserted by haskeline bindings" do
+        it "detects printable sentinels from older input versions" do
             let payload = "hello from clipboard"
                 wrapped = Text.pack [toEnum 0x27E6] <> payload
                     <> Text.pack [toEnum 0x27E7]
@@ -86,46 +81,21 @@ spec = do
             formatPasteChip (Text.unlines ["a", "b", "c", "d"])
                 `shouldBe` "[Pasted: 4 lines]"
 
-    describe "cycle mode sentinel" do
-        it "detects and strips the Shift+Tab marker" do
-            let marked = "hello" <> Text.singleton '\xFFFC'
-            isCycleModeSentinel marked `shouldBe` True
-            dropCycleModeSentinel marked `shouldBe` "hello"
-            isCycleModeSentinel "hello" `shouldBe` False
-            dropCycleModeSentinel "hello" `shouldBe` "hello"
+    describe "safe editor rendering" do
+        it "renders pasted terminal controls as visible characters" do
+            displayEditorText "\ESC]0;owned\BEL"
+                `shouldBe` "␛]0;owned␇"
 
-        it "parses Shift+Tab keyseq and bind lines" $ do
-            tmp <- getTemporaryDirectory
-            bracket
-                (openTempFile tmp "haskeline-shift-tab")
-                (\(path, _) -> removeFile path)
-                \(path, handle) -> do
-                    Text.hPutStr handle shiftTabPrefsText
-                    hClose handle
-                    prefs <- readPrefs path
-                    show prefs `shouldSatisfy` ("f24" `Text.isInfixOf`) . Text.pack
-                    show prefs `shouldSatisfy` ("\\ESC[Z" `Text.isInfixOf`) . Text.pack
+        it "measures wide and combining Unicode in terminal columns" do
+            terminalTextWidth "a界🙂e\x0301" `shouldBe` 6
+            visibleEditorText 3 "a界b" 2 `shouldBe` ("界b", 2)
 
-        it "parses bracketed-paste keyseq and bind lines" $ do
-            tmp <- getTemporaryDirectory
-            bracket
-                (openTempFile tmp "haskeline-bracketed-paste")
-                (\(path, _) -> removeFile path)
-                \(path, handle) -> do
-                    Text.hPutStr handle pastePrefsText
-                    hClose handle
-                    prefs <- readPrefs path
-                    show prefs `shouldSatisfy` ("f23" `Text.isInfixOf`) . Text.pack
-                    show prefs `shouldSatisfy`
-                        ("\\ESC[200~" `Text.isInfixOf`) . Text.pack
+        it "truncates the complete row without exceeding its column budget" do
+            let truncated = truncateDisplayText 5 "/always-approve"
+            truncated `shouldBe` "/alw…"
+            terminalTextWidth truncated `shouldBe` 5
 
-        it "parses the Ctrl+V clipboard-image binding" $ do
-            tmp <- getTemporaryDirectory
-            bracket
-                (openTempFile tmp "haskeline-clipboard-paste")
-                (\(path, _) -> removeFile path)
-                \(path, handle) -> do
-                    Text.hPutStr handle clipboardPastePrefsText
-                    hClose handle
-                    prefs <- readPrefs path
-                    show prefs `shouldSatisfy` ("ctrl-v" `Text.isInfixOf`) . Text.pack
+    describe "clipboard image paste key" do
+        it "recognizes Ctrl+V without treating ordinary v as paste" do
+            isClipboardPasteKey '\SYN' `shouldBe` True
+            isClipboardPasteKey 'v' `shouldBe` False

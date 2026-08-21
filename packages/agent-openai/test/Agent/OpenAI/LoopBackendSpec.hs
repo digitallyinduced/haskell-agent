@@ -1,6 +1,7 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.Responses.Types
@@ -22,6 +23,37 @@ spec = do
                     message.content `shouldBe`
                         MessageContentParts [InputTextPart "hello" Nothing KeyMap.empty]
                 other -> expectationFailure ("expected one user message, got " <> show other)
+
+        it "preserves encrypted collaboration payloads as agent_message content" do
+            let message = InterAgentMessage
+                    { messageAuthor = "/root"
+                    , messageRecipient = "/root/worker"
+                    , messageType = NewTaskMessage
+                    , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
+                    }
+            case turnInputsToItems [AgentMessage message] of
+                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
+                    [ "type" Aeson..= ("agent_message" :: Text)
+                    , "author" Aeson..= ("/root" :: Text)
+                    , "recipient" Aeson..= ("/root/worker" :: Text)
+                    , "content" Aeson..=
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text)
+                            , "text" Aeson..=
+                                ("Message Type: NEW_TASK\n\
+                                \Task name: /root/worker\n\
+                                \Sender: /root\n\
+                                \Payload:\n" :: Text)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("encrypted_content" :: Text)
+                            , "encrypted_content" Aeson..=
+                                ("gAAAAA-ciphertext" :: Text)
+                            ]
+                        ]
+                    ]
+                other ->
+                    expectationFailure ("expected one agent_message, got " <> show other)
 
         it "encodes multimodal turns as input_text plus input_image data URLs" do
             let image = ImageAttachment "image/png" "png-bytes"
@@ -81,6 +113,22 @@ spec = do
                 , customToolCall "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
                 ]
                 (Just "working")
+
+        it "marks encrypted collaboration arguments and honors plaintext override" do
+            let encrypted = responseToTurnOutput $ testResponse "resp-encrypted"
+                    [functionCallItemWithExtras "fc1" "spawn_agent"
+                        "{\"task_name\":\"worker\",\"message\":\"gAAAAA\"}"
+                        (KeyMap.fromList
+                            [(Key.fromText "namespace", Aeson.String "collaboration")])]
+                plaintext = responseToTurnOutput $ testResponse "resp-plaintext"
+                    [functionCallItemWithExtras "fc2" "spawn_agent"
+                        "{\"task_name\":\"worker\",\"message\":\"hello\"}"
+                        (KeyMap.fromList
+                            [ (Key.fromText "namespace", Aeson.String "collaboration")
+                            , (Key.fromText "encrypted_function_args", Aeson.Array mempty)
+                            ])]
+            map (.argumentsEncrypted) encrypted.toolCalls `shouldBe` [True]
+            map (.argumentsEncrypted) plaintext.toolCalls `shouldBe` [False]
 
         it "joins multiple assistant messages" do
             let turn = responseToTurnOutput $ testResponse "resp-text"
@@ -305,13 +353,23 @@ customResult callId output = ToolCallResult
     }
 
 functionCallItem :: Text -> Text -> Text -> ResponseItem
-functionCallItem callId name arguments = FunctionCallItem FunctionCall
+functionCallItem callId name arguments =
+    functionCallItemWithExtras callId name arguments KeyMap.empty
+
+functionCallItemWithExtras
+    :: Text
+    -> Text
+    -> Text
+    -> Aeson.Object
+    -> ResponseItem
+functionCallItemWithExtras callId name arguments extraFields =
+    FunctionCallItem FunctionCall
     { itemId = Nothing
     , callId
     , name
     , arguments
     , status = Just ItemCompleted
-    , extraFields = KeyMap.empty
+    , extraFields
     }
 
 customCallItem :: Text -> Text -> Text -> ResponseItem

@@ -24,6 +24,7 @@ module Agent.Loop
 
 import Agent.Cancel (CancelFlag, isCancelled, resetCancel, waitCancel)
 import Agent.Error (ApiError)
+import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -47,6 +48,7 @@ data ImageAttachment = ImageAttachment
 
 data TurnInput
     = UserMessage Text
+    | AgentMessage InterAgentMessage
     | UserMultimodal
         { userText :: !Text
         , userImages :: ![ImageAttachment]
@@ -148,9 +150,9 @@ data LoopError
     = LoopTransport ApiError
     | LoopMaxTurns TurnOutput
     | LoopNoResponseId
-    -- | Soft-cancel after tools ran. Carries the tool results that must be
-    -- committed to the local transcript so function_call items are not left
-    -- without matching outputs.
+    -- | Soft-cancel after tools ran. Carries the completed tool results for
+    -- callers that retain the in-progress turn; callers may instead roll the
+    -- whole turn back to its last committed response boundary.
     | LoopCancelled [ToolCallResult]
     deriving (Eq, Show)
 

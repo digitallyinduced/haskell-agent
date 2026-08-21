@@ -51,8 +51,10 @@ library
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
+                    , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
+                    , Agent.CLI.PendingInputs
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
                     , Agent.CLI.Progress
@@ -121,10 +123,12 @@ test-suite agent-cli-test
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.ProviderFallbackSpec
