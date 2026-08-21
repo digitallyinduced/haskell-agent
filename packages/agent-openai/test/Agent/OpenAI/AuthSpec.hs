@@ -51,6 +51,17 @@ spec = do
             let idTok = mkJwt (Aeson.object [ "exp" .= (1_800_000_000 :: Int) ])
             deriveAccountId idTok `shouldBe` Nothing
 
+    describe "deriveEmail" $ do
+        it "extracts the standard email claim" $ do
+            let idTok = mkJwt $ Aeson.object
+                    [ "email" .= ("person@example.com" :: Text) ]
+            deriveEmail idTok `shouldBe` Just "person@example.com"
+
+        it "returns Nothing when the email claim is absent or empty" $ do
+            deriveEmail (mkJwt (Aeson.object [])) `shouldBe` Nothing
+            deriveEmail (mkJwt (Aeson.object ["email" .= ("" :: Text)]))
+                `shouldBe` Nothing
+
     describe "needsRefresh" $ do
         it "returns False for tokens with an exp far in the future" $ do
             let state = mkFreshAuth "acc"
