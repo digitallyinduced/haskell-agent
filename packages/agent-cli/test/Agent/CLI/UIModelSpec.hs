@@ -81,6 +81,7 @@ spec = describe "fullscreen UI reducer" do
                     running
             after = reduceUi UiTick finished
         idle.uiElapsedTenths `shouldBe` 0
+        idle.uiFrame `shouldBe` 0
         running.uiElapsedTenths `shouldBe` 3
         after.uiElapsedTenths `shouldBe` 3
 

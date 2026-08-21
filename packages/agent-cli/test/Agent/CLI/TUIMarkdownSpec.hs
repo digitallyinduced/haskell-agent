@@ -1,6 +1,7 @@
 module Agent.CLI.TUIMarkdownSpec (spec) where
 
 import Agent.CLI.TUI.Markdown
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -28,3 +29,8 @@ spec = describe "fullscreen Markdown inline parsing" do
     it "leaves unmatched delimiters visible" do
         inlinePlainText (parseInline "unfinished **bold")
             `shouldBe` "unfinished **bold"
+
+    it "keeps long unstyled input in one plain span" do
+        let input = Text.replicate 10000 "a"
+        parseInline input
+            `shouldBe` [InlineSpan InlinePlain input]
