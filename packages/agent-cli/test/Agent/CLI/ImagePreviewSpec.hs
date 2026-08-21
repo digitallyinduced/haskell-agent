@@ -35,10 +35,10 @@ spec = do
             previewColumnsFor 30 `shouldBe` 12
 
     describe "kittyImageSequence" do
-        it "specifies only rows so Kitty preserves the source aspect ratio" do
+        it "transmits and displays in one action while preserving source aspect ratio" do
             let seq_ = kittyImageSequence 7 20 6 "image/png" "png-bytes"
-            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=t,q=2,i=7,f=100,t=d,r=6,C=1,m=0;"
-            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=p,i=7,r=6,C=1,q=2\ESC\\"
+            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=T,q=2,i=7,f=100,t=d,r=6,C=1,m=0;"
+            seq_ `shouldSatisfy` (not . Text.isInfixOf "\ESC_Ga=p")
             seq_ `shouldSatisfy` (not . Text.isInfixOf ",c=")
             -- payload is base64 of the raw bytes
             seq_ `shouldSatisfy` Text.isInfixOf "cG5nLWJ5dGVz"
@@ -52,6 +52,8 @@ spec = do
                 seq_ = kittyImageSequence 2 10 4 "image/png" bytes
             Text.count ",m=1;" seq_ `shouldBe` 1
             seq_ `shouldSatisfy` Text.isInfixOf ",m=0;"
+            Text.count "\ESC_Ga=T" seq_ `shouldBe` 1
+            Text.count "\ESC_Ga=t" seq_ `shouldBe` 1
 
     describe "itermImageSequence" do
         it "emits OSC 1337 inline file with cell size" do
@@ -75,7 +77,7 @@ spec = do
             case renderImagePreview PreviewKitty False muted 20 6 3 [img] of
                 Nothing -> expectationFailure "expected a preview block"
                 Just block -> do
-                    block `shouldSatisfy` Text.isInfixOf "\ESC_Ga=t,q=2,i=3"
+                    block `shouldSatisfy` Text.isInfixOf "\ESC_Ga=T,q=2,i=3"
                     block `shouldSatisfy` Text.isInfixOf "image/png (9 B)"
                     -- six blank lines (rows=6) sit between the bitmap and the caption
                     block `shouldSatisfy` Text.isInfixOf (Text.replicate 6 "\n")
@@ -85,7 +87,7 @@ spec = do
                 Nothing -> expectationFailure "expected a preview block"
                 Just block -> do
                     block `shouldSatisfy` Text.isPrefixOf "\ESCPtmux;"
-                    block `shouldSatisfy` Text.isInfixOf "\ESC\ESC_Ga=t"
+                    block `shouldSatisfy` Text.isInfixOf "\ESC\ESC_Ga=T"
 
         it "falls back to a caption without graphics" do
             case renderImagePreview PreviewUnsupported False muted 20 6 1 [img] of
