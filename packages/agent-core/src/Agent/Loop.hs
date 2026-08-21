@@ -24,6 +24,7 @@ module Agent.Loop
 
 import Agent.Cancel (CancelFlag, isCancelled, resetCancel, waitCancel)
 import Agent.Error (ApiError)
+import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -47,6 +48,7 @@ data ImageAttachment = ImageAttachment
 
 data TurnInput
     = UserMessage Text
+    | AgentMessage InterAgentMessage
     | UserMultimodal
         { userText :: !Text
         , userImages :: ![ImageAttachment]
