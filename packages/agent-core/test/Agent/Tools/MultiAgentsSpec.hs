@@ -7,6 +7,7 @@ import Agent.Loop
     , defaultLoopDispatch
     , emptyTokenUsage
     )
+import Agent.OsPath (fromFilePath)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
 import Agent.ToolDispatch
@@ -16,7 +17,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     )
 import Agent.Tools.MultiAgents
-import Agent.Tools.Types (appToolHandlers)
+import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent.STM
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,9 +25,25 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
+    it "allows collaboration coordination without approval" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let tools = multiAgentTools (rootContext registry Nothing)
+        map (\tool -> (tool.appToolName, tool.appToolReadOnly)) tools
+            `shouldBe`
+                [ ("spawn_agent", True)
+                , ("wait_agent", True)
+                , ("send_message", True)
+                , ("followup_task", True)
+                , ("list_agents", True)
+                , ("interrupt_agent", True)
+                ]
+        closeSubagentRegistry registry
+
     it "preserves encrypted spawn payloads" do
         spawned <- newEmptyTMVarIO
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ message _ -> do
                 atomically (putTMVar spawned message)
                 pure $ Right LoopResult
@@ -50,7 +67,7 @@ spec = describe "Agent.Tools.MultiAgents" do
 
     it "routes encrypted child messages to the root inbox" do
         rootInbox <- newEmptyTMVarIO
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         Right workerPath <- pure (joinTaskPath taskPathRoot "worker")

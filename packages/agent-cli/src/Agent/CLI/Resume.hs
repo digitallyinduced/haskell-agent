@@ -19,6 +19,7 @@ import Agent.CLI.Session
     , loadSession
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
+import Agent.OsPath (OsPath, toText)
 import Agent.Provider (providerSlug)
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
@@ -27,7 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Console.ANSI (getTerminalSize)
-import System.FilePath (takeFileName)
+import System.OsPath (takeFileName)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 
 data ResumeEntry = ResumeEntry
@@ -59,7 +60,7 @@ entryFrom meta turns =
         , resumeTitle =
             if Text.null meta.metaTitle then "(untitled)" else meta.metaTitle
         , resumeModel = meta.metaModel
-        , resumeCwd = Text.pack (takeFileName meta.metaCwd)
+        , resumeCwd = toText (takeFileName meta.metaCwd)
         , resumeWhen =
             Text.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M" meta.metaUpdatedAt)
         , resumeProvider = providerSlug meta.metaProvider
@@ -260,7 +261,7 @@ formatOne color entry =
 
 -- | TTY picker; non-TTY prints the list. Confirm returns the session id.
 -- Loading is capped to the latest sessions so opening the picker stays cheap.
-pickResumeSession :: Bool -> FilePath -> [SessionMeta] -> IO (Maybe Text)
+pickResumeSession :: Bool -> OsPath -> [SessionMeta] -> IO (Maybe Text)
 pickResumeSession color root metas = do
     isTty <- hIsTerminalDevice stdin
     loaded <- loadRecentSessions root metas
@@ -282,7 +283,7 @@ pickResumeSession color root metas = do
                 Just (Just entry) -> Just entry.resumeId
                 _ -> Nothing
 
-loadRecentSessions :: FilePath -> [SessionMeta] -> IO [(SessionMeta, [SessionTurn])]
+loadRecentSessions :: OsPath -> [SessionMeta] -> IO [(SessionMeta, [SessionTurn])]
 loadRecentSessions root metas =
     forM (take 20 metas) \meta ->
         loadSession root meta.metaId >>= \case

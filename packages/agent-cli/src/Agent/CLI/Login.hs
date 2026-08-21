@@ -43,6 +43,7 @@ import Agent.CLI.Style
     )
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.Provider (Provider(..), providerSlug)
@@ -62,9 +63,9 @@ import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-import System.Directory (doesFileExist, getHomeDirectory)
+import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 import System.IO
     ( hFlush
     , hGetEcho
@@ -231,9 +232,11 @@ discoverLoginAccounts = do
     home <- getHomeDirectory
     now <- getCurrentTime
     openaiEnv <- discoverOpenAIEnv
-    openaiFile <- discoverOpenAIFile now (home </> ".codex" </> "auth.json")
+    openaiFile <- discoverOpenAIFile now
+        (home </> fromFilePath ".codex" </> fromFilePath "auth.json")
     grokEnv <- discoverGrokEnv
-    grokFile <- discoverGrokFile (home </> ".grok" </> "auth.json")
+    grokFile <- discoverGrokFile
+        (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
     openRouter <- discoverOpenRouter
     broker <- discoverBroker
     managed <- loadManagedCredentials
@@ -566,20 +569,20 @@ discoverOpenAIEnv = do
             OpenAIProvider accountId "ChatGPT" "environment"
             accessToken ManagedBearerToken accessToken
 
-discoverOpenAIFile :: UTCTime -> FilePath -> IO (Maybe LoginAccount)
+discoverOpenAIFile :: UTCTime -> OsPath -> IO (Maybe LoginAccount)
 discoverOpenAIFile now path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
         else do
-            bytes <- LBS.readFile path
+            bytes <- LBS.readFile (toFilePath path)
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
                     OpenAIProvider
                     auth.accountId
                     "ChatGPT"
-                    (Text.pack path)
+                    (toText path)
                     auth.accessToken
                     ManagedOpenAIAuthJson
                     (Text.decodeUtf8 (LBS.toStrict bytes))
@@ -596,16 +599,17 @@ discoverGrokEnv = do
             (\token -> grokAccount token "environment"
                 ManagedBearerToken token) <$> rawToken
 
-discoverGrokFile :: FilePath -> IO (Maybe LoginAccount)
+discoverGrokFile :: OsPath -> IO (Maybe LoginAccount)
 discoverGrokFile path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
         else do
-            raw <- Text.decodeUtf8 . LBS.toStrict <$> LBS.readFile path
+            raw <- Text.decodeUtf8 . LBS.toStrict
+                <$> LBS.readFile (toFilePath path)
             pure $ do
                 token <- grokCredentialFromAuthJson raw
-                pure (grokAccount token (Text.pack path)
+                pure (grokAccount token (toText path)
                     ManagedGrokAuthJson raw)
 
 discoverOpenRouter :: IO (Maybe LoginAccount)

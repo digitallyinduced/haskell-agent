@@ -23,6 +23,7 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.Tools (lookupAppTool)
 import Agent.JsonText (jsonTextFieldDefault)
+import Agent.OsPath (OsPath, fromText)
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
@@ -107,26 +108,26 @@ approveToolDecision policyRef allowedToolsRef tools planMode call = do
                                                 Just PermissionDeny ->
                                                     pure (Right False)
 
-planModeBlocksCall :: Bool -> FilePath -> ToolCall -> Bool
+planModeBlocksCall :: Bool -> OsPath -> ToolCall -> Bool
 planModeBlocksCall active planPath call
     | not active = False
     | call.name == "apply_patch" = True
     | call.name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in Text.null target
-            || not (isPlanFileEditTarget planPath (Text.unpack target))
+            || not (isPlanFileEditTarget planPath (fromText target))
     | otherwise = False
 
-isPlanFileWrite :: Bool -> FilePath -> ToolCall -> Bool
+isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
 isPlanFileWrite active planPath call
     | not active = False
     | call.name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in not (Text.null target)
-            && isPlanFileEditTarget planPath (Text.unpack target)
+            && isPlanFileEditTarget planPath (fromText target)
     | otherwise = False
 
-toggleAlwaysApprove :: IORef ApprovalPolicy -> FilePath -> IO ()
+toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO ()
 toggleAlwaysApprove policyRef projectRoot = do
     color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->

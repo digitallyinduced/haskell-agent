@@ -18,7 +18,9 @@ mkDerivation {
     network-uri retry safe-exceptions scientific text time unix vector
     websockets wuss
   ];
-  executableHaskellDepends = [ base directory filepath text ];
+  executableHaskellDepends = [
+    agent-core base directory filepath text
+  ];
   testHaskellDepends = [
     aeson agent-core base base64-bytestring bytestring case-insensitive
     directory filepath hspec http-types retry temporary text time unix

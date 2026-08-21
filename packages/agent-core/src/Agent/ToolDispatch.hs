@@ -12,6 +12,7 @@ module Agent.ToolDispatch
     , functionToolCall
     , customToolCall
     , dispatchToolCall
+    , canonicalToolName
     , toolArgumentsValue
     , decodeToolArguments
     ) where
@@ -125,12 +126,12 @@ decodeToolArguments value =
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
 findHandler name handlers =
     find ((== name) . handlerName) handlers
-        <|> find ((== stripNamespace name) . handlerName) handlers
+        <|> find ((== canonicalToolName name) . handlerName) handlers
 
 -- | Codex namespaced tools may arrive as @collaboration.spawn_agent@ or
 -- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
-stripNamespace :: Text -> Text
-stripNamespace name
+canonicalToolName :: Text -> Text
+canonicalToolName name
     | Just rest <- Text.stripPrefix "collaboration." name = rest
     | Just rest <- Text.stripPrefix "collaboration" name
     , rest `elem` multiAgentBareNames =

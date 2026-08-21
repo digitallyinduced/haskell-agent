@@ -1,6 +1,7 @@
 module Agent.Tools.GrokSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
+import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
@@ -85,7 +86,7 @@ spec = describe "Agent.Tools.Grok" do
 
     it "reads a file with grok line-number anchors" do
         withTempSession \(session, ghci) -> do
-            let path = session.grokEnv.toolCwd </> "sample.txt"
+            let path = toFilePath session.grokEnv.toolCwd </> "sample.txt"
             Text.writeFile path (Text.unlines ["alpha", "bravo", "charlie"])
             output <- runTool session ghci "read_file" "{\"target_file\":\"sample.txt\"}"
             output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
@@ -93,7 +94,7 @@ spec = describe "Agent.Tools.Grok" do
 
     it "rejects a path that escapes cwd" do
         withTempSession \(session, ghci) -> do
-            let cwd = session.grokEnv.toolCwd
+            let cwd = toFilePath session.grokEnv.toolCwd
                 name = takeFileName cwd <> "-outside.txt"
                 outsider = takeDirectory cwd </> name
             Text.writeFile outsider "secret"
@@ -105,8 +106,8 @@ spec = describe "Agent.Tools.Grok" do
 
     it "lists directory entries with a trailing slash for folders" do
         withTempSession \(session, ghci) -> do
-            createDirectoryIfMissing True (session.grokEnv.toolCwd </> "sub")
-            Text.writeFile (session.grokEnv.toolCwd </> "a.txt") "x"
+            createDirectoryIfMissing True (toFilePath session.grokEnv.toolCwd </> "sub")
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "a.txt") "x"
             output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
@@ -116,30 +117,30 @@ spec = describe "Agent.Tools.Grok" do
             created <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"\",\"new_string\":\"hello world\\n\"}"
             created `shouldSatisfy` Text.isInfixOf "created successfully"
-            doesFileExist (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` True
+            doesFileExist (toFilePath session.grokEnv.toolCwd </> "new.txt") `shouldReturn` True
 
             updated <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"hello\",\"new_string\":\"goodbye\"}"
             updated `shouldSatisfy` Text.isInfixOf "updated successfully"
-            Text.readFile (session.grokEnv.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
+            Text.readFile (toFilePath session.grokEnv.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
 
     it "refuses a non-unique search_replace without replace_all" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "dup.txt") "aaa bbb aaa\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
             output `shouldSatisfy` Text.isInfixOf "multiple times"
 
     it "grep finds a literal match" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
             output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "grep accepts glob before the path terminator" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
-            Text.writeFile (session.grokEnv.toolCwd </> "hit.md") "needle in markdown\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.md") "needle in markdown\n"
             output <- runTool session ghci "grep"
                 "{\"pattern\":\"needle\",\"glob\":\"*.txt\"}"
             output `shouldSatisfy` Text.isInfixOf "hit.txt"
@@ -168,29 +169,29 @@ spec = describe "Agent.Tools.Grok" do
 
     it "starts read_file from a negative offset" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
             output <- runTool session ghci "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
             output `shouldNotSatisfy` Text.isInfixOf "beyond the end"
             output `shouldSatisfy` Text.isInfixOf "d"
 
     it "wraps grep output in a workspace_result card" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
             output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "<workspace_result"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "hints the nearest line when search_replace misses" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"near.txt\",\"old_string\":\"xyz unique\",\"new_string\":\"x\"}"
             output `shouldSatisfy` Text.isInfixOf "Nearest match: line 2"
 
     it "refuses to edit a gitignored file" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
-            Text.writeFile (session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
             initOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
             initOut `shouldSatisfy` Text.isPrefixOf "exit: 0"
@@ -258,7 +259,7 @@ spec = describe "Agent.Tools.Grok" do
             started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo liveout; touch flag; sleep 30\",\"description\":\"live snapshot\",\"background\":true}"
             let taskId = taskIdFrom started
-            waitForFile (session.grokEnv.toolCwd </> "flag")
+            waitForFile (toFilePath session.grokEnv.toolCwd </> "flag")
             snap <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\"}")
             snap `shouldSatisfy` Text.isInfixOf "liveout"
@@ -276,9 +277,9 @@ spec = describe "Agent.Tools.Grok" do
     it "deletes the env dump when the session closes" do
         withTempSession \(session, ghci) -> do
             shell <- readMVar session.grokShell
-            doesFileExist shell.shellEnvFile `shouldReturn` True
+            doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` True
             closeGrokSession session
-            doesFileExist shell.shellEnvFile `shouldReturn` False
+            doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` False
 
     describe "hasUnwaitedBackgroundOp" do
         it "detects a trailing bare ampersand" do
@@ -326,7 +327,7 @@ withTempSession action = do
         (mkdtemp (tmp </> "agent-grok-XXXXXX"))
         (\dir -> removeDirectoryRecursive dir)
         \dir -> do
-            env <- defaultToolEnv dir
+            env <- defaultToolEnv (fromFilePath dir)
             session <- newGrokSession env
             ghci <- newGhciSession env
             action (session, ghci) `finally` (closeGrokSession session >> closeGhciSession ghci)
