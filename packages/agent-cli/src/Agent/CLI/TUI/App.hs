@@ -12,7 +12,12 @@ module Agent.CLI.TUI.App
     , withFullscreenSuspended
     ) where
 
-import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , appendReplHistory
+    , readReplHistory
+    , terminalTextWidth
+    )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
     ( ReplAction(..)
@@ -24,7 +29,7 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.ReplMode (replModeLabel)
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.CLI.TUI.Theme as Theme
 import Agent.CLI.TUI.Markdown (markdownWidget)
@@ -97,6 +102,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeNativeProgress :: !(Bool -> IO ())
+    , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
 
@@ -111,6 +117,10 @@ data AppState = AppState
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
+    , appHistory :: ![Text]
+    , appHistoryIndex :: !(Maybe Int)
+    , appHistoryDraft :: !Text
+    , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
     }
 
@@ -133,6 +143,7 @@ newFullscreenRuntime
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
     -> (Bool -> IO ())
+    -> Bool
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntime
@@ -140,6 +151,7 @@ newFullscreenRuntime
     ctrlCAction
     copyAction
     nativeProgress
+    color
     initial = FullscreenRuntime
     <$> newBChan 512
     <*> newTQueueIO
@@ -147,6 +159,7 @@ newFullscreenRuntime
     <*> pure ctrlCAction
     <*> pure copyAction
     <*> pure nativeProgress
+    <*> pure color
     <*> pure initial
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
@@ -217,6 +230,7 @@ withFullscreenSuspended runtime action = do
 
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
+    history <- readReplHistory
     let vtyConfig =
             V.defaultConfig
                 { V.configPreferredColorMode = Just V.FullColor
@@ -235,6 +249,10 @@ runFullscreen runtime workerAction = do
             , appTextReply = Nothing
             , appSlashDismissed = False
             , appPasted = False
+            , appHistory = history
+            , appHistoryIndex = Nothing
+            , appHistoryDraft = ""
+            , appKillBuffer = ""
             , appSkillCommands = []
             }
     withAsync workerAction \worker ->
@@ -395,7 +413,10 @@ fullscreenApp = App
     , appChooseCursor = showFirstCursor
     , appHandleEvent = handleEvent
     , appStartEvent = vScrollToEnd (viewportScroll ConversationViewport)
-    , appAttrMap = const Theme.solarizedDark
+    , appAttrMap = \state ->
+        if state.appRuntime.runtimeColor
+            then Theme.solarizedDark
+            else Theme.monochrome
     }
 
 drawApp :: AppState -> [Widget Name]
@@ -447,6 +468,11 @@ drawHeader state =
     right =
         (if state.uiRunning then spinnerFrame state.uiFrame <> " " else "")
             <> state.uiActivity
+            <> if state.uiRunning
+                then " · "
+                    <> formatElapsed
+                        (fromIntegral state.uiElapsedTenths / 10)
+                else ""
             <> if Text.null usage then "" else " │ " <> usage
 
 spinnerFrame :: Int -> Text
@@ -795,6 +821,12 @@ handleEvent event = case event of
             , appPasted = case uiEvent of
                 UiSetDraft _ _ -> False
                 _ -> state.appPasted
+            , appHistoryIndex = case uiEvent of
+                UiSetDraft _ _ -> Nothing
+                _ -> state.appHistoryIndex
+            , appHistoryDraft = case uiEvent of
+                UiSetDraft text _ -> text
+                _ -> state.appHistoryDraft
             }
         state <- get
         case nativeProgressSignal uiEvent state.appUi of
@@ -853,6 +885,9 @@ eventFollows :: UiEvent -> Bool
 eventFollows = \case
     UiLoop _ -> True
     UiUserSubmitted _ -> True
+    UiAssistantHistory _ -> True
+    UiSystemMessage _ -> True
+    UiErrorMessage _ -> True
     UiConversationCleared -> True
     _ -> False
 
@@ -1037,10 +1072,14 @@ handleComposerKey event = do
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash (-1) (length menu.slashMenuSuggestions)
+        V.EvKey V.KUp [] ->
+            moveHistory 1
         V.EvKey V.KDown []
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash 1 (length menu.slashMenuSuggestions)
+        V.EvKey V.KDown [] ->
+            moveHistory (-1)
         V.EvKey (V.KChar '\t') [] ->
             case slashMenu of
                 Just menu -> acceptSlash menu
@@ -1070,6 +1109,12 @@ handleComposerKey event = do
         V.EvKey (V.KChar 'k') modifiers
             | V.MCtrl `elem` modifiers ->
                 deleteLineEnd
+        V.EvKey (V.KChar 'y') modifiers
+            | V.MCtrl `elem` modifiers ->
+                insertKillBuffer
+        V.EvKey (V.KChar 'l') modifiers
+            | V.MCtrl `elem` modifiers ->
+                invalidateCache
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
                 setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
@@ -1132,6 +1177,7 @@ handleComposerKey event = do
         if Text.null (Text.strip draft)
             then pure ()
             else do
+                liftIO (appendReplHistory draft)
                 liftIO $ atomically $
                     writeTQueue state.appRuntime.runtimeInput $
                         if state.appPasted
@@ -1149,6 +1195,9 @@ handleComposerKey event = do
                                 (UiUserSubmitted draft)
                                 current.appUi
                         , appPasted = False
+                        , appHistory = draft : current.appHistory
+                        , appHistoryIndex = Nothing
+                        , appHistoryDraft = ""
                         }
                 vScrollToEnd (viewportScroll ConversationViewport)
 
@@ -1191,21 +1240,38 @@ handleComposerKey event = do
 
     deletePreviousWord = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteWordBefore state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killed =
+                Text.take (oldCursor - cursor) (Text.drop cursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
 
     deleteLineEnd = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteToLineEnd state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killedLength = Text.length old - Text.length next
+            killed = Text.take killedLength (Text.drop oldCursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
 
     deleteCurrentLine = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteToLineStart state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killed =
+                Text.take (oldCursor - cursor) (Text.drop cursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
+
+    insertKillBuffer = do
+        state <- get
+        when (not (Text.null state.appKillBuffer)) $
+            insertText state.appKillBuffer
 
     moveCursor delta = do
         state <- get
@@ -1231,7 +1297,61 @@ handleComposerKey event = do
                 { appUi = reduceUi uiEvent state.appUi
                 , appSlashIndex = 0
                 , appSlashDismissed = False
+                , appHistoryIndex = Nothing
+                , appHistoryDraft =
+                    case uiEvent of
+                        UiSetDraft text _ -> text
+                        _ -> state.appHistoryDraft
                 }
+
+    modifyUiWithKill killed uiEvent =
+        modify' \state ->
+            state
+                { appUi = reduceUi uiEvent state.appUi
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                , appKillBuffer = killed
+                , appHistoryIndex = Nothing
+                , appHistoryDraft =
+                    case uiEvent of
+                        UiSetDraft text _ -> text
+                        _ -> state.appHistoryDraft
+                }
+
+    moveHistory delta = do
+        state <- get
+        let entries = state.appHistory
+            current = maybe (-1) id state.appHistoryIndex
+            next = current + delta
+        if null entries
+            then pure ()
+            else if next < 0
+                then modify' \currentState ->
+                    currentState
+                        { appUi =
+                            reduceUi
+                                (UiSetDraft
+                                    currentState.appHistoryDraft
+                                    (Text.length currentState.appHistoryDraft))
+                                currentState.appUi
+                        , appHistoryIndex = Nothing
+                        }
+                else when (next < length entries) do
+                    let text = entries !! next
+                        draft = case state.appHistoryIndex of
+                            Nothing -> state.appUi.uiDraft
+                            Just _ -> state.appHistoryDraft
+                    modify' \currentState ->
+                        currentState
+                            { appUi =
+                                reduceUi
+                                    (UiSetDraft text (Text.length text))
+                                    currentState.appUi
+                            , appHistoryIndex = Just next
+                            , appHistoryDraft = draft
+                            , appSlashIndex = 0
+                            , appSlashDismissed = False
+                            }
 
     moveSlash delta count =
         modify' \current ->

@@ -15,6 +15,7 @@ module Agent.CLI.TUI.Theme
     , thinkingAttr
     , toolAttr
     , userAttr
+    , monochrome
     , solarizedDark
     ) where
 
@@ -94,6 +95,26 @@ solarizedDark =
         , (codeAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
             `V.withBackColor` rgb 7 54 66)
+        ]
+
+monochrome :: AttrMap
+monochrome =
+    attrMap V.defAttr
+        [ (baseAttr, V.defAttr)
+        , (headerAttr, V.defAttr `V.withStyle` V.bold)
+        , (footerAttr, V.defAttr)
+        , (mutedAttr, V.defAttr)
+        , (userAttr, V.defAttr `V.withStyle` V.bold)
+        , (assistantAttr, V.defAttr)
+        , (thinkingAttr, V.defAttr)
+        , (toolAttr, V.defAttr)
+        , (errorAttr, V.defAttr `V.withStyle` V.bold)
+        , (successAttr, V.defAttr)
+        , (selectedAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (borderAttr, V.defAttr)
+        , (borderActiveAttr, V.defAttr `V.withStyle` V.bold)
+        , (headingAttr, V.defAttr `V.withStyle` V.bold)
+        , (codeAttr, V.defAttr)
         ]
 
 rgb :: Int -> Int -> Int -> V.Color

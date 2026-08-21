@@ -91,7 +91,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.List (isPrefixOf)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
@@ -185,7 +185,7 @@ runOneTurn env@SessionEnv
     turnInputs <- stampTurnInputs turnInputs0
     startedAt <- readIORef render.renderStartedAt
     wallStarted <- getCurrentTime
-    when terminal.terminalSemanticPrompts $
+    when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout osc133CommandStart
     rootTurnId <- beginSubagentTurn
     result <- runLoopInputs config prev turnInputs
@@ -217,7 +217,8 @@ runOneTurn env@SessionEnv
     case result of
         Left cancelled@(LoopCancelled _) -> do
             restoreStartupContext
-            finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
+            finishTerminal (isNothing fullscreen)
+                terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
             model <- readIORef render.renderModelRef
@@ -248,7 +249,8 @@ runOneTurn env@SessionEnv
                             Just runtime ->
                                 emitUiEvent runtime
                                     (UiTurnEnded BlockFailed)
-                        finishTerminal terminal wallStarted finishedAt 1
+                        finishTerminal (isNothing fullscreen)
+                            terminal wallStarted finishedAt 1
                             "Agent provider unavailable"
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
@@ -258,7 +260,8 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
-                    finishTerminal terminal wallStarted finishedAt 1 "Agent turn failed"
+                    finishTerminal (isNothing fullscreen)
+                        terminal wallStarted finishedAt 1 "Agent turn failed"
                     writeIORef transcriptRef beforeItems
                     model <- readIORef render.renderModelRef
                     case fullscreen of
@@ -279,7 +282,8 @@ runOneTurn env@SessionEnv
                     persistIncomplete (Text.pack (show err))
                     pure TurnFailed
         Right loopResult -> do
-            finishTerminal terminal wallStarted finishedAt 0 "Agent finished"
+            finishTerminal (isNothing fullscreen)
+                terminal wallStarted finishedAt 0 "Agent finished"
             finishSubagentTurn rootTurnId
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
@@ -402,14 +406,15 @@ applyPendingSessionTitles env =
                                     (Just updated.sessionMeta.metaTitle))
 
 finishTerminal
-    :: TerminalCapabilities
+    :: Bool
+    -> TerminalCapabilities
     -> UTCTime
     -> UTCTime
     -> Int
     -> Text
     -> IO ()
-finishTerminal terminal started finished exitCode message = do
-    when terminal.terminalSemanticPrompts $
+finishTerminal semanticPrompts terminal started finished exitCode message = do
+    when (semanticPrompts && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout
             (osc133CommandFinished (Just exitCode))
     let seconds = realToFrac (diffUTCTime finished started) :: Double
