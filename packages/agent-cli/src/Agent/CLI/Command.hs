@@ -43,6 +43,8 @@ data ReplAction
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
+    | ReplRename Text
+    | ReplRenameAuto
     | ReplLogin
     | ReplReloadAuth
     | ReplPaste
@@ -91,6 +93,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "session" [] "/session" "Print the current session id" False
+    , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
@@ -167,6 +170,16 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "rename" ->
+                let title = Text.strip (Text.drop (Text.length command) line)
+                in if title == "--auto"
+                    then ReplRenameAuto
+                    else if Text.null title
+                        then ReplCommandError "usage: /rename <TITLE>|--auto"
+                        else if Text.length title > 100
+                            then ReplCommandError
+                                "session titles must be at most 100 characters"
+                            else ReplRename title
             "login" ->
                 if null args
                     then ReplLogin
@@ -400,6 +413,7 @@ argCompletions spec = case spec.slashName of
     "effort" -> reasoningEfforts
     "model" -> catalogModelIds
     "help" -> map (.slashName) slashCommands
+    "rename" -> ["--auto"]
     "paste" -> ["--send"]
     _ -> []
 

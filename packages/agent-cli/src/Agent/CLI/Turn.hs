@@ -1,6 +1,7 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( runOneTurn
+    ( applyPendingSessionTitles
+    , runOneTurn
     ) where
 
 import Agent.Cancel (resetCancel)
@@ -29,8 +30,18 @@ import Agent.CLI.Session
     , PersistenceState(..)
     , appendTurn
     , ensureSession
+    , loadSession
+    , sessionConversationText
+    , setGeneratedSessionTitle
+    , writeSessionMeta
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionTitle
+    ( SessionTitleResult(..)
+    , requestSessionTitle
+    , takeSessionTitleResults
+    , titleRefreshIndex
+    )
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Style
     ( cliWindowTitle
@@ -81,6 +92,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.IO (hIsTerminalDevice, stderr, stdout)
+import qualified System.OsPath
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
@@ -108,6 +120,7 @@ runOneTurn env@SessionEnv
   resetCancel config.loopCancel >>
   (withTurnCancel interrupt config.loopCancel
     . withEscCancel config.loopCancel escPaused) do
+    applyPendingSessionTitles env
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents
@@ -124,6 +137,14 @@ runOneTurn env@SessionEnv
                 putTextLn stderr
                     (roleMuted color
                         (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+            titleTurns <- readIORef env.sessionTitleTurnCount
+            when
+                ( titleTurns == 0
+                    && not handle.sessionMeta.metaTitleIsManual
+                    && handle.sessionMeta.metaTitleRefreshIndex == 0
+                )
+                (requestSessionTitle env.sessionTitleManager
+                    handle.sessionMeta.metaId 1 promptText)
         PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
@@ -262,12 +283,26 @@ runOneTurn env@SessionEnv
                             , turnUsage = Just loopResult.tokenUsage
                             }
                     handle' <- appendTurn handle turn
-                    writeIORef slotRef (PersistenceActive handle')
-                    when (handle'.sessionMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                    titleTurns <- atomicModifyIORef' env.sessionTitleTurnCount \n ->
+                        let next = n + 1 in (next, next)
+                    let countedMeta = handle'.sessionMeta
+                            { metaTitleUserTurns = titleTurns }
+                        countedHandle = handle' { sessionMeta = countedMeta }
+                    writeSessionMeta countedHandle.sessionMetaPath countedMeta
+                    writeIORef slotRef (PersistenceActive countedHandle)
+                    when
+                        ( titleTurns `elem` [3, 6]
+                            && not countedMeta.metaTitleIsManual
+                            && countedMeta.metaTitleRefreshIndex
+                                < titleRefreshIndex titleTurns
+                        )
+                        (requestConversationTitle env countedHandle titleTurns)
+                    when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
                         tty <- hIsTerminalDevice stdout
                         setCliWindowTitle tty stdout
-                            (cliWindowTitle handle'.sessionMeta.metaCwd
-                                (Just handle'.sessionMeta.metaTitle))
+                            (cliWindowTitle countedMeta.metaCwd
+                                (Just countedMeta.metaTitle))
+                    applyPendingSessionTitles env
             case followUp of
                 Nothing -> pure TurnSucceeded
                 Just notes -> do
@@ -278,6 +313,43 @@ isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
     PersistencePending _ -> True
     PersistenceActive _ -> False
+
+requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
+requestConversationTitle env handle milestone =
+    loadSession
+        (System.OsPath.takeDirectory handle.sessionDir)
+        handle.sessionMeta.metaId
+        >>= \case
+            Left _ -> pure ()
+            Right (_, turns) ->
+                requestSessionTitle env.sessionTitleManager
+                    handle.sessionMeta.metaId
+                    milestone
+                    (sessionConversationText turns)
+
+applyPendingSessionTitles :: SessionEnv -> IO ()
+applyPendingSessionTitles env =
+    takeSessionTitleResults env.sessionTitleManager >>= mapM_ applyOne
+  where
+    applyOne SessionTitleResult{..} =
+        case env.sessionPersist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistencePending _ -> pure ()
+                    PersistenceActive handle
+                        | handle.sessionMeta.metaId /= resultSessionId -> pure ()
+                        | handle.sessionMeta.metaTitleIsManual -> pure ()
+                        | otherwise -> do
+                            updated <- setGeneratedSessionTitle
+                                (titleRefreshIndex resultMilestone)
+                                resultTitle
+                                handle
+                            writeIORef slotRef (PersistenceActive updated)
+                            tty <- hIsTerminalDevice stdout
+                            setCliWindowTitle tty stdout
+                                (cliWindowTitle updated.sessionMeta.metaCwd
+                                    (Just updated.sessionMeta.metaTitle))
 
 finishTerminal
     :: TerminalCapabilities
