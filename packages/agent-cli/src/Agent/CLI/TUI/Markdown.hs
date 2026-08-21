@@ -7,15 +7,17 @@ module Agent.CLI.TUI.Markdown
     , parseInline
     ) where
 
-import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Input (terminalCharWidth)
 import qualified Agent.CLI.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
 import Data.Char (isDigit, isSpace)
 import Data.List (transpose)
+import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
 
 data InlineStyle
@@ -194,33 +196,47 @@ asumPrefix prefixes text = case prefixes of
         Nothing -> asumPrefix rest text
 
 parseInline :: Text -> [InlineSpan]
-parseInline = mergePlain . go Nothing
+parseInline = go Nothing []
   where
-    go _ text | Text.null text = []
-    go previous text
+    go _ plain text
+        | Text.null text = flushPlain plain []
+    go previous plain text
         | Just (body, rest) <- delimited "**" text =
-            InlineSpan InlineStrong body : go (lastChar body) rest
+            flushPlain plain $
+                InlineSpan InlineStrong body
+                    : go (lastChar body) [] rest
         | Just (body, rest) <- delimited "__" text =
-            InlineSpan InlineStrong body : go (lastChar body) rest
+            flushPlain plain $
+                InlineSpan InlineStrong body
+                    : go (lastChar body) [] rest
         | Just (body, rest) <- codeSpan text =
-            InlineSpan InlineCode body : go (lastChar body) rest
+            flushPlain plain $
+                InlineSpan InlineCode body
+                    : go (lastChar body) [] rest
         | Just (label, url, rest) <- linkSpan text =
-            InlineSpan InlineLink
-                (label
-                    <> if Text.null url || label == url
-                        then ""
-                        else " (" <> url <> ")")
-                : go (lastChar label) rest
+            flushPlain plain $
+                InlineSpan InlineLink
+                    (label
+                        <> if Text.null url || label == url
+                            then ""
+                            else " (" <> url <> ")")
+                    : go (lastChar label) [] rest
         | Just (body, rest) <- emphasis previous '*' text =
-            InlineSpan InlineEmphasis body : go (lastChar body) rest
+            flushPlain plain $
+                InlineSpan InlineEmphasis body
+                    : go (lastChar body) [] rest
         | Just (body, rest) <- emphasis previous '_' text =
-            InlineSpan InlineEmphasis body : go (lastChar body) rest
+            flushPlain plain $
+                InlineSpan InlineEmphasis body
+                    : go (lastChar body) [] rest
         | otherwise =
             case Text.uncons text of
-                Nothing -> []
+                Nothing -> flushPlain plain []
                 Just (character, rest) ->
-                    InlineSpan InlinePlain (Text.singleton character)
-                        : go (Just character) rest
+                    let (ordinary, remaining) =
+                            Text.span (not . inlineMarker) rest
+                        chunk = Text.cons character ordinary
+                    in go (lastChar chunk) (chunk : plain) remaining
 
     delimited marker text = do
         after <- Text.stripPrefix marker text
@@ -275,15 +291,13 @@ parseInline = mergePlain . go Nothing
     lastChar value =
         snd <$> Text.unsnoc value
 
-mergePlain :: [InlineSpan] -> [InlineSpan]
-mergePlain = foldr merge []
-  where
-    merge span_ (next : rest)
-        | span_.inlineStyle == next.inlineStyle =
-            InlineSpan span_.inlineStyle
-                (span_.inlineText <> next.inlineText)
-                : rest
-    merge span_ rest = span_ : rest
+    inlineMarker character =
+        character `elem` ("*_`[" :: String)
+
+    flushPlain [] rest = rest
+    flushPlain chunks rest =
+        InlineSpan InlinePlain (Text.concat (reverse chunks))
+            : rest
 
 inlinePlainText :: [InlineSpan] -> Text
 inlinePlainText = Text.concat . map (.inlineText)
@@ -320,32 +334,42 @@ styleAttr = \case
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =
     finalize $
-        foldl addCell ([[]], 0) cells
+        List.foldl' addCell ([[]], 0) cells
   where
     cells =
-        [ (attr, Text.singleton character)
+        [ (attr, character)
         | (attr, text) <- spans
         , character <- Text.unpack text
         ]
     addCell (rows, used) (attr, cell)
-        | cell == "\n" = ([] : rows, 0)
+        | cell == '\n' = ([] : rows, 0)
         | used > 0
         , used + cellWidth > width =
-            ([(attr, cell)] : rows, cellWidth)
+            ([(attr, Builder.singleton cell)] : rows, cellWidth)
         | otherwise =
             case rows of
-                [] -> ([[(attr, cell)]], cellWidth)
+                [] ->
+                    ([[(attr, Builder.singleton cell)]], cellWidth)
                 row : rest ->
                     (appendCell attr cell row : rest, used + cellWidth)
       where
-        cellWidth = terminalTextWidth cell
+        cellWidth = terminalCharWidth cell
     appendCell attr cell row =
-        case reverse row of
+        case row of
             (previousAttr, previousText) : prior
                 | previousAttr == attr ->
-                    reverse
-                        ((previousAttr, previousText <> cell) : prior)
-            _ -> row <> [(attr, cell)]
+                    ( previousAttr
+                    , previousText <> Builder.singleton cell
+                    ) : prior
+            _ -> (attr, Builder.singleton cell) : row
     finalize (rows, _) =
-        let ordered = reverse rows
+        let ordered =
+                map
+                    (map
+                        (\(attr, text) ->
+                            ( attr
+                            , LazyText.toStrict (Builder.toLazyText text)
+                            ))
+                        . reverse)
+                    (reverse rows)
         in if null ordered then [[]] else ordered

@@ -302,14 +302,13 @@ reduceUi event state = case event of
             , uiNotice = Just "Restarting current turn…"
             , uiToolCalls = Map.empty
             }
-    UiTick ->
-        state
-            { uiFrame = (state.uiFrame + 1) `mod` 10
-            , uiElapsedTenths =
-                if state.uiRunning
-                    then state.uiElapsedTenths + 1
-                    else state.uiElapsedTenths
-            }
+    UiTick
+        | not state.uiRunning -> state
+        | otherwise ->
+            state
+                { uiFrame = (state.uiFrame + 1) `mod` 10
+                , uiElapsedTenths = state.uiElapsedTenths + 1
+                }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
