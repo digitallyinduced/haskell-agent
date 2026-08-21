@@ -2,7 +2,7 @@ cabal-version:      2.2
 name:               agent-core
 version:            0.1.0.0
 synopsis:           Provider-neutral infrastructure for the agent harness
-description:        Shared provider credentials, broker failover, errors,
+description:        Shared provider credentials, errors,
                     transport utilities, the agent loop, and JSON
                     tool-argument helpers.
 license:            BSD-3-Clause
@@ -36,13 +36,13 @@ library
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
-                    , Agent.Broker
                     , Agent.Loop
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.ResourceScope
+                    , Agent.Skills
                     , Agent.Subagents
                     , Agent.Subagents.Format
                     , Agent.Subagents.Registry
@@ -84,7 +84,6 @@ library
                     , containers
                     , directory
                     , filepath
-                    , http-conduit
                     , process
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
@@ -96,6 +95,7 @@ library
                     , unix
                     , vector
                     , websockets
+                    , yaml
 
 test-suite agent-core-test
     import:           common-opts
@@ -108,6 +108,7 @@ test-suite agent-core-test
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
                     , Agent.ResourceScopeSpec
+                    , Agent.SkillsSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
                     , Agent.ToolArgsSpec
@@ -137,3 +138,4 @@ test-suite agent-core-test
                     , bytestring
                     , unix
                     , websockets
+                    , yaml

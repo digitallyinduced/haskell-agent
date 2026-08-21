@@ -39,18 +39,6 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-    describe "loadAuth" do
-        it "returns Text errors for incomplete broker configuration" do
-            withEnv "AGENT_BROKER_URL" (Just "http://127.0.0.1:1") $
-                withEnv "AGENT_BROKER_TOKEN" Nothing do
-                    result <- loadAuth Nothing
-                    case result of
-                        Left err ->
-                            err `shouldBe`
-                                "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN"
-                        Right _ ->
-                            expectationFailure "expected broker configuration failure"
-
     describe "probeLoadedAuth" do
         it "rejects auth whose accounts are currently cooling down" do
             let retryAt = UTCTime (fromGregorian 2026 8 21) 3600
@@ -313,9 +301,7 @@ withCleanOpenAiEnv action =
     foldr
         (\name next -> withEnv name Nothing next)
         action
-        [ "AGENT_BROKER_URL"
-        , "AGENT_BROKER_TOKEN"
-        , "CODEX_ACCESS_TOKEN"
+        [ "CODEX_ACCESS_TOKEN"
         , "CODEX_AUTH_JSON"
         , "CODEX_ACCOUNT_ID"
         , "CODEX_ID_TOKEN"

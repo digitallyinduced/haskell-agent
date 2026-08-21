@@ -63,6 +63,7 @@ library
                     , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
+                    , Agent.CLI.Request
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderTransition
                     , Agent.CLI.Render
@@ -71,8 +72,10 @@ library
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
+                    , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
                     , Agent.CLI.Timestamp
@@ -154,6 +157,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderTransitionSpec
+                    , Agent.CLI.RequestSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
@@ -162,6 +166,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionTitleSpec
+                    , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.UIModelSpec

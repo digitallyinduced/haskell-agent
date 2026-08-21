@@ -5,7 +5,7 @@ A universal coding-agent harness written in Haskell.
 ## Packages
 
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
-- `agent-core` provides provider-neutral credentials, broker failover, common
+- `agent-core` provides provider-neutral credentials, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
 - `agent-responses` provides the canonical Responses wire model, codecs, error
   normalization, response merging, and provider-neutral loop adapters.
@@ -49,9 +49,10 @@ From `nix develop`, `repl` opens `cabal repl lib:agent-cli` (via expect) and
 starts the agent with a GHCi `:cmd` loop. Development REPL sessions default to
 OpenAI `gpt-5.6-sol` with `--yolo`. On first open it also passes `--worktree`
 when the cwd is not already under `~/.haskell-agent/worktrees`. Inside the agent
-REPL, `:reload` writes `~/.haskell-agent/dev-resume`, returns to GHCi, reloads
-modules, and resumes the same session automatically. `:q` exits the agent back
-to `ghci>`.
+REPL, `:reload` returns to GHCi, reloads modules, and resumes the same session
+automatically through that REPL's GHCi continuation. Concurrent development
+REPLs therefore keep independent reload state. `:q` exits the agent back to
+`ghci>`.
 
 Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /
@@ -62,6 +63,38 @@ Ghostty receives native progress, notifications, semantic turn boundaries,
 working-directory updates, inline images, synchronized picker redraws, and
 terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the
 CLI to inspect the detected capabilities.
+
+## Skills
+
+The CLI discovers reusable Agent Skills from `SKILL.md` files. It scans
+`.agents/skills`, `.grok/skills`, and `.codex/skills` in each directory from
+the repository root to the current working directory, plus the matching
+directories under the user home. Repository skills take priority over user
+skills for bare invocation names; colliding definitions remain available
+through qualified names shown by `/skills`.
+
+Each skill is a directory whose `SKILL.md` starts with YAML frontmatter:
+
+```markdown
+---
+name: commit
+description: Create a well-formed commit. Use when the user asks to commit changes.
+---
+
+Review the diff, run relevant checks, and create the commit.
+```
+
+Skill names appear in the interactive slash menu. Invoke one with
+`/commit optional arguments`, mention one in a prompt as `$commit`, or let the
+model select it from its description. `/skills` lists the active catalog and
+`/skills reload` rescans disk. Use `--no-skills` to disable discovery and
+invocation for a session.
+
+Skill scripts, references, and assets remain relative to the skill directory
+and are loaded only when needed. Skill-specific model overrides and
+`allowed-tools` auto-approval are parsed for compatibility but are not applied;
+normal model selection, permissions, and plan-mode restrictions remain in
+force.
 
 Build and run the CLI directly with Nix:
 

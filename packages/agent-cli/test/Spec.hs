@@ -31,11 +31,13 @@ import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
 import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
+import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
+import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
@@ -76,6 +78,7 @@ main = hspec do
     PromptSpec.spec
     ProviderFallbackSpec.spec
     ProviderTransitionSpec.spec
+    RequestSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
@@ -84,6 +87,7 @@ main = hspec do
     TerminalSpec.spec
     SessionSpec.spec
     SessionTitleSpec.spec
+    SkillsSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
     UIModelSpec.spec

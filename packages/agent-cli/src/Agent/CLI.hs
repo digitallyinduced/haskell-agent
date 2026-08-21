@@ -6,6 +6,7 @@ module Agent.CLI
     , cycleReplInteraction
     , devArgs
     , devMain
+    , devMainResume
     , formatReplStatusLine
     , formatTokenUsage
     , run
@@ -41,14 +42,12 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.Approval
     ( approveToolDecision
     , approveToolDecisionWith
-    , childApprove
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
     ( BtwBackendFactory
     , formatBtwError
     , runBtwWithCancel
-    , trimDanglingToolSuffix
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -70,7 +69,11 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLineWithInitial)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , formatPasteChip
+    , readReplLineWithSkills
+    )
 import Agent.CLI.ReplMode
     ( ReplMode(..)
     , replModeFromState
@@ -109,6 +112,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( automaticCooldownRetryDelay
     , fallbackCandidates
@@ -130,17 +134,30 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Skills
+    ( formatSkillsListing
+    , loadSkillsCatalog
+    , queueSkillCatalogContext
+    , reservedSlashNames
+    , skillInvocationCommand
+    )
 import Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
     )
-import Agent.CLI.SubagentStore
-    ( SubagentDiskMeta(..)
-    , forkSubagentTranscript
-    , loadSubagentState
-    , saveSubagentState
+import Agent.CLI.Subagents.Runtime
+    ( SubagentRuntime(..)
+    , SubagentSession(..)
+    , SubagentStoreRoot
+    , flushAllSubagentSnapshots
+    , freshOpenAiBackend
+    , persistSubagentSnapshotWithStatus
+    , prepareCollaborationSpawn
+    , restoreAgentFromDisk
+    , runCodexSubagent
+    , runHttpSubagent
     )
 import Agent.CLI.Style
     ( beginBackground
@@ -169,7 +186,7 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (schemasFromAppTools)
+import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , emitUiEvent
@@ -202,7 +219,6 @@ import Agent.CLI.Worktree
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
 import Agent.Loop
 import Agent.Error (ApiError(..))
-import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
@@ -210,6 +226,15 @@ import Agent.ProjectInstructions
     , formatAgentsMdForProvider
     , globalAgentsHomeDir
     , loadedInstructionFiles
+    )
+import Agent.Skills
+    ( Skill(..)
+    , SkillCatalog(..)
+    , SkillInvocation(..)
+    , buildSkillInvocations
+    , formatSkillActivation
+    , resolveSkillInvocation
+    , resolveSkillMentions
     )
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
@@ -219,13 +244,12 @@ import Agent.OpenAI.Compaction
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
+import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
 import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
-    , withCodexWsRetrying
     , withCodexWsWithProvider
     )
 import Agent.Provider
@@ -238,53 +262,24 @@ import Agent.Provider
     , providerSlug
     )
 import Agent.Subagents
-    ( RunSubagent
-    , RootTurnId
+    ( RootTurnId
     , SubagentId(..)
-    , SubagentRegistry
-    , SubagentSpawnEnv(..)
-    , SubagentStatus(..)
     , abortRootTurn
     , beginRootTurn
     , closeSubagentRegistry
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
-    , getPreviousResponseId
-    , getStatus
-    , getSubagentCwd
-    , getSubagentIdentity
-    , getTaskPath
     , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
-    , restoreSubagent
-    , restoreSubagentAtStatus
-    , restoreSubagentAtWithCwdStatus
-    , restoreSubagentWithCwd
-    , setPreviousResponseId
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools
-    ( CodingTools(..)
-    , codingToolsFor
-    , codingToolsForWithTypes
-    , filterChildGrokTools
-    )
-import Agent.Tools.Grok.Task
-    ( GrokSubagentSpec(..)
-    , GrokSubagentSpecs
-    , defaultSubagentType
-    , lookupAgentModel
-    , lookupAgentReasoningEffort
-    , lookupAgentType
-    , recordAgentSpec
-    )
-import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
+import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.Tools.MultiAgents
-    ( CollaborationSpawnOptions(..)
-    , MultiAgentContext(..)
+    ( MultiAgentContext(..)
     , SubagentWorktree(..)
     )
 import Agent.Tools.PlanMode
@@ -296,11 +291,9 @@ import Agent.Tools.PlanMode
     , planFilePath
     )
 import Agent.Tools.Types
-    ( AppTool(..)
+    ( AppTool
     , ToolEnv(..)
-    , ToolRegistry
     , defaultToolEnv
-    , mkToolRegistry
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
@@ -318,7 +311,6 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (when)
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -353,26 +345,30 @@ import System.Timeout (timeout)
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
     = DevQuit
-    | DevReload
+    | DevReload Text
     deriving (Eq, Show)
 
 data RunResult
     = RunQuit
-    | RunReload
+    | RunReload Text
     | RunSwitchProvider ProviderTransition
     | RunProviderStartFailed ApiError
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
 
--- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
+-- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
+-- session. Keeping the id in the generated GHCi command avoids a shared
+-- cross-process resume pointer when several development REPLs are open.
 afterDev :: DevResult -> IO String
 afterDev = \case
     DevQuit -> pure ""
-    DevReload -> pure $ unlines
+    DevReload sessionId -> pure $ unlines
         [ ":reload"
         , ":module +Agent.CLI"
-        , ":cmd afterDev =<< devMain"
+        , ":cmd afterDev =<< devMainResume (Just "
+            <> show (Text.unpack sessionId)
+            <> ")"
         ]
 
 -- | Arguments used by the development @repl@ launcher.
@@ -392,14 +388,16 @@ devArgs resumeId underWorktree = case resumeId of
         ]
             <> ["--worktree" | not underWorktree]
 
--- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
--- On first open (no resume pointer), selects OpenAI/gpt-5.6-sol with yolo
--- enabled and passes @--worktree@ unless the cwd is already under
--- @~/.haskell-agent/worktrees@.
+-- | Start a fresh agent from GHCi (@repl@).
 devMain :: IO DevResult
-devMain = do
+devMain = devMainResume Nothing
+
+-- | Start or resume the GHCi-driven agent. 'afterDev' embeds the session id in
+-- the next @:cmd@ invocation, so concurrent REPLs cannot consume each other's
+-- reload state.
+devMainResume :: Maybe Text -> IO DevResult
+devMainResume resumeId = do
     home <- getHomeDirectory
-    resumeId <- readDevResumePointer home
     underWorktree <- case resumeId of
         Just _ -> pure True
         Nothing -> do
@@ -408,9 +406,7 @@ devMain = do
             pure (isUnderWorktreeRoot root cwd)
     let args = devArgs resumeId underWorktree
     case parseArgs args of
-        Left err -> do
-            clearDevResumePointer home
-            die err
+        Left err -> die err
         Right ShowHelp -> putStr usage >> pure DevQuit
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right Login -> do
@@ -422,8 +418,8 @@ devMain = do
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
-                DevQuit -> clearDevResumePointer home >> pure DevQuit
-                DevReload -> pure DevReload
+                DevQuit -> pure DevQuit
+                DevReload sessionId -> pure (DevReload sessionId)
 
 run :: IO ()
 run = do
@@ -441,16 +437,16 @@ run = do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
-                DevReload -> do
-                    home <- getHomeDirectory
-                    clearDevResumePointer home
+                DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options = go options Nothing
+runAgentWithRestarts options = do
+    originalCwd <- getCurrentDirectory
+    go options Nothing `finally` setCurrentDirectory originalCwd
   where
     go current transition =
         runAgent current transition >>= \case
@@ -481,7 +477,7 @@ runAgentWithRestarts options = go options Nothing
                                     pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
-            RunReload -> pure DevReload
+            RunReload sessionId -> pure (DevReload sessionId)
 
 runListSessions :: IO ()
 runListSessions = do
@@ -717,6 +713,16 @@ runAgent options transition = do
                 Just _ -> Nothing
                 Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
+        let subagentRuntime = SubagentRuntime
+                { subagentOptions = options
+                , subagentPolicy = policy
+                , subagentPlanHooks = planHooks
+                , subagentParams = paramsRef
+                , subagentRegistry = registry
+                , subagentSessions = subagentSessions
+                , subagentStoreRoot = subagentStoreRoot
+                , subagentTypes = agentTypesRef
+                }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just transcriptRef)
@@ -725,7 +731,13 @@ runAgent options transition = do
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
         setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
-        agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        startupContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        skills <- loadSkillsCatalog options home projectRoot cwd True
+        skillsRef <- newIORef skills
+        skillInvocationsRef <- newIORef
+            (buildSkillInvocations reservedSlashNames skills)
+        when (null initialItems && not (isJust initialPrevious)) $
+            queueSkillCatalogContext startupContext skills
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
         writeIORef persistSlotRef persist
@@ -754,15 +766,8 @@ runAgent options transition = do
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
                                             runCodexSubagent
-                                                options
-                                                policy
-                                                planHooks
-                                                paramsRef
+                                                subagentRuntime
                                                 loaded.loadedTokenProvider
-                                                ctx.multiRegistry
-                                                subagentSessions
-                                                subagentStoreRoot
-                                                agentTypesRef
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let lockedBackend =
@@ -784,7 +789,7 @@ runAgent options transition = do
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -800,18 +805,11 @@ runAgent options transition = do
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
-                                        options
-                                        policy
-                                        planHooks
-                                        paramsRef
+                                        subagentRuntime
                                         XAIProvider
                                         (\childParamsRef childTranscript ->
                                             xaiBackend xaiOptions loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
-                                        ctx.multiRegistry
-                                        subagentSessions
-                                        agentTypesRef
-                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -823,7 +821,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -831,18 +829,11 @@ runAgent options transition = do
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
-                                        options
-                                        policy
-                                        planHooks
-                                        paramsRef
+                                        subagentRuntime
                                         OpenRouterProvider
                                         (\childParamsRef childTranscript ->
                                             openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
-                                        ctx.multiRegistry
-                                        subagentSessions
-                                        agentTypesRef
-                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -854,7 +845,7 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
@@ -947,10 +938,6 @@ printResumeHint progName = \case
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
-requireToolRegistry :: [AppTool] -> IO ToolRegistry
-requireToolRegistry tools =
-    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
-
 isJustCwd :: CliOptions -> Bool
 isJustCwd options = case options.optCwd of
     Just _ -> True
@@ -979,6 +966,8 @@ runSession
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
+    -> IORef SkillCatalog
+    -> IORef [SkillInvocation]
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
@@ -991,7 +980,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
   withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -1005,6 +994,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     reasoningBuffer <- newIORef ""
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
+    toolCallsRef <- newIORef Map.empty
     allowedToolsRef <- newIORef Set.empty
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
@@ -1055,8 +1045,21 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext options provider home cwd [] Nothing
+            freshSkills <- loadSkillsCatalog options home projectRoot cwd True
+            writeIORef skillsRef freshSkills
+            writeIORef skillInvocationsRef
+                (buildSkillInvocations reservedSlashNames freshSkills)
+            queueSkillCatalogContext freshAgents freshSkills
             fresh <- readIORef freshAgents
-            writeIORef agentsContext fresh
+            writeIORef startupContext fresh
+        refreshSkills queueContext = do
+            refreshed <- loadSkillsCatalog
+                options home projectRoot cwd queueContext
+            writeIORef skillsRef refreshed
+            writeIORef skillInvocationsRef
+                (buildSkillInvocations reservedSlashNames refreshed)
+            when queueContext $
+                queueSkillCatalogContext startupContext refreshed
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
@@ -1113,6 +1116,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , renderModelRef = modelRef
             , renderActivityRef = activityRef
             , renderStartedAt = startedAtRef
+            , renderToolCalls = toolCallsRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
@@ -1192,7 +1196,10 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionAgentsContext = agentsContext
+            , sessionStartupContext = startupContext
+            , sessionSkills = skillsRef
+            , sessionSkillInvocations = skillInvocationsRef
+            , sessionRefreshSkills = refreshSkills
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
@@ -1214,7 +1221,9 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
                 runPendingTurn env pending
             Nothing -> case prompt of
                 Just text -> do
-                    result <- runOneTurn env text [UserMessage text]
+                    inputs <- preparePromptSkillInputs env text [UserMessage text]
+                        >>= either (die . Text.unpack) pure
+                    result <- runOneTurn env text inputs
                     finishTurn env True result
                 Nothing ->
                     repl env
@@ -1386,6 +1395,9 @@ replWithDraft env@SessionEnv
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionOpenAiPool = openAiPool
+    , sessionSkills = skillsRef
+    , sessionSkillInvocations = skillInvocationsRef
+    , sessionRefreshSkills = refreshSkills
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -1398,6 +1410,11 @@ replWithDraft env@SessionEnv
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
+    refreshSkills False
+    skillInvocations <- readIORef skillInvocationsRef
+    let skillCommands =
+            map skillInvocationCommand
+                (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -1409,7 +1426,7 @@ replWithDraft env@SessionEnv
     usage <- readIORef usageRef
     mline <- case fullscreen of
         Just runtime ->
-            readFullscreenLine runtime
+            readFullscreenLine runtime skillCommands
                 PromptState
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
@@ -1418,7 +1435,10 @@ replWithDraft env@SessionEnv
                     , promptAttachments = length pendingAttachments
                     }
                 draft
-        Nothing -> do
+        Nothing -> withMVar render.renderLock \_ -> do
+            -- The inline editor redraws its ANSI frame with several writes.
+            -- Keep the renderer out for the complete prompt lifetime so a
+            -- late tool event cannot be spliced into the composer row.
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptStart
             termCols <- fmap snd <$> getTerminalSize
@@ -1459,7 +1479,8 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- readReplLineWithInitial interrupt chromePrompt draft
+            result <- readReplLineWithSkills
+                skillCommands interrupt chromePrompt draft
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptEnd
             Text.putStr (endBackground stdoutColor)
@@ -1501,11 +1522,13 @@ replWithDraft env@SessionEnv
                                     (glyphOk <> message))
             continueWith keptDraft
         ReplPasted pasted ->
-            submitLine continue stdoutColor True pasted
+            submitLine skillCommands skillInvocations
+                continue stdoutColor True pasted
         ReplText line ->
-            submitLine continue stdoutColor False line
+            submitLine skillCommands skillInvocations
+                continue stdoutColor False line
   where
-    submitLine continue color pasted line =
+    submitLine skillCommands skillInvocations continue color pasted line =
         let stripped = Text.strip line
         in if Text.null stripped
             then continue
@@ -1514,7 +1537,7 @@ replWithDraft env@SessionEnv
                     let chip = formatPasteChip stripped
                     when (chip /= stripped && isNothing fullscreen) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLine line of
+                case parseReplLineWithSkills skillCommands line of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -1548,8 +1571,58 @@ replWithDraft env@SessionEnv
                                                     , userImages = pendingImages
                                                     }
                                                 ]
-                                result <- runOneTurn env text turnInputs
+                                preparePromptSkillInputs env text turnInputs >>= \case
+                                    Left err -> do
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                        continue
+                                    Right skillInputs -> do
+                                        result <- runOneTurn env text skillInputs
+                                        finishTurn env False result
+                    ReplInvokeSkill invocationName arguments ->
+                        case resolveSkillInvocation
+                            skillInvocations invocationName of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right invocation -> do
+                                pendingImages <- atomicModifyIORef'
+                                    attachmentsRef \imgs -> ([], imgs)
+                                let userText =
+                                        if Text.null arguments
+                                            then "Use the "
+                                                <> invocation.invocationSkill.skillName
+                                                <> " skill."
+                                            else arguments
+                                    userInput =
+                                        if null pendingImages
+                                            then UserMessage userText
+                                            else UserMultimodal
+                                                { userText = userText
+                                                , userImages = pendingImages
+                                                }
+                                    skillInputs =
+                                        [ UserMessage
+                                            (formatSkillActivation
+                                                invocation arguments)
+                                        , userInput
+                                        ]
+                                writeIORef printed False
+                                fullscreenEvent (UiUserSubmitted line)
+                                result <- runOneTurn env line skillInputs
                                 finishTurn env False result
+                    ReplSkills reloadFirst -> do
+                        when reloadFirst (refreshSkills True)
+                        current <- readIORef skillsRef
+                        invocations <- readIORef skillInvocationsRef
+                        let listing =
+                                formatSkillsListing color current invocations
+                        displayInfo (formatSkillsListing False current invocations) $
+                            Text.putStrLn listing
+                        continue
                     ReplPaste{pasteImmediate, pasteCaption} -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
@@ -2159,9 +2232,12 @@ replWithDraft env@SessionEnv
                         continue
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
-                        displayInfo (formatSlashHelp False maybeName) $
+                        displayInfo
+                            (formatSlashHelpWithSkills
+                                False skillCommands maybeName) $
                             Text.putStrLn
-                                (formatSlashHelp color maybeName)
+                                (formatSlashHelpWithSkills
+                                    color skillCommands maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
@@ -2620,7 +2696,6 @@ requestReload
     :: Persistence
     -> IO RunResult
 requestReload persist = do
-    home <- getHomeDirectory
     color <- resolveColor stderr
     case persist of
         PersistenceDisabled -> do
@@ -2629,11 +2704,10 @@ requestReload persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
-            writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
-            pure RunReload
+            pure (RunReload handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv
@@ -2720,6 +2794,21 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                             <> Text.pack (show (length files))
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
+
+preparePromptSkillInputs
+    :: SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> IO (Either Text [TurnInput])
+preparePromptSkillInputs env prompt inputs = do
+    invocations <- readIORef env.sessionSkillInvocations
+    pure do
+        selected <- resolveSkillMentions invocations prompt
+        let activations =
+                [ UserMessage (formatSkillActivation invocation prompt)
+                | invocation <- selected
+                ]
+        pure (activations <> inputs)
 
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.
@@ -2868,186 +2957,6 @@ currentSessionId = \case
             PersistencePending _ -> Nothing
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
-data SubagentSession = SubagentSession
-    { subSessionTranscript :: !(IORef [ResponseItem])
-    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
-    }
-
--- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
-type SubagentStoreRoot = IORef (Maybe OsPath)
-
--- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
-syncStoreRootFromPlan :: SubagentStoreRoot -> PlanModeEnv -> IO ()
-syncStoreRootFromPlan storeRootRef planMode = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Just _ -> pure ()
-        Nothing -> do
-            sessionDir <- readIORef planMode.planSessionDir
-            case sessionDir of
-                Just dir -> writeIORef storeRootRef (Just dir)
-                Nothing -> pure ()
-
-prepareCollaborationSpawn
-    :: IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> IORef (Maybe (IORef [ResponseItem]))
-    -> SubagentId
-    -> CollaborationSpawnOptions
-    -> IO ()
-prepareCollaborationSpawn
-        sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
-    recordAgentSpec typesRef agentId GrokSubagentSpec
-        { agentType = defaultSubagentType
-        , modelOverride = spawnOptions.collaborationModel
-        , reasoningEffortOverride =
-            spawnOptions.collaborationReasoningEffort
-        }
-    session <-
-        lookupOrCreateSubagentSession
-            sessionsRef storeRootRef typesRef agentId
-    source <- readIORef sourceRef
-    sourceItems <- maybe (pure []) readIORef source
-    writeIORef session.subSessionTranscript
-        (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
-
-persistSubagentSnapshot
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IORef [ResponseItem]
-    -> IO ()
-persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = do
-    status <- getStatus registry agentId
-    persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status transcriptRef
-
-persistSubagentSnapshotWithStatus
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> SubagentStatus
-    -> IORef [ResponseItem]
-    -> IO ()
-persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status transcriptRef = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Nothing -> pure ()
-        Just sessionDir -> do
-            items <- trimDanglingToolSuffix <$> readIORef transcriptRef
-            previous <- getPreviousResponseId registry agentId
-            agentType <- lookupAgentType typesRef agentId
-            agentModel <- lookupAgentModel typesRef agentId
-            reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
-            agentCwd <- getSubagentCwd registry agentId
-            identity <- getSubagentIdentity registry agentId
-            _ <- saveSubagentState
-                sessionDir agentId items previous status agentType agentModel
-                reasoningEffort agentCwd identity
-            pure ()
-
-flushAllSubagentSnapshots
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> IO ()
-flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
-    sessions <- readIORef sessionsRef
-    mapM_
-        (\(agentId, session) ->
-            persistSubagentSnapshot storeRootRef registry typesRef agentId
-                session.subSessionTranscript)
-        (Map.toList sessions)
-
--- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
--- 'resume_agent' / 'resume_from' can continue the prior transcript.
-restoreAgentFromDisk
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IO (Either Text ())
-restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
-    status <- getStatus registry agentId
-    case status of
-        NotFound -> restore
-        Closed -> restore
-        _ -> pure (Right ())
-  where
-    restore = do
-        mroot <- readIORef storeRootRef
-        case mroot of
-            Nothing ->
-                pure (Left "no session directory; cannot restore subagent from disk")
-            Just sessionDir ->
-                loadSubagentState sessionDir agentId >>= \case
-                    Left err -> pure (Left err)
-                    Right Nothing ->
-                        -- Same-process close with no disk yet: still reopen.
-                        reopenInMemory Nothing Nothing
-                    Right (Just (items, meta)) -> do
-                        result <- reopenPersisted meta
-                        case result of
-                            Left err -> pure (Left err)
-                            Right () -> do
-                                case meta.diskAgentType of
-                                    Just agentType ->
-                                        recordAgentSpec typesRef agentId GrokSubagentSpec
-                                            { agentType
-                                            , modelOverride = meta.diskAgentModel
-                                            , reasoningEffortOverride =
-                                                meta.diskReasoningEffort
-                                            }
-                                    Nothing -> pure ()
-                                transcript <- newIORef items
-                                contextTokens <- newIORef Nothing
-                                let session =
-                                        SubagentSession
-                                            { subSessionTranscript = transcript
-                                            , subSessionContextTokens = contextTokens
-                                            }
-                                atomicModifyIORef' sessionsRef \m ->
-                                    (Map.insert agentId session m, ())
-                                pure (Right ())
-    reopenPersisted meta =
-        case meta.diskTaskPath of
-            Nothing -> restoreAt taskPathRoot
-            Just pathText ->
-                case parseTaskPath pathText of
-                    Left err -> pure (Left err)
-                    Right taskPath -> restoreAt taskPath
-      where
-        restoredStatus = fromMaybe (Completed Nothing) meta.diskStatus
-        restoreAt taskPath = do
-            let restore =
-                    case meta.diskCwd of
-                        Just childCwd ->
-                            restoreSubagentAtWithCwdStatus
-                                registry childCwd
-                        Nothing ->
-                            restoreSubagentAtStatus registry
-            restore
-                agentId meta.diskParentId taskPath
-                (fromMaybe 1 meta.diskDepth)
-                Nothing meta.diskPreviousResponseId restoredStatus
-                >>= pure . fmap (const ())
-    reopenInMemory previous requestedCwd = do
-        restored <- case requestedCwd of
-            Just childCwd ->
-                restoreSubagentWithCwd
-                    registry childCwd agentId Nothing 1 Nothing previous
-            Nothing ->
-                restoreSubagent registry agentId Nothing 1 Nothing previous
-        pure $ case restored of
-            Left err -> Left err
-            Right _ -> Right ()
-
 -- | Serialize turns on the root OpenAI WebSocket connection because
 -- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
@@ -3067,256 +2976,6 @@ lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
             withMVar wsLock \_ -> submit previous inputs onEvent
     in autoCompactOpenAiBackend provider
         getParams transcript contextTokens serialized
-
--- | Use a disposable WebSocket for side questions so cancellation cannot
--- leave abandoned response frames queued on the main conversation connection.
-freshOpenAiBackend
-    :: TokenProvider
-    -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
-freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEvent ->
-    withCodexWsRetrying provider \conn _credential ->
-        let Backend submit = openAiBackend conn getParams transcript
-        in submit previous inputs onEvent
--- | Child Codex agent: per-agent transcript retained across follow-ups,
--- independently scoped WebSocket requests, and nested multi-agent tools.
-runCodexSubagent
-    :: CliOptions
-    -> ApprovalPolicy
-    -> PlanModeHooks
-    -> IORef ResponseCreateParams
-    -> TokenProvider
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef tokenProvider registry sessionsRef storeRootRef typesRef sendToRoot =
-    \env previous prompt onEvent -> do
-        parentParams <- readIORef paramsRef
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
-        session <-
-            lookupOrCreateSubagentSession
-                sessionsRef storeRootRef typesRef env.subId
-        nestedForkSource <- newIORef (Just session.subSessionTranscript)
-        childModel <- lookupAgentModel typesRef env.subId
-        childEffort <- lookupAgentReasoningEffort typesRef env.subId
-        -- Inherit soft-cancel from the registry-owned child flag.
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = registry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiPrepareSpawn = Just
-                    (prepareCollaborationSpawn
-                        sessionsRef storeRootRef typesRef nestedForkSource)
-                , multiSendToRoot = sendToRoot
-                }
-        -- Child tools create their own PlanModeEnv; sync store root from parent
-        -- params is handled by noteSessionDir on the parent path. If the parent
-        -- already has a session dir in storeRootRef, we persist; otherwise skip.
-        coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
-        syncStoreRootFromPlan storeRootRef coding.codingPlanMode
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let model = fromMaybe
-                    (fromMaybe (defaultModelFor OpenAIProvider) parentParams.model)
-                    childModel
-                inheritedEffort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
-                    Nothing -> defaultEffortFor OpenAIProvider
-                effort = fromMaybe inheritedEffort childEffort
-                baseInstructions =
-                    fromMaybe
-                        (systemPrompt OpenAIProvider env.subCwd today True)
-                        parentParams.instructions
-                instructions =
-                    baseInstructions
-                        <> "\n\nYou are a Codex subagent. Complete the assigned task and "
-                        <> "report results clearly. Your agent id is "
-                        <> env.subId.unSubagentId
-                        <> "."
-                tools = coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools OpenAIProvider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            let baseBackend =
-                    freshOpenAiBackend tokenProvider
-                        (readIORef childParamsRef) session.subSessionTranscript
-                backend =
-                    autoCompactOpenAiBackend tokenProvider
-                        (readIORef childParamsRef)
-                        session.subSessionTranscript
-                        session.subSessionContextTokens
-                        baseBackend
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = options.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            result <- runLoopInputs config previous [AgentMessage prompt]
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ ->
-                    modifyIORef' session.subSessionTranscript
-                        trimDanglingToolSuffix
-            persistSubagentSnapshot storeRootRef registry typesRef env.subId
-                session.subSessionTranscript
-            pure result
-
--- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
-runHttpSubagent
-    :: CliOptions
-    -> ApprovalPolicy
-    -> PlanModeHooks
-    -> IORef ResponseCreateParams
-    -> Provider
-    -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> SubagentStoreRoot
-    -> RunSubagent
-runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef storeRootRef =
-    \env previous prompt onEvent -> do
-        parentParams <- readIORef paramsRef
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
-        session <-
-            lookupOrCreateSubagentSession
-                sessionsRef storeRootRef typesRef env.subId
-        nestedForkSource <- newIORef (Just session.subSessionTranscript)
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = registry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiPrepareSpawn = Just
-                    (prepareCollaborationSpawn
-                        sessionsRef storeRootRef typesRef nestedForkSource)
-                , multiSendToRoot = Nothing
-                }
-        agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
-        childModel <- lookupAgentModel typesRef env.subId
-        childEffort <- lookupAgentReasoningEffort typesRef env.subId
-        coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let model = fromMaybe
-                    (fromMaybe (defaultModelFor provider) parentParams.model)
-                    childModel
-                inheritedEffort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
-                    Nothing -> defaultEffortFor provider
-                effort = fromMaybe inheritedEffort childEffort
-                baseInstructions = systemPrompt provider env.subCwd today True
-                instructions =
-                    baseInstructions
-                        <> "\n\n"
-                        <> grokSubagentSuffix agentType env.subId
-                tools = filterChildGrokTools agentType coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools provider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            let backend = mkBackend childParamsRef session.subSessionTranscript
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = options.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            -- XAI/OpenRouter ignore previous_response_id and replay local
-            -- transcripts; still pass previous for API symmetry.
-            result <- runLoop config previous (interAgentMessagePayload prompt)
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ ->
-                    modifyIORef' session.subSessionTranscript
-                        trimDanglingToolSuffix
-            persistSubagentSnapshot storeRootRef registry typesRef env.subId
-                session.subSessionTranscript
-            pure result
-
-grokSubagentSuffix :: Text -> SubagentId -> Text
-grokSubagentSuffix agentType agentId =
-    "You are a Grok Build subagent — a focused worker delegated a specific task.\n\
-    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
-    \Report blocked or unverified work explicitly.\n\n\
-    \Subagent type: "
-        <> agentType
-        <> "\nAgent id: "
-        <> agentId.unSubagentId
-        <> case agentType of
-            "explore" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \You have no file editing or command execution tools. Search broadly, narrow down, \
-                \and return absolute file paths and relevant findings."
-            "plan" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete implementation files. Explore the codebase, \
-                \consider trade-offs, and produce a concrete implementation strategy. End with \
-                \a Critical Files for Implementation section listing 3-5 files."
-            _ ->
-                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
-                \Never create documentation files unless explicitly requested."
-
-lookupOrCreateSubagentSession
-    :: IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IO SubagentSession
-lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
-    sessions <- readIORef sessionsRef
-    case Map.lookup agentId sessions of
-        Just session -> pure session
-        Nothing -> do
-            mroot <- readIORef storeRootRef
-            loaded <- case mroot of
-                Just sessionDir -> loadSubagentState sessionDir agentId
-                Nothing -> pure (Right Nothing)
-            let (items, meta) = case loaded of
-                    Right (Just (xs, m)) -> (xs, Just m)
-                    _ -> ([], Nothing)
-            transcript <- newIORef items
-            contextTokens <- newIORef Nothing
-            case meta >>= (.diskAgentType) of
-                Just agentType ->
-                    recordAgentSpec typesRef agentId GrokSubagentSpec
-                        { agentType
-                        , modelOverride = meta >>= (.diskAgentModel)
-                        , reasoningEffortOverride =
-                            meta >>= (.diskReasoningEffort)
-                        }
-                Nothing -> pure ()
-            let session = SubagentSession
-                    { subSessionTranscript = transcript
-                    , subSessionContextTokens = contextTokens
-                    }
-            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
-            pure session
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
@@ -3391,30 +3050,3 @@ hydrateUiHistory = foldl addTurn initialUiState
         in case turn.turnError of
             Nothing -> withAssistant
             Just err -> reduceUi (UiErrorMessage err) withAssistant
-
--- | Codex requires @store = false@. Continuation still uses
--- @previous_response_id@, with the local transcript available for recovery.
-requestParams
-    :: Text
-    -> Text
-    -> [ResponseTool]
-    -> Text
-    -> ResponseCreateParams
-requestParams modelName instructionText toolSchemas effort =
-    case defaultResponseCreateParams of
-        ResponseCreateParams{..} ->
-            ResponseCreateParams
-                { model = Just modelName
-                , instructions = Just instructionText
-                , tools = Just toolSchemas
-                , reasoning = Just ReasoningConfig
-                    { context = Nothing
-                    , effort = Just effort
-                    , generateSummary = Nothing
-                    , reasoningMode = Nothing
-                    , summary = Nothing
-                    , extraFields = KeyMap.empty
-                    }
-                , store = Just False
-                , ..
-                }

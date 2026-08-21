@@ -24,6 +24,7 @@ module Agent.CLI.UI.Model
 import Agent.CLI.ReplMode (ReplMode(..))
 import Agent.CLI.Render
     ( formatSearchReplaceDiff
+    , formatToolOutput
     , summarizeToolCall
     )
 import Agent.Loop
@@ -34,6 +35,7 @@ import Agent.Loop
     )
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Data.Foldable (toList)
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -115,6 +117,7 @@ data UiState = UiState
     , uiFrame :: !Int
     , uiElapsedTenths :: !Int
     , uiTurnStartBlock :: !Int
+    , uiToolCalls :: !(Map.Map Text ToolCall)
     }
     deriving (Eq, Show)
 
@@ -168,6 +171,7 @@ initialUiState = UiState
     , uiFrame = 0
     , uiElapsedTenths = 0
     , uiTurnStartBlock = 0
+    , uiToolCalls = Map.empty
     }
 
 reduceUi :: UiEvent -> UiState -> UiState
@@ -269,6 +273,7 @@ reduceLoop event state = case event of
             , uiNotice = Nothing
             , uiElapsedTenths = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiToolCalls = Map.empty
             }
     ReasoningDelta delta ->
         appendOrExtend BlockThinking "Thought" delta BlockStreaming state
@@ -287,10 +292,20 @@ reduceLoop event state = case event of
                 _ -> ""
         in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)
-            state { uiActivity = summarizeToolCall call }
+            state
+                { uiActivity = summarizeToolCall call
+                , uiToolCalls = Map.insert call.callId call state.uiToolCalls
+                }
     ToolFinished result ->
-        completeTool result state
-            { uiActivity = "Thinking…" }
+        let displayed = case Map.lookup result.callId state.uiToolCalls of
+                Nothing -> result
+                Just call ->
+                    result
+                        { output = formatToolOutput call result.output }
+        in completeTool displayed state
+            { uiActivity = "Thinking…"
+            , uiToolCalls = Map.delete result.callId state.uiToolCalls
+            }
     TurnFinished output ->
         let finalized = finalizeStreams state
             withFallback = case output.assistantText of

@@ -88,6 +88,28 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
             _ -> expectationFailure "expected one running edit block"
 
+    it "formats collaboration result JSON for display" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "collaboration.spawn_agent"
+                    "{\"task_name\":\"reviewer\",\"message\":\"review\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "{\"task_name\":\"/root/reviewer\",\"nickname\":null}"
+                , callKind = FunctionCallKind
+                }
+            blocks = Foldable.toList $ (.uiBlocks) $ apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted call)
+                , UiLoop (ToolFinished result)
+                ]
+        case blocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Spawned agent reviewer"
+                block.blockBody `shouldBe` "Agent: /root/reviewer"
+            _ -> expectationFailure "expected one collaboration tool block"
+
     it "only marks structured cancellation results as cancelled" do
         toolStateFor "exit: cancelled\npartial output"
             `shouldBe` BlockCancelled
