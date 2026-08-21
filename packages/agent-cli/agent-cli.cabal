@@ -38,6 +38,7 @@ library
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
+                    , Agent.CLI.Artifact
                     , Agent.CLI.Auth
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
@@ -112,6 +113,7 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ApprovalSpec
+                    , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
@@ -132,6 +134,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.PickerSpec
                     , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
@@ -142,6 +145,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ResumeSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
+                    , Agent.CLI.TerminalSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec

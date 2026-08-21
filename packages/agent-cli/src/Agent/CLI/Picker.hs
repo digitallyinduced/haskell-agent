@@ -7,6 +7,14 @@ module Agent.CLI.Picker
     , withRawTty
     ) where
 
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , emitTerminalSequence
+    , kittyKeyboardPop
+    , kittyKeyboardPush
+    , withSynchronizedOutput
+    )
 import Control.Exception.Safe (bracket, throwIO, tryIO)
 import Control.Monad (when)
 import Data.Text (Text)
@@ -69,45 +77,87 @@ decodePickerKey = \case
     "\ESC[OB" -> Just PickerKeyDown
     "\DEL" -> Just PickerKeyBackspace
     "\b" -> Just PickerKeyBackspace
+    sequence_
+        | Just codepoint <- kittyCodepoint sequence_ ->
+            codepointKey codepoint
+    sequence_
+        | "\ESC[" `Text.isPrefixOf` Text.pack sequence_
+        , Just final <- safeLast sequence_ ->
+            case final of
+                'A' -> Just PickerKeyUp
+                'B' -> Just PickerKeyDown
+                _ -> Nothing
     [c] -> Just (PickerKeyChar c)
     _ -> Nothing
+
+kittyCodepoint :: String -> Maybe Int
+kittyCodepoint sequence_ = do
+    body <- Text.stripPrefix "\ESC[" (Text.pack sequence_)
+    raw <- Text.stripSuffix "u" body
+    let code = Text.takeWhile (/= ';') raw
+    case reads (Text.unpack code) of
+        [(n, "")] -> Just n
+        _ -> Nothing
+
+codepointKey :: Int -> Maybe PickerKey
+codepointKey = \case
+    13 -> Just PickerKeyConfirm
+    27 -> Just PickerKeyCancel
+    8 -> Just PickerKeyBackspace
+    127 -> Just PickerKeyBackspace
+    n
+        | n >= 0
+        , n <= fromEnum (maxBound :: Char) ->
+            Just (PickerKeyChar (toEnum n))
+    _ -> Nothing
+
+safeLast :: [a] -> Maybe a
+safeLast [] = Nothing
+safeLast xs = Just (last xs)
 
 -- | Draw @render@, then feed keys through @step@ until it returns @Left@.
 runOverlay :: (state -> Text) -> (PickerKey -> state -> Either result state) -> state -> IO (Maybe result)
 runOverlay render step state0 =
     withRawTty do
+        terminal <- detectTerminalCapabilities stderr
         let frame0 = render state0
             lines0 = frameLineCount frame0
-        drawFrame stderr frame0
-        loop stderr state0 lines0
+        withSynchronizedOutput terminal stderr (drawFrame stderr frame0)
+        loop terminal stderr state0 lines0
   where
-    loop h state drawnLines = do
+    loop terminal h state drawnLines = do
         mkey <- readPickerKey
         case mkey of
             Nothing -> do
-                clearDrawn h drawnLines
+                withSynchronizedOutput terminal h (clearDrawn h drawnLines)
                 pure Nothing
             Just raw -> case decodePickerKey raw of
-                Nothing -> loop h state drawnLines
+                Nothing -> loop terminal h state drawnLines
                 Just key -> case step key state of
                     Left result -> do
-                        clearDrawn h drawnLines
+                        withSynchronizedOutput terminal h (clearDrawn h drawnLines)
                         pure (Just result)
                     Right state' -> do
                         let frame = render state'
                             n = frameLineCount frame
-                        redraw h drawnLines frame
-                        loop h state' n
+                        withSynchronizedOutput terminal h
+                            (redraw h drawnLines frame)
+                        loop terminal h state' n
 
 withRawTty :: IO a -> IO a
 withRawTty action = do
     oldTerm <- getTerminalAttributes stdInput
     oldBuf <- hGetBuffering stdin
+    terminal <- detectTerminalCapabilities stderr
     let enter = do
             setTerminalAttributes stdInput (rawAttrs oldTerm) Immediately
             hSetBuffering stdin NoBuffering
             hHideCursor stderr
+            when terminal.terminalKittyKeyboard $
+                emitTerminalSequence terminal stderr kittyKeyboardPush
         restore = do
+            when terminal.terminalKittyKeyboard $
+                emitTerminalSequence terminal stderr kittyKeyboardPop
             hShowCursor stderr
             setTerminalAttributes stdInput oldTerm Immediately
             hSetBuffering stdin oldBuf
@@ -166,14 +216,22 @@ readPickerKey = do
                 else do
                     c2 <- hGetChar stdin
                     case c2 of
-                        '[' -> do
-                            c3 <- hGetChar stdin
-                            pure (Just ['\ESC', '[', c3])
+                        '[' -> Just . ("\ESC[" <>) <$> readCsiTail
                         'O' -> do
                             c3 <- hGetChar stdin
                             pure (Just ['\ESC', 'O', c3])
                         _ -> pure (Just ['\ESC', c2])
         Right c -> pure (Just [c])
+
+readCsiTail :: IO String
+readCsiTail = go []
+  where
+    go reversed = do
+        char <- hGetChar stdin
+        let accumulated = char : reversed
+        if char >= '@' && char <= '~'
+            then pure (reverse accumulated)
+            else go accumulated
 
 rawAttrs :: TerminalAttributes -> TerminalAttributes
 rawAttrs oldTerm =

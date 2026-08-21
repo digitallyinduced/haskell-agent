@@ -9,6 +9,7 @@ import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (SessionCreate, SessionHandle)
+import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.OsPath (OsPath)
@@ -31,6 +32,7 @@ data SessionEnv = SessionEnv
     , sessionPersist :: !(Maybe (IORef (Either SessionCreate SessionHandle)))
     , sessionPlanMode :: !PlanModeEnv
     , sessionProjectRoot :: !OsPath
+    , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionAgentsContext :: !(IORef (Maybe Text))
@@ -40,6 +42,8 @@ data SessionEnv = SessionEnv
     , sessionInterrupt :: !InterruptState
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
+    , sessionLastAssistant :: !(IORef (Maybe Text))
+    , sessionTerminal :: !TerminalCapabilities
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionAbortSubagents :: !(IO ())
     , sessionReset :: !(IO ())
