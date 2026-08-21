@@ -51,6 +51,7 @@ library
                     , Agent.Tools.ApplyPatch
                     , Agent.Tools.Codex
                     , Agent.Tools.Dangerous
+                    , Agent.Tools.FileSystem
                     , Agent.Tools.Grok
                     , Agent.Tools.Grok.Common
                     , Agent.Tools.Grok.Grep
