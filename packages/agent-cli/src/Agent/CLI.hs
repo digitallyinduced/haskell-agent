@@ -176,6 +176,8 @@ import Agent.CLI.TUI.App
     , readFullscreenLine
     , requestFullscreenPermission
     , requestFullscreenChoice
+    , requestFullscreenChoiceWithBody
+    , requestFullscreenText
     , runFullscreen
     , withFullscreenSuspended
     )
@@ -287,7 +289,8 @@ import Agent.Tools.MultiAgents
     , SubagentWorktree(..)
     )
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(..)
+    ( PlanDecision(..)
+    , PlanModeEnv(..)
     , PlanModeHooks(..)
     , PlanModeState(..)
     , activatePlanMode
@@ -322,6 +325,7 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.List (findIndex)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1614,8 +1618,8 @@ replWithDraft env@SessionEnv
                                 entries <- viewport.viewportEntries
                                 selected <- readIORef viewport.viewportSelected
                                 color <- resolveColor stderr
-                                legacy
-                                    (pickAgentViewport color selected entries) >>= \case
+                                pickAgentChoice
+                                    fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
                                     Just target ->
                                         writeIORef viewport.viewportSelected target
@@ -1769,10 +1773,11 @@ replWithDraft env@SessionEnv
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
                     ReplBtw question -> do
-                        color <- resolveColor stdout
-                        putTextLn stdout
-                            (roleMuted color (glyphSession <> "btw · asking…"))
-                        result <- legacy $
+                        displayInfo "btw · asking…" do
+                            color <- resolveColor stdout
+                            putTextLn stdout
+                                (roleMuted color (glyphSession <> "btw · asking…"))
+                        result <-
                             runBtwWithCancel
                                 (\cancel action ->
                                     withTurnCancel interrupt cancel $
@@ -1782,15 +1787,19 @@ replWithDraft env@SessionEnv
                                 transcriptRef
                                 question
                         case result of
-                            Left err -> do
-                                errorColor <- resolveColor stderr
-                                putTextLn stderr
-                                    (roleError errorColor (formatBtwError err))
+                            Left err ->
+                                displayError (formatBtwError err) do
+                                    errorColor <- resolveColor stderr
+                                    putTextLn stderr
+                                        (roleError errorColor (formatBtwError err))
                             Right answer ->
-                                putTextLn stdout (renderAssistantText color answer)
+                                displayInfo answer do
+                                    color <- resolveColor stdout
+                                    putTextLn stdout
+                                        (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
-                        legacy (handleResume maybeId persist) >>= \case
+                        handleResume fullscreen maybeId persist >>= \case
                             Nothing -> continue
                             Just result -> pure result
                     ReplClear -> do
@@ -2008,9 +2017,14 @@ replWithDraft env@SessionEnv
                         legacy (runLoginManager color)
                         continue
                     ReplUsage -> do
-                        legacy
-                            (showAccountUsage
-                                provider tokenProvider openAiPool)
+                        case fullscreen of
+                            Nothing ->
+                                showAccountUsage
+                                    provider tokenProvider openAiPool
+                            Just runtime ->
+                                accountUsageText
+                                    False provider tokenProvider openAiPool
+                                    >>= emitUiEvent runtime . UiSystemMessage
                         continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
@@ -2081,23 +2095,89 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
     { planConfirmEnter = \reason ->
         withCurrentFullscreen runtimeRef
             (hooks.planConfirmEnter reason)
+            \runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Enter plan mode?"
+                    reason
+                    0
+                    [ ("Enter plan mode", "Explore and design before implementing")
+                    , ("Stay in normal mode", "Continue without entering plan mode")
+                    ]
+                    >>= pure . (== Just 0)
     , planDecideExit = \planBody ->
         withCurrentFullscreen runtimeRef
             (hooks.planDecideExit planBody)
+            \runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Ready to implement this plan?"
+                    planBody
+                    0
+                    [ ("Approve and implement", "Leave plan mode and start implementation")
+                    , ("Request changes", "Send feedback and keep planning")
+                    , ("Cancel plan", "Leave plan mode without implementing")
+                    ]
+                    >>= \case
+                        Just 0 -> pure PlanApprove
+                        Just 1 ->
+                            requestFullscreenText
+                                runtime
+                                "Request changes"
+                                "What should be changed in the plan?"
+                                ""
+                                >>= pure
+                                    . PlanRequestChanges
+                                    . normalizePlanNotes
+                        _ -> pure PlanCancel
     , planAskQuestion = \question options ->
         withCurrentFullscreen runtimeRef
             (hooks.planAskQuestion question options)
+            \runtime -> case options of
+                [] ->
+                    requestFullscreenText
+                        runtime
+                        "Planning question"
+                        question
+                        ""
+                        >>= pure . nonBlank
+                choices ->
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        "Planning question"
+                        question
+                        0
+                        [(choice, "") | choice <- choices]
+                        >>= pure . (>>= (`atMay` choices))
     }
 
 withCurrentFullscreen
     :: IORef (Maybe FullscreenRuntime)
     -> IO a
+    -> (FullscreenRuntime -> IO a)
     -> IO a
-withCurrentFullscreen runtimeRef action = do
+withCurrentFullscreen runtimeRef fallback fullscreenAction = do
     runtime <- readIORef runtimeRef
     case runtime of
-        Nothing -> action
-        Just active -> withFullscreenSuspended active action
+        Nothing -> fallback
+        Just active -> fullscreenAction active
+
+normalizePlanNotes :: Maybe Text -> Text
+normalizePlanNotes =
+    fromMaybe "(no notes)" . nonBlank
+
+nonBlank :: Maybe Text -> Maybe Text
+nonBlank =
+    (>>= \text ->
+        let stripped = Text.strip text
+        in if Text.null stripped then Nothing else Just stripped)
+
+atMay :: Int -> [a] -> Maybe a
+atMay index values
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing
 
 showAccountUsage
     :: Provider
@@ -2106,6 +2186,16 @@ showAccountUsage
     -> IO ()
 showAccountUsage provider tokenProvider openAiPool = do
     color <- resolveColor stdout
+    accountUsageText color provider tokenProvider openAiPool
+        >>= Text.putStrLn
+
+accountUsageText
+    :: Bool
+    -> Provider
+    -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
+    -> IO Text
+accountUsageText color provider tokenProvider openAiPool = do
     now <- getCurrentTime
     case provider of
         OpenAIProvider ->
@@ -2113,19 +2203,19 @@ showAccountUsage provider tokenProvider openAiPool = do
                 Just pool -> do
                     snapshots <- OpenAI.snapshotAccounts pool
                     lines_ <- mapM fetchSnapshot snapshots
-                    Text.putStrLn (formatUsageReport color now lines_)
+                    pure (formatUsageReport color now lines_)
                 Nothing ->
                     case tokenProvider of
                         Just provider_ ->
                             getNextToken provider_ Nothing >>= \case
                                 Left err ->
-                                    Text.putStrLn
-                                        (roleError color
-                                            ("usage: " <> Text.pack (show err)))
+                                    pure $
+                                        roleError color
+                                            ("usage: " <> Text.pack (show err))
                                 Right credential -> do
                                     result <- fetchUsage
                                         credential.accessToken credential.accountId
-                                    Text.putStrLn $
+                                    pure $
                                         formatUsageReport color now
                                             [ AccountUsageLine
                                                 { usageAccountId = credential.accountId
@@ -2134,10 +2224,11 @@ showAccountUsage provider tokenProvider openAiPool = do
                                                 }
                                             ]
                         Nothing ->
-                            Text.putStrLn
-                                (roleMuted color "usage: no OpenAI credentials loaded")
+                            pure $
+                                roleMuted color
+                                    "usage: no OpenAI credentials loaded"
         _ ->
-            Text.putStrLn $
+            pure $
                 roleMuted color
                     "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
 
@@ -2642,10 +2733,11 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     _ -> pure Nothing
 
 handleResume
-    :: Maybe Text
+    :: Maybe FullscreenRuntime
+    -> Maybe Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleResume maybeId persist = do
+handleResume fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let root = sessionsRoot home
@@ -2667,9 +2759,59 @@ handleResume maybeId persist = do
         Just sessionId -> resume sessionId
         Nothing -> do
             sessions <- listSessions root
-            pickResumeSession color root sessions >>= \case
+            pickResumeChoice fullscreen color root sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
+
+pickResumeChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> OsPath
+    -> [SessionMeta]
+    -> IO (Maybe Text)
+pickResumeChoice fullscreen color root sessions = case fullscreen of
+    Nothing -> pickResumeSession color root sessions
+    Just runtime ->
+        requestFullscreenChoice
+            runtime
+            "Resume session"
+            0
+            [ ( meta.metaTitle
+              , providerSlug meta.metaProvider
+                    <> "/"
+                    <> meta.metaModel
+                    <> " · "
+                    <> toText meta.metaCwd
+              )
+            | meta <- sessions
+            ]
+            >>= pure . (>>= (`atMay` map (.metaId) sessions))
+
+pickAgentChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> AgentTarget
+    -> [AgentEntry]
+    -> IO (Maybe AgentTarget)
+pickAgentChoice fullscreen color selected entries = case fullscreen of
+    Nothing -> pickAgentViewport color selected entries
+    Just runtime ->
+        requestFullscreenChoice
+            runtime
+            "Agents"
+            (fromMaybe 0
+                (findIndex ((== selected) . (.agentTarget)) entries))
+            [ ( entry.agentPath
+              , entry.agentStatus
+                    <> case entry.agentTranscript of
+                        first : _
+                            | not (Text.null (Text.strip first)) ->
+                                " · " <> Text.take 80 (Text.strip first)
+                        _ -> ""
+              )
+            | entry <- entries
+            ]
+            >>= pure . (>>= (`atMay` map (.agentTarget) entries))
 
 currentSessionId
     :: Persistence
