@@ -98,7 +98,8 @@ import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
-    ( osc9ProgressRemove
+    ( osc9ProgressIndeterminate
+    , osc9ProgressRemove
     , wrapOscForTmux
     )
 import Agent.CLI.Project
@@ -1078,6 +1079,9 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             (requestCancel toolEnv.toolCancel)
             (noteFullscreenCtrlC interrupt)
             (copyTerminalClipboard terminal stdout)
+            (\active ->
+                when terminal.terminalNativeProgress $
+                    setNativeProgress stderr active)
             initialFullscreenState
         else pure Nothing
     writeIORef uiRuntimeRef fullscreen
@@ -2544,11 +2548,18 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.
 clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle = do
+clearNativeProgress handle =
+    setNativeProgress handle False
+
+setNativeProgress :: Handle -> Bool -> IO ()
+setNativeProgress handle active = do
     tty <- hIsTerminalDevice handle
     when tty do
         inTmux <- isJust <$> lookupEnv "TMUX"
-        Text.hPutStr handle (wrapOscForTmux inTmux osc9ProgressRemove)
+        let sequence_
+                | active = osc9ProgressIndeterminate
+                | otherwise = osc9ProgressRemove
+        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
 -- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
