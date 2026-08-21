@@ -82,14 +82,12 @@ library
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
-                    , Agent.CLI.TUI.Markdown
                     , Agent.CLI.TUI.Scroll
-                    , Agent.CLI.TUI.Theme
-                    , Agent.CLI.UI.Model
                     , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
@@ -172,13 +170,12 @@ test-suite agent-cli-test
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIBridgeSpec
-                    , Agent.CLI.TUIMarkdownSpec
                     , Agent.CLI.TUIScrollSpec
-                    , Agent.CLI.UIModelSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-tui
                     , agent-openai
                     , agent-responses
                     , agent-xai

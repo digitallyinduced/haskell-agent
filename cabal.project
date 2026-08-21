@@ -1,6 +1,7 @@
 packages:
     packages/agent-cli
     packages/agent-core
+    packages/agent-tui
     packages/agent-responses
     packages/agent-openai
     packages/agent-xai

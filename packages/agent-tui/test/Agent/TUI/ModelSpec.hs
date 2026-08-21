@@ -1,6 +1,6 @@
-module Agent.CLI.UIModelSpec (spec) where
+module Agent.TUI.ModelSpec (spec) where
 
-import Agent.CLI.UI.Model
+import Agent.TUI.Model
 import Agent.Loop
     ( LoopEvent(..)
     , emptyTurnOutput

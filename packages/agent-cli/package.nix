@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-core, agent-openai, agent-openrouter
+{ mkDerivation, aeson, agent-core, agent-tui, agent-openai, agent-openrouter
 , agent-responses, agent-xai, ansi-terminal, async, base
 , base64-bytestring, brick, bytestring, colour, containers
 , directory, filepath, haskeline, hspec, lib, mtl, process
@@ -12,7 +12,7 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-core agent-openai agent-openrouter agent-responses
+    aeson agent-core agent-tui agent-openai agent-openrouter agent-responses
     agent-xai ansi-terminal async base base64-bytestring brick
     bytestring colour containers directory filepath haskeline mtl
     process safe-exceptions stm text time transformers unix vty
@@ -20,7 +20,7 @@ mkDerivation {
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    aeson agent-core agent-openai agent-responses agent-xai
+    aeson agent-core agent-tui agent-openai agent-responses agent-xai
     ansi-terminal base bytestring colour containers directory filepath
     haskeline hspec process safe-exceptions text time unix vty
   ];

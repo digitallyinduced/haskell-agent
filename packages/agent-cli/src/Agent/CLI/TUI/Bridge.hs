@@ -9,7 +9,7 @@ module Agent.CLI.TUI.Bridge
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
-import Agent.CLI.UI.Model (UiEvent(..), UiState(..))
+import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..))
 import Data.Text (Text)
 import qualified Graphics.Vty as V

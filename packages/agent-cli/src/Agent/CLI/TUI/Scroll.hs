@@ -9,7 +9,7 @@ module Agent.CLI.TUI.Scroll
     , startConversationAnchor
     ) where
 
-import Agent.CLI.UI.Model (BlockId)
+import Agent.TUI.Model (BlockId)
 import Data.Text (Text)
 
 data ConversationPhase

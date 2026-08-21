@@ -79,6 +79,7 @@ import Agent.CLI.Input
     )
 import Agent.CLI.ReplMode
     ( ReplMode(..)
+    , replModeLabel
     , replModeFromState
     )
 import Agent.CLI.Interrupt
@@ -207,7 +208,7 @@ import Agent.CLI.TUI.App
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
-import Agent.CLI.UI.Model
+import Agent.TUI.Model
     ( PromptState(..)
     , UiEvent(..)
     , UiState(..)
@@ -1769,7 +1770,7 @@ replWithDraft env@SessionEnv
                 PromptState
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
-                    , promptMode = idleMode
+                    , promptMode = replModeLabel idleMode
                     , promptUsage = usage
                     , promptAttachments = length pendingAttachments
                     }

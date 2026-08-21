@@ -1,5 +1,5 @@
 -- | Renderer-independent state for the retained terminal UI.
-module Agent.CLI.UI.Model
+module Agent.TUI.Model
     ( BlockId(..)
     , BlockKind(..)
     , BlockState(..)
@@ -29,8 +29,7 @@ module Agent.CLI.UI.Model
     , warningNotice
     ) where
 
-import Agent.CLI.ReplMode (ReplMode(..))
-import Agent.CLI.Render
+import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
     , summarizeToolCall
@@ -115,7 +114,7 @@ data PermissionOverlay = PermissionOverlay
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
-    , promptMode :: !ReplMode
+    , promptMode :: !Text
     , promptUsage :: !TokenUsage
     , promptAttachments :: !Int
     }
@@ -194,7 +193,7 @@ initialUiState = UiState
     , uiPrompt = PromptState
         { promptModel = ""
         , promptEffort = ""
-        , promptMode = ReplModeNormal
+        , promptMode = "ask"
         , promptUsage = emptyTokenUsage
         , promptAttachments = 0
         }
@@ -410,7 +409,7 @@ reduceLoop event state = case event of
             kind = toolBlockKind call.name
             body = case call.name of
                 "search_replace" ->
-                    formatSearchReplaceDiff False call.arguments
+                    formatSearchReplaceDiff call.arguments
                 _ -> ""
         in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)

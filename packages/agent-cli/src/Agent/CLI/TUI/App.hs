@@ -41,14 +41,13 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Options (reasoningEfforts)
-import Agent.CLI.ReplMode (replModeLabel)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
-import qualified Agent.CLI.TUI.Theme as Theme
+import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
-import Agent.CLI.TUI.Markdown (markdownWidget)
+import Agent.TUI.Markdown (markdownWidget)
 import qualified Agent.CLI.TUI.Scroll as Scroll
-import Agent.CLI.UI.Model
+import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -1312,7 +1311,7 @@ drawComposer :: AppState -> Widget Name
 drawComposer appState =
     let focused = state.uiFocus == FocusComposer
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
-        mode = replModeLabel state.uiPrompt.promptMode
+        mode = state.uiPrompt.promptMode
         leading =
             filter (not . Text.null)
                 [ if state.uiPrompt.promptAttachments > 0

@@ -16,7 +16,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.TUI.App
     ( emitUiEvent
     )
-import Agent.CLI.UI.Model
+import Agent.TUI.Model
     ( BlockState(..)
     , UiEvent(..)
     , successNotice

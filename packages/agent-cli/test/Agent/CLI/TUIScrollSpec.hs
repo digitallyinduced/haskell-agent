@@ -1,7 +1,7 @@
 module Agent.CLI.TUIScrollSpec (spec) where
 
 import Agent.CLI.TUI.Scroll
-import Agent.CLI.UI.Model (BlockId(..))
+import Agent.TUI.Model (BlockId(..))
 import Test.Hspec
 
 spec :: Spec
