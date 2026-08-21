@@ -154,7 +154,7 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
     , PropertySchema "fork_turns" PropertyString False $ Just
         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
     ]
-    False
+    True
     (typedToolWithCall "spawn_agent" (runSpawn ctx))
 
 spawnAgentDescription :: Text
@@ -301,7 +301,7 @@ sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
     , PropertySchema "message"
         (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
-    False
+    True
     (typedToolWithCall "send_message" (runSendMessage ctx))
 
 sendMessageDescription :: Text
@@ -339,7 +339,7 @@ followupTaskTool ctx = jsonTool "followup_task" followupDescription
     , PropertySchema "message"
         (encryptedString "Message text to send to the target agent.") True Nothing
     ]
-    False
+    True
     (typedToolWithCall "followup_task" (runFollowup ctx))
 
 followupDescription :: Text
@@ -456,7 +456,7 @@ interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to interrupt (from spawn_agent)."
     ]
-    False
+    True
     (typedTool "interrupt_agent" (runInterrupt ctx))
 
 interruptDescription :: Text

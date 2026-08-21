@@ -1,14 +1,15 @@
 -- | Nestable subagent registry.
 --
 -- Shared state (agent map, status, mailboxes, admission count) lives in STM.
--- IO is only used to allocate ids, start child 'Async' loops, and wait with
--- timeouts via 'threadDelay'.
+-- IO is only used to allocate ids, start explicitly tracked child threads,
+-- and wait with timeouts via 'threadDelay'.
 module Agent.Subagents.Registry
     ( SubagentRegistry
     , newSubagentRegistry
     , setSubagentRunner
     , setSubagentOnComplete
     , closeSubagentRegistry
+    , interruptActiveSubagents
     , resetSubagentRegistry
     , spawnSubagent
     , spawnSubagentWithCwd
@@ -58,23 +59,15 @@ import Agent.Subagents.Types
     , maxWaitTimeoutMs
     , minWaitTimeoutMs
     )
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async
-    ( Async
-    , async
-    , asyncThreadId
-    , cancel
-    , race
-    , waitCatch
+import Control.Concurrent
+    ( ThreadId
+    , forkFinally
+    , killThread
+    , threadDelay
     )
+import Control.Concurrent.Async (race)
 import Control.Concurrent.STM
-import Control.Exception.Safe
-    ( SomeException
-    , finally
-    , mask
-    , onException
-    , tryAny
-    )
+import Control.Exception.Safe (SomeException, finally, mask, onException, tryAny)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Map.Strict (Map)
@@ -101,7 +94,7 @@ data SubagentRecord = SubagentRecord
     , recordStatus :: !(TVar SubagentStatus)
     , recordCancel :: !(TVar CancelFlag)
     , recordMailbox :: !(TQueue InterAgentMessage)
-    , recordAsync :: !(TVar (Maybe (Async ())))
+    , recordWorker :: !(TVar (Maybe Worker))
       -- | Whether this agent currently occupies a concurrency slot.
     , recordSlotHeld :: !(TVar Bool)
       -- | Last successful response id for conversation continuity.
@@ -109,6 +102,11 @@ data SubagentRecord = SubagentRecord
     , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
+    }
+
+data Worker = Worker
+    { workerThreadId :: !(TMVar (Maybe ThreadId))
+    , workerDone :: !(TMVar ())
     }
 
 data SubagentRegistry = SubagentRegistry
@@ -279,7 +277,7 @@ spawnSubagentAtWithCwdMasked restore registry childCwd parentId parentPath paren
                 cancelVar <- newTVarIO cancelFlag
                 mailbox <- newTQueueIO
                 statusVar <- newTVarIO Pending
-                asyncVar <- newTVarIO Nothing
+                workerVar <- newTVarIO Nothing
                 slotHeld <- newTVarIO True
                 previousVar <- newTVarIO Nothing
                 lastUpdateVar <- newTVarIO Nothing
@@ -291,7 +289,7 @@ spawnSubagentAtWithCwdMasked restore registry childCwd parentId parentPath paren
                         , recordStatus = statusVar
                         , recordCancel = cancelVar
                         , recordMailbox = mailbox
-                        , recordAsync = asyncVar
+                        , recordWorker = workerVar
                         , recordSlotHeld = slotHeld
                         , recordPreviousResponseId = previousVar
                         , recordLastUpdate = lastUpdateVar
@@ -338,12 +336,12 @@ spawnSubagentAtWithCwdMasked restore registry childCwd parentId parentPath paren
                         started <-
                             startRecordWorker registry record
                                 (restore (runWorker registry record message))
-                                `onException` rollbackSpawn registry record
+                                `onException` shutdownRecord registry record
                         if started
                             then pure (Right (agentId, childPath))
                             else do
-                                rollbackSpawn registry record
-                                pure (Left "Subagent was closed while starting.")
+                                shutdownRecord registry record
+                                pure (Left "Subagent closed before its worker started.")
 
 validateParentSTM
     :: SubagentRegistry
@@ -371,74 +369,16 @@ validateParentSTM registry parentId parentPath parentDepth =
                                 else pure (Left "parent agent context does not match registry")
                         else pure (Left "parent agent is not running")
 
-startRecordWorker
-    :: SubagentRegistry
-    -> SubagentRecord
-    -> IO ()
-    -> IO Bool
-startRecordWorker registry record action =
-    mask \restore -> do
-        startGate <- newEmptyTMVarIO
-        self <- newEmptyTMVarIO
-        child <- async $
-            (do
-                _ <- atomically (readTMVar self)
-                atomically (takeTMVar startGate)
-                restore action)
-            `finally` clearPublishedWorker record self
-        installed <- atomically do
-            closed <- readTVar registry.registryClosed
-            status <- readTVar record.recordStatus
-            current <- readTVar record.recordAsync
-            if closed || status == Closed || maybe False (const True) current
-                then pure False
-                else do
-                    writeTVar record.recordAsync (Just child)
-                    putTMVar self child
-                    putTMVar startGate ()
-                    pure True
-        if installed
-            then pure True
-            else do
-                cancel child
-                _ <- tryAny (waitCatch child)
-                pure False
-
-clearPublishedWorker :: SubagentRecord -> TMVar (Async ()) -> IO ()
-clearPublishedWorker record self = do
-    finished <- atomically (tryReadTMVar self)
-    mapM_ (clearRecordWorker record) finished
-
-clearRecordWorker :: SubagentRecord -> Async () -> IO ()
-clearRecordWorker record finished = atomically do
-    current <- readTVar record.recordAsync
-    case current of
-        Nothing -> pure ()
-        Just active ->
-            whenSTM
-                (asyncThreadId active == asyncThreadId finished)
-                (writeTVar record.recordAsync Nothing)
-
-rollbackSpawn :: SubagentRegistry -> SubagentRecord -> IO ()
-rollbackSpawn registry record = atomically do
-    modifyTVar' registry.registryAgents (Map.delete record.recordId)
-    paths <- readTVar registry.registryPaths
-    case Map.lookup record.recordTaskPath paths of
-        Just owner ->
-            whenSTM (owner == record.recordId) $
-                writeTVar registry.registryPaths
-                    (Map.delete record.recordTaskPath paths)
-        Nothing -> pure ()
-    releaseSlotSTM registry record
-
 runWorker :: SubagentRegistry -> SubagentRecord -> InterAgentMessage -> IO ()
 runWorker registry record firstPrompt = do
-    started <- atomically do
+    mayRun <- atomically do
         closed <- readTVar registry.registryClosed
-        status <- readTVar record.recordStatus
-        if closed || status == Closed
+        current <- readTVar record.recordStatus
+        if closed || current == Closed
             then pure False
-            else writeTVar record.recordStatus Running >> pure True
+            else do
+                writeTVar record.recordStatus Running
+                pure True
     let onEvent = registry.registryOnEvent record.recordId
         loop prompt = do
             cancelFlag <- atomically $ readTVar record.recordCancel
@@ -488,7 +428,7 @@ runWorker registry record firstPrompt = do
                     whenIO notifyRoot
                         (notifyRootComplete registry record.recordId status)
                 Just msg -> loop msg
-    whenIO started (loop firstPrompt)
+    whenIO mayRun (loop firstPrompt)
 
 publishCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
 publishCompletionSTM registry record status = do
@@ -543,11 +483,71 @@ completionMessage child parent status =
         QueuedMessage
         (plainInterAgentContent (formatCompletionNotice child.recordId status))
 
+-- | Record ownership before forking. The thread id is published immediately
+-- afterward, so shutdown can safely race startup and still cancel and join.
+startRecordWorker
+    :: SubagentRegistry
+    -> SubagentRecord
+    -> IO ()
+    -> IO Bool
+startRecordWorker registry record action = mask \restore -> do
+    -- A completed turn publishes its status just before its worker exits.
+    -- Wait for that short tail before replacing the tracked worker.
+    atomically do
+        current <- readTVar record.recordWorker
+        case current of
+            Nothing -> pure ()
+            Just worker -> readTMVar worker.workerDone
+    threadIdVar <- newEmptyTMVarIO
+    done <- newEmptyTMVarIO
+    let worker = Worker
+            { workerThreadId = threadIdVar
+            , workerDone = done
+            }
+    started <- atomically do
+        closed <- readTVar registry.registryClosed
+        status <- readTVar record.recordStatus
+        current <- readTVar record.recordWorker
+        case current of
+            Just _ -> pure False
+            Nothing
+                | closed || status == Closed -> pure False
+                | otherwise -> do
+                    writeTVar record.recordWorker (Just worker)
+                    pure True
+    if started
+        then do
+            tid <- forkFinally (restore action) (\_ -> finishWorker record worker)
+                `onException` do
+                    atomically $ putTMVar threadIdVar Nothing
+                    finishWorker record worker
+            atomically $ putTMVar threadIdVar (Just tid)
+            pure True
+        else pure False
+
+finishWorker :: SubagentRecord -> Worker -> IO ()
+finishWorker record worker = atomically do
+    writeTVar record.recordWorker Nothing
+    putTMVar worker.workerDone ()
+
+stopWorker :: Worker -> IO ()
+stopWorker worker = do
+    threadId <- atomically $ readTMVar worker.workerThreadId
+    mapM_ killThread threadId
+    atomically $ readTMVar worker.workerDone
+
 notifyRootComplete :: SubagentRegistry -> SubagentId -> SubagentStatus -> IO ()
 notifyRootComplete registry agentId status
     | isFinalStatus status && status /= Closed && status /= NotFound = do
-        current <- getStatus registry agentId
-        whenIO (current == status) do
+        shouldNotify <- atomically do
+            closed <- readTVar registry.registryClosed
+            agents <- readTVar registry.registryAgents
+            case Map.lookup agentId agents of
+                Nothing -> pure False
+                Just record -> do
+                    current <- readTVar record.recordStatus
+                    pure (not closed && current == status)
+        whenIO shouldNotify do
             onComplete <- readIORef registry.registryOnCompleteRef
             onComplete agentId status
     | otherwise = pure ()
@@ -611,11 +611,6 @@ waitSubagentsFrom registry caller targets timeoutMs =
         atomically $
             modifyTVar' registry.registryActiveWaits
                 (Map.insert caller targets)
-        waitRegistered
-    unregister =
-        atomically $
-            modifyTVar' registry.registryActiveWaits (Map.delete caller)
-    waitRegistered = do
         let clamped = max minWaitTimeoutMs (min maxWaitTimeoutMs (max 1 timeoutMs))
             waitForFinal = atomically do
                 statuses <- mapM (readStatusSTM registry) targets
@@ -625,11 +620,15 @@ waitSubagentsFrom registry caller targets timeoutMs =
                     else retry
             waitForTimeout = do
                 threadDelay (clamped * 1000)
-                statuses <- atomically (mapM (readStatusSTM registry) targets)
-                pure (Map.fromList (zip targets statuses))
+                atomically do
+                    statuses <- mapM (readStatusSTM registry) targets
+                    pure (Map.fromList (zip targets statuses))
         race waitForFinal waitForTimeout >>= \case
             Left statuses -> pure (statuses, False)
             Right statuses -> pure (statuses, True)
+    unregister =
+        atomically $
+            modifyTVar' registry.registryActiveWaits (Map.delete caller)
 
 data SendKick
     = KickNone
@@ -697,7 +696,7 @@ sendInputMessageMasked restore registry senderPath agentId content interrupt = d
                                 writeTQueue record.recordMailbox message
                                 pure KickNone
                             _ -> do
-                                worker <- readTVar record.recordAsync
+                                worker <- readTVar record.recordWorker
                                 case worker of
                                     Just _ -> retry
                                     Nothing -> do
@@ -722,7 +721,7 @@ sendInputMessageMasked restore registry senderPath agentId content interrupt = d
                                 then pure (Right "queued")
                                 else do
                                     rollbackFollowup registry record previous acquired
-                                    pure (Left "agent was closed while starting")
+                                    pure (Left "agent was closed before its worker started")
 
 whenIO :: Bool -> IO () -> IO ()
 whenIO True action = action
@@ -761,17 +760,56 @@ shutdownRecord :: SubagentRegistry -> SubagentRecord -> IO ()
 shutdownRecord registry record = do
     cancelFlag <- atomically $ readTVar record.recordCancel
     requestCancel cancelFlag
-    masync <- atomically do
+    mworker <- atomically do
         writeTVar record.recordStatus Closed
-        readTVar record.recordAsync
-    case masync of
+        readTVar record.recordWorker
+    case mworker of
         Nothing -> pure ()
-        Just child -> do
-            cancel child
-            _ <- tryAny (waitCatch child)
-            clearRecordWorker record child
-            pure ()
+        Just worker -> stopWorker worker
     releaseSlot registry record
+
+-- | Stop every currently pending/running child while keeping completed agent
+-- records and the registry available for later turns. The registry is closed
+-- during the transition so a descendant cannot publish a newly-created worker
+-- after the abort snapshot has been taken.
+interruptActiveSubagents :: SubagentRegistry -> IO ()
+interruptActiveSubagents registry = do
+    (wasClosed, records) <- atomically do
+        wasClosed <- readTVar registry.registryClosed
+        writeTVar registry.registryClosed True
+        agents <- Map.elems <$> readTVar registry.registryAgents
+        records <- filterMSTM isActiveRecord agents
+        pure (wasClosed, records)
+    mapM_ (interruptRecord registry) records
+        `finally`
+            atomically (writeTVar registry.registryClosed wasClosed)
+  where
+    isActiveRecord :: SubagentRecord -> STM Bool
+    isActiveRecord record = do
+        status <- readTVar record.recordStatus
+        pure (status == Pending || status == Running)
+
+interruptRecord :: SubagentRegistry -> SubagentRecord -> IO ()
+interruptRecord registry record = do
+    cancelFlag <- atomically $ readTVar record.recordCancel
+    requestCancel cancelFlag
+    mworker <- atomically do
+        writeTVar record.recordStatus Interrupted
+        _ <- flushTQueue record.recordMailbox
+        readTVar record.recordWorker
+    case mworker of
+        Nothing -> pure ()
+        Just worker -> stopWorker worker
+    atomically $ writeTVar record.recordStatus Interrupted
+    releaseSlot registry record
+
+filterMSTM :: (a -> STM Bool) -> [a] -> STM [a]
+filterMSTM predicate = fmap reverse . go []
+  where
+    go kept [] = pure kept
+    go kept (value : rest) = do
+        include <- predicate value
+        go (if include then value : kept else kept) rest
 
 -- | Re-admit a previously persisted agent that is not currently in the
 -- in-memory map (e.g. after close, or across a process restart within the
@@ -831,26 +869,25 @@ restoreSubagentAtWithCwd registry childCwd agentId parentId taskPath depth nickn
             -- Same-process resume after close: reopen without consuming a slot.
             atomically do
                 closed <- readTVar registry.registryClosed
+                status <- readTVar record.recordStatus
+                worker <- readTVar record.recordWorker
                 if closed
                     then pure (Left "Subagent registry is closed.")
-                    else do
-                        status <- readTVar record.recordStatus
-                        worker <- readTVar record.recordAsync
-                        if status == Running || status == Pending
-                            then pure (Left "agent is already running")
-                            else case worker of
-                                Just _ ->
-                                    pure (Left "agent shutdown is still in progress")
-                                Nothing -> do
-                                    writeTVar record.recordStatus (Completed Nothing)
-                                    writeTVar record.recordCancel freshCancel
-                                    writeTVar record.recordPreviousResponseId previous
-                                    pure (Right agentId)
+                    else if status == Running || status == Pending
+                        then pure (Left "agent is already running")
+                        else case worker of
+                            Just _ ->
+                                pure (Left "agent shutdown is still in progress")
+                            Nothing -> do
+                                writeTVar record.recordStatus (Completed Nothing)
+                                writeTVar record.recordCancel freshCancel
+                                writeTVar record.recordPreviousResponseId previous
+                                pure (Right agentId)
         Nothing -> do
             cancelVar <- newTVarIO freshCancel
             mailbox <- newTQueueIO
             statusVar <- newTVarIO (Completed Nothing)
-            asyncVar <- newTVarIO Nothing
+            workerVar <- newTVarIO Nothing
             slotHeld <- newTVarIO False
             previousVar <- newTVarIO previous
             lastUpdateVar <- newTVarIO Nothing
@@ -862,7 +899,7 @@ restoreSubagentAtWithCwd registry childCwd agentId parentId taskPath depth nickn
                     , recordStatus = statusVar
                     , recordCancel = cancelVar
                     , recordMailbox = mailbox
-                    , recordAsync = asyncVar
+                    , recordWorker = workerVar
                     , recordSlotHeld = slotHeld
                     , recordPreviousResponseId = previousVar
                     , recordLastUpdate = lastUpdateVar

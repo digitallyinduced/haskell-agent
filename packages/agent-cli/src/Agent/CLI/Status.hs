@@ -6,6 +6,7 @@ module Agent.CLI.Status
     , formatTokenUsage
     ) where
 
+import Agent.CLI.Input (terminalTextWidth, truncateDisplayText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.ReplMode
@@ -41,14 +42,25 @@ formatReplStatusLine color width model effort mode usage =
     let left = "  " <> model <> " · " <> effort <> " · " <> replModeLabel mode
         right = formatTokenUsage usage
         padded = case width of
-            Just cols | cols > 0, not (Text.null right) ->
-                let gap = cols - Text.length left - Text.length right
-                in if gap > 0
-                    then left <> Text.replicate gap " " <> right
-                    else left <> "  " <> right
+            Just cols | cols > 0 ->
+                fitStatusLine cols left right
             _ | Text.null right -> left
             _ -> left <> "  " <> right
     in roleMuted color padded
+
+-- | Keep the status on one physical row so composer redraws never inherit a
+-- wrapped status line. Prefer interaction state over token totals.
+fitStatusLine :: Int -> Text -> Text -> Text
+fitStatusLine cols left right
+    | cols <= 0 = ""
+    | Text.null right = truncateDisplayText cols left
+    | leftWidth + 1 + rightWidth <= cols =
+        left <> Text.replicate (cols - leftWidth - rightWidth) " " <> right
+    | leftWidth <= cols = left
+    | otherwise = truncateDisplayText cols left
+  where
+    leftWidth = terminalTextWidth left
+    rightWidth = terminalTextWidth right
 
 -- | Apply a cycled idle mode: plan pending vs always-approve vs ask.
 -- Always-approve still persists to project settings, matching /always-approve.

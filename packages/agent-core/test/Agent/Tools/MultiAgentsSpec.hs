@@ -17,7 +17,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     )
 import Agent.Tools.MultiAgents
-import Agent.Tools.Types (appToolHandlers)
+import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent.STM
 import Control.Monad (unless)
 import Data.Text (Text)
@@ -26,6 +26,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
+    it "allows collaboration coordination without approval" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let tools = multiAgentTools (rootContext registry Nothing)
+        map (\tool -> (tool.appToolName, tool.appToolReadOnly)) tools
+            `shouldBe`
+                [ ("spawn_agent", True)
+                , ("wait_agent", True)
+                , ("send_message", True)
+                , ("followup_task", True)
+                , ("list_agents", True)
+                , ("interrupt_agent", True)
+                ]
+        closeSubagentRegistry registry
+
     it "preserves encrypted spawn payloads" do
         spawned <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

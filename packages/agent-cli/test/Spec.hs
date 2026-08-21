@@ -3,11 +3,13 @@ module Main (main) where
 import Test.Hspec (hspec)
 
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
+import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -38,12 +40,14 @@ import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
 main :: IO ()
 main = hspec do
+    AgentViewportSpec.spec
     ApprovalSpec.spec
     AuthSpec.spec
     BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    CompactionSpec.spec
     CredentialStoreSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec

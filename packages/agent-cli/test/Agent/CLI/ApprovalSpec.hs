@@ -27,6 +27,10 @@ spec = describe "childApprove" do
         childApprove DenyMutating [mutatingTool] mutatingCall
             `shouldReturn` Right False
 
+    it "recognizes namespaced collaboration tools as read-only" do
+        childApprove DenyMutating [namespacedReadOnlyTool] namespacedReadOnlyCall
+            `shouldReturn` Right True
+
     it "returns an in-band denial when a child would need to prompt" do
         result <- childApprove PromptMutating [mutatingTool] mutatingCall
         result `shouldSatisfy` \case
@@ -51,6 +55,10 @@ dynamicReadCall = functionToolCall "call-dynamic-read" "dynamic" "read"
 dynamicWriteCall :: ToolCall
 dynamicWriteCall = functionToolCall "call-dynamic-write" "dynamic" "write"
 
+namespacedReadOnlyCall :: ToolCall
+namespacedReadOnlyCall =
+    functionToolCall "call-list-agents" "collaboration.list_agents" "{}"
+
 readOnlyTool :: AppTool
 readOnlyTool = tool "read" True Nothing
 
@@ -59,6 +67,9 @@ mutatingTool = tool "write" False Nothing
 
 dynamicTool :: AppTool
 dynamicTool = tool "dynamic" False (Just (\call -> pure (call == dynamicReadCall)))
+
+namespacedReadOnlyTool :: AppTool
+namespacedReadOnlyTool = tool "list_agents" True Nothing
 
 tool :: Text -> Bool -> Maybe (ToolCall -> IO Bool) -> AppTool
 tool name readOnly classify = AppTool

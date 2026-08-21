@@ -7,6 +7,7 @@ import Agent.CLI
     , formatReplStatusLine
     , formatTokenUsage
     )
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -67,10 +68,22 @@ spec = do
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 `shouldBe` "  grok-4.6 · high · ask        1.2k in · 340 out"
 
-        it "keeps a two-space gap when the line would overflow" do
+        it "drops usage rather than wrapping when only the state fits" do
+            formatReplStatusLine False (Just 24) "grok-4.6" "high" ReplModeNormal
+                TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
+                `shouldBe` "  grok-4.6 · high · ask"
+
+        it "truncates the state when a narrow pane cannot fit it" do
             formatReplStatusLine False (Just 20) "grok-4.6" "high" ReplModeNormal
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
-                `shouldBe` "  grok-4.6 · high · ask  1.2k in · 340 out"
+                `shouldBe` "  grok-4.6 · high ·…"
+
+        it "measures and truncates wide model names in terminal columns" do
+            let line =
+                    formatReplStatusLine False (Just 16) "模型模型" "high"
+                        ReplModeNormal emptyTokenUsage
+            terminalTextWidth line `shouldBe` 16
+            line `shouldBe` "  模型模型 · hi…"
 
     describe "cycleReplMode" do
         it "walks ask → plan → always-approve → ask" do

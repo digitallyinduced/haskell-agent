@@ -36,6 +36,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
                     , Agent.CLI.Auth
                     , Agent.CLI.Btw
@@ -94,6 +95,7 @@ library
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
+                    , transformers
                     , unix
 
 executable agent-cli
@@ -110,11 +112,13 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ApprovalSpec
+                    , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.CompactionSpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
