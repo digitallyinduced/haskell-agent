@@ -47,6 +47,7 @@ data ReplAction
         }
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplAgents
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
@@ -87,6 +88,7 @@ slashCommands =
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
+    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport"
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)"
     ]
   where
@@ -177,6 +179,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplClearAttachments
                     else ReplCommandError "usage: /clear-attachments"
+            "agents" ->
+                if null args
+                    then ReplAgents
+                    else ReplCommandError "usage: /agents"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove

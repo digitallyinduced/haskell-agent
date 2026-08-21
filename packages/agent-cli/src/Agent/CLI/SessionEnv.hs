@@ -4,6 +4,7 @@ module Agent.CLI.SessionEnv
     ) where
 
 import Agent.CLI.Interrupt (InterruptState)
+import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -38,5 +39,6 @@ data SessionEnv = SessionEnv
     , sessionInterrupt :: !InterruptState
     , sessionStoreRoot :: !(IORef (Maybe FilePath))
     , sessionUsage :: !(IORef TokenUsage)
+    , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionReset :: !(IO ())
     }
