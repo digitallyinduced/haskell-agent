@@ -138,6 +138,14 @@ spec = describe "Agent.CLI.Session" do
                         Left err -> err `shouldContain` "unsupported session schema"
                         Right _ -> expectationFailure "expected schema failure"
 
+        it "rejects session ids that escape the sessions root" $
+            withTempDir "agent-sessions-" \root -> do
+                isValidSessionId "normal-id" `shouldBe` True
+                isValidSessionId "../outside" `shouldBe` False
+                isValidSessionId "nested/id" `shouldBe` False
+                loadSession root "../outside"
+                    `shouldReturn` Left "invalid session id"
+
         it "creates a pending session only when ensureSession runs" $
             withTempDir "agent-sessions-" \root -> do
                 slot <- newIORef (Left (testCreate root))

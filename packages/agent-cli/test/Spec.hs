@@ -3,6 +3,7 @@ module Main (main) where
 import Test.Hspec (hspec)
 
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
+import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
@@ -41,6 +42,7 @@ import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 main :: IO ()
 main = hspec do
     AgentViewportSpec.spec
+    AgentSessionsSpec.spec
     ApprovalSpec.spec
     AuthSpec.spec
     BtwSpec.spec

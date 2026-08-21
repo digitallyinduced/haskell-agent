@@ -42,5 +42,6 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionAbortSubagents :: !(IO ())
+    , sessionOnPersisted :: !(SessionHandle -> IO ())
     , sessionReset :: !(IO ())
     }

@@ -85,6 +85,7 @@ runOneTurn env@SessionEnv
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAbortSubagents = abortSubagents
+    , sessionOnPersisted = onPersisted
     } promptText inputs =
   withTurnCancel interrupt config.loopCancel $
   withEscCancel config.loopCancel escPaused do
@@ -96,6 +97,7 @@ runOneTurn env@SessionEnv
         Just slotRef -> do
             created <- isLeftSlot <$> readIORef slotRef
             handle <- ensureSession slotRef
+            onPersisted handle
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
             writeIORef storeRoot (Just handle.sessionDir)
             when created do
