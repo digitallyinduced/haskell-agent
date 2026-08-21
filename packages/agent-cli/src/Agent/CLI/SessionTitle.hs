@@ -22,7 +22,7 @@ import Agent.OpenAI.Responses.Types
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import Control.Exception.Safe (tryAny)
-import Control.Monad (forever)
+import Control.Monad (forever, void)
 import Data.IORef (IORef, newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -58,9 +58,10 @@ data SessionTitleManager = SessionTitleManager
 withSessionTitleManager
     :: BtwBackendFactory
     -> IORef ResponseCreateParams
+    -> (SessionTitleResult -> IO ())
     -> (SessionTitleManager -> IO a)
     -> IO a
-withSessionTitleManager backendFactory paramsRef action = do
+withSessionTitleManager backendFactory paramsRef onGenerated action = do
     jobs <- newTQueueIO
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
@@ -73,7 +74,7 @@ withSessionTitleManager backendFactory paramsRef action = do
             , titleBackendFactory = backendFactory
             , titleParams = paramsRef
             }
-    withAsync (titleWorker manager) \_ -> action manager
+    withAsync (titleWorker onGenerated manager) \_ -> action manager
 
 requestSessionTitle
     :: SessionTitleManager
@@ -139,11 +140,11 @@ titleRefreshIndex milestone
     | milestone >= 3 = 1
     | otherwise = 0
 
-titleWorker :: SessionTitleManager -> IO ()
-titleWorker manager = forever do
+titleWorker :: (SessionTitleResult -> IO ()) -> SessionTitleManager -> IO ()
+titleWorker onGenerated manager = forever do
     job <- atomically (readTQueue manager.titleJobs)
     generated <- tryAny (generateTitle manager job)
-    atomically do
+    accepted <- atomically do
         modifyTVar' manager.titleRequested
             (Set.delete
                 (job.jobSessionId, job.jobMilestone, job.jobGeneration))
@@ -152,14 +153,17 @@ titleWorker manager = forever do
                 Map.findWithDefault 0 job.jobSessionId generations
         case generated of
             Right (Just title)
-                | current == job.jobGeneration ->
-                    writeTQueue manager.titleResults SessionTitleResult
-                        { resultSessionId = job.jobSessionId
-                        , resultMilestone = job.jobMilestone
-                        , resultTitle = title
-                        , resultGeneration = job.jobGeneration
-                        }
-            _ -> pure ()
+                | current == job.jobGeneration -> do
+                    let result = SessionTitleResult
+                            { resultSessionId = job.jobSessionId
+                            , resultMilestone = job.jobMilestone
+                            , resultTitle = title
+                            , resultGeneration = job.jobGeneration
+                            }
+                    writeTQueue manager.titleResults result
+                    pure (Just result)
+            _ -> pure Nothing
+    mapM_ (void . tryAny . onGenerated) accepted
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Maybe Text)
 generateTitle manager job = do
