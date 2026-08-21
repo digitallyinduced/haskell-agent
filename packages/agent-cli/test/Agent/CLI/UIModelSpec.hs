@@ -49,6 +49,28 @@ spec = describe "fullscreen UI reducer" do
         state.uiCursor `shouldBe` 20
         state.uiAwaitingInput `shouldBe` True
 
+    it "discards partial output and updates effort when restarting a turn" do
+        let initialPrompt =
+                initialUiState.uiPrompt
+                    { promptEffort = "low"
+                    }
+            state =
+                apply
+                    [ UiSetPrompt initialPrompt
+                    , UiUserSubmitted "try this"
+                    , UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "partial thought")
+                    , UiLoop (TextDelta "partial answer")
+                    , UiSetPromptEffort "high"
+                    , UiTurnRestarted
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["try this"]
+        state.uiPrompt.promptEffort `shouldBe` "high"
+        state.uiRunning `shouldBe` False
+        state.uiActivity `shouldBe` "Restarting…"
+        state.uiNotice `shouldBe` Just "Restarting current turn…"
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult

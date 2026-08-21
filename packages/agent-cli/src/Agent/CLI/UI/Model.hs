@@ -130,6 +130,7 @@ data UiEvent
     | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
+    | UiSetPromptEffort !Text
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe Text)
@@ -147,6 +148,7 @@ data UiEvent
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
+    | UiTurnRestarted
     | UiTick
     deriving (Eq, Show)
 
@@ -217,6 +219,10 @@ reduceUi event state = case event of
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
+    UiSetPromptEffort effort ->
+        state
+            { uiPrompt = state.uiPrompt { promptEffort = effort }
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
@@ -288,6 +294,14 @@ reduceUi event state = case event of
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
+    UiTurnRestarted ->
+        state
+            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            , uiRunning = False
+            , uiActivity = "Restarting…"
+            , uiNotice = Just "Restarting current turn…"
+            , uiToolCalls = Map.empty
+            }
     UiTick ->
         state
             { uiFrame = (state.uiFrame + 1) `mod` 10
