@@ -1,6 +1,7 @@
 module Agent.Tools.Grok.TaskSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
+import Agent.InterAgentMessage (interAgentMessagePayload)
 import Agent.Subagents
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -24,13 +25,14 @@ spec = describe "Agent.Tools.Grok.Task" do
         registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "c"
-                , finalText = Just ("done:" <> prompt)
+                , finalText = Just ("done:" <> interAgentMessagePayload prompt)
                 , turnsUsed = 1
                 , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing Nothing
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                Nothing Nothing Nothing
             tool = taskTool "/tmp" ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -66,7 +68,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         typesRef <- newIORef Map.empty
         let createIsolated _ = pure (Right "/tmp")
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-                (Just createIsolated)
+                (Just createIsolated) Nothing
             tool = taskTool "/tmp" ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"

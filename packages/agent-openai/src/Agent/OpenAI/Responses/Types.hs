@@ -510,6 +510,7 @@ instance FromJSON ResponseContentPart where
 
 data ResponseItemType
     = ItemMessage
+    | ItemAgentMessage
     | ItemFileSearchCall
     | ItemComputerCall
     | ItemComputerCallOutput
@@ -544,6 +545,7 @@ data ResponseItemType
 responseItemTypeText :: ResponseItemType -> Text
 responseItemTypeText = \case
     ItemMessage -> "message"
+    ItemAgentMessage -> "agent_message"
     ItemFileSearchCall -> "file_search_call"
     ItemComputerCall -> "computer_call"
     ItemComputerCallOutput -> "computer_call_output"
@@ -577,6 +579,7 @@ responseItemTypeText = \case
 parseResponseItemType :: Text -> ResponseItemType
 parseResponseItemType value = case value of
     "message" -> ItemMessage
+    "agent_message" -> ItemAgentMessage
     "file_search_call" -> ItemFileSearchCall
     "computer_call" -> ItemComputerCall
     "computer_call_output" -> ItemComputerCallOutput

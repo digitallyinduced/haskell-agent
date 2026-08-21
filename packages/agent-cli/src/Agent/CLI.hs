@@ -60,6 +60,7 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Options
+import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
@@ -121,6 +122,7 @@ import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
 import Agent.Loop
 import Agent.Error (ApiError)
+import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
@@ -169,6 +171,7 @@ import Agent.Subagents
     , newSubagentRegistry
     , restoreSubagent
     , restoreSubagentWithCwd
+    , setPreviousResponseId
     , setSubagentOnComplete
     , setSubagentRunner
     )
@@ -394,6 +397,10 @@ printTurn turn = do
         Just text | not (Text.null (Text.strip text)) ->
             Text.putStrLn ("assistant> " <> text)
         _ -> pure ()
+    case turn.turnError of
+        Just err | not (Text.null (Text.strip err)) ->
+            Text.putStrLn ("error> " <> err)
+        _ -> pure ()
     putStrLn ""
 
 runAgent :: CliOptions -> Maybe ProviderTransition -> IO RunResult
@@ -464,12 +471,16 @@ runAgent options transition = do
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
-    pendingNotices <- newIORef ([] :: [Text])
+    pendingNotices <- newIORef ([] :: [TurnInput])
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
     agentTypesRef <- newIORef Map.empty
-    let multiCtx = Just MultiAgentContext
+    let sendToRoot message = do
+            atomicModifyIORef' pendingNotices \xs ->
+                (xs <> [AgentMessage message], ())
+            pure (Right "queued")
+        multiCtx = Just MultiAgentContext
             { multiRegistry = registry
             , multiSelfId = Nothing
             , multiDepth = 0
@@ -480,13 +491,14 @@ runAgent options transition = do
                 createWorktree source (worktreeRoot home) >>= \case
                     Left err -> pure (Left (Text.pack err))
                     Right path -> pure (Right path)
+            , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
         Just ctx ->
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
-                    (xs <> [formatCompletionNotice agentId status], ())
+                    (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
@@ -502,7 +514,10 @@ runAgent options transition = do
             writeIORef subagentStoreRoot (Just dir)
         closeAll = do
             case multiCtx of
-                Just ctx -> closeSubagentRegistry ctx.multiRegistry
+                Just ctx -> do
+                    closeSubagentRegistry ctx.multiRegistry
+                    flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
+                        subagentSessions agentTypesRef
                 Nothing -> pure ()
             coding.codingClose
     flip finally closeAll do
@@ -571,6 +586,7 @@ runAgent options transition = do
                                                 subagentSessions
                                                 subagentStoreRoot
                                                 agentTypesRef
+                                                ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let lockedBackend =
                                         lockedOpenAiBackend
@@ -581,7 +597,7 @@ runAgent options transition = do
                                             (readIORef paramsRef)
                                             transcriptRef
                                     noticingBackend =
-                                        withPendingNotices pendingNotices lockedBackend
+                                        withPendingInputs pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
                                             loaded.loadedTokenProvider
@@ -620,7 +636,7 @@ runAgent options transition = do
                                         subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
-                                withPendingNotices pendingNotices $
+                                withPendingInputs pendingNotices $
                                     xaiBackend xaiOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
@@ -651,7 +667,7 @@ runAgent options transition = do
                                         subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
-                                withPendingNotices pendingNotices $
+                                withPendingInputs pendingNotices $
                                     openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                         (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
@@ -766,7 +782,7 @@ runSession
     -> InterruptState
     -> Maybe MultiAgentContext
     -> IORef (Map SubagentId SubagentSession)
-    -> IORef [Text]
+    -> IORef [TurnInput]
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> Backend
@@ -1193,6 +1209,7 @@ replWithDraft env@SessionEnv
                                                 { turnAt = now
                                                 , turnUserText = compactSessionUserText focus
                                                 , turnAssistantText = Just outcome.compactSummary
+                                                , turnError = Nothing
                                                 , turnResponseId = Nothing
                                                 , turnItems = outcome.compactHistory
                                                 , turnUsage = Nothing
@@ -1254,6 +1271,7 @@ replWithDraft env@SessionEnv
                                                 , turnUserText = clearSessionUserText
                                                 , turnAssistantText =
                                                     Just "Conversation cleared."
+                                                , turnError = Nothing
                                                 , turnResponseId = Nothing
                                                 , turnItems = []
                                                 , turnUsage = Nothing
@@ -1315,6 +1333,7 @@ replWithDraft env@SessionEnv
                                         , turnUserText = newSessionUserText
                                         , turnAssistantText =
                                             Just "Started a new session."
+                                        , turnError = Nothing
                                         , turnResponseId = Nothing
                                         , turnItems = []
                                         , turnUsage = Nothing
@@ -1986,16 +2005,6 @@ freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEv
     withCodexWsRetrying provider \conn _credential ->
         let Backend submit = openAiBackend conn getParams transcript
         in submit previous inputs onEvent
-
--- | Prepend drained subagent completion notices to the next parent turn.
-withPendingNotices :: IORef [Text] -> Backend -> Backend
-withPendingNotices pending (Backend submit) = Backend \previous inputs onEvent -> do
-    notices <- atomicModifyIORef' pending \xs -> ([], xs)
-    let prefixed
-            | null notices = inputs
-            | otherwise = UserMessage (Text.intercalate "\n\n" notices) : inputs
-    submit previous prefixed onEvent
-
 -- | Child Codex agent: per-agent transcript (retained across send_input), same
 -- WS (locked), nested multi-agent tools.
 runCodexSubagent
@@ -2011,8 +2020,9 @@ runCodexSubagent
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef =
+runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef sendToRoot =
     \env previous prompt onEvent -> do
         parentParams <- readIORef paramsRef
         childEnv <- defaultToolEnv env.subCwd
@@ -2026,6 +2036,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
+                , multiSendToRoot = sendToRoot
                 }
         -- Child tools create their own PlanModeEnv; sync store root from parent
         -- params is handled by noteSessionDir on the parent path. If the parent
@@ -2066,7 +2077,11 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                     , loopApprove = \call -> childApprove policy tools call
                     , loopCancel = env.subCancel
                     }
-            result <- runLoop config previous prompt
+            result <- runLoopInputs config previous [AgentMessage prompt]
+            case result of
+                Right loopResult ->
+                    setPreviousResponseId registry env.subId loopResult.finalResponseId
+                Left _ -> pure ()
             persistSubagentSnapshot storeRootRef registry typesRef env.subId
                 session.subSessionTranscript
             pure result
@@ -2097,6 +2112,7 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 , multiTaskPath = childPath
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
+                , multiSendToRoot = Nothing
                 }
         session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
         agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
@@ -2131,7 +2147,11 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                     }
             -- XAI/OpenRouter ignore previous_response_id and replay local
             -- transcripts; still pass previous for API symmetry.
-            result <- runLoop config previous prompt
+            result <- runLoop config previous (interAgentMessagePayload prompt)
+            case result of
+                Right loopResult ->
+                    setPreviousResponseId registry env.subId loopResult.finalResponseId
+                Left _ -> pure ()
             persistSubagentSnapshot storeRootRef registry typesRef env.subId
                 session.subSessionTranscript
             pure result

@@ -79,6 +79,7 @@ sampleTurn =
         { turnAt = posixSecondsToUTCTime 0
         , turnUserText = "hello"
         , turnAssistantText = Just "hi"
+        , turnError = Nothing
         , turnResponseId = Nothing
         , turnItems = []
         , turnUsage = Nothing
