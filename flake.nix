@@ -89,7 +89,10 @@
                 };
 
                 haskellPackages = pkgs.haskellPackages.extend (
-                    final: _previous: {
+                    final: previous: {
+                        vty-unix = pkgs.haskell.lib.appendPatch
+                            previous.vty-unix
+                            ./patches/vty-unix-all-motion.patch;
                         agent-core = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;

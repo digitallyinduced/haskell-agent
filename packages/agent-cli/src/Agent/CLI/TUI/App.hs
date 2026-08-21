@@ -145,6 +145,8 @@ data AppState = AppState
     , appSkillCommands :: ![SkillCommand]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
+    , appHoveredControl :: !(Maybe Name)
+    , appPressedControl :: !(Maybe Name)
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -301,6 +303,8 @@ runFullscreen runtime workerAction = do
             , appSkillCommands = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
+            , appHoveredControl = Nothing
+            , appPressedControl = Nothing
             }
     withAsync workerAction \worker ->
         withAsync ticker \_ticker ->
@@ -413,6 +417,52 @@ confirmChoiceAt index = do
                         }
                 resolveChoice True
         _ -> pure ()
+
+handleControlMouseDown :: Name -> EventM Name AppState ()
+handleControlMouseDown name =
+    modify' \state ->
+        state
+            { appHoveredControl = Just name
+            , appPressedControl = case state.appPressedControl of
+                Nothing -> Just name
+                pressed -> pressed
+            }
+
+handleControlMouseUp
+    :: Name
+    -> EventM Name AppState ()
+    -> EventM Name AppState ()
+handleControlMouseUp name action = do
+    state <- get
+    let activate = state.appPressedControl == Just name
+    modify' \current ->
+        current
+            { appHoveredControl =
+                if activate then Nothing else Just name
+            , appPressedControl = Nothing
+            }
+    when activate action
+
+activateControl :: Name -> EventM Name AppState ()
+activateControl = \case
+    ComposerModel ->
+        handlePromptControlClick ReplChooseModel
+    ComposerEffort ->
+        handlePromptControlClick ReplChooseEffort
+    ComposerMode ->
+        handlePromptControlClick ReplCycleMode
+    ChoiceRow index ->
+        confirmChoiceAt index
+    _ ->
+        pure ()
+
+isInteractiveControl :: Name -> Bool
+isInteractiveControl = \case
+    ComposerModel -> True
+    ComposerEffort -> True
+    ComposerMode -> True
+    ChoiceRow _ -> True
+    _ -> False
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -538,7 +588,7 @@ drawApp state =
             , drawMain state
             ]
         (Nothing, Just choice, _) ->
-            [ drawChoice choice
+            [ drawChoice state choice
             , drawMain state
             ]
         (Nothing, Nothing, Just permission) ->
@@ -555,7 +605,7 @@ drawMain state =
             , drawWorkspace state
             , drawNotice state.appUi
             , drawSlashMenu state
-            , drawComposer state.appUi
+            , drawComposer state
             , drawFooter state
             ]
 
@@ -793,8 +843,8 @@ drawSlashRow selected index suggestion =
                 else row
     in clickable (SlashRow index) styled
 
-drawComposer :: UiState -> Widget Name
-drawComposer state =
+drawComposer :: AppState -> Widget Name
+drawComposer appState =
     let focused = state.uiFocus == FocusComposer
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
         mode = replModeLabel state.uiPrompt.promptMode
@@ -812,13 +862,17 @@ drawComposer state =
             | Text.null state.uiPrompt.promptModel = []
             | otherwise =
                 [ clickable ComposerModel $
-                    txt state.uiPrompt.promptModel
+                    forceAttr
+                        (controlAttr appState ComposerModel)
+                        (txt state.uiPrompt.promptModel)
                 ]
         effortControl
             | Text.null state.uiPrompt.promptEffort = []
             | otherwise =
                 [ clickable ComposerEffort $
-                    txt (" (" <> state.uiPrompt.promptEffort <> ")")
+                    forceAttr
+                        (controlAttr appState ComposerEffort)
+                        (txt (" (" <> state.uiPrompt.promptEffort <> ")"))
                 ]
         modelAndEffort = case modelControl <> effortControl of
             [] -> []
@@ -826,7 +880,12 @@ drawComposer state =
         labelWidgets =
             map txt leading
                 <> modelAndEffort
-                <> [clickable ComposerMode (txt mode) | not (Text.null mode)]
+                <> [ clickable ComposerMode $
+                        forceAttr
+                            (controlAttr appState ComposerMode)
+                            (txt mode)
+                   | not (Text.null mode)
+                   ]
         label =
             if null labelWidgets
                 then txt " "
@@ -844,6 +903,24 @@ drawComposer state =
             withBorderStyle unicodeRounded $
                 borderWithLabel (withAttr Theme.footerAttr label) $
                     editor
+  where
+    state = appState.appUi
+
+controlAttr :: AppState -> Name -> AttrName
+controlAttr state name =
+    case controlInteractionAttr state name of
+        Just attr -> attr
+        Nothing -> Theme.controlLinkAttr
+
+controlInteractionAttr :: AppState -> Name -> Maybe AttrName
+controlInteractionAttr state name
+    | state.appPressedControl == Just name
+    , state.appHoveredControl == Just name =
+        Just Theme.controlLinkActiveAttr
+    | state.appHoveredControl == Just name =
+        Just Theme.controlLinkHoverAttr
+    | otherwise =
+        Nothing
 
 renderDraft :: Bool -> UiState -> Widget Name
 renderDraft focused state =
@@ -918,8 +995,8 @@ permissionRow selected index label =
                 else widget
     in clickable (PermissionRow index) styled
 
-drawChoice :: ChoiceOverlay -> Widget Name
-drawChoice choice =
+drawChoice :: AppState -> ChoiceOverlay -> Widget Name
+drawChoice appState choice =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
@@ -937,7 +1014,9 @@ drawChoice choice =
                                                     markdownWidget choice.choiceBody
                                     , vBox $
                                         zipWith
-                                            (choiceRow choice.choiceIndex)
+                                            (choiceRow
+                                                appState
+                                                choice.choiceIndex)
                                             [start ..]
                                             rows
                                     ]
@@ -984,9 +1063,10 @@ renderTextDraft prompt =
             draftCursorLocation prompt.textDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
 
-choiceRow :: Int -> Int -> (Text, Text) -> Widget Name
-choiceRow selected index (label, detail) =
+choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
+choiceRow appState selected index (label, detail) =
     let prefix = if selected == index then "› " else "  "
+        name = ChoiceRow index
         row =
             hBox
                 [ txt (prefix <> label)
@@ -997,7 +1077,10 @@ choiceRow selected index (label, detail) =
             if selected == index
                 then withAttr Theme.selectedAttr row
                 else row
-    in clickable (ChoiceRow index) styled
+        interactive = case controlInteractionAttr appState name of
+            Nothing -> styled
+            Just attr -> forceAttr attr row
+    in clickable name interactive
 
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = case event of
@@ -1096,11 +1179,11 @@ handleEvent event = case event of
             (Nothing, Nothing, Nothing) ->
                 case (name, button) of
                     (ComposerModel, V.BLeft) ->
-                        handlePromptControlClick ReplChooseModel
+                        handleControlMouseDown ComposerModel
                     (ComposerEffort, V.BLeft) ->
-                        handlePromptControlClick ReplChooseEffort
+                        handleControlMouseDown ComposerEffort
                     (ComposerMode, V.BLeft) ->
-                        handlePromptControlClick ReplCycleMode
+                        handleControlMouseDown ComposerMode
                     (SlashRow index, V.BLeft) ->
                         activateSlashAt index
                     (SlashRow _, V.BScrollUp) ->
@@ -1116,7 +1199,7 @@ handleEvent event = case event of
             (Nothing, Just _, _) ->
                 case (name, button) of
                     (ChoiceRow index, V.BLeft) ->
-                        confirmChoiceAt index
+                        handleControlMouseDown (ChoiceRow index)
                     (ChoiceRow _, V.BScrollUp) ->
                         handleChoiceKey (V.EvKey V.KUp [])
                     (ChoiceRow _, V.BScrollDown) ->
@@ -1135,6 +1218,23 @@ handleEvent event = case event of
                     (PermissionRow index, V.BLeft) ->
                         resolvePermission (permissionChoiceAt index)
                     _ -> pure ()
+    -- The patched vty-unix backend represents no-button pointer motion as
+    -- MouseUp Nothing so Brick can route it through clickable extents.
+    MouseUp name button _
+        | isInteractiveControl name
+        , button == Just V.BLeft || button == Nothing ->
+            handleControlMouseUp name (activateControl name)
+    VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
+        modify' \state ->
+            state
+                { appHoveredControl = Nothing
+                }
+    VtyEvent (V.EvMouseUp _ _ _) ->
+        modify' \state ->
+            state
+                { appHoveredControl = Nothing
+                , appPressedControl = Nothing
+                }
     VtyEvent vtyEvent -> do
         state <- get
         case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
