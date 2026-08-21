@@ -42,3 +42,15 @@ spec = do
             parsePlanDecisionAnswer "q" `shouldBe` Just PlanCancel
             parsePlanDecisionAnswer "cancel" `shouldBe` Just PlanCancel
             parsePlanDecisionAnswer "maybe" `shouldBe` Nothing
+
+    describe "planDecisionFollowUp" do
+        it "continues immediately when the plan is approved" do
+            planDecisionFollowUp PlanApprove
+                `shouldSatisfy` maybe False (Text.isInfixOf "Begin implementing")
+
+        it "keeps revising when changes are requested" do
+            planDecisionFollowUp (PlanRequestChanges "cover retries")
+                `shouldSatisfy` maybe False (Text.isInfixOf "cover retries")
+
+        it "does not continue after cancellation" do
+            planDecisionFollowUp PlanCancel `shouldBe` Nothing

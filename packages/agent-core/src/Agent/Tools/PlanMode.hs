@@ -19,6 +19,7 @@ module Agent.Tools.PlanMode
     , readPlanMarkdown
     , writePlanMarkdown
     , planModeReminder
+    , planApprovedContinuation
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
     , enterPlanModeTool
@@ -144,6 +145,12 @@ planModeReminder path =
         , "When the plan is ready, call `exit_plan_mode` (Grok/OpenRouter) or end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block (OpenAI/Codex) so the user can approve, request changes, or cancel."
         ]
 
+planApprovedContinuation :: Text
+planApprovedContinuation =
+    "The user approved the plan. Plan mode is now off. "
+        <> "Begin implementing the approved plan immediately. "
+        <> "Do not wait for another user message."
+
 planModeBlockedEditMessage :: OsPath -> Text
 planModeBlockedEditMessage path =
     "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file ("
@@ -260,8 +267,7 @@ runExitPlanMode env args = do
             case decision of
                 PlanApprove -> do
                     deactivatePlanMode env
-                    pure $ Right
-                        "Your plan has been approved. You can now start coding."
+                    pure (Right planApprovedContinuation)
                 PlanRequestChanges notes ->
                     pure $ Right $
                         "The user requested changes to the plan. Stay in plan mode and revise plan.md.\n"
