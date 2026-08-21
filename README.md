@@ -55,6 +55,11 @@ Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
 `--provider` overrides auto-detection.
 
+Ghostty receives native progress, notifications, semantic turn boundaries,
+working-directory updates, inline images, synchronized picker redraws, and
+terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the
+CLI to inspect the detected capabilities.
+
 Build and run the CLI directly with Nix:
 
 ```console

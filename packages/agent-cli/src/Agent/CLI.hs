@@ -11,6 +11,7 @@ module Agent.CLI
     , run
     ) where
 
+import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
@@ -93,6 +94,7 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , emptyMarkdownStreamState
     , putTextLn
     , renderAssistantText
     , renderEvent
@@ -125,10 +127,31 @@ import Agent.CLI.Style
     , setCliWindowTitle
     , userBackground
     )
-import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , copyTerminalClipboard
+    , detectTerminalCapabilities
+    , emitTerminalSequence
+    , formatTerminalCapabilities
+    , osc133PromptEnd
+    , osc133PromptStart
+    , reportTerminalCwd
+    , resolveColor
+    , notifyTerminal
+    , withSynchronizedOutput
+    )
 import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Turn (runOneTurn)
-import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
+import Agent.CLI.Usage
+    ( AccountUsageLine(..)
+    , formatUsageReport
+    )
+import Agent.CLI.Worktree
+    ( createWorktree
+    , isUnderWorktreeRoot
+    , removeWorktree
+    , worktreeRoot
+    )
 import Agent.Loop
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
@@ -146,8 +169,10 @@ import Agent.OpenAI.Compaction
     , isTranscriptResetTurn
     , newSessionUserText
     )
+import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
 import Agent.OpenAI.Responses.Types
+import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
@@ -165,12 +190,14 @@ import Agent.Provider
     )
 import Agent.Subagents
     ( RunSubagent
+    , RootTurnId
     , SubagentId(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
+    , abortRootTurn
+    , beginRootTurn
     , closeSubagentRegistry
-    , interruptActiveSubagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
@@ -201,7 +228,7 @@ import Agent.Tools.Grok.Task
     , recordAgentSpec
     )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeHooks
@@ -497,6 +524,7 @@ runAgent options transition = do
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
+    rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
     let sendToRoot message = do
             atomicModifyIORef' pendingNotices \xs ->
@@ -507,12 +535,19 @@ runAgent options transition = do
             , multiSelfId = Nothing
             , multiDepth = 0
             , multiTaskPath = taskPathRoot
+            , multiRootTurnId = readIORef rootTurnRef
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
                     Left err -> pure (Left (Text.pack err))
-                    Right path -> pure (Right path)
+                    Right path -> pure $ Right SubagentWorktree
+                        { subagentWorktreePath = path
+                        , subagentWorktreeCleanup =
+                            removeWorktree source path >>= \case
+                                Left err -> pure (Left (Text.pack err))
+                                Right () -> pure (Right ())
+                        }
             , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
@@ -521,6 +556,9 @@ runAgent options transition = do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
+                terminal <- detectTerminalCapabilities stderr
+                notifyTerminal terminal stderr
+                    ("Subagent completed: " <> agentId.unSubagentId)
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
@@ -628,8 +666,8 @@ runAgent options transition = do
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                                    multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -667,8 +705,8 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -698,8 +736,8 @@ runAgent options transition = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) agentsContext escPaused interrupt
-                            multiCtx subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeBackend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -804,10 +842,12 @@ runSession
     -> OsPath
     -> OsPath
     -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
+    -> IORef (Maybe RootTurnId)
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [TurnInput]
     -> SubagentStoreRoot
@@ -815,12 +855,13 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider agentsContext escPaused interrupt multiCtx subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
+runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef backend btwBackend = do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
     textBuffer <- newIORef ""
+    markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
@@ -828,6 +869,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
     allowedToolsRef <- newIORef Set.empty
+    lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     ioLock <- newMVar ()
@@ -866,6 +908,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
+            writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
@@ -878,6 +921,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             writeIORef agentsContext fresh
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
+    terminal <- detectTerminalCapabilities stdout
+    reportTerminalCwd terminal stdout (toFilePath cwd)
     useColor <- resolveColor stdout
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
@@ -894,6 +939,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
+            , renderMarkdownState = markdownState
             , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout
@@ -904,7 +950,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
-            , renderNativeProgress = stderrTty
+            , renderNativeProgress =
+                stderrTty && terminal.terminalNativeProgress
             }
         config = LoopConfig
             { loopBackend = backend
@@ -919,6 +966,23 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                             policyRef allowedToolsRef toolRegistry planMode call
             , loopCancel = toolEnv.toolCancel
             }
+        beginSubagentTurn = do
+            case multiCtx of
+                Nothing -> pure Nothing
+                Just ctx -> do
+                    rootTurnId <- beginRootTurn ctx.multiRegistry
+                    writeIORef rootTurnRef (Just rootTurnId)
+                    pure (Just rootTurnId)
+        finishSubagentTurn rootTurnId =
+            atomicModifyIORef' rootTurnRef \current ->
+                (if current == rootTurnId then Nothing else current, ())
+        abortSubagentTurn rootTurnId = do
+            case rootTurnId of
+                Just owned -> case multiCtx of
+                    Just ctx -> abortRootTurn ctx.multiRegistry owned
+                    Nothing -> pure ()
+                Nothing -> pure ()
+            finishSubagentTurn rootTurnId
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -933,8 +997,10 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionPersist = persist
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
+            , sessionCwd = cwd
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
+            , sessionOpenAiPool = openAiPool
             , sessionAgentsContext = agentsContext
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
@@ -942,10 +1008,12 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionInterrupt = interrupt
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
+            , sessionLastAssistant = lastAssistantRef
+            , sessionTerminal = terminal
             , sessionAgentViewport = Just agentViewport
-            , sessionAbortSubagents = case multiCtx of
-                Just ctx -> interruptActiveSubagents ctx.multiRegistry
-                Nothing -> pure ()
+            , sessionBeginSubagentTurn = beginSubagentTurn
+            , sessionFinishSubagentTurn = finishSubagentTurn
+            , sessionAbortSubagentTurn = abortSubagentTurn
             , sessionReset = sessionReset
             }
     case pendingTurn of
@@ -1013,16 +1081,22 @@ replWithDraft env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
+    , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
+    , sessionOpenAiPool = openAiPool
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionLastAssistant = lastAssistantRef
+    , sessionTerminal = terminal
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout osc133PromptStart
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -1048,12 +1122,13 @@ replWithDraft env@SessionEnv
     -- any live completion rows below it.
     -- Token totals sit on the right of that line when the TTY width is known.
     usage <- readIORef usageRef
-    Text.putStrLn $ formatReplStatusLine stdoutColor termCols
-        (currentModel params)
-        (currentEffort params)
-        idleMode
-        usage
-    hFlush stdout
+    withSynchronizedOutput terminal stdout do
+        Text.putStrLn $ formatReplStatusLine stdoutColor termCols
+            (currentModel params)
+            (currentEffort params)
+            idleMode
+            usage
+        hFlush stdout
     -- Solarized user wash under the prompt; the inline editor redraws it.
     -- Ctrl+U keeps the familiar kill-to-start behavior.
     let modeTag
@@ -1074,6 +1149,8 @@ replWithDraft env@SessionEnv
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
     mline <- readReplLineWithInitial interrupt chromePrompt draft
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout osc133PromptEnd
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
@@ -1223,6 +1300,40 @@ replWithDraft env@SessionEnv
                                         writeIORef viewport.viewportSelected target
                                 continue
 
+                    ReplCopyLast -> do
+                        answer <- readIORef lastAssistantRef
+                        maybe (copyMissing "no assistant response to copy")
+                            (copyValue terminal "last response") answer
+                        continue
+                    ReplCopyCode index -> do
+                        answer <- readIORef lastAssistantRef
+                        case answer >>= fencedCodeBlock index of
+                            Nothing -> copyMissing
+                                ("code block " <> Text.pack (show index) <> " was not found")
+                            Just block -> copyValue terminal
+                                ("code block " <> Text.pack (show index)) block
+                        continue
+                    ReplCopyDiff -> do
+                        answer <- readIORef lastAssistantRef
+                        case answer >>= lastDiffBlock of
+                            Nothing -> copyMissing "no diff block was found"
+                            Just block -> copyValue terminal "diff block" block
+                        continue
+                    ReplCopyPath -> do
+                        copyValue terminal "worktree path" (toText cwd)
+                        continue
+                    ReplCopySession -> do
+                        sessionId <- currentSessionId persist
+                        maybe
+                            (copyMissing "this session has no persisted id yet")
+                            (copyValue terminal "session id")
+                            sessionId
+                        continue
+                    ReplShowTerminal -> do
+                        Text.putStrLn
+                            (roleMuted color
+                                (formatTerminalCapabilities terminal))
+                        continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -1477,6 +1588,9 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         runLoginManager color
                         continue
+                    ReplUsage -> do
+                        showAccountUsage provider tokenProvider openAiPool
+                        continue
                     ReplReloadAuth -> do
                         reloadAuth provider tokenProvider
                         continue
@@ -1492,6 +1606,71 @@ replWithDraft env@SessionEnv
     continueWith keptDraft =
         replWithDraft env keptDraft
 
+showAccountUsage
+    :: Provider
+    -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
+    -> IO ()
+showAccountUsage provider tokenProvider openAiPool = do
+    color <- resolveColor stdout
+    now <- getCurrentTime
+    case provider of
+        OpenAIProvider ->
+            case openAiPool of
+                Just pool -> do
+                    snapshots <- OpenAI.snapshotAccounts pool
+                    lines_ <- mapM fetchSnapshot snapshots
+                    Text.putStrLn (formatUsageReport color now lines_)
+                Nothing ->
+                    case tokenProvider of
+                        Just provider_ ->
+                            getNextToken provider_ Nothing >>= \case
+                                Left err ->
+                                    Text.putStrLn
+                                        (roleError color
+                                            ("usage: " <> Text.pack (show err)))
+                                Right credential -> do
+                                    result <- fetchUsage
+                                        credential.accessToken credential.accountId
+                                    Text.putStrLn $
+                                        formatUsageReport color now
+                                            [ AccountUsageLine
+                                                { usageAccountId = credential.accountId
+                                                , usageCooldownUntil = Nothing
+                                                , usageResult = result
+                                                }
+                                            ]
+                        Nothing ->
+                            Text.putStrLn
+                                (roleMuted color "usage: no OpenAI credentials loaded")
+        _ ->
+            Text.putStrLn $
+                roleMuted color
+                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
+
+fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
+fetchSnapshot snapshot = do
+    result <- fetchUsage
+        snapshot.snapshotAuth.accessToken
+        snapshot.snapshotAuth.accountId
+    pure AccountUsageLine
+        { usageAccountId = snapshot.snapshotAuth.accountId
+        , usageCooldownUntil = snapshot.snapshotCooldownUntil
+        , usageResult = result
+        }
+copyMissing :: Text -> IO ()
+copyMissing message = do
+    color <- resolveColor stderr
+    Text.hPutStrLn stderr (roleError color message)
+
+copyValue :: TerminalCapabilities -> Text -> Text -> IO ()
+copyValue terminal label payload = do
+    copied <- copyTerminalClipboard terminal stdout payload
+    color <- resolveColor stderr
+    Text.hPutStrLn stderr $
+        if copied
+            then roleSuccess color (glyphOk <> "copied " <> label)
+            else roleError color "terminal clipboard is unavailable"
 applyModelChange
     :: Provider
     -> Text
@@ -2165,6 +2344,7 @@ runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connect
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
+                , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
                 , multiSendToRoot = sendToRoot
@@ -2242,6 +2422,7 @@ runHttpSubagent options policy planHooks paramsRef provider mkBackend registry s
                 , multiSelfId = Just env.subId
                 , multiDepth = env.subDepth
                 , multiTaskPath = childPath
+                , multiRootTurnId = pure env.subRootTurnId
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
                 , multiSendToRoot = Nothing

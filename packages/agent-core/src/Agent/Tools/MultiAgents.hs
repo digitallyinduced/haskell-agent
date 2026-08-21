@@ -4,6 +4,7 @@
 -- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
+    , SubagentWorktree(..)
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
@@ -12,15 +13,16 @@ module Agent.Tools.MultiAgents
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentRegistry
+    , RootTurnId
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , encodeStatus
     , interruptSubagent
     , listAgents
-    , queueMessageFrom
+    , queueMessageFromForTurn
     , resolveAgentTarget
-    , sendInputMessage
-    , spawnSubagentAt
+    , sendInputMessageForTurn
+    , spawnSubagentAtForTurn
     , waitAnyLive
     , waitSubagents
     )
@@ -67,17 +69,23 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
+data SubagentWorktree = SubagentWorktree
+    { subagentWorktreePath :: !OsPath
+    , subagentWorktreeCleanup :: !(IO (Either Text ()))
+    }
+
 -- | Per-agent identity for nesting depth / parent linkage / task path.
 data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
     , multiSelfId :: !(Maybe SubagentId)
     , multiDepth :: !Int
     , multiTaskPath :: !TaskPath
+    , multiRootTurnId :: !(IO (Maybe RootTurnId))
       -- | Optional host hook to rehydrate a closed/missing agent from disk
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
       -- | Optional host hook for Grok-style isolated worktree children.
-    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text OsPath)))
+    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }
@@ -167,8 +175,10 @@ runSpawn ctx call args
         pure (Left "fork_turns must be none, all, or a positive integer string")
     | otherwise = do
         _ <- pure (args.model, args.reasoningEffort, args.forkTurns)
-        result <- spawnSubagentAt
+        rootTurnId <- ctx.multiRootTurnId
+        result <- spawnSubagentAtForTurn
             ctx.multiRegistry
+            rootTurnId
             ctx.multiSelfId
             ctx.multiTaskPath
             ctx.multiDepth
@@ -314,8 +324,10 @@ runSendMessage ctx call args
                 resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
                 case resolved of
                     Left err -> pure (Left err)
-                    Right agentId ->
-                        queueMessageFrom ctx.multiRegistry ctx.multiTaskPath agentId
+                    Right agentId -> do
+                        rootTurnId <- ctx.multiRootTurnId
+                        queueMessageFromForTurn ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
                             (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
@@ -347,8 +359,10 @@ runFollowup ctx call args
                 resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
                 case resolved of
                     Left err -> pure (Left err)
-                    Right agentId ->
-                        sendInputMessage ctx.multiRegistry ctx.multiTaskPath agentId
+                    Right agentId -> do
+                        rootTurnId <- ctx.multiRootTurnId
+                        sendInputMessageForTurn ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
                             (messageContent call args.message) False
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)

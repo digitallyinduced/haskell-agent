@@ -2,7 +2,7 @@ module Agent.Tools.Grok.TaskSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
 import Agent.InterAgentMessage (interAgentMessagePayload)
-import Agent.OsPath (fromFilePath)
+import Agent.OsPath (OsPath, fromFilePath)
 import Agent.Subagents
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -12,12 +12,13 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Grok.Task
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolSchema(..)
     )
+import Control.Concurrent.MVar
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -37,7 +38,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -46,6 +47,20 @@ spec = describe "Agent.Tools.Grok.Task" do
         result.output `shouldSatisfy` Text.isInfixOf "subagent_id: agent-"
         specs <- Map.elems <$> readIORef typesRef
         map (\entry -> entry.modelOverride) specs `shouldBe` [Just "grok-4.5-mini"]
+        closeSubagentRegistry registry
+
+    it "records overrides before the child worker starts" do
+        typesRef <- newIORef Map.empty
+        observed <- newEmptyMVar
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (observeSpec typesRef observed)
+            (\_ _ -> pure ())
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) Nothing Nothing Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+            (functionToolCall "c1" "task" raceArgs)
+        takeMVar observed `shouldReturn` (Just "explore", Just "grok-4.5-mini")
         closeSubagentRegistry registry
 
     it "filters explore tools to the Grok Build read-only set" do
@@ -71,15 +86,30 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let createIsolated _ = pure (Right (fromFilePath "/tmp"))
-            ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-                (Just createIsolated) Nothing
+        let createIsolated _ = pure $ Right SubagentWorktree
+                { subagentWorktreePath = fromFilePath "/tmp"
+                , subagentWorktreeCleanup = pure (Right ())
+                }
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
+                Nothing (Just createIsolated) Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"x\",\"description\":\"y\",\"isolation\":\"worktree\"}")
         result.output `shouldSatisfy` Text.isInfixOf "worktree_path: /tmp"
         closeSubagentRegistry registry
+
+    it "cleans up worktrees after failed registry admission" do
+        cleaned <- newIORef False
+        registry <- closedRegistry
+        typesRef <- newIORef Map.empty
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+            (functionToolCall "c1" "task" worktreeArgs)
+        result.output `shouldSatisfy` Text.isInfixOf "registry is closed"
+        readIORef cleaned `shouldReturn` True
 
 fake :: Text -> AppTool
 fake name = AppTool
@@ -89,3 +119,44 @@ fake name = AppTool
     , appToolHandler = noArgsTool name (pure (Right "ok"))
     , appToolApproval = AlwaysReadOnly
     }
+
+raceArgs :: Text
+raceArgs =
+    "{\"prompt\":\"hello\",\"description\":\"race test\",\
+    \\"subagent_type\":\"explore\",\"model\":\"grok-4.5-mini\"}"
+
+observeSpec
+    :: GrokSubagentSpecs
+    -> MVar (Maybe Text, Maybe Text)
+    -> RunSubagent
+observeSpec specs observed env _ _ _ = do
+    agentType <- lookupAgentType specs env.subId
+    agentModel <- lookupAgentModel specs env.subId
+    putMVar observed (agentType, agentModel)
+    pure $ Right LoopResult
+        { finalResponseId = "c"
+        , finalText = Just "done"
+        , turnsUsed = 1
+        , tokenUsage = emptyTokenUsage
+        }
+
+worktreeArgs :: Text
+worktreeArgs =
+    "{\"prompt\":\"x\",\"description\":\"cleanup\",\
+    \\"isolation\":\"worktree\"}"
+
+closedRegistry :: IO SubagentRegistry
+closedRegistry = do
+    registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+        (\_ _ -> pure ())
+    closeSubagentRegistry registry
+    pure registry
+
+cleanupLease :: IORef Bool -> OsPath -> IO (Either Text SubagentWorktree)
+cleanupLease cleaned _ =
+    pure $ Right SubagentWorktree
+        { subagentWorktreePath = fromFilePath "/tmp/isolate"
+        , subagentWorktreeCleanup =
+            writeIORef cleaned True >> pure (Right ())
+        }

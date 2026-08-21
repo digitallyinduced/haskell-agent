@@ -185,11 +185,13 @@ spec = do
                 body `shouldSatisfy` (not . Text.isInfixOf "secret plan")
                 body `shouldSatisfy` (not . Text.isInfixOf "Thought for")
 
-        it "streams TextDelta append-only in color mode" do
+        it "styles inline markdown while streaming append-only in color mode" do
             withRenderConfig False True \config handle path -> do
-                renderEvent config (TextDelta "see `file.txt`")
+                renderEvent config (TextDelta "say **")
+                renderEvent config (TextDelta "hello")
+                renderEvent config (TextDelta "** there")
                 buffered <- readIORef config.renderTextBuffer
-                buffered `shouldBe` "see `file.txt`"
+                buffered `shouldBe` "say **hello** there"
                 live <- readIORef config.renderLiveActive
                 live `shouldBe` True
                 printed <- readIORef config.renderPrintedText
@@ -202,24 +204,37 @@ spec = do
                     })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "file.txt"
+                body `shouldSatisfy` Text.isInfixOf "hello"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
-                body `shouldSatisfy` Text.isInfixOf "`file.txt`"
+                body `shouldSatisfy` (not . Text.isInfixOf "**")
                 readIORef config.renderLiveActive `shouldReturn` False
 
         it "does not repaint earlier content across deltas" do
             withRenderConfig False True \config handle path -> do
-                renderEvent config (TextDelta "see `fi")
-                renderEvent config (TextDelta "le.txt`")
+                renderEvent config (TextDelta "first ")
+                renderEvent config (TextDelta "second")
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "see `fi"
-                body `shouldSatisfy` Text.isInfixOf "le.txt`"
-                Text.count "see " body `shouldBe` 1
+                body `shouldSatisfy` Text.isInfixOf "first "
+                body `shouldSatisfy` Text.isInfixOf "second"
+                Text.count "first " body `shouldBe` 1
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
+
+        it "flushes an unmatched inline delimiter literally at turn end" do
+            withRenderConfig False True \config handle path -> do
+                renderEvent config (TextDelta "say **unfinished")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "**unfinished"
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
@@ -345,6 +360,7 @@ withRenderConfigNative showThinking color native action = do
     activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
+    markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
@@ -359,6 +375,7 @@ withRenderConfigNative showThinking color native action = do
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
+                , renderMarkdownState = markdownState
                 , renderLiveActive = liveActive
                 , renderLock = lock
                 , renderStdout = handle

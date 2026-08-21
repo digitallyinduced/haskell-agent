@@ -27,6 +27,7 @@ module Agent.Tools.PlanMode
     , askUserQuestionTool
     ) where
 
+import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.ToolArgs (objectArgs, optText, reqText)
 import Agent.ToolDSL
@@ -123,13 +124,14 @@ readPlanMarkdown env = do
     exists <- doesFileExist path
     if not exists
         then pure ""
-        else either (const "") id <$> tryAny (Text.readFile (toFilePath path))
+        else either (const "") id
+            <$> tryAny (retryOnFileBusy (Text.readFile (toFilePath path)))
 
 writePlanMarkdown :: PlanModeEnv -> Text -> IO (Either Text ())
 writePlanMarkdown env content = do
     path <- planFilePath env
     createDirectoryIfMissing True (takeDirectory path)
-    result <- tryAny (Text.writeFile (toFilePath path) content)
+    result <- tryAny (retryOnFileBusy (Text.writeFile (toFilePath path) content))
     pure $ case result of
         Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
         Right () -> Right ()

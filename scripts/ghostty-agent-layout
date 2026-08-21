@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+project_dir=${1:-"$PWD"}
+case "$project_dir" in
+    /*) ;;
+    *) project_dir="$PWD/$project_dir" ;;
+esac
+
+exec osascript "$(dirname "$0")/ghostty-agent-layout.applescript" "$project_dir"
