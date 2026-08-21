@@ -811,6 +811,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
     textBuffer <- newIORef ""
+    markdownBuffer <- newIORef ""
+    markdownContext <- newIORef Nothing
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
@@ -884,6 +886,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderColor = useColor
             , renderPrintedText = printed
             , renderTextBuffer = textBuffer
+            , renderMarkdownBuffer = markdownBuffer
+            , renderMarkdownContext = markdownContext
             , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout

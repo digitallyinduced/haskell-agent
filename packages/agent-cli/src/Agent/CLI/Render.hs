@@ -21,7 +21,11 @@ module Agent.CLI.Render
     , wrapThinkingLines
     ) where
 
-import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Markdown
+    ( renderMarkdown
+    , renderMarkdownFragment
+    , splitMarkdownFragment
+    )
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
     , osc9ProgressRemove
@@ -78,6 +82,10 @@ data RenderConfig = RenderConfig
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
+    -- | Unemitted suffix beginning at a possibly incomplete inline construct.
+    , renderMarkdownBuffer :: !(IORef Text)
+    -- | Last visible source character emitted before 'renderMarkdownBuffer'.
+    , renderMarkdownContext :: !(IORef (Maybe Char))
     -- | True after assistant text has been streamed for the current round.
     , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
@@ -113,6 +121,8 @@ renderEventUnlocked config = \case
         appendReasoningUnlocked config delta
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
+        writeIORef config.renderMarkdownBuffer ""
+        writeIORef config.renderMarkdownContext Nothing
         writeIORef config.renderLiveActive False
         writeIORef config.renderReasoningBuffer ""
         writeIORef config.renderActivityRef "Thinking…"
@@ -150,23 +160,33 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
--- | Stream assistant text append-only.
+-- | Stream assistant text append-only while buffering incomplete inline
+-- markdown constructs. Once a closing delimiter arrives, the whole construct
+-- is emitted with styling and neither delimiter reaches the terminal.
 --
 -- Repainting the full accumulated response with DECSC/DECRC looks correct
 -- inside the current viewport, but once a repaint scrolls the terminal the
 -- previous frame has already entered scrollback and cannot be erased. Long
--- responses therefore appeared there many times. Markdown styling that needs
--- future context is reserved for non-streaming responses.
+-- responses therefore appeared there many times.
 streamAssistantDelta :: RenderConfig -> Text -> IO ()
 streamAssistantDelta config delta
     | Text.null delta = pure ()
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
-        writeIORef config.renderPrintedText True
-        writeIORef config.renderLiveActive True
-        Text.hPutStr config.renderStdout
-            (paintBackgroundLines True agentBackground safe)
-        hFlush config.renderStdout
+        pending <- readIORef config.renderMarkdownBuffer
+        context <- readIORef config.renderMarkdownContext
+        let (ready, pending', nextContext) =
+                splitMarkdownFragment context (pending <> safe)
+        writeIORef config.renderMarkdownBuffer pending'
+        unless (Text.null ready) do
+            writeIORef config.renderPrintedText True
+            writeIORef config.renderLiveActive True
+            writeIORef config.renderMarkdownContext nextContext
+            Text.hPutStr config.renderStdout
+                ( paintBackgroundLines True agentBackground
+                    (renderMarkdownFragment True context ready)
+                )
+            hFlush config.renderStdout
 
 -- | End-of-turn: keep live paint when deltas already drew; otherwise paint
 -- once from the buffer or completed 'assistantText' (non-streaming backends).
@@ -175,11 +195,21 @@ finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
     buffered <- readIORef config.renderTextBuffer
     writeIORef config.renderTextBuffer ""
+    pending <- readIORef config.renderMarkdownBuffer
+    writeIORef config.renderMarkdownBuffer ""
+    context <- readIORef config.renderMarkdownContext
+    writeIORef config.renderMarkdownContext Nothing
     live <- readIORef config.renderLiveActive
     writeIORef config.renderLiveActive False
     if live
         then do
             writeIORef config.renderPrintedText True
+            unless (Text.null pending) do
+                Text.hPutStr config.renderStdout
+                    ( paintBackgroundLines True agentBackground
+                        (renderMarkdownFragment True context pending)
+                    )
+                hFlush config.renderStdout
             pure True
         else do
             let raw
