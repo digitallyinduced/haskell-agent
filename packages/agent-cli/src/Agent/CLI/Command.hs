@@ -47,6 +47,12 @@ data ReplAction
         }
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplCopyLast
+    | ReplCopyCode Int
+    | ReplCopyDiff
+    | ReplCopyPath
+    | ReplCopySession
+    | ReplShowTerminal
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
@@ -87,6 +93,12 @@ slashCommands =
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
     , cmd "attachments" [] "/attachments" "List queued clipboard images"
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
+    , cmd "copy" ["copy-last"] "/copy" "Copy the last assistant response"
+    , cmd "copy-code" [] "/copy-code [N]" "Copy fenced code block N from the last response"
+    , cmd "copy-diff" [] "/copy-diff" "Copy the last diff block"
+    , cmd "copy-path" [] "/copy-path" "Copy the active worktree path"
+    , cmd "copy-session" [] "/copy-session" "Copy the current session id"
+    , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities"
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)"
     ]
   where
@@ -177,6 +189,27 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplClearAttachments
                     else ReplCommandError "usage: /clear-attachments"
+            "copy" ->
+                if null args
+                    then ReplCopyLast
+                    else ReplCommandError "usage: /copy"
+            "copy-code" -> parseCopyCodeCommand args
+            "copy-diff" ->
+                if null args
+                    then ReplCopyDiff
+                    else ReplCommandError "usage: /copy-diff"
+            "copy-path" ->
+                if null args
+                    then ReplCopyPath
+                    else ReplCommandError "usage: /copy-path"
+            "copy-session" ->
+                if null args
+                    then ReplCopySession
+                    else ReplCommandError "usage: /copy-session"
+            "terminal" ->
+                if null args
+                    then ReplShowTerminal
+                    else ReplCommandError "usage: /terminal"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -203,6 +236,14 @@ parseResumeCommand = \case
             ReplCommandError "usage: /resume [ID]"
         | otherwise -> ReplResume (Just sessionId)
     _ -> ReplCommandError "usage: /resume [ID]"
+
+parseCopyCodeCommand :: [Text] -> ReplAction
+parseCopyCodeCommand = \case
+    [] -> ReplCopyCode 1
+    [raw] -> case reads (Text.unpack raw) of
+        [(n, "")] | n > 0 -> ReplCopyCode n
+        _ -> ReplCommandError "usage: /copy-code [N]"
+    _ -> ReplCommandError "usage: /copy-code [N]"
 
 isAlwaysApproveAlias :: Text -> Bool
 isAlwaysApproveAlias name =

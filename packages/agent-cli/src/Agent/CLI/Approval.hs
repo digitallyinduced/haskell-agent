@@ -1,6 +1,7 @@
 -- | Parent and child tool-approval policy for interactive CLI sessions.
 module Agent.CLI.Approval
     ( approveToolDecision
+    , approveToolDecisionWithPromptNotice
     , childApprove
     , toggleAlwaysApprove
     ) where
@@ -53,6 +54,19 @@ approveToolDecision
     -> ToolCall
     -> IO (Either Text Bool)
 approveToolDecision policyRef allowedToolsRef tools planMode call = do
+    approveToolDecisionWithPromptNotice
+        (pure ()) policyRef allowedToolsRef tools planMode call
+
+approveToolDecisionWithPromptNotice
+    :: IO ()
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> [AppTool]
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWithPromptNotice onPrompt
+        policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -89,6 +103,7 @@ approveToolDecision policyRef allowedToolsRef tools planMode call = do
                                     PromptMutating
                                         | readOnly -> pure (Right True)
                                         | otherwise -> do
+                                            onPrompt
                                             color <- resolveColor stderr
                                             promptPermission color call >>= \case
                                                 Nothing -> pure (Right False)

@@ -27,6 +27,7 @@ import Agent.CLI.Progress
     , osc9ProgressRemove
     , wrapOscForTmux
     )
+import Agent.CLI.Terminal (fileUri)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -37,6 +38,7 @@ import Agent.CLI.Style
     , glyphToolAccent
     , glyphToolOut
     , paintBackgroundLines
+    , osc8Link
     , roleError
     , roleMuted
     , roleSuccess
@@ -500,7 +502,7 @@ formatToolStarted color call =
                         | otherwise -> " " <> roleToolDetail color detail
                     ToolDetailPath
                         | Text.null detail -> ""
-                        | otherwise -> " " <> roleToolPath color detail
+                        | otherwise -> " " <> renderToolPath color detail
                     ToolDetailCommand
                         | Text.null detail -> ""
                         | otherwise -> " " <> roleToolCommand color detail
@@ -559,9 +561,9 @@ formatSearchReplaceDiff color arguments =
         newText = jsonTextFieldDefault "new_string" arguments
         header = case (Text.null oldText, Text.null newText) of
             (True, False) ->
-                roleMuted color "  create " <> roleToolPath color path
+                roleMuted color "  create " <> renderToolPath color path
             (False, True) ->
-                roleMuted color "  delete " <> roleToolPath color path
+                roleMuted color "  delete " <> renderToolPath color path
             _ -> ""
         oldLines = Text.lines oldText
         newLines = Text.lines newText
@@ -577,6 +579,13 @@ formatSearchReplaceDiff color arguments =
                 else [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
         body = shown <> more
     in Text.intercalate "\n" (filter (not . Text.null) (header : body))
+
+renderToolPath :: Bool -> Text -> Text
+renderToolPath color path =
+    let styled = roleToolPath color path
+    in if "/" `Text.isPrefixOf` path
+        then osc8Link color (fileUri (Text.unpack path)) styled
+        else styled
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case call.name of

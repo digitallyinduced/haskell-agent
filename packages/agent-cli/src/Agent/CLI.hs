@@ -11,9 +11,10 @@ module Agent.CLI
     , run
     ) where
 
+import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth)
 import Agent.CLI.Approval
-    ( approveToolDecision
+    ( approveToolDecisionWithPromptNotice
     , childApprove
     , toggleAlwaysApprove
     )
@@ -111,7 +112,19 @@ import Agent.CLI.Style
     , setCliWindowTitle
     , userBackground
     )
-import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , copyTerminalClipboard
+    , detectTerminalCapabilities
+    , emitTerminalSequence
+    , formatTerminalCapabilities
+    , osc133PromptEnd
+    , osc133PromptStart
+    , reportTerminalCwd
+    , resolveColor
+    , notifyTerminal
+    , withSynchronizedOutput
+    )
 import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Worktree (createWorktree, isUnderWorktreeRoot, worktreeRoot)
@@ -148,6 +161,7 @@ import Agent.Provider
     , getNextToken
     , providerSlug
     )
+import Agent.ToolDispatch (ToolCall(..))
 import Agent.Subagents
     ( RunSubagent
     , SubagentId(..)
@@ -483,6 +497,9 @@ runAgent options transition = do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [formatCompletionNotice agentId status], ())
+                terminal <- detectTerminalCapabilities stderr
+                notifyTerminal terminal stderr
+                    ("Subagent completed: " <> agentId.unSubagentId)
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
@@ -780,6 +797,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
     allowedToolsRef <- newIORef Set.empty
+    lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     ioLock <- newMVar ()
@@ -787,6 +805,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
+            writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             case multiCtx of
@@ -798,6 +817,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             writeIORef agentsContext fresh
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
+    terminal <- detectTerminalCapabilities stdout
+    reportTerminalCwd terminal stdout cwd
     useColor <- resolveColor stdout
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
@@ -824,7 +845,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
-            , renderNativeProgress = stderrTty
+            , renderNativeProgress =
+                stderrTty && terminal.terminalNativeProgress
             }
         config = LoopConfig
             { loopBackend = backend
@@ -835,7 +857,9 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
                     withStdinPaused escPaused $
-                        approveToolDecision
+                        approveToolDecisionWithPromptNotice
+                            (notifyTerminal terminal stderr
+                                ("Approval required: " <> call.name))
                             policyRef allowedToolsRef tools planMode call
             , loopCancel = toolEnv.toolCancel
             }
@@ -853,6 +877,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionPersist = persist
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
+            , sessionCwd = cwd
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionAgentsContext = agentsContext
@@ -862,6 +887,8 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionInterrupt = interrupt
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
+            , sessionLastAssistant = lastAssistantRef
+            , sessionTerminal = terminal
             , sessionReset = sessionReset
             }
     case pendingTurn of
@@ -924,6 +951,7 @@ replWithDraft env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
+    , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
@@ -931,8 +959,12 @@ replWithDraft env@SessionEnv
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionLastAssistant = lastAssistantRef
+    , sessionTerminal = terminal
     , sessionReset = sessionReset
     } draft = do
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout osc133PromptStart
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -945,12 +977,13 @@ replWithDraft env@SessionEnv
     -- Token totals sit on the right of that line when the TTY width is known.
     termCols <- fmap snd <$> getTerminalSize
     usage <- readIORef usageRef
-    Text.putStrLn $ formatReplStatusLine stdoutColor termCols
-        (currentModel params)
-        (currentEffort params)
-        idleMode
-        usage
-    hFlush stdout
+    withSynchronizedOutput terminal stdout do
+        Text.putStrLn $ formatReplStatusLine stdoutColor termCols
+            (currentModel params)
+            (currentEffort params)
+            idleMode
+            usage
+        hFlush stdout
     -- Solarized user wash under the prompt; haskeline redraws it on edit.
     -- Cmd+Delete / Ctrl+U kill-to-start via haskeline Emacs bindings.
     let modeTag
@@ -967,6 +1000,8 @@ replWithDraft env@SessionEnv
                     then Text.pack clearFromCursorToLineEndCode
                     else mempty
     mline <- readReplLineWithInitial interrupt chromePrompt draft
+    when terminal.terminalSemanticPrompts $
+        emitTerminalSequence terminal stdout osc133PromptEnd
     Text.putStr (endBackground stdoutColor)
     hFlush stdout
     case mline of
@@ -1099,6 +1134,40 @@ replWithDraft env@SessionEnv
                         Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
                         continue
 
+                    ReplCopyLast -> do
+                        answer <- readIORef lastAssistantRef
+                        maybe (copyMissing "no assistant response to copy")
+                            (copyValue terminal "last response") answer
+                        continue
+                    ReplCopyCode index -> do
+                        answer <- readIORef lastAssistantRef
+                        case answer >>= fencedCodeBlock index of
+                            Nothing -> copyMissing
+                                ("code block " <> Text.pack (show index) <> " was not found")
+                            Just block -> copyValue terminal
+                                ("code block " <> Text.pack (show index)) block
+                        continue
+                    ReplCopyDiff -> do
+                        answer <- readIORef lastAssistantRef
+                        case answer >>= lastDiffBlock of
+                            Nothing -> copyMissing "no diff block was found"
+                            Just block -> copyValue terminal "diff block" block
+                        continue
+                    ReplCopyPath -> do
+                        copyValue terminal "worktree path" (Text.pack cwd)
+                        continue
+                    ReplCopySession -> do
+                        sessionId <- currentSessionId persist
+                        maybe
+                            (copyMissing "this session has no persisted id yet")
+                            (copyValue terminal "session id")
+                            sessionId
+                        continue
+                    ReplShowTerminal -> do
+                        Text.putStrLn
+                            (roleMuted color
+                                (formatTerminalCapabilities terminal))
+                        continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
@@ -1364,6 +1433,20 @@ replWithDraft env@SessionEnv
     continue = continueWith ""
     continueWith keptDraft =
         replWithDraft env keptDraft
+
+copyMissing :: Text -> IO ()
+copyMissing message = do
+    color <- resolveColor stderr
+    Text.hPutStrLn stderr (roleError color message)
+
+copyValue :: TerminalCapabilities -> Text -> Text -> IO ()
+copyValue terminal label payload = do
+    copied <- copyTerminalClipboard terminal stdout payload
+    color <- resolveColor stderr
+    Text.hPutStrLn stderr $
+        if copied
+            then roleSuccess color (glyphOk <> "copied " <> label)
+            else roleError color "terminal clipboard is unavailable"
 
 applyModelChange
     :: Provider
