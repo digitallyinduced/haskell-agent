@@ -49,9 +49,10 @@ From `nix develop`, `repl` opens `cabal repl lib:agent-cli` (via expect) and
 starts the agent with a GHCi `:cmd` loop. Development REPL sessions default to
 OpenAI `gpt-5.6-sol` with `--yolo`. On first open it also passes `--worktree`
 when the cwd is not already under `~/.haskell-agent/worktrees`. Inside the agent
-REPL, `:reload` writes `~/.haskell-agent/dev-resume`, returns to GHCi, reloads
-modules, and resumes the same session automatically. `:q` exits the agent back
-to `ghci>`.
+REPL, `:reload` returns to GHCi, reloads modules, and resumes the same session
+automatically through that REPL's GHCi continuation. Concurrent development
+REPLs therefore keep independent reload state. `:q` exits the agent back to
+`ghci>`.
 
 Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /

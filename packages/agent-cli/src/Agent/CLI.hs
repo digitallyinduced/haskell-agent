@@ -6,6 +6,7 @@ module Agent.CLI
     , cycleReplInteraction
     , devArgs
     , devMain
+    , devMainResume
     , formatReplStatusLine
     , formatTokenUsage
     , run
@@ -353,26 +354,30 @@ import System.Timeout (timeout)
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
     = DevQuit
-    | DevReload
+    | DevReload Text
     deriving (Eq, Show)
 
 data RunResult
     = RunQuit
-    | RunReload
+    | RunReload Text
     | RunSwitchProvider ProviderTransition
     | RunProviderStartFailed ApiError
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
 
--- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
+-- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
+-- session. Keeping the id in the generated GHCi command avoids a shared
+-- cross-process resume pointer when several development REPLs are open.
 afterDev :: DevResult -> IO String
 afterDev = \case
     DevQuit -> pure ""
-    DevReload -> pure $ unlines
+    DevReload sessionId -> pure $ unlines
         [ ":reload"
         , ":module +Agent.CLI"
-        , ":cmd afterDev =<< devMain"
+        , ":cmd afterDev =<< devMainResume (Just "
+            <> show (Text.unpack sessionId)
+            <> ")"
         ]
 
 -- | Arguments used by the development @repl@ launcher.
@@ -392,14 +397,16 @@ devArgs resumeId underWorktree = case resumeId of
         ]
             <> ["--worktree" | not underWorktree]
 
--- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
--- On first open (no resume pointer), selects OpenAI/gpt-5.6-sol with yolo
--- enabled and passes @--worktree@ unless the cwd is already under
--- @~/.haskell-agent/worktrees@.
+-- | Start a fresh agent from GHCi (@repl@).
 devMain :: IO DevResult
-devMain = do
+devMain = devMainResume Nothing
+
+-- | Start or resume the GHCi-driven agent. 'afterDev' embeds the session id in
+-- the next @:cmd@ invocation, so concurrent REPLs cannot consume each other's
+-- reload state.
+devMainResume :: Maybe Text -> IO DevResult
+devMainResume resumeId = do
     home <- getHomeDirectory
-    resumeId <- readDevResumePointer home
     underWorktree <- case resumeId of
         Just _ -> pure True
         Nothing -> do
@@ -408,9 +415,7 @@ devMain = do
             pure (isUnderWorktreeRoot root cwd)
     let args = devArgs resumeId underWorktree
     case parseArgs args of
-        Left err -> do
-            clearDevResumePointer home
-            die err
+        Left err -> die err
         Right ShowHelp -> putStr usage >> pure DevQuit
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right Login -> do
@@ -422,8 +427,8 @@ devMain = do
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
-                DevQuit -> clearDevResumePointer home >> pure DevQuit
-                DevReload -> pure DevReload
+                DevQuit -> pure DevQuit
+                DevReload sessionId -> pure (DevReload sessionId)
 
 run :: IO ()
 run = do
@@ -441,16 +446,16 @@ run = do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
-                DevReload -> do
-                    home <- getHomeDirectory
-                    clearDevResumePointer home
+                DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options = go options Nothing
+runAgentWithRestarts options = do
+    originalCwd <- getCurrentDirectory
+    go options Nothing `finally` setCurrentDirectory originalCwd
   where
     go current transition =
         runAgent current transition >>= \case
@@ -481,7 +486,7 @@ runAgentWithRestarts options = go options Nothing
                                     pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
-            RunReload -> pure DevReload
+            RunReload sessionId -> pure (DevReload sessionId)
 
 runListSessions :: IO ()
 runListSessions = do
@@ -2453,7 +2458,6 @@ requestReload
     :: Persistence
     -> IO RunResult
 requestReload persist = do
-    home <- getHomeDirectory
     color <- resolveColor stderr
     case persist of
         PersistenceDisabled -> do
@@ -2462,11 +2466,10 @@ requestReload persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
-            writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
-            pure RunReload
+            pure (RunReload handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv
