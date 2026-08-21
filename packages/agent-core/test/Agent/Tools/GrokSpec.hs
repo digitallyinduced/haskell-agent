@@ -281,6 +281,16 @@ spec = describe "Agent.Tools.Grok" do
             closeGrokSession session
             doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` False
 
+    it "stops background commands when the session closes" do
+        withTempSession \(session, ghci) -> do
+            let escaped = toFilePath session.grokEnv.toolCwd </> "escaped"
+            started <- runTool session ghci "run_terminal_cmd"
+                "{\"command\":\"sleep 1; touch escaped\",\"description\":\"cleanup test\",\"background\":true}"
+            started `shouldSatisfy` Text.isInfixOf "task_id:"
+            closeGrokSession session
+            threadDelay 1500000
+            doesFileExist escaped `shouldReturn` False
+
     describe "hasUnwaitedBackgroundOp" do
         it "detects a trailing bare ampersand" do
             hasUnwaitedBackgroundOp "sleep 1 &" `shouldBe` True

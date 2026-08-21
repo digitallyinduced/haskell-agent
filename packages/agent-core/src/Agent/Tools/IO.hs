@@ -10,6 +10,7 @@ module Agent.Tools.IO
     , listDirectoryEntries
     , runShellCommand
     , startShellCommand
+    , stopShellCommand
     , runningLiveOutput
     , truncateText
     ) where
@@ -25,12 +26,30 @@ import Agent.Tools.FileSystem
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Concurrent (forkFinally, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Monad (void)
-import Control.Concurrent.Async (concurrently, race)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
+import Control.Concurrent.Async
+    ( Async
+    , async
+    , cancel
+    , concurrently
+    , race
+    , waitCatch
+    )
+import Control.Concurrent.MVar
+    ( MVar
+    , newEmptyMVar
+    , readMVar
+    , tryPutMVar
+    )
 import Control.Exception (evaluate)
-import Control.Exception.Safe (SomeException, try)
+import Control.Exception.Safe
+    ( SomeException
+    , finally
+    , mask
+    , onException
+    , try
+    )
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -46,6 +65,7 @@ import System.Process
     , createProcess
     , interruptProcessGroupOf
     , shell
+    , terminateProcess
     , waitForProcess
     )
 
@@ -63,6 +83,7 @@ data RunningCommand = RunningCommand
     , runningStdout :: !(IORef BS.ByteString)
     , runningStderr :: !(IORef BS.ByteString)
     , runningCap :: !Int
+    , runningSupervisor :: !(Async ())
     }
 
 -- | Bytes already drained from a still-running command, decoded and capped.
@@ -170,8 +191,8 @@ cancelledResult = CommandResult
     , commandCancelled = True
     }
 
--- | Start a command without waiting. The result is written to 'runningResult'
--- when the process exits. Use 'interruptProcessGroupOf' on 'runningHandle' to kill it.
+-- | Start a command without waiting. Call 'stopShellCommand' when its owner
+-- is closed or the task is explicitly killed.
 startShellCommand
     :: ToolEnv
     -> OsPath
@@ -185,46 +206,92 @@ startShellCommand env workdir command = do
             , std_err = CreatePipe
             , create_group = True
             }
-    try @_ @SomeException (createProcess spec) >>= \case
+    try @_ @SomeException
+        (acquireRunningCommand spec env.toolStdoutCap) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
-        Right (Just hin, Just hout, Just herr, processHandle) -> do
-            hClose hin
-            resultVar <- newEmptyMVar
-            stdoutRef <- newIORef BS.empty
-            stderrRef <- newIORef BS.empty
-            _ <- forkFinally
-                (do
-                    ((outBytes, errBytes), code) <- concurrently
-                        (concurrently
-                            (drainHandle hout stdoutRef)
-                            (drainHandle herr stderrRef))
-                        (waitForProcess processHandle)
-                    pure CommandResult
-                        { commandExitCode = Just (exitCodeInt code)
-                        , commandStdout = truncateText env.toolStdoutCap
-                            (decodeUtf8With lenientDecode outBytes)
-                        , commandStderr = truncateText env.toolStdoutCap
-                            (decodeUtf8With lenientDecode errBytes)
-                        , commandTimedOut = False
-                        , commandCancelled = False
-                        })
-                (publishCommandResult resultVar)
-            pure $ Right RunningCommand
-                { runningHandle = processHandle
-                , runningResult = resultVar
-                , runningStdout = stdoutRef
-                , runningStderr = stderrRef
-                , runningCap = env.toolStdoutCap
-                }
+        Right running ->
+            pure (Right running)
+
+acquireRunningCommand :: CreateProcess -> Int -> IO RunningCommand
+acquireRunningCommand spec outputCap =
+    mask \restore ->
+    restore (createProcess spec) >>= \case
+        (Just hin, Just hout, Just herr, processHandle) -> do
+            let rollback = cleanupProcess processHandle [hin, hout, herr]
+            flip onException rollback do
+                hClose hin
+                resultVar <- newEmptyMVar
+                stdoutRef <- newIORef BS.empty
+                stderrRef <- newIORef BS.empty
+                supervisor <- async $
+                    (do
+                        result <- try @_ @SomeException do
+                            ((outBytes, errBytes), code) <- concurrently
+                                (concurrently
+                                    (drainHandle hout stdoutRef)
+                                    (drainHandle herr stderrRef))
+                                (waitForProcess processHandle)
+                            pure (outBytes, errBytes, code)
+                        void $ tryPutMVar resultVar $ case result of
+                            Left exception -> commandFailure exception
+                            Right (outBytes, errBytes, code) -> CommandResult
+                                { commandExitCode = Just (exitCodeInt code)
+                                , commandStdout = truncateText outputCap
+                                    (decodeUtf8With lenientDecode outBytes)
+                                , commandStderr = truncateText outputCap
+                                    (decodeUtf8With lenientDecode errBytes)
+                                , commandTimedOut = False
+                                , commandCancelled = False
+                                })
+                    `finally` do
+                        void $ tryPutMVar resultVar cancelledResult
+                        mapM_
+                            (\handle ->
+                                void $ try @_ @SomeException (hClose handle))
+                            [hout, herr]
+                pure RunningCommand
+                    { runningHandle = processHandle
+                    , runningResult = resultVar
+                    , runningStdout = stdoutRef
+                    , runningStderr = stderrRef
+                    , runningCap = outputCap
+                    , runningSupervisor = supervisor
+                    }
+        _ -> fail "Failed to capture command output"
+
+cleanupProcess :: ProcessHandle -> [Handle] -> IO ()
+cleanupProcess processHandle handles = do
+    void $ try @_ @SomeException (interruptProcessGroupOf processHandle)
+    void $ try @_ @SomeException (terminateProcess processHandle)
+    mapM_ (\handle -> void $ try @_ @SomeException (hClose handle)) handles
+    void $ try @_ @SomeException (waitForProcess processHandle)
+
+stopShellCommand :: RunningCommand -> IO ()
+stopShellCommand running = do
+    void $ try @_ @SomeException
+        (interruptProcessGroupOf running.runningHandle)
+    stopped <- race
+        (threadDelay 5000000)
+        (readMVar running.runningResult)
+    case stopped of
         Right _ ->
-            pure $ Left "Failed to capture command output"
+            void (waitCatch running.runningSupervisor)
+        Left () -> do
+            void $ try @_ @SomeException
+                (terminateProcess running.runningHandle)
+            stoppedAfterTerminate <- race
+                (threadDelay 1000000)
+                (readMVar running.runningResult)
+            case stoppedAfterTerminate of
+                Right _ ->
+                    void (waitCatch running.runningSupervisor)
+                Left () -> do
+                    cancel running.runningSupervisor
+                    void (waitCatch running.runningSupervisor)
+                    void $ tryPutMVar running.runningResult cancelledResult
 
-publishCommandResult :: MVar CommandResult -> Either SomeException CommandResult -> IO ()
-publishCommandResult resultVar result =
-    putMVar resultVar (either failedCommandResult id result)
-
-failedCommandResult :: SomeException -> CommandResult
-failedCommandResult exception = CommandResult
+commandFailure :: SomeException -> CommandResult
+commandFailure exception = CommandResult
     { commandExitCode = Just 127
     , commandStdout = ""
     , commandStderr = Text.pack (show exception)
