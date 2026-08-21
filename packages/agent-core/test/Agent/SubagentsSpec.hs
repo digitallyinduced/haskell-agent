@@ -1,10 +1,16 @@
 module Agent.SubagentsSpec (spec) where
 
+import Agent.Cancel (isCancelled)
 import Agent.InterAgentMessage
 import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
 import Agent.OsPath (fromFilePath)
 import Agent.Subagents
-import Agent.Subagents.TaskPath (TaskPath, taskPathRoot, taskPathText)
+import Agent.Subagents.TaskPath
+    ( TaskPath
+    , parseTaskPath
+    , taskPathRoot
+    , taskPathText
+    )
 import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
@@ -17,12 +23,51 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
+import System.Timeout (timeout)
 import Test.Hspec
 
 messagePayload :: InterAgentMessage -> Text
 messagePayload message = case message.messageContent of
     PlainInterAgentContent text -> text
     EncryptedInterAgentContent text -> text
+
+completedResult :: Text -> Either LoopError LoopResult
+completedResult text = Right LoopResult
+    { finalResponseId = text
+    , finalText = Just text
+    , turnsUsed = 1
+    , tokenUsage = emptyTokenUsage
+    }
+
+runNestedRouting
+    :: SubagentRegistry
+    -> TMVar ()
+    -> TMVar ()
+    -> TMVar SubagentId
+    -> TMVar InterAgentMessage
+    -> SubagentSpawnEnv
+    -> InterAgentMessage
+    -> IO (Either LoopError LoopResult)
+runNestedRouting registry parentRelease childRelease childSpawned noticeSeen env prompt
+    | env.subDepth == 1 = runParent
+    | otherwise = do
+        atomically (takeTMVar childRelease)
+        pure (completedResult "leaf-final")
+  where
+    runParent =
+        case prompt.messageType of
+            NewTaskMessage -> startChild
+            _ -> do
+                atomically (putTMVar noticeSeen prompt)
+                pure (completedResult "parent-final")
+    startChild = do
+        parentPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
+        Right (child, _) <-
+            spawnSubagentAt registry (Just env.subId) parentPath env.subDepth
+                "leaf" (plainInterAgentContent "leaf") Nothing
+        atomically (putTMVar childSpawned child)
+        atomically (takeTMVar parentRelease)
+        pure (completedResult "parent-first")
 
 blockingRunner started cleanedUp _ _ _ _ =
     (atomically (putTMVar started ()) >> atomically retry)
@@ -144,7 +189,7 @@ spec = describe "Agent.Subagents" do
             if env.subDepth == 1
                 then do
                     Right gid <- spawnSubagent registry (Just env.subId) env.subDepth "nested" Nothing
-                    _ <- waitSubagents registry [gid] 15000
+                    _ <- waitSubagentsFrom registry (Just env.subId) [gid] 15000
                     pure $ Right LoopResult
                         { finalResponseId = "child"
                         , finalText = Just ("parent-of-" <> gid.unSubagentId)
@@ -192,6 +237,21 @@ spec = describe "Agent.Subagents" do
         observations <- readIORef seen
         observations `shouldContain` [("child", 2, Just parent)]
 
+    it "rejects descendants after the parent is closed" do
+        gate <- newTVarIO False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> do
+                atomically $ readTVar gate >>= \ready -> unless ready retry
+                pure (completedResult "parent"))
+            (\_ _ -> pure ())
+        Right (parent, parentPath) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "parent"
+                (plainInterAgentContent "parent") Nothing
+        _ <- closeSubagent registry parent
+        result <- spawnSubagentAt registry (Just parent) parentPath 1 "child"
+            (plainInterAgentContent "child") Nothing
+        result `shouldBe` Left "Parent subagent is closed or missing."
+
     it "waitSubagents returns when any target finishes" do
         gate <- newTVarIO False
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -225,6 +285,40 @@ spec = describe "Agent.Subagents" do
         atomically $ writeTVar gate True
         _ <- waitSubagents registry [slow] 15000
         pure ()
+
+    it "untargeted waits exclude the calling agent" do
+        parentGate <- newTVarIO False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> case messagePayload prompt of
+                "parent" -> do
+                    atomically $ readTVar parentGate >>= \ready -> unless ready retry
+                    pure (completedResult "parent")
+                other -> pure (completedResult other))
+            (\_ _ -> pure ())
+        Right parent <- spawnSubagent registry Nothing 0 "parent" Nothing
+        Right child <- spawnSubagent registry Nothing 0 "child" Nothing
+        (statuses, timedOut) <- waitAnyLive registry (Just parent) 15000
+        timedOut `shouldBe` False
+        Map.lookup child statuses `shouldBe` Just (Completed (Just "child"))
+        Map.member parent statuses `shouldBe` False
+        atomically $ writeTVar parentGate True
+        _ <- waitSubagents registry [parent] 15000
+        pure ()
+
+    it "untargeted waits consume completions" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right child <- spawnSubagent registry Nothing 0 "one" Nothing
+        (first, firstTimedOut) <- waitAnyLive registry Nothing 15000
+        firstTimedOut `shouldBe` False
+        Map.lookup child first `shouldBe` Just (Completed (Just "one"))
+        repeated <- timeout 100000 (waitAnyLive registry Nothing 15000)
+        repeated `shouldBe` Nothing
+        Right _ <- sendInput registry child "two" False
+        (second, secondTimedOut) <- waitAnyLive registry Nothing 15000
+        secondTimedOut `shouldBe` False
+        Map.lookup child second `shouldBe` Just (Completed (Just "two"))
 
     it "passes previous response id on send_input follow-ups" do
         seen <- newIORef ([] :: [Maybe Text])
@@ -297,11 +391,40 @@ spec = describe "Agent.Subagents" do
         setSubagentOnComplete registry \agentId status ->
             atomicModifyIORef' notices \xs -> (xs <> [(agentId, status)], ())
         Right agentId <- spawnSubagent registry Nothing 0 "notify-me" Nothing
-        _ <- waitSubagents registry [agentId] 15000
-        -- Allow the completion callback a moment to run after status write.
-        threadDelay 50000
+        threadDelay 100000
         seen <- readIORef notices
         seen `shouldBe` [(agentId, Completed (Just "notify-me"))]
+
+    it "routes nested completion to the direct parent" do
+        parentRelease <- newEmptyTMVarIO
+        childRelease <- newEmptyTMVarIO
+        childSpawned <- newEmptyTMVarIO
+        noticeSeen <- newEmptyTMVarIO
+        rootNotices <- newIORef ([] :: [SubagentId])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (Left LoopNoResponseId))
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId _ ->
+            atomicModifyIORef' rootNotices \xs -> (xs <> [agentId], ())
+        setSubagentRunner registry \env _ prompt _ ->
+            runNestedRouting
+                registry parentRelease childRelease childSpawned noticeSeen
+                env prompt
+        Right parent <- spawnSubagent registry Nothing 0 "parent" Nothing
+        child <- atomically (takeTMVar childSpawned)
+        atomically (putTMVar childRelease ())
+        _ <- waitSubagents registry [child] 15000
+        atomically (putTMVar parentRelease ())
+        delivered <- timeout 1000000 (atomically (takeTMVar noticeSeen))
+        delivered `shouldSatisfy` \case
+            Just message ->
+                message.messageAuthor /= "/root"
+                    && message.messageType == QueuedMessage
+                    && child.unSubagentId `Text.isInfixOf` messagePayload message
+            Nothing -> False
+        _ <- waitSubagents registry [parent] 15000
+        notices <- readIORef rootNotices
+        notices `shouldNotContain` [child]
 
     it "allows completion callbacks to queue a follow-up without deadlocking" do
         prompts <- newIORef ([] :: [Text])
@@ -485,6 +608,37 @@ spec = describe "Agent.Subagents" do
         _ <- closeSubagent registry parent
         result <- spawnSubagent registry (Just parent) 1 "child" Nothing
         result `shouldBe` Left "Parent subagent is closed or missing."
+
+    it "restored agents receive a fresh cancellation flag" do
+        seenCancelled <- newIORef ([] :: [Bool])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ prompt _ -> do
+                cancelled <- isCancelled env.subCancel
+                atomicModifyIORef' seenCancelled \xs -> (xs <> [cancelled], ())
+                pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        _ <- closeSubagent registry agentId
+        Right _ <- restoreSubagent registry agentId Nothing 1 Nothing (Just "prev")
+        Right _ <- sendInput registry agentId "second" False
+        _ <- waitSubagents registry [agentId] 15000
+        readIORef seenCancelled `shouldReturn` [False, False]
+
+    it "restores canonical task topology" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        let agentId = SubagentId "agent-restored-topology"
+            parentId = SubagentId "agent-parent"
+        Right path <- pure (parseTaskPath "/root/research/worker")
+        Right _ <- restoreSubagentAt
+            registry agentId (Just parentId) path 2 Nothing (Just "prev")
+        getTaskPath registry agentId `shouldReturn` Just path
+        resolveAgentTarget registry taskPathRoot "/root/research/worker"
+            `shouldReturn` Right agentId
+        identity <- getSubagentIdentity registry agentId
+        identity `shouldBe` Just (SubagentIdentity (Just parentId) 2 path)
 
     it "spawns at a task path and resolves relative targets" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

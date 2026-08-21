@@ -188,6 +188,20 @@ spec = do
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 3 :: Int]
             ids `shouldSatisfy` all (== "acc-b")
 
+        it "retries an auth-broken account after about one minute" $ do
+            now <- getCurrentTime
+            pool <- newPool [mkFreshAuth "only-account"] neverRefresh
+            reportAuthBroken pool "only-account"
+
+            result <- getAccessToken pool
+
+            case result of
+                Left CredentialsExhausted{retryAt} -> do
+                    retryAt `shouldSatisfy` (> addUTCTime 50 now)
+                    retryAt `shouldSatisfy` (< addUTCTime 70 now)
+                other -> expectationFailure
+                    ("expected CredentialsExhausted, got " <> show other)
+
     describe "forceRefresh" $ do
         it "invokes the refresh callback and caches the returned state" $ do
             callCounter <- newIORef (0 :: Int)

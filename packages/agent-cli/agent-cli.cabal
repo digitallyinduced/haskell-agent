@@ -36,6 +36,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
@@ -93,7 +94,7 @@ library
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
-                    , process
+                    , process >= 1.6.26
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
@@ -114,6 +115,7 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ApprovalSpec
+                    , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AuthSpec

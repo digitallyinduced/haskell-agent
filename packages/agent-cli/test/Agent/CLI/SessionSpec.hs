@@ -101,7 +101,7 @@ spec = describe "Agent.CLI.Session" do
 
                 loaded <- loadSession root handle.sessionMeta.metaId
                 case loaded of
-                    Left err -> expectationFailure err
+                    Left err -> expectationFailure (Text.unpack err)
                     Right (meta, turns) -> do
                         meta.metaId `shouldBe` handle.sessionMeta.metaId
                         meta.metaProvider `shouldBe` XAIProvider
@@ -135,8 +135,50 @@ spec = describe "Agent.CLI.Session" do
                 writeSessionMeta handle.sessionMetaPath bad
                 loadSession root handle.sessionMeta.metaId
                     >>= \case
-                        Left err -> err `shouldContain` "unsupported session schema"
+                        Left err ->
+                            err `shouldSatisfy`
+                                Text.isInfixOf "unsupported session schema"
                         Right _ -> expectationFailure "expected schema failure"
+
+        it "rejects session ids that escape the sessions root" $
+            withTempDir "agent-sessions-" \root -> do
+                isValidSessionId "normal-id" `shouldBe` True
+                isValidSessionId "../outside" `shouldBe` False
+                isValidSessionId "nested/id" `shouldBe` False
+                loadSession root "../outside"
+                    `shouldReturn` Left "invalid session id"
+
+        it "reports a missing session with a Text error" $
+            withTempDir "agent-sessions-" \root ->
+                loadSession root "missing-session"
+                    `shouldReturn` Left "session not found: missing-session"
+
+        it "rejects metadata whose id does not match its directory" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                writeSessionMeta handle.sessionMetaPath
+                    handle.sessionMeta { metaId = "different-session" }
+                loadSession root handle.sessionMeta.metaId
+                    `shouldReturn` Left "session id does not match directory"
+
+        it "reports malformed metadata and transcript lines as Text" $
+            withTempDir "agent-sessions-" \root -> do
+                badMeta <- createSession (testCreate root)
+                writeFile (toFilePath badMeta.sessionMetaPath) "{not-json"
+                loadSession root badMeta.sessionMeta.metaId >>= \case
+                    Left err ->
+                        err `shouldSatisfy` Text.isInfixOf "meta.json"
+                    Right _ -> expectationFailure "expected metadata decode failure"
+
+                badTranscript <- createSession (testCreate root)
+                writeFile
+                    (toFilePath badTranscript.sessionTranscriptPath)
+                    "{not-json}\n"
+                loadSession root badTranscript.sessionMeta.metaId >>= \case
+                    Left err ->
+                        err `shouldSatisfy`
+                            Text.isInfixOf "invalid transcript line"
+                    Right _ -> expectationFailure "expected transcript decode failure"
 
         it "creates a pending session only when ensureSession runs" $
             withTempDir "agent-sessions-" \root -> do

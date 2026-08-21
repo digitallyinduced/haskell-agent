@@ -12,6 +12,7 @@ module Agent.CLI.Session
     , appendTurn
     , appendTurnKeepTitle
     , loadSession
+    , isValidSessionId
     , listSessions
     , sessionsRoot
     , sessionTitleFromPrompt
@@ -31,11 +32,19 @@ import Agent.FileRetry
     , writeLazyFileAtomically
     )
 import Agent.Loop (TokenUsage(..))
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception (try)
+import Control.Exception.Safe (tryIO)
+import Control.Monad (unless)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , except
+    , runExceptT
+    , throwE
+    )
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -98,7 +107,7 @@ readDevResumePointer home = do
 clearDevResumePointer :: OsPath -> IO ()
 clearDevResumePointer home = do
     let path = devResumePointerPath home
-    _ <- try @IOError (removeFile path)
+    _ <- tryIO (removeFile path)
     pure ()
 
 data SessionMeta = SessionMeta
@@ -309,29 +318,39 @@ appendTurnKeepTitle handle turn = do
     pure handle { sessionMeta = meta }
 
 
-loadSession :: OsPath -> Text -> IO (Either String (SessionMeta, [SessionTurn]))
-loadSession root sessionId = do
+loadSession :: OsPath -> Text -> IO (Either Text (SessionMeta, [SessionTurn]))
+loadSession root sessionId = runExceptT do
+    unless (isValidSessionId sessionId) $
+        throwE "invalid session id"
     let dir = root </> fromFilePath (Text.unpack sessionId)
         metaPath = dir </> fromFilePath "meta.json"
         transcriptPath = dir </> fromFilePath "transcript.jsonl"
-    exists <- doesDirectoryExist dir
-    if not exists
-        then pure (Left ("session not found: " <> Text.unpack sessionId))
-        else do
-            metaResult <- decodeFileEither metaPath
-            case metaResult of
-                Left err -> pure (Left err)
-                Right meta
-                    | meta.metaVersion /= sessionSchemaVersion ->
-                        pure $ Left $
-                            "unsupported session schema version "
-                                <> show meta.metaVersion
-                                <> " (expected "
-                                <> show sessionSchemaVersion
-                                <> ")"
-                    | otherwise -> do
-                        turnsResult <- loadTranscript transcriptPath
-                        pure ((meta,) <$> turnsResult)
+    exists <- lift (doesDirectoryExist dir)
+    unless exists $
+        throwE ("session not found: " <> sessionId)
+    meta <- decodeFileEither metaPath
+    unless (isValidSessionId meta.metaId) $
+        throwE "invalid session id in metadata"
+    unless (meta.metaId == sessionId) $
+        throwE "session id does not match directory"
+    unless (meta.metaVersion == sessionSchemaVersion) $
+        throwE $
+            "unsupported session schema version "
+                <> Text.pack (show meta.metaVersion)
+                <> " (expected "
+                <> Text.pack (show sessionSchemaVersion)
+                <> ")"
+    turns <- loadTranscript transcriptPath
+    pure (meta, turns)
+
+-- | Session ids are single path components. Keep this deliberately broader
+-- than the current date-plus-hex allocator so older ids remain resumable.
+isValidSessionId :: Text -> Bool
+isValidSessionId sessionId =
+    not (Text.null sessionId)
+        && sessionId /= "."
+        && sessionId /= ".."
+        && Text.all (\char -> char /= '/' && char /= '\\' && char /= '\NUL') sessionId
 
 listSessions :: OsPath -> IO [SessionMeta]
 listSessions root = do
@@ -390,7 +409,7 @@ allocateSessionDir root now = go (0 :: Int)
             let hex = hex8 (start + fromIntegral attempt)
                 sessionId = Text.pack (day <> "-" <> hex)
                 dir = root </> fromFilePath (Text.unpack sessionId)
-            result <- try @IOError (createDirectory dir)
+            result <- tryIO (createDirectory dir)
             case result of
                 Left _ -> go (attempt + 1)
                 Right () -> do
@@ -405,40 +424,39 @@ hex8 n =
 ensurePrivateDir :: OsPath -> IO ()
 ensurePrivateDir path = do
     createDirectoryIfMissing True path
-    _ <- try @IOError (setFileMode (toFilePath path) 0o700)
+    _ <- tryIO (setFileMode (toFilePath path) 0o700)
     pure ()
 
-loadTranscript :: OsPath -> IO (Either String [SessionTurn])
+loadTranscript :: OsPath -> ExceptT Text IO [SessionTurn]
 loadTranscript path = do
-    exists <- doesFileExist path
+    exists <- lift (doesFileExist path)
     if not exists
-        then pure (Right [])
+        then pure []
         else do
-            raw <- retryOnFileBusy (Text.readFile (toFilePath path))
+            raw <- lift (retryOnFileBusy (Text.readFile (toFilePath path)))
             let linesOf = filter (not . Text.null) (Text.lines raw)
-            pure (mapM decodeTurnLine linesOf)
+            except (mapM decodeTurnLine linesOf)
 
-decodeTurnLine :: Text -> Either String SessionTurn
+decodeTurnLine :: Text -> Either Text SessionTurn
 decodeTurnLine line =
     case Aeson.eitherDecodeStrict' (Text.encodeUtf8 line) of
-        Left err -> Left ("invalid transcript line: " <> err)
+        Left err -> Left ("invalid transcript line: " <> Text.pack err)
         Right turn -> Right turn
 
-decodeFileEither :: FromJSON a => OsPath -> IO (Either String a)
+decodeFileEither :: FromJSON a => OsPath -> ExceptT Text IO a
 decodeFileEither path = do
-    exists <- doesFileExist path
-    if not exists
-        then pure (Left ("missing file: " <> toFilePath path))
-        else do
-            bytes <- retryOnFileBusy (LBS.readFile (toFilePath path))
-            pure (case Aeson.eitherDecode' bytes of
-                Left err -> Left (toFilePath path <> ": " <> err)
-                Right value -> Right value)
+    exists <- lift (doesFileExist path)
+    unless exists $
+        throwE ("missing file: " <> toText path)
+    bytes <- lift (retryOnFileBusy (LBS.readFile (toFilePath path)))
+    case Aeson.eitherDecode' bytes of
+        Left err -> throwE (toText path <> ": " <> Text.pack err)
+        Right value -> pure value
 
 readMetaQuiet :: OsPath -> OsPath -> IO (Maybe SessionMeta)
 readMetaQuiet root name = do
     let path = root </> name </> fromFilePath "meta.json"
-    result <- try @IOError (decodeFileEither path)
+    result <- tryIO (runExceptT (decodeFileEither path))
     pure $ case result of
         Left _ -> Nothing
         Right (Left _) -> Nothing

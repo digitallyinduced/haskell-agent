@@ -8,7 +8,7 @@ import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
-import Agent.CLI.Session (Persistence)
+import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -51,5 +51,6 @@ data SessionEnv = SessionEnv
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())
     , sessionAbortSubagentTurn :: !(Maybe RootTurnId -> IO ())
+    , sessionOnPersisted :: !(SessionHandle -> IO ())
     , sessionReset :: !(IO ())
     }

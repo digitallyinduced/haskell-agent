@@ -247,6 +247,7 @@ spec = do
         it "retries transient Codex server errors before visible output" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
+            events <- newIORef []
             let serverError = ProviderError ApiErrorType
                     "An error occurred while processing your request. (code: server_error)"
                     Nothing
@@ -261,9 +262,21 @@ spec = do
                     send
                     (pure baseParams)
                     transcript
-            result <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            result <- backend.submitTurn Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-retried" [] (Just "ok"))
             readIORef attempts `shouldReturn` 3
+            observedEvents <- reverse <$> readIORef events
+            observedEvents `shouldBe`
+                [ ActivityUpdated
+                    "Codex server error; retrying in 0s (attempt 1)…"
+                , ActivityUpdated
+                    "Retrying Codex request (attempt 1)…"
+                , ActivityUpdated
+                    "Codex server error; retrying in 0s (attempt 2)…"
+                , ActivityUpdated
+                    "Retrying Codex request (attempt 2)…"
+                ]
 
         it "does not retry after visible output was streamed" do
             attempts <- newIORef (0 :: Int)
