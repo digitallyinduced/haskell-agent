@@ -10,10 +10,10 @@ import Agent.Subagents
     , getStatus
     , waitSubagents
     )
-import Agent.ToolArgs (objectArgs, reqText)
+import Agent.ToolArgs (objectArgs, optInt, reqText, reqTextList)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.Grok.Common (jsonTool, optionalTimeout, stripAnsi)
+import Agent.Tools.Grok.Common (jsonTool, stripAnsi)
 import Agent.Tools.Grok.Shell
     ( GrokSession
     , killTask
@@ -23,56 +23,150 @@ import Agent.Tools.Grok.Task (isSubagentIdText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool)
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async (mapConcurrently)
 import Data.Aeson (FromJSON(..))
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 data TaskOutputArgs = TaskOutputArgs
-    { taskId :: Text
-    , timeout :: Maybe Int
+    { taskIds :: [Text]
+    , timeoutMs :: Maybe Int
     }
 
 instance FromJSON TaskOutputArgs where
-    parseJSON = objectArgs \object ->
-        TaskOutputArgs
-            <$> (reqText object "task_id" <|> reqText object "task_ids")
-            <*> optionalTimeout object
+    parseJSON = objectArgs \object -> do
+        taskIds <-
+            reqTextList object "task_ids"
+                <|> reqTextList object "task_id"
+        canonicalTimeout <- optInt object "timeout_ms"
+        legacyTimeout <- optInt object "timeout"
+        pure TaskOutputArgs
+            { taskIds
+            , timeoutMs = canonicalTimeout <|> legacyTimeout
+            }
 
 getTaskOutputTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
 getTaskOutputTool session multi = jsonTool "get_task_output" getTaskOutputDescription
-    [ PropertySchema "task_id" PropertyString True $ Just
-        "The task id from a background run_terminal_cmd or the subagent_id from task."
-    , PropertySchema "timeout" PropertyInteger False $ Just
-        "Optional wait in milliseconds. If omitted, return a snapshot immediately."
+    [ PropertySchema "task_ids" (PropertyArray PropertyString) True $ Just
+        "Task IDs to get output from. For a single task use a one-element array."
+    , PropertySchema "timeout_ms" PropertyInteger False $ Just
+        "Max wait time in milliseconds, up to 600000. A positive value waits for completion; omit or pass 0 for a non-blocking status snapshot."
     ]
     True
     (typedTool "get_task_output" (runGetTaskOutput session multi))
 
 getTaskOutputDescription :: Text
 getTaskOutputDescription =
-    "Read output from a background command or subagent.\n\
-    \Use this for a snapshot of current output, or one bounded wait — not a polling loop."
+    "Get output and status from a background task or subagent.\n\n\
+    \Usage notes:\n\
+    \- Pass task_ids with one or more ids from background=true commands or run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
+    \- Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at 600000 (~10 min)\n\
+    \- Returns current output and status."
 
 runGetTaskOutput
     :: GrokSession
     -> Maybe MultiAgentContext
     -> TaskOutputArgs
     -> IO (Either Text Text)
-runGetTaskOutput session multi args = case multi of
-    Just ctx | isSubagentIdText args.taskId -> do
-        let agentId = SubagentId args.taskId
-            timeoutMs = fromMaybe 0 args.timeout
-        if timeoutMs <= 0
-            then do
-                status <- getStatus ctx.multiRegistry agentId
-                pure $ Right $ formatAgentWait args.taskId False (Just status)
-            else do
-                (statuses, timedOut) <-
+runGetTaskOutput session multi args
+    | null resolvedIds =
+        pure (Left "Provide a non-empty task_ids list.")
+    | length resolvedIds > maxTaskOutputIds =
+        pure $ Left $
+            "task_ids exceeds maximum of "
+                <> Text.pack (show maxTaskOutputIds)
+                <> " entries."
+    | otherwise = do
+        entries <- mapConcurrently
+            (runOneTaskOutput session multi effectiveTimeout)
+            resolvedIds
+        pure $ Right $ case entries of
+            [entry] -> entry.output
+            _ -> formatMultiTaskOutput waits entries
+  where
+    resolvedIds =
+        nub
+            [ stripped
+            | taskId <- args.taskIds
+            , let stripped = Text.strip taskId
+            , not (Text.null stripped)
+            ]
+    waits = maybe False (> 0) args.timeoutMs
+    effectiveTimeout
+        | waits = Just (min maxTaskOutputWaitMs (fromMaybe 0 args.timeoutMs))
+        | otherwise = Nothing
+
+maxTaskOutputIds :: Int
+maxTaskOutputIds = 20
+
+maxTaskOutputWaitMs :: Int
+maxTaskOutputWaitMs = 600000
+
+data TaskOutputEntry = TaskOutputEntry
+    { taskOutputId :: !Text
+    , output :: !Text
+    , terminal :: !Bool
+    }
+
+runOneTaskOutput
+    :: GrokSession
+    -> Maybe MultiAgentContext
+    -> Maybe Int
+    -> Text
+    -> IO TaskOutputEntry
+runOneTaskOutput session multi timeout taskId = case multi of
+    Just ctx | isSubagentIdText taskId -> do
+        let agentId = SubagentId taskId
+        (status, timedOut) <- case timeout of
+            Nothing -> do
+                current <- getStatus ctx.multiRegistry agentId
+                pure (current, False)
+            Just timeoutMs -> do
+                (statuses, didTimeOut) <-
                     waitSubagents ctx.multiRegistry [agentId] timeoutMs
-                pure $ Right $ formatAgentWait args.taskId timedOut (Map.lookup agentId statuses)
-    _ ->
-        Right . stripAnsi <$> readTaskOutput session args.taskId args.timeout
+                pure (fromMaybe NotFound (Map.lookup agentId statuses), didTimeOut)
+        pure TaskOutputEntry
+            { taskOutputId = taskId
+            , output = formatAgentWait taskId timedOut (Just status)
+            , terminal = isTerminalAgentStatus status
+            }
+    _ -> do
+        text <- stripAnsi <$> readTaskOutput session taskId timeout
+        pure TaskOutputEntry
+            { taskOutputId = taskId
+            , output = text
+            , terminal = terminalCommandOutput text
+            }
+
+isTerminalAgentStatus :: SubagentStatus -> Bool
+isTerminalAgentStatus = \case
+    Completed {} -> True
+    Errored {} -> True
+    Interrupted -> True
+    Closed -> True
+    _ -> False
+
+terminalCommandOutput :: Text -> Bool
+terminalCommandOutput text =
+    "exit:" `Text.isPrefixOf` text
+        || "killed " `Text.isPrefixOf` text
+
+formatMultiTaskOutput :: Bool -> [TaskOutputEntry] -> Text
+formatMultiTaskOutput waits entries =
+    Text.intercalate "\n\n"
+        [ "task_id: " <> entry.taskOutputId <> "\n" <> entry.output
+        | entry <- entries
+        ]
+        <> "\n\n"
+        <> Text.pack (show (length (filter (.terminal) entries)))
+        <> "/"
+        <> Text.pack (show (length entries))
+        <> " tasks completed ("
+        <> (if waits then "wait_all" else "poll")
+        <> ")"
 
 formatAgentWait :: Text -> Bool -> Maybe SubagentStatus -> Text
 formatAgentWait taskId timedOut mstatus = case mstatus of

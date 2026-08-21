@@ -13,6 +13,7 @@ module Agent.Subagents.Types
     ) where
 
 import Agent.Cancel (CancelFlag)
+import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopError, LoopEvent, LoopResult)
 import Agent.OsPath (OsPath)
 import qualified Data.Aeson as Aeson
@@ -74,6 +75,6 @@ data SubagentSpawnEnv = SubagentSpawnEnv
 type RunSubagent =
     SubagentSpawnEnv
     -> Maybe Text
-    -> Text
+    -> InterAgentMessage
     -> (LoopEvent -> IO ())
     -> IO (Either LoopError LoopResult)

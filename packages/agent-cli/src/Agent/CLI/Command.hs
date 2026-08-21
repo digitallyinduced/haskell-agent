@@ -36,6 +36,8 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplBtw Text
+    -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
     | ReplLogin
     | ReplReloadAuth
@@ -74,9 +76,10 @@ slashCommands =
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort"
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
+    , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation"
     , cmd "session" [] "/session" "Print the current session id"
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage"
-    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
+    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
     , cmd "new" [] "/new" "Start a fresh persisted session id"
@@ -132,6 +135,12 @@ parseSlash line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplPlan
                     (if Text.null description then Nothing else Just description)
+            "btw" ->
+                let question =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null question
+                    then ReplCommandError "usage: /btw <QUESTION>"
+                    else ReplBtw question
             "session" ->
                 if null args
                     then ReplShowSession

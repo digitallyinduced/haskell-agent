@@ -38,6 +38,7 @@ library
     exposed-modules:  Agent.CLI
                     , Agent.CLI.Approval
                     , Agent.CLI.Auth
+                    , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
@@ -50,8 +51,10 @@ library
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
+                    , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
+                    , Agent.CLI.PendingInputs
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
                     , Agent.CLI.Progress
@@ -78,6 +81,7 @@ library
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
+                    , async
                     , base >= 4.17 && < 5
                     , base64-bytestring
                     , bytestring
@@ -107,6 +111,7 @@ test-suite agent-cli-test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ApprovalSpec
                     , Agent.CLI.AuthSpec
+                    , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
@@ -118,10 +123,12 @@ test-suite agent-cli-test
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.ProviderFallbackSpec

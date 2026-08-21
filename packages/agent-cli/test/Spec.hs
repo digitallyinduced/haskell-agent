@@ -4,6 +4,7 @@ import Test.Hspec (hspec)
 
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
+import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
@@ -15,7 +16,9 @@ import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
+import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
+import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
 import qualified Agent.CLI.PermissionSpec as PermissionSpec
 import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProgressSpec as ProgressSpec
@@ -37,6 +40,7 @@ main :: IO ()
 main = hspec do
     ApprovalSpec.spec
     AuthSpec.spec
+    BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
@@ -48,7 +52,9 @@ main = hspec do
     MarkdownSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
+    NotificationSpec.spec
     OptionsSpec.spec
+    PendingInputsSpec.spec
     PermissionSpec.spec
     PlanSpec.spec
     ProgressSpec.spec

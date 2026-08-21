@@ -58,6 +58,8 @@ spec = describe "Agent.Tools.Codex" do
                     , multiDepth = 0
                     , multiTaskPath = taskPathRoot
                     , multiResumeFromDisk = Nothing
+                    , multiCreateWorktree = Nothing
+                    , multiSendToRoot = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools

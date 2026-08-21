@@ -41,6 +41,16 @@ spec = describe "systemPrompt" do
         let grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") (fromGregorian 2026 8 19) True
         grok `shouldSatisfy` Text.isInfixOf "no human operator"
 
+    it "keeps OpenAI web-search references internal" do
+        let openai =
+                systemPrompt OpenAIProvider
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    False
+        openai `shouldSatisfy` Text.isInfixOf "turn2search5"
+        openai `shouldSatisfy` Text.isInfixOf "never expose internal reference IDs"
+        openai `shouldSatisfy` Text.isInfixOf "descriptive Markdown links"
+
     it "tells grok and openai to prefer ghci for general-purpose scripting" do
         let day = fromGregorian 2026 8 19
             grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") day False

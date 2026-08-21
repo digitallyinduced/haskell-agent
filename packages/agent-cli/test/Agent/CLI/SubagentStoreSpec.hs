@@ -28,6 +28,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , extraFields = KeyMap.empty
                     }
             saveSubagentState dir agentId [item] (Just "resp-1") (Just "explore")
+                (Just "grok-4.5-mini") (Just (fromFilePath "/tmp/work"))
                 `shouldReturn` Right ()
             loaded <- loadSubagentState dir agentId
             case loaded of
@@ -35,6 +36,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                     length items `shouldBe` 1
                     meta.diskPreviousResponseId `shouldBe` Just "resp-1"
                     meta.diskAgentType `shouldBe` Just "explore"
+                    meta.diskAgentModel `shouldBe` Just "grok-4.5-mini"
+                    meta.diskCwd `shouldBe` Just (fromFilePath "/tmp/work")
                 other -> expectationFailure ("unexpected load: " <> show other)
             case subagentStoreDir dir agentId of
                 Right path ->
@@ -52,7 +55,7 @@ spec = describe "Agent.CLI.SubagentStore" do
     it "fails closed on corrupt transcript JSON" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-corrupt-1"
-            saveSubagentState dir agentId [] (Just "r") Nothing
+            saveSubagentState dir agentId [] (Just "r") Nothing Nothing Nothing
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
             LBS.writeFile

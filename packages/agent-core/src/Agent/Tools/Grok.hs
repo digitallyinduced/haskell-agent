@@ -11,7 +11,6 @@ module Agent.Tools.Grok
     , GrokSession
     ) where
 
-import Agent.Subagents (SubagentId)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Grok.Grep (grepTool)
 import Agent.Tools.Grok.ListDir (listDirTool)
@@ -23,7 +22,8 @@ import Agent.Tools.Grok.Shell
     , newGrokSession
     )
 import Agent.Tools.Grok.Task
-    ( filterGrokToolsForType
+    ( GrokSubagentSpecs
+    , filterGrokToolsForType
     , taskTool
     )
 import Agent.Tools.Grok.TaskControl
@@ -38,10 +38,7 @@ import Agent.Tools.PlanMode
     , enterPlanModeTool
     , exitPlanModeTool
     )
-import Agent.Tools.Types (AppTool)
-import Data.IORef (IORef)
-import Data.Map.Strict (Map)
-import Data.Text (Text)
+import Agent.Tools.Types (AppTool, ToolEnv(..))
 
 -- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash,
 -- get_task_output, kill_task, task, enter_plan_mode, exit_plan_mode, ask_user_question}.
@@ -51,7 +48,7 @@ grokTools
     -> GhciSession
     -> PlanModeEnv
     -> Maybe MultiAgentContext
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> [AppTool]
 grokTools session ghci planMode multi typesRef =
     let env = session.grokEnv
@@ -70,4 +67,4 @@ grokTools session ghci planMode multi typesRef =
             ]
     in case multi of
         Nothing -> base
-        Just ctx -> base ++ [taskTool ctx typesRef]
+        Just ctx -> base ++ [taskTool env.toolCwd ctx typesRef]

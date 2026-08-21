@@ -33,6 +33,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Cancel
                     , Agent.Error
+                    , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Broker
                     , Agent.Loop
@@ -67,6 +68,7 @@ library
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
+                    , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
@@ -110,6 +112,7 @@ test-suite agent-core-test
                     , Agent.Tools.Grok.TaskSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
+                    , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec

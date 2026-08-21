@@ -11,17 +11,23 @@ module Agent.Subagents.Registry
     , closeSubagentRegistry
     , resetSubagentRegistry
     , spawnSubagent
+    , spawnSubagentWithCwd
     , spawnSubagentAt
     , restoreSubagent
+    , restoreSubagentWithCwd
     , waitSubagents
     , waitAnyLive
     , sendInput
+    , sendInputMessage
     , queueMessage
+    , queueMessageFrom
     , closeSubagent
     , interruptSubagent
     , resumeSubagent
     , getStatus
     , getPreviousResponseId
+    , getSubagentCwd
+    , setPreviousResponseId
     , getTaskPath
     , resolveAgentTarget
     , listLive
@@ -29,6 +35,12 @@ module Agent.Subagents.Registry
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag, requestCancel)
+import Agent.InterAgentMessage
+    ( InterAgentMessage(..)
+    , InterAgentMessageContent
+    , InterAgentMessageType(..)
+    , plainInterAgentContent
+    )
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
 import Agent.OsPath (OsPath)
 import Agent.Subagents.Format (isFinalStatus)
@@ -70,13 +82,14 @@ data SubagentRecord = SubagentRecord
     , recordNickname :: !(Maybe Text)
     , recordStatus :: !(TVar SubagentStatus)
     , recordCancel :: !CancelFlag
-    , recordMailbox :: !(TQueue Text)
+    , recordMailbox :: !(TQueue InterAgentMessage)
     , recordAsync :: !(TVar (Maybe (Async ())))
       -- | Whether this agent currently occupies a concurrency slot.
     , recordSlotHeld :: !(TVar Bool)
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordTaskPath :: !TaskPath
+    , recordCwd :: !OsPath
     }
 
 data SubagentRegistry = SubagentRegistry
@@ -153,7 +166,18 @@ spawnSubagent
     -> Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-spawnSubagent registry parentId parentDepth message nickname = do
+spawnSubagent registry =
+    spawnSubagentWithCwd registry registry.registryCwd
+
+spawnSubagentWithCwd
+    :: SubagentRegistry
+    -> OsPath
+    -> Maybe SubagentId
+    -> Int
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnSubagentWithCwd registry childCwd parentId parentDepth message nickname = do
     parentPath <- case parentId of
         Nothing -> pure taskPathRoot
         Just pid -> do
@@ -166,7 +190,9 @@ spawnSubagent registry parentId parentDepth message nickname = do
     -- Reuse the generated id by spawning with an explicit path helper that
     -- still allocates internally; uniqueness comes from the id-derived name.
     fmap (fmap fst) $
-        spawnSubagentAt registry parentId parentPath parentDepth taskName message nickname
+        spawnSubagentAtWithCwd
+            registry childCwd parentId parentPath parentDepth taskName
+                (plainInterAgentContent message) nickname
 
 -- | Spawn with an explicit parent path and task_name (Codex multi-agent v2).
 spawnSubagentAt
@@ -175,10 +201,23 @@ spawnSubagentAt
     -> TaskPath
     -> Int
     -> Text
-    -> Text
+    -> InterAgentMessageContent
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
-spawnSubagentAt registry parentId parentPath parentDepth taskName message nickname = do
+spawnSubagentAt registry =
+    spawnSubagentAtWithCwd registry registry.registryCwd
+
+spawnSubagentAtWithCwd
+    :: SubagentRegistry
+    -> OsPath
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> InterAgentMessageContent
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskName content nickname = do
     let nextDepth = parentDepth + 1
         cfg = registry.registryConfig
     case cfg.maxDepth of
@@ -206,6 +245,7 @@ spawnSubagentAt registry parentId parentPath parentDepth taskName message nickna
                         , recordSlotHeld = slotHeld
                         , recordPreviousResponseId = previousVar
                         , recordTaskPath = childPath
+                        , recordCwd = childCwd
                         }
                 admitted <- atomically do
                     closed <- readTVar registry.registryClosed
@@ -231,18 +271,24 @@ spawnSubagentAt registry parentId parentPath parentDepth taskName message nickna
                 case admitted of
                     Left err -> pure (Left err)
                     Right () -> do
+                        let message = InterAgentMessage
+                                { messageAuthor = taskPathText parentPath
+                                , messageRecipient = taskPathText childPath
+                                , messageType = NewTaskMessage
+                                , messageContent = content
+                                }
                         child <- async (runWorker registry record message)
                         atomically $ writeTVar asyncVar (Just child)
                         pure (Right (agentId, childPath))
 
-runWorker :: SubagentRegistry -> SubagentRecord -> Text -> IO ()
+runWorker :: SubagentRegistry -> SubagentRecord -> InterAgentMessage -> IO ()
 runWorker registry record firstPrompt = do
     atomically $ writeTVar record.recordStatus Running
     let env = SubagentSpawnEnv
             { subId = record.recordId
             , subDepth = record.recordDepth
             , subParentId = record.recordParent
-            , subCwd = registry.registryCwd
+            , subCwd = record.recordCwd
             , subCancel = record.recordCancel
             }
         onEvent = registry.registryOnEvent record.recordId
@@ -366,7 +412,18 @@ sendInput
     -> Text
     -> Bool
     -> IO (Either Text Text)
-sendInput registry agentId message interrupt = do
+sendInput registry agentId message interrupt =
+    sendInputMessage registry taskPathRoot agentId
+        (plainInterAgentContent message) interrupt
+
+sendInputMessage
+    :: SubagentRegistry
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> Bool
+    -> IO (Either Text Text)
+sendInputMessage registry senderPath agentId content interrupt = do
     mrecord <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case mrecord of
         Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
@@ -376,6 +433,12 @@ sendInput registry agentId message interrupt = do
                 Closed -> pure (Left "agent is closed")
                 NotFound -> pure (Left "agent not found")
                 _ -> do
+                    let message = InterAgentMessage
+                            { messageAuthor = taskPathText senderPath
+                            , messageRecipient = taskPathText record.recordTaskPath
+                            , messageType = FollowUpMessage
+                            , messageContent = content
+                            }
                     whenIO interrupt (requestCancel record.recordCancel)
                     -- Admit before mutating status/mailbox so a failed resume
                     -- does not leave the agent stuck in Running with no worker.
@@ -459,7 +522,19 @@ restoreSubagent
     -> Maybe Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-restoreSubagent registry agentId parentId depth nickname previous = do
+restoreSubagent registry =
+    restoreSubagentWithCwd registry registry.registryCwd
+
+restoreSubagentWithCwd
+    :: SubagentRegistry
+    -> OsPath
+    -> SubagentId
+    -> Maybe SubagentId
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previous = do
     existing <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case existing of
         Just record -> do
@@ -488,6 +563,7 @@ restoreSubagent registry agentId parentId depth nickname previous = do
                     , recordSlotHeld = slotHeld
                     , recordPreviousResponseId = previousVar
                     , recordTaskPath = taskPathRoot
+                    , recordCwd = childCwd
                     }
             atomically do
                 closed <- readTVar registry.registryClosed
@@ -524,6 +600,19 @@ getPreviousResponseId registry agentId = atomically do
     case Map.lookup agentId agents of
         Nothing -> pure Nothing
         Just record -> readTVar record.recordPreviousResponseId
+
+getSubagentCwd :: SubagentRegistry -> SubagentId -> IO (Maybe OsPath)
+getSubagentCwd registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    pure ((.recordCwd) <$> Map.lookup agentId agents)
+
+setPreviousResponseId :: SubagentRegistry -> SubagentId -> Text -> IO ()
+setPreviousResponseId registry agentId responseId = atomically do
+    agents <- readTVar registry.registryAgents
+    case Map.lookup agentId agents of
+        Nothing -> pure ()
+        Just record ->
+            writeTVar record.recordPreviousResponseId (Just responseId)
 
 readStatusSTM :: SubagentRegistry -> SubagentId -> STM SubagentStatus
 readStatusSTM registry agentId = do
@@ -617,7 +706,17 @@ queueMessage
     -> SubagentId
     -> Text
     -> IO (Either Text Text)
-queueMessage registry agentId message = do
+queueMessage registry agentId message =
+    queueMessageFrom registry taskPathRoot agentId
+        (plainInterAgentContent message)
+
+queueMessageFrom
+    :: SubagentRegistry
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> IO (Either Text Text)
+queueMessageFrom registry senderPath agentId content = do
     mrecord <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case mrecord of
         Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
@@ -627,6 +726,12 @@ queueMessage registry agentId message = do
                 Closed -> pure (Left "agent is closed")
                 NotFound -> pure (Left "agent not found")
                 _ -> do
+                    let message = InterAgentMessage
+                            { messageAuthor = taskPathText senderPath
+                            , messageRecipient = taskPathText record.recordTaskPath
+                            , messageType = QueuedMessage
+                            , messageContent = content
+                            }
                     atomically $ writeTQueue record.recordMailbox message
                     pure (Right "queued")
 

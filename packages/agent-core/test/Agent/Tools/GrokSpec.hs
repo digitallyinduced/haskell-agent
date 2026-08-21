@@ -5,8 +5,10 @@ import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
+import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
 import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
 import Agent.Subagents.TaskPath (taskPathRoot)
@@ -37,7 +39,7 @@ spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
         withTempSession \(session, ghci) -> do
             plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
-            typesRef <- newIORef (Map.empty :: Map SubagentId Text)
+            typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
             let names = map (.appToolName) (grokTools session ghci plan Nothing typesRef)
             names `shouldBe`
                 [ "read_file"
@@ -54,6 +56,13 @@ spec = describe "Agent.Tools.Grok" do
                 ]
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
+            let outputSchemas =
+                    [ tool.appToolParameters
+                    | tool <- grokTools session ghci plan Nothing typesRef
+                    , tool.appToolName == "get_task_output"
+                    ]
+            map (map (.propertyName)) outputSchemas
+                `shouldBe` [["task_ids", "timeout_ms"]]
             xai <- codingToolsFor XAIProvider session.grokEnv Nothing Nothing
             openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing Nothing
             (do
@@ -69,7 +78,8 @@ spec = describe "Agent.Tools.Grok" do
                 (\_ _ _ _ -> pure $ Left LoopNoResponseId)
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
-            let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
+            let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                    Nothing Nothing Nothing
                 names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
             names `shouldContain` ["task"]
             closeSubagentRegistry registry
@@ -216,11 +226,11 @@ spec = describe "Agent.Tools.Grok" do
             started `shouldSatisfy` Text.isInfixOf "task_id:"
             let taskId = taskIdFrom started
             snapshot <- runTool session ghci "get_task_output"
-                ("{\"task_id\":\"" <> taskId <> "\"}")
+                ("{\"task_ids\":[\"" <> taskId <> "\"]}")
             snapshot `shouldSatisfy` \text ->
                 Text.isInfixOf "still running" text || Text.isInfixOf "bgdone" text
             finished <- runTool session ghci "get_task_output"
-                ("{\"task_id\":\"" <> taskId <> "\",\"timeout\":5000}")
+                ("{\"task_ids\":[\"" <> taskId <> "\"],\"timeout_ms\":5000}")
             finished `shouldSatisfy` Text.isInfixOf "exit: 0"
             finished `shouldSatisfy` Text.isInfixOf "bgdone"
 
@@ -289,7 +299,7 @@ spec = describe "Agent.Tools.Grok" do
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
     plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
-    typesRef <- newIORef (Map.empty :: Map SubagentId Text)
+    typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
     result <- dispatchToolCall defaultLoopDispatch
         (appToolHandlers (grokTools session ghci plan Nothing typesRef))
         (functionToolCall "call-1" name arguments)

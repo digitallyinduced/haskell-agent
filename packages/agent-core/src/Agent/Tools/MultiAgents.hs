@@ -17,17 +17,27 @@ import Agent.Subagents
     , encodeStatus
     , interruptSubagent
     , listAgents
-    , queueMessage
+    , queueMessageFrom
     , resolveAgentTarget
-    , sendInput
+    , sendInputMessage
     , spawnSubagentAt
     , waitAnyLive
     , waitSubagents
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
+    , resolveTaskPath
+    , taskPathRoot
     , taskPathText
     )
+import Agent.InterAgentMessage
+    ( InterAgentMessage(..)
+    , InterAgentMessageContent
+    , InterAgentMessageType(..)
+    , encryptedInterAgentContent
+    , plainInterAgentContent
+    )
+import Agent.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
     , optInt
@@ -39,7 +49,7 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCall)
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
@@ -65,6 +75,10 @@ data MultiAgentContext = MultiAgentContext
       -- | Optional host hook to rehydrate a closed/missing agent from disk
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
+      -- | Optional host hook for Grok-style isolated worktree children.
+    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text OsPath)))
+      -- | Deliver a child message to the root agent's next model turn.
+    , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }
 
 multiAgentNamespace :: Text
@@ -141,7 +155,7 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
     ]
     False
-    (typedTool "spawn_agent" (runSpawn ctx))
+    (typedToolWithCall "spawn_agent" (runSpawn ctx))
 
 spawnAgentDescription :: Text
 spawnAgentDescription =
@@ -150,8 +164,8 @@ spawnAgentDescription =
     \have canonical task name /root/task1/task_3. You may refer to this agent \
     \as task_3 or /root/task1/task_3. Returns the canonical task_name."
 
-runSpawn :: MultiAgentContext -> SpawnAgentArgs -> IO (Either Text Text)
-runSpawn ctx args
+runSpawn :: MultiAgentContext -> ToolCall -> SpawnAgentArgs -> IO (Either Text Text)
+runSpawn ctx call args
     | Text.null (Text.strip args.message) =
         pure (Left "spawn_agent requires a non-empty message")
     | not (validForkTurns args.forkTurns) =
@@ -164,7 +178,7 @@ runSpawn ctx args
             ctx.multiTaskPath
             ctx.multiDepth
             args.taskName
-            args.message
+            (messageContent call args.message)
             Nothing
         pure $ case result of
             Left err -> Left err
@@ -285,23 +299,29 @@ sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
         (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
     False
-    (typedTool "send_message" (runSendMessage ctx))
+    (typedToolWithCall "send_message" (runSendMessage ctx))
 
 sendMessageDescription :: Text
 sendMessageDescription =
     "Send a message to an existing agent. The message will be delivered \
     \promptly. Does not trigger a new turn."
 
-runSendMessage :: MultiAgentContext -> MessageArgs -> IO (Either Text Text)
-runSendMessage ctx args
+runSendMessage :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
+runSendMessage ctx call args
     | Text.null (Text.strip args.message) =
         pure (Left "send_message requires a non-empty message")
     | otherwise = do
-        _ <- maybeRestore ctx args.target
-        resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-        case resolved of
-            Left err -> pure (Left err)
-            Right agentId -> queueMessage ctx.multiRegistry agentId args.message
+        case resolveTaskPath ctx.multiTaskPath args.target of
+            Right targetPath | targetPath == taskPathRoot ->
+                sendToRoot ctx (messageContent call args.message)
+            _ -> do
+                _ <- maybeRestore ctx args.target
+                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
+                case resolved of
+                    Left err -> pure (Left err)
+                    Right agentId ->
+                        queueMessageFrom ctx.multiRegistry ctx.multiTaskPath agentId
+                            (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -311,7 +331,7 @@ followupTaskTool ctx = jsonTool "followup_task" followupDescription
         (encryptedString "Message text to send to the target agent.") True Nothing
     ]
     False
-    (typedTool "followup_task" (runFollowup ctx))
+    (typedToolWithCall "followup_task" (runFollowup ctx))
 
 followupDescription :: Text
 followupDescription =
@@ -319,16 +339,43 @@ followupDescription =
     \turn if it is idle. If the target is already running, deliver the task \
     \promptly at message boundaries."
 
-runFollowup :: MultiAgentContext -> MessageArgs -> IO (Either Text Text)
-runFollowup ctx args
+runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
+runFollowup ctx call args
     | Text.null (Text.strip args.message) =
         pure (Left "followup_task requires a non-empty message")
     | otherwise = do
-        _ <- maybeRestore ctx args.target
-        resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
-        case resolved of
-            Left err -> pure (Left err)
-            Right agentId -> sendInput ctx.multiRegistry agentId args.message False
+        case resolveTaskPath ctx.multiTaskPath args.target of
+            Right targetPath | targetPath == taskPathRoot ->
+                pure (Left "followup_task cannot target the root agent; use send_message")
+            _ -> do
+                _ <- maybeRestore ctx args.target
+                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
+                case resolved of
+                    Left err -> pure (Left err)
+                    Right agentId ->
+                        sendInputMessage ctx.multiRegistry ctx.multiTaskPath agentId
+                            (messageContent call args.message) False
+
+sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
+sendToRoot ctx content =
+    if ctx.multiTaskPath == taskPathRoot
+        then pure (Left "root agent cannot send_message to itself")
+        else case ctx.multiSendToRoot of
+            Nothing -> pure (Left "root agent mailbox is unavailable")
+            Just deliver -> deliver (rootMessage ctx content)
+
+rootMessage :: MultiAgentContext -> InterAgentMessageContent -> InterAgentMessage
+rootMessage ctx content = InterAgentMessage
+    { messageAuthor = taskPathText ctx.multiTaskPath
+    , messageRecipient = taskPathText taskPathRoot
+    , messageType = QueuedMessage
+    , messageContent = content
+    }
+
+messageContent :: ToolCall -> Text -> InterAgentMessageContent
+messageContent call
+    | call.argumentsEncrypted = encryptedInterAgentContent
+    | otherwise = plainInterAgentContent
 
 maybeRestore :: MultiAgentContext -> Text -> IO (Either Text ())
 maybeRestore ctx target = case ctx.multiResumeFromDisk of

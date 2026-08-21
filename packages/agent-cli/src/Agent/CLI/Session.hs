@@ -149,6 +149,7 @@ data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
     , turnUserText :: !Text
     , turnAssistantText :: !(Maybe Text)
+    , turnError :: !(Maybe Text)
     , turnResponseId :: !(Maybe Text)
     , turnItems :: ![ResponseItem]
     , turnUsage :: !(Maybe TokenUsage)
@@ -159,6 +160,7 @@ instance ToJSON SessionTurn where
         [ "at" .= turn.turnAt
         , "userText" .= turn.turnUserText
         , "assistantText" .= turn.turnAssistantText
+        , "error" .= turn.turnError
         , "responseId" .= turn.turnResponseId
         , "items" .= turn.turnItems
         , "usage" .= turn.turnUsage
@@ -170,6 +172,7 @@ instance FromJSON SessionTurn where
             <$> o .: "at"
             <*> o .: "userText"
             <*> o .:? "assistantText"
+            <*> o .:? "error"
             <*> o .:? "responseId"
             <*> o .: "items"
             <*> o .:? "usage"

@@ -35,12 +35,16 @@ import System.Posix.Files (setFileMode)
 data SubagentDiskMeta = SubagentDiskMeta
     { diskPreviousResponseId :: !(Maybe Text)
     , diskAgentType :: !(Maybe Text)
+    , diskAgentModel :: !(Maybe Text)
+    , diskCwd :: !(Maybe OsPath)
     } deriving (Eq, Show)
 
 instance ToJSON SubagentDiskMeta where
     toJSON meta = object
         [ "previousResponseId" .= meta.diskPreviousResponseId
         , "agentType" .= meta.diskAgentType
+        , "agentModel" .= meta.diskAgentModel
+        , "cwd" .= fmap toFilePath meta.diskCwd
         ]
 
 instance FromJSON SubagentDiskMeta where
@@ -48,6 +52,8 @@ instance FromJSON SubagentDiskMeta where
         SubagentDiskMeta
             <$> o .:? "previousResponseId"
             <*> o .:? "agentType"
+            <*> o .:? "agentModel"
+            <*> (fmap fromFilePath <$> o .:? "cwd")
 
 -- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
 -- traversal so resume paths cannot escape @agents/@.
@@ -79,8 +85,10 @@ saveSubagentState
     -> [ResponseItem]
     -> Maybe Text
     -> Maybe Text
+    -> Maybe Text
+    -> Maybe OsPath
     -> IO (Either Text ())
-saveSubagentState sessionDir agentId items previous agentType =
+saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
@@ -93,6 +101,8 @@ saveSubagentState sessionDir agentId items previous agentType =
             LBS.writeFile (toFilePath metaTmp) $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
                 , diskAgentType = agentType
+                , diskAgentModel = agentModel
+                , diskCwd = cwd
                 }
             _ <- tryAny (setFileMode (toFilePath metaTmp) 0o600)
             LBS.writeFile (toFilePath transcriptTmp) (Aeson.encode items)
@@ -118,7 +128,7 @@ loadSubagentState sessionDir agentId =
                 else do
                     metaResult <- if hasMeta
                         then decodeFile metaPath
-                        else pure (Right (SubagentDiskMeta Nothing Nothing))
+                        else pure (Right (SubagentDiskMeta Nothing Nothing Nothing Nothing))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])
