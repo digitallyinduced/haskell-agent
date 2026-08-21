@@ -506,7 +506,7 @@ runAgent options transition = do
             Nothing -> case resumed of
                 Just (meta, _) -> Just meta.metaProvider
                 Nothing -> options.optProvider
-    loaded <- loadAuth requestedProvider >>= either die pure
+    loaded <- loadAuth requestedProvider >>= either (die . Text.unpack) pure
     case (transitionTarget, resumed) of
         (Just target, _)
             | loaded.loadedProvider /= target.modelProvider ->
@@ -1894,7 +1894,7 @@ validateProviderTarget choice =
             "cannot switch to "
                 <> providerSlug choice.modelProvider
                 <> ": "
-                <> Text.pack err
+                <> err
         Right loaded
             | loaded.loadedProvider /= choice.modelProvider ->
                 pure $ Left $
