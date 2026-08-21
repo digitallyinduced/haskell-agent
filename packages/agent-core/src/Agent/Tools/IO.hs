@@ -25,9 +25,9 @@ import Agent.Tools.FileSystem
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkFinally, threadDelay)
 import Control.Monad (void)
-import Control.Concurrent.Async (async, concurrently, race, wait)
+import Control.Concurrent.Async (concurrently, race)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar)
 import Control.Exception (evaluate)
 import Control.Exception.Safe (SomeException, try)
@@ -192,23 +192,14 @@ startShellCommand env workdir command = do
             resultVar <- newEmptyMVar
             stdoutRef <- newIORef BS.empty
             stderrRef <- newIORef BS.empty
-            outA <- async (drainHandle hout stdoutRef)
-            errA <- async (drainHandle herr stderrRef)
-            _ <- forkIO do
-                result <- try @_ @SomeException do
-                    code <- waitForProcess processHandle
-                    outBytes <- wait outA
-                    errBytes <- wait errA
-                    pure (outBytes, errBytes, code)
-                putMVar resultVar $ case result of
-                    Left exception -> CommandResult
-                        { commandExitCode = Just 127
-                        , commandStdout = ""
-                        , commandStderr = Text.pack (show exception)
-                        , commandTimedOut = False
-                        , commandCancelled = False
-                        }
-                    Right (outBytes, errBytes, code) -> CommandResult
+            _ <- forkFinally
+                (do
+                    ((outBytes, errBytes), code) <- concurrently
+                        (concurrently
+                            (drainHandle hout stdoutRef)
+                            (drainHandle herr stderrRef))
+                        (waitForProcess processHandle)
+                    pure CommandResult
                         { commandExitCode = Just (exitCodeInt code)
                         , commandStdout = truncateText env.toolStdoutCap
                             (decodeUtf8With lenientDecode outBytes)
@@ -216,7 +207,8 @@ startShellCommand env workdir command = do
                             (decodeUtf8With lenientDecode errBytes)
                         , commandTimedOut = False
                         , commandCancelled = False
-                        }
+                        })
+                (publishCommandResult resultVar)
             pure $ Right RunningCommand
                 { runningHandle = processHandle
                 , runningResult = resultVar
@@ -226,6 +218,19 @@ startShellCommand env workdir command = do
                 }
         Right _ ->
             pure $ Left "Failed to capture command output"
+
+publishCommandResult :: MVar CommandResult -> Either SomeException CommandResult -> IO ()
+publishCommandResult resultVar result =
+    putMVar resultVar (either failedCommandResult id result)
+
+failedCommandResult :: SomeException -> CommandResult
+failedCommandResult exception = CommandResult
+    { commandExitCode = Just 127
+    , commandStdout = ""
+    , commandStderr = Text.pack (show exception)
+    , commandTimedOut = False
+    , commandCancelled = False
+    }
 
 strictGetContents :: Handle -> IO BS.ByteString
 strictGetContents handle = do

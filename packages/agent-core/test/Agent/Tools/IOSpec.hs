@@ -4,12 +4,15 @@ import Agent.Cancel (requestCancel)
 import Agent.OsPath (fromFilePath)
 import Agent.Tools.IO
     ( CommandResult(..)
+    , RunningCommand(..)
     , readTextFile
     , runShellCommand
+    , startShellCommand
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket)
 import Control.Monad (replicateM)
 import Data.Either (isLeft)
@@ -77,6 +80,19 @@ spec = describe "Agent.Tools.IO" do
             CommandResult{commandCancelled, commandTimedOut} <- takeMVar done
             commandCancelled `shouldBe` True
             commandTimedOut `shouldBe` False
+
+    it "collects both output streams from a background shell command" do
+        withTempDir checkBackgroundOutput
+
+checkBackgroundOutput dir = do
+    let osDir = fromFilePath dir
+    env <- defaultToolEnv osDir
+    Right running <-
+        startShellCommand env osDir "printf stdout; printf stderr >&2"
+    result <- readMVar running.runningResult
+    result.commandExitCode `shouldBe` Just 0
+    result.commandStdout `shouldBe` "stdout"
+    result.commandStderr `shouldBe` "stderr"
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do
