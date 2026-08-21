@@ -533,12 +533,8 @@ drawBlock state block =
             if selected && state.uiFocus == FocusScrollback
                 then withAttr Theme.selectedAttr content
                 else content
-        visibleFramed =
-            if selected && state.uiFocus == FocusScrollback
-                then visibleRegion (Location (0, 0)) (1, 1) framed
-                else framed
     in clickable (ConversationBlock block.blockId) $
-        padBottom (Pad 1) visibleFramed
+        padBottom (Pad 1) framed
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
@@ -887,8 +883,11 @@ handleEvent event = case event of
             pure state
     MouseDown name button _ _ -> do
         state <- get
-        case (state.appChoice, state.appUi.uiPermission) of
-            (Nothing, Nothing) -> handleMouseDown name button
+        case ( state.appTextPrompt
+             , state.appChoice
+             , state.appUi.uiPermission
+             ) of
+            (Nothing, Nothing, Nothing) -> handleMouseDown name button
             _ -> pure ()
     VtyEvent vtyEvent -> do
         state <- get
@@ -1062,9 +1061,13 @@ handleScrollbackKey = \case
     _ -> pure ()
   where
     scroll = viewportScroll ConversationViewport
-    moveBlock delta =
+    moveBlock delta = do
         modify' \state ->
             state { appUi = reduceUi (UiMoveSelection delta) state.appUi }
+        state <- get
+        case state.appUi.uiSelectedBlock of
+            Just ident -> makeVisible (ConversationBlock ident)
+            Nothing -> pure ()
     toggle =
         modify' \state ->
             state { appUi = reduceUi UiToggleSelected state.appUi }
