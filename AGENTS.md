@@ -97,7 +97,12 @@ When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval p
 
 ### memory / RTS heap cap
 
-`nix develop` and the `repl` wrapper default `GHCRTS` to `-M2G -A64m` so the agent/GHCi process dies at a 2 GiB heap instead of OOMing the whole machine. The `agent-cli` executable retains a separate `-M8G -A64m` RTS default (overridable via `+RTS` because `-rtsopts` is enabled). Override when needed:
+`nix develop` does not impose a heap ceiling on every development command. The
+`repl` wrapper defaults `GHCRTS` to `-M8G -A64m`, which leaves enough room for
+the multi-package GHCi session while protecting the machine from an unbounded
+long-running agent. The compiled `agent-cli` executable has the same 8 GiB RTS
+default, overridable via `+RTS` because `-rtsopts` is enabled. Set `GHCRTS`
+explicitly to override the wrapper:
 
 ```
 GHCRTS='-M16G -A64m' repl

@@ -157,10 +157,10 @@
                       echo "repl: missing $script" >&2
                       exit 1
                     fi
-                    # Cap the agent/GHCi heap so a runaway session OOMs itself
-                    # instead of the whole machine. Override with GHCRTS=...
+                    # Cap the long-running GHCi/agent process without forcing
+                    # every command in nix develop to inherit the same limit.
                     if [ -z "''${GHCRTS:-}" ]; then
-                      export GHCRTS="-M2G -A64m"
+                      export GHCRTS="-M8G -A64m"
                     fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
@@ -226,14 +226,6 @@
                             ripgrep
                         ])
                         ++ [ agentRepl ];
-                    # Default RTS heap ceiling for GHCi / agent runs started from
-                    # this shell (including `cabal repl` and `cabal run`). The
-                    # `repl` wrapper sets the same default if GHCRTS is unset.
-                    shellHook = ''
-                      if [ -z "''${GHCRTS:-}" ]; then
-                        export GHCRTS="-M2G -A64m"
-                      fi
-                    '';
                 };
 
                 checks = {
