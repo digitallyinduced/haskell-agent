@@ -121,6 +121,10 @@ data ReplLine
     | ReplClipboardPaste Text
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
+    | ReplChooseModel Text
+    -- ^ Fullscreen status click: open the model selector and keep the draft.
+    | ReplChooseEffort Text
+    -- ^ Fullscreen status click: open the effort selector and keep the draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
 

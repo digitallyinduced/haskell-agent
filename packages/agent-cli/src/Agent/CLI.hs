@@ -316,9 +316,9 @@ import Control.Exception.Safe
 import Control.Monad (when)
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.List (elemIndex, findIndex)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.List (findIndex)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1525,6 +1525,10 @@ replWithDraft env@SessionEnv
                                 (roleMuted stdoutColor
                                     (glyphOk <> message))
             continueWith keptDraft
+        ReplChooseModel keptDraft ->
+            chooseModel (continueWith keptDraft)
+        ReplChooseEffort keptDraft ->
+            chooseEffort (continueWith keptDraft)
         ReplPasted pasted ->
             submitLine skillCommands skillInvocations
                 continue stdoutColor True pasted
@@ -1822,61 +1826,10 @@ replWithDraft env@SessionEnv
                                 (roleMuted color (glyphSession <> message))
                         continue
                     ReplSetEffort level -> do
-                        color <- resolveColor stdout
-                        modifyIORef' paramsRef (setReasoningEffort level)
-                        displayInfo ("effort set to " <> level) $
-                            Text.putStrLn
-                                (roleMuted color
-                                    (glyphOk <> "effort set to " <> level))
-                        case persist of
-                            PersistenceDisabled -> pure ()
-                            PersistenceEnabled slotRef -> do
-                                slot <- readIORef slotRef
-                                case slot of
-                                    PersistencePending pending ->
-                                        writeIORef slotRef
-                                            (PersistencePending pending { createEffort = level })
-                                    PersistenceActive handle -> do
-                                        let meta = handle.sessionMeta { metaEffort = level }
-                                        writeSessionMeta handle.sessionMetaPath meta
-                                        writeIORef slotRef
-                                            (PersistenceActive handle { sessionMeta = meta })
+                        setEffort level
                         continue
                     ReplShowModel -> do
-                        color <- resolveColor stderr
-                        params <- readIORef paramsRef
-                        let current = currentModel params
-                        modelChoice fullscreen color provider current >>= \case
-                            Nothing -> continue
-                            Just choice
-                                | choice.modelProvider == provider
-                                , choice.modelId == current -> do
-                                    let message =
-                                            "model: "
-                                                <> providerSlug provider
-                                                <> "/"
-                                                <> choice.modelId
-                                    displayInfo message $
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphSession <> message))
-                                    continue
-                                | choice.modelProvider == provider -> do
-                                    message <- applyModelChange
-                                        provider choice.modelId paramsRef render previous persist
-                                    displayInfo message $
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphOk <> message))
-                                    continue
-                                | otherwise ->
-                                    requestModelProviderSwitch choice persist >>= \case
-                                        Left err -> do
-                                            displayError err $
-                                                Text.hPutStrLn stderr
-                                                    (roleError color err)
-                                            continue
-                                        Right result -> pure result
+                        chooseModel continue
                     ReplSetModel name -> do
                         color <- resolveColor stdout
                         message <- applyModelChange
@@ -2267,6 +2220,66 @@ replWithDraft env@SessionEnv
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    setEffort level = do
+        color <- resolveColor stdout
+        modifyIORef' paramsRef (setReasoningEffort level)
+        displayInfo ("effort set to " <> level) $
+            Text.putStrLn
+                (roleMuted color
+                    (glyphOk <> "effort set to " <> level))
+        case persist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef -> do
+                slot <- readIORef slotRef
+                case slot of
+                    PersistencePending pending ->
+                        writeIORef slotRef
+                            (PersistencePending pending { createEffort = level })
+                    PersistenceActive handle -> do
+                        let meta = handle.sessionMeta { metaEffort = level }
+                        writeSessionMeta handle.sessionMetaPath meta
+                        writeIORef slotRef
+                            (PersistenceActive handle { sessionMeta = meta })
+    chooseEffort next = do
+        params <- readIORef paramsRef
+        effortChoice fullscreen (currentEffort params) >>= \case
+            Nothing -> next
+            Just level -> setEffort level >> next
+    chooseModel next = do
+        color <- resolveColor stderr
+        params <- readIORef paramsRef
+        let current = currentModel params
+        modelChoice fullscreen color provider current >>= \case
+            Nothing -> next
+            Just choice
+                | choice.modelProvider == provider
+                , choice.modelId == current -> do
+                    let message =
+                            "model: "
+                                <> providerSlug provider
+                                <> "/"
+                                <> choice.modelId
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted color
+                                (glyphSession <> message))
+                    next
+                | choice.modelProvider == provider -> do
+                    message <- applyModelChange
+                        provider choice.modelId paramsRef render previous persist
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted color
+                                (glyphOk <> message))
+                    next
+                | otherwise ->
+                    requestModelProviderSwitch choice persist >>= \case
+                        Left err -> do
+                            displayError err $
+                                Text.hPutStrLn stderr
+                                    (roleError color err)
+                            next
+                        Right result -> pure result
     copyCommand label missing payload = case payload of
         Nothing ->
             displayError missing do
@@ -2317,6 +2330,27 @@ modelChoice fullscreen color provider current = case fullscreen of
                     | index >= 0
                     , index < length options ->
                         pure (Just (options !! index))
+                _ -> pure Nothing
+
+effortChoice
+    :: Maybe FullscreenRuntime
+    -> Text
+    -> IO (Maybe Text)
+effortChoice fullscreen current = case fullscreen of
+    Nothing -> pure Nothing
+    Just runtime -> do
+        let efforts = reasoningEfforts
+            initial = fromMaybe 0 (elemIndex current efforts)
+        requestFullscreenChoice
+            runtime
+            "Reasoning effort"
+            initial
+            [(effort, "") | effort <- efforts]
+            >>= \case
+                Just index
+                    | index >= 0
+                    , index < length efforts ->
+                        pure (Just (efforts !! index))
                 _ -> pure Nothing
 
 fullscreenAwarePlanHooks
