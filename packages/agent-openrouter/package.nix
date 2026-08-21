@@ -1,5 +1,5 @@
 { mkDerivation, aeson, agent-core, agent-openai, base, bytestring
-, case-insensitive, hspec, http-client, http-conduit, http-types
+, case-insensitive, hspec, http-client, http-client-tls, http-conduit, http-types
 , lib, safe-exceptions, text, time, wai, warp
 }:
 mkDerivation {
@@ -7,7 +7,7 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson agent-core agent-openai base bytestring http-client
+    aeson agent-core agent-openai base bytestring http-client http-client-tls
     http-conduit http-types safe-exceptions text time
   ];
   testHaskellDepends = [

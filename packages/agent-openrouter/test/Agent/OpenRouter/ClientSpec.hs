@@ -6,7 +6,10 @@ import Agent.OpenRouter.Client
 import Agent.OpenRouter.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.OpenAI.Responses.Types
+import Control.Concurrent.MVar
+import Control.Monad (when)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
@@ -17,6 +20,7 @@ import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -45,6 +49,21 @@ spec = do
             requestModel request `shouldBe` Just "openai/gpt-5.1"
             (instructionsOf <$> requestBodyObject request)
                 `shouldBe` Just (Just "You are a test agent.")
+
+        it "streams callbacks before the response completes" do
+            recorded <- newIORef []
+            callbackSeen <- newEmptyMVar
+            serverSawCallback <- newIORef False
+            let handler _ = pure $
+                    streamingResponse callbackSeen serverSawCallback
+            withMockOpenRouter recorded handler \options -> do
+                result <- createResponseWithEvents options
+                    (openRouterCredential "token-a")
+                    (helloRequest "hi")
+                    (recordOutputItem callbackSeen)
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-stream"
+            readIORef serverSawCallback `shouldReturn` True
 
         it "rejects a non-OpenRouter credential before contacting the host" do
             recorded <- newIORef []
@@ -239,3 +258,24 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+recordOutputItem :: MVar () -> ResponseStreamEvent -> IO ()
+recordOutputItem callbackSeen event =
+    when (responseStreamEventType event == EventOutputItemDone) do
+        tryPutMVar callbackSeen ()
+        pure ()
+
+streamingResponse :: MVar () -> IORef Bool -> Wai.Response
+streamingResponse callbackSeen serverSawCallback =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \write flush -> do
+            writeSse write (outputItemDone (assistantMessage "hello"))
+            flush
+            seen <- timeout 2_000_000 (readMVar callbackSeen)
+            writeIORef serverSawCallback (maybe False (const True) seen)
+            writeSse write (completedEvent "resp-stream" [])
+            flush
+
+writeSse :: (Builder.Builder -> IO ()) -> Text -> IO ()
+writeSse write = write . Builder.byteString . Text.encodeUtf8

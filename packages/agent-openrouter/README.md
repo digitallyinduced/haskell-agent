@@ -6,7 +6,8 @@ OpenRouter transport package for the agent harness.
   OpenAI-compatible Responses dialect while keeping the request typed.
 - Forces `store = false` and omits `previous_response_id` — OpenRouter's
   Responses API is stateless and rejects server-side transcripts.
-- Decodes SSE into the canonical typed `ResponseStreamEvent` union and
+- Decodes SSE incrementally into the canonical typed `ResponseStreamEvent`
+  union, delivers callbacks while the response is still arriving, and
   assembles the terminal `Response`.
 - Authenticates with a static OpenRouter API key.
 

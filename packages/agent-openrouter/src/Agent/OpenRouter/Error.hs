@@ -29,27 +29,34 @@ instance FromJSON OpenRouterErrorEnvelope where
 -- | Classify a non-success response from OpenRouter.
 classifyFailure :: Int -> Maybe Int -> Text -> ApiError
 classifyFailure status retryAfterHeader body =
-    case decodeOpenAIError body of
-        Right (ProviderError errType message retryAfter) ->
-            ProviderError errType message (retryAfter `orElse` retryAfterHeader)
-        Right other -> other
-        Left _ -> case decodeOpenRouterError body of
-            Just envelope ->
-                ProviderError
-                    (errorTypeFromOpenRouter status envelope.envelopeCode)
-                    (nonEmptyMessage envelope.envelopeMessage body)
-                    retryAfterHeader
-            Nothing -> case status of
-                401 -> auth
-                403 -> auth
-                402 -> ProviderError BillingError (preview body) Nothing
-                429 -> ProviderError RateLimitError (preview body) retryAfterHeader
-                _ -> case classifyHttpFailure status body of
-                    HttpError 429 message ->
-                        ProviderError RateLimitError (preview message) retryAfterHeader
-                    other -> other
+    case openRouterEnvelope of
+        Just envelope
+            | isOpenRouterSpecificCode envelope.envelopeCode ->
+                fromOpenRouterEnvelope envelope
+        _ -> case decodeOpenAIError body of
+            Right (ProviderError errType message retryAfter) ->
+                ProviderError errType message (retryAfter `orElse` retryAfterHeader)
+            Right other -> other
+            Left _ -> case openRouterEnvelope of
+                Just envelope -> fromOpenRouterEnvelope envelope
+                Nothing -> case status of
+                    401 -> auth
+                    403 -> auth
+                    402 -> ProviderError BillingError (preview body) Nothing
+                    429 -> ProviderError RateLimitError (preview body) retryAfterHeader
+                    _ -> case classifyHttpFailure status body of
+                        HttpError 429 message ->
+                            ProviderError RateLimitError (preview message) retryAfterHeader
+                        other -> other
   where
+    openRouterEnvelope = decodeOpenRouterError body
     auth = ProviderError AuthenticationError (preview body) Nothing
+    fromOpenRouterEnvelope :: OpenRouterErrorEnvelope -> ApiError
+    fromOpenRouterEnvelope envelope =
+        ProviderError
+            (errorTypeFromOpenRouter status envelope.envelopeCode)
+            (nonEmptyMessage envelope.envelopeMessage body)
+            retryAfterHeader
 
 -- | Convert a typed Responses streaming error into the shared error channel.
 classifyStreamError :: ResponseStreamError -> ApiError
@@ -90,6 +97,21 @@ errorTypeFromOpenRouter status code = case Text.toLower <$> code of
         404 -> NotFoundError
         429 -> RateLimitError
         _ -> ApiErrorType
+
+isOpenRouterSpecificCode :: Maybe Text -> Bool
+isOpenRouterSpecificCode code =
+    (Text.toLower <$> code) `elem` map Just
+        [ "invalid_prompt"
+        , "invalid_request"
+        , "invalid_request_error"
+        , "authentication"
+        , "unauthorized"
+        , "forbidden"
+        , "rate_limit"
+        , "insufficient_credits"
+        , "payment_required"
+        , "billing_error"
+        ]
 
 nonEmptyMessage :: Text -> Text -> Text
 nonEmptyMessage message body

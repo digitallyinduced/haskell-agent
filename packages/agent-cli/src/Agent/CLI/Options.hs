@@ -23,6 +23,7 @@ import qualified Data.Text as Text
 data Command
     = ShowHelp
     | ShowVersion
+    | Login
     | ListSessions
     | ShowSession Text
     | RunAgent CliOptions
@@ -112,7 +113,10 @@ parseArgs :: [String] -> Either String Command
 parseArgs args
     | any (`elem` ["--help", "-h"]) args = Right ShowHelp
     | "--version" `elem` args = Right ShowVersion
-    | take 1 args == ["login"] = Left loginHint
+    | take 1 args == ["login"] =
+        if length args == 1
+            then Right Login
+            else Left "usage: agent-cli login"
     | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
     | otherwise = RunAgent <$> parseOptions defaultCliOptions args
 
@@ -204,14 +208,10 @@ parseEffort raw =
                 <> ")"
             )
 
-loginHint :: String
-loginHint =
-    "login is not in this slice. Place credentials in ~/.codex/auth.json \
-    \or ~/.grok/auth.json, or set CODEX_ACCESS_TOKEN / GROK_ACCESS_TOKEN."
-
 usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
+    , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
     , ""

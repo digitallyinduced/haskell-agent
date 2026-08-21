@@ -58,6 +58,12 @@ spec = do
             parseReplLine "/reload-auth now"
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
+        it "opens the credential manager" do
+            parseReplLine "/login" `shouldBe` ReplLogin
+            parseReplLine "/accounts" `shouldBe` ReplLogin
+            parseReplLine "/login openai"
+                `shouldBe` ReplCommandError "usage: /login"
+
         it "clears or starts a new session" do
             parseReplLine "/clear" `shouldBe` ReplClear
             parseReplLine "/new" `shouldBe` ReplNew
@@ -158,6 +164,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "session"
+                    , "login"
                     , "resume"
                     , "compact"
                     , "clear"
@@ -173,6 +180,8 @@ spec = do
             fmap (.slashName) (lookupSlashCommand "m") `shouldBe` Just "model"
             fmap (.slashName) (lookupSlashCommand "/yolo")
                 `shouldBe` Just "always-approve"
+            fmap (.slashName) (lookupSlashCommand "/accounts")
+                `shouldBe` Just "login"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"

@@ -67,13 +67,15 @@ renderBlocks = go
         | Just (level, title) <- headingLine line =
             -- Hide the markdown `#` markers (grok pretty mode); color the title.
             md (headingPrefixStyle level) (styleInline title) : go rest
-        | Just item <- unorderedItem line =
-            ( md listMarkerStyle "• "
+        | Just (indent, item) <- unorderedItemParts line =
+            ( indent
+                <> md listMarkerStyle "• "
                 <> styleInline item
             )
                 : go rest
-        | Just (digits, item) <- orderedItemParts line =
-            ( md listMarkerStyle (digits <> ". ")
+        | Just (indent, digits, item) <- orderedItemParts line =
+            ( indent
+                <> md listMarkerStyle (digits <> ". ")
                 <> styleInline item
             )
                 : go rest
@@ -162,26 +164,26 @@ startsWithSpace t = case Text.uncons t of
     Just (c, _) -> isSpace c
     Nothing -> False
 
-unorderedItem :: Text -> Maybe Text
-unorderedItem line =
-    let stripped = Text.stripStart line
+unorderedItemParts :: Text -> Maybe (Text, Text)
+unorderedItemParts line =
+    let (indent, stripped) = Text.span isSpace line
     in case Text.uncons stripped of
         Just (c, rest)
             | c `elem` ['-', '*', '+']
             , Just (sp, after) <- Text.uncons rest
             , isSpace sp ->
-                Just (Text.strip after)
+                Just (indent, Text.strip after)
         _ -> Nothing
 
 -- | Ordered list: number marker and item body separately so the marker can
 -- be colored without restyling the whole line twice.
-orderedItemParts :: Text -> Maybe (Text, Text)
+orderedItemParts :: Text -> Maybe (Text, Text, Text)
 orderedItemParts line =
-    let stripped = Text.stripStart line
+    let (indent, stripped) = Text.span isSpace line
         (digits, after) = Text.span isDigit stripped
     in if not (Text.null digits)
         then case Text.stripPrefix ". " after of
-            Just item -> Just (digits, Text.strip item)
+            Just item -> Just (indent, digits, Text.strip item)
             Nothing -> Nothing
         else Nothing
 

@@ -39,6 +39,7 @@ data ReplAction
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
+    | ReplLogin
     | ReplReloadAuth
     | ReplPaste
         { pasteImmediate :: !Bool
@@ -77,6 +78,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)"
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation"
     , cmd "session" [] "/session" "Print the current session id"
+    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage"
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
@@ -143,6 +145,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "login" ->
+                if null args
+                    then ReplLogin
+                    else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
             "compact" ->
                 let focus =
