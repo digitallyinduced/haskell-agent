@@ -33,6 +33,22 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
 
+    it "retains a draft composed while a turn is running" do
+        let state =
+                apply
+                    [ UiUserSubmitted "first request"
+                    , UiLoop TurnStarted
+                    , UiSetDraft "follow-up while busy" 20
+                    , UiLoop (ReasoningDelta "checking")
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] (Just "done")))
+                    , UiSetAwaitingInput True
+                    ]
+        state.uiDraft `shouldBe` "follow-up while busy"
+        state.uiCursor `shouldBe` 20
+        state.uiAwaitingInput `shouldBe` True
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
