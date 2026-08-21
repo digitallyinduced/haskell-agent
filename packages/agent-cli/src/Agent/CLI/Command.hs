@@ -19,7 +19,7 @@ module Agent.CLI.Command
 import Agent.CLI.Models (catalogModelIds)
 import Agent.CLI.Options (parseEffort, reasoningEfforts)
 import Agent.CLI.Style (roleMuted, rolePrompt)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Char (isSpace)

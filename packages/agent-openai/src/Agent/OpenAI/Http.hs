@@ -5,8 +5,8 @@ module Agent.OpenAI.Http
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.OpenAI.Error (mkOpenAIError)
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Types as OpenAI
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Types as OpenAI
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)

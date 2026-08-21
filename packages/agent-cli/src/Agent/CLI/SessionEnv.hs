@@ -12,7 +12,7 @@ import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import Agent.OsPath (OsPath)
 import Agent.Provider (Provider, TokenProvider)
 import Agent.Subagents (RootTurnId)

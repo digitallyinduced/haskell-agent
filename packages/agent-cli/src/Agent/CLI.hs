@@ -186,7 +186,7 @@ import Agent.OpenAI.Compaction
     )
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)

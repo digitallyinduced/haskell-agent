@@ -12,10 +12,8 @@ module Agent.OpenRouter.LoopBackend
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
-import Agent.OpenAI.Responses.StatelessBackend
-    ( statelessResponsesBackendWith
-    )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.LoopBackend (statelessResponsesBackend)
+import Agent.Responses.Types
 import Agent.Provider
     ( TokenProvider
     , runWithTokenProvider
@@ -48,4 +46,4 @@ openRouterBackendWith
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-openRouterBackendWith = statelessResponsesBackendWith
+openRouterBackendWith = statelessResponsesBackend

@@ -42,7 +42,6 @@ library
     import:           common-opts
     exposed-modules:  Agent.OpenAI.Responses.Types
                     , Agent.OpenAI.Responses.Codec
-                    , Agent.OpenAI.Responses.StatelessBackend
                     , Agent.OpenAI.Error
                     , Agent.OpenAI.Http
                     , Agent.OpenAI.Auth
@@ -62,6 +61,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-responses       >= 0.1 && < 0.2
                     , text
                     , bytestring
                     , aeson                 >= 2.0
@@ -121,6 +121,7 @@ test-suite agent-openai-test
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-openai
+                    , agent-responses
                     , hspec
                     , aeson
                     , retry >= 0.9.3.1 && < 0.10

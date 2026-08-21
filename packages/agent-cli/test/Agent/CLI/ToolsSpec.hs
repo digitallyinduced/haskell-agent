@@ -1,7 +1,7 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))

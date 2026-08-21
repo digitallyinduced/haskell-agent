@@ -5,10 +5,10 @@ module Agent.XAI.Stream
     ) where
 
 import Agent.Error (ApiError(..), errorTypeFromText)
-import Agent.OpenAI.Error (mkOpenAIError)
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Error (mkOpenAIError)
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.Types
 import Agent.XAI.Error (classifyStreamError)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
