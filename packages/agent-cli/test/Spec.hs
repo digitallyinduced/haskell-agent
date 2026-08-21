@@ -41,6 +41,7 @@ import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
+import qualified Agent.CLI.UIModelSpec as UIModelSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
@@ -85,5 +86,6 @@ main = hspec do
     SessionTitleSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
+    UIModelSpec.spec
     UsageSpec.spec
     WorktreeSpec.spec
