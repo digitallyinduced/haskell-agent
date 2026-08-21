@@ -63,6 +63,7 @@ library
                     , Agent.Tools.Grok.TaskControl
                     , Agent.Tools.Grok.Terminal
                     , Agent.Tools.Ghci
+                    , Agent.Tools.Ghci.Classify
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode

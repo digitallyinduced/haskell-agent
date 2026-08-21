@@ -27,6 +27,12 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool)
+import Agent.Tools.Ghci.Classify
+    ( GhciClass(..)
+    , classifyGhciInput
+    , defaultGhciExtensions
+    , typeLooksEffectful
+    )
 import Agent.Tools.Types (AppTool(..), AppToolKind(..), ToolEnv(..))
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Object)
@@ -44,7 +50,6 @@ import Control.Exception.Safe (SomeException, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Char (isAlphaNum, isSpace)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -62,11 +67,6 @@ import System.Process
     , terminateProcess
     , waitForProcess
     )
-
-data GhciClass
-    = GhciPure
-    | GhciEffectful
-    deriving (Eq, Show)
 
 data GhciResult = GhciResult
     { ghciOk :: !Bool
@@ -138,125 +138,6 @@ classifyGhciLocked session expression =
                     if typeLooksEffectful typeResult.ghciOutput
                         then pure GhciEffectful
                         else pure GhciPure
-
--- | Static gate. @Nothing@ means "needs a :type probe".
-classifyGhciInput :: Text -> Maybe GhciClass
-classifyGhciInput raw =
-    let text = Text.strip raw
-    in if Text.null text
-        then Just GhciEffectful
-        else if mentionsUnsafe text
-            then Just GhciEffectful
-            else case ghciCommandName text of
-                Just cmd
-                    | cmd `elem` safeInfoCommands -> Just GhciPure
-                    | cmd `elem` effectfulCommands -> Just GhciEffectful
-                    | cmd == "set" && isPromptSet text -> Just GhciEffectful
-                    | otherwise -> Just GhciEffectful
-                Nothing
-                    | looksLikeDoBlock text -> Just GhciEffectful
-                    | isBinding text -> Just GhciPure
-                    | otherwise -> Nothing
-
-safeInfoCommands :: [Text]
-safeInfoCommands =
-    [ "type", "t", "kind", "k", "info", "i", "browse", "show", "doc"
-    , "hoogle", "instances", "module"
-    ]
-
-effectfulCommands :: [Text]
-effectfulCommands =
-    [ "!", "cd", "def", "script", "load", "l", "reload", "r"
-    , "add", "unadd", "main", "run", "edit", "e", "sprint"
-    , "force", "print", "quit", "q", "issafe", "ctags", "etags"
-    ]
-
-mentionsUnsafe :: Text -> Bool
-mentionsUnsafe text =
-    any (`Text.isInfixOf` text)
-        [ "unsafePerformIO"
-        , "unsafeInterleaveIO"
-        , "accursedUnutterablePerformIO"
-        , "inlinePerformIO"
-        , "unsafeDupablePerformIO"
-        ]
-
-ghciCommandName :: Text -> Maybe Text
-ghciCommandName text =
-    case Text.uncons (Text.dropWhile isSpace text) of
-        Just (':', rest) ->
-            let name = Text.takeWhile (\c -> isAlphaNum c || c == '!' || c == '-') rest
-            in if Text.null name then Just "!" else Just (Text.toLower name)
-        _ -> Nothing
-
-isPromptSet :: Text -> Bool
-isPromptSet text =
-    let lowered = Text.toLower text
-    in "prompt" `Text.isInfixOf` lowered
-
-looksLikeDoBlock :: Text -> Bool
-looksLikeDoBlock text =
-    let stripped = Text.strip text
-    in "do" == stripped
-        || "do\n" `Text.isPrefixOf` stripped
-        || "do " `Text.isPrefixOf` stripped
-        || "\ndo " `Text.isInfixOf` stripped
-        || "\ndo\n" `Text.isInfixOf` stripped
-
-isBinding :: Text -> Bool
-isBinding text =
-    let stripped = Text.strip text
-        lowered = Text.toLower stripped
-    in "let " `Text.isPrefixOf` lowered
-        || "let\n" `Text.isPrefixOf` lowered
-        || (hasEqualsBinding stripped && not (Text.isPrefixOf "data " lowered)
-            && not (Text.isPrefixOf "type " lowered)
-            && not (Text.isPrefixOf "newtype " lowered)
-            && not (Text.isPrefixOf "class " lowered)
-            && not (Text.isPrefixOf "instance " lowered))
-
-hasEqualsBinding :: Text -> Bool
-hasEqualsBinding text =
-    case Text.breakOn "=" text of
-        (before, after)
-            | Text.null after -> False
-            | ":" `Text.isInfixOf` before -> False
-            | otherwise ->
-                let name = Text.strip before
-                in not (Text.null name)
-                    && Text.all (\c -> isAlphaNum c || c `elem` ("_' " :: String)) name
-
--- | True when a @:type@ reply denotes an IO (or clearly effectful) result.
-typeLooksEffectful :: Text -> Bool
-typeLooksEffectful output =
-    let cleaned = Text.unwords (Text.words (stripTypeErrors output))
-        typePart = case Text.breakOnEnd "::" cleaned of
-            (prefix, rest)
-                | Text.null prefix -> cleaned
-                | otherwise -> Text.strip rest
-        afterConstraints = case Text.breakOnEnd "=>" typePart of
-            (prefix, rest)
-                | Text.null prefix -> typePart
-                | otherwise -> Text.strip rest
-        resultSide = case Text.breakOnEnd "->" afterConstraints of
-            (prefix, rest)
-                | Text.null prefix -> afterConstraints
-                | otherwise -> Text.strip rest
-        tokens = tokenizeType resultSide
-        allTokens = tokenizeType afterConstraints
-    in case tokens of
-        (headTok : _) -> headTok == "IO" || "MonadIO" `elem` allTokens
-        [] -> "MonadIO" `elem` allTokens
-
-stripTypeErrors :: Text -> Text
-stripTypeErrors =
-    Text.unlines
-        . filter (\line -> not ("error:" `Text.isInfixOf` line)
-            && not ("<interactive>" `Text.isPrefixOf` Text.strip line))
-        . Text.lines
-
-tokenizeType :: Text -> [Text]
-tokenizeType = filter (not . Text.null) . Text.split (\c -> isSpace c || c == '(' || c == ')' || c == ',')
 
 evalRawGhci :: GhciSession -> Text -> Int -> IO GhciResult
 evalRawGhci session expression timeoutMs = do
@@ -331,24 +212,6 @@ restartProcess session =
     modifyMVar_ session.ghciProcess \current -> do
         mapM_ shutdownProcess current
         Just <$> spawnProcess session.ghciEnv
-
--- | Extra @-X@ flags on top of GHC2021. Matches @agent-cli@ / @agent-core@
--- @default-extensions@ so snippets the model writes (@"hello"@, @\\case@,
--- @do@ after @id@, @person.name@) work without LANGUAGE pragmas.
---
--- GHC2021 already includes NamedFieldPuns, TypeApplications, and
--- ScopedTypeVariables. NoFieldSelectors is set explicitly because GHC2021
--- turns FieldSelectors on.
-defaultGhciExtensions :: [String]
-defaultGhciExtensions =
-    [ "BlockArguments"
-    , "OverloadedStrings"
-    , "OverloadedRecordDot"
-    , "DuplicateRecordFields"
-    , "NoFieldSelectors"
-    , "LambdaCase"
-    , "RecordWildCards"
-    ]
 
 ghciArgs :: [String]
 ghciArgs = "-v0" : "-XGHC2021" : map ("-X" <>) defaultGhciExtensions
