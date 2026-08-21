@@ -43,6 +43,22 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "ping" "{this is ignored")
         result `shouldBe` functionResult "call-1" "pong"
 
+    it "forwards snapshots from streaming typed tools with their call" do
+        seen <- newIORef []
+        let call = functionToolCall "call-1" "echo" "{\"message\":\"hello\"}"
+            config = testConfig
+                { toolDispatchOnOutput = \seenCall output ->
+                    modifyIORef' seen (<> [(seenCall.callId, output)])
+                }
+        result <- dispatchToolCall config
+            [ typedStreamingTool "echo" \emit (EchoArgs message) -> do
+                emit ("partial:" <> message)
+                pure (Right ("echo:" <> message))
+            ]
+            call
+        result `shouldBe` functionResult "call-1" "echo:hello"
+        readIORef seen `shouldReturn` [("call-1", "partial:hello")]
+
     it "formats unknown tools consistently" do
         result <- dispatchToolCall testConfig [] (functionToolCall "call-1" "missing" "{}")
         result `shouldBe` functionResult "call-1" "ERR unknown:missing"
@@ -71,6 +87,7 @@ testConfig = ToolDispatchConfig
     , toolDispatchFormatResult = either ("ERR " <>) id
     , toolDispatchFormatException = \name _ -> "EX " <> name
     , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
     }
 
 functionResult :: Text -> Text -> ToolCallResult

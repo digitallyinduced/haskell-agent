@@ -9,6 +9,7 @@ module Agent.Tools.IO
     , renameTextFile
     , listDirectoryEntries
     , runShellCommand
+    , runShellCommandStreaming
     , startShellCommand
     , stopShellCommand
     , runningLiveOutput
@@ -27,13 +28,14 @@ import Agent.Tools.FileSystem
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Concurrent.Async
     ( Async
     , async
     , cancel
     , concurrently
     , race
+    , withAsync
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -42,7 +44,6 @@ import Control.Concurrent.MVar
     , readMVar
     , tryPutMVar
     )
-import Control.Exception (evaluate)
 import Control.Exception.Safe
     ( SomeException
     , finally
@@ -103,7 +104,20 @@ runShellCommand
     -> String
     -> Int
     -> IO CommandResult
-runShellCommand env workdir command timeoutMs = do
+runShellCommand env workdir command timeoutMs =
+    runShellCommandStreaming env workdir command timeoutMs (\_ _ -> pure ())
+
+-- | Run a foreground shell command while publishing accumulated stdout/stderr
+-- snapshots. Snapshots are coalesced to at most roughly ten per second and the
+-- final 'CommandResult' remains authoritative.
+runShellCommandStreaming
+    :: ToolEnv
+    -> OsPath
+    -> String
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO CommandResult
+runShellCommandStreaming env workdir command timeoutMs onSnapshot = do
     let spec = (shell command)
             { cwd = Just (toFilePath workdir)
             , std_in = CreatePipe
@@ -121,14 +135,37 @@ runShellCommand env workdir command timeoutMs = do
             }
         Right (Just hin, Just hout, Just herr, processHandle) -> do
             hClose hin
+            stdoutRef <- newIORef BS.empty
+            stderrRef <- newIORef BS.empty
+            lastSnapshotRef <- newIORef Nothing
             let collect = do
                     -- Drain stdout and stderr concurrently so a child that
                     -- fills one pipe cannot deadlock the other.
-                    (outBytes, errBytes) <- concurrently
-                        (strictGetContents hout)
-                        (strictGetContents herr)
-                    code <- waitForProcess processHandle
-                    pure (outBytes, errBytes, code)
+                    withAsync sampleSnapshots \_sampler -> do
+                        (outBytes, errBytes) <- concurrently
+                            (drainHandle hout stdoutRef)
+                            (drainHandle herr stderrRef)
+                        code <- waitForProcess processHandle
+                        emitSnapshot
+                        pure (outBytes, errBytes, code)
+                sampleSnapshots = do
+                    threadDelay 100000
+                    emitSnapshot
+                    sampleSnapshots
+                emitSnapshot = do
+                    outBytes <- readIORef stdoutRef
+                    errBytes <- readIORef stderrRef
+                    let out = truncateText env.toolStdoutCap
+                            (decodeUtf8With lenientDecode outBytes)
+                        err = truncateText env.toolStdoutCap
+                            (decodeUtf8With lenientDecode errBytes)
+                        snapshot = (out, err)
+                    changed <- atomicModifyIORef' lastSnapshotRef \previous ->
+                        if previous == Just snapshot
+                            then (previous, False)
+                            else (Just snapshot, True)
+                    when (changed && not (Text.null out && Text.null err)) $
+                        onSnapshot out err
                 killGroup = void $ try @_ @SomeException
                     (interruptProcessGroupOf processHandle)
                 -- Prefer cancel over timeout when both fire: race cancel
@@ -298,12 +335,6 @@ commandFailure exception = CommandResult
     , commandTimedOut = False
     , commandCancelled = False
     }
-
-strictGetContents :: Handle -> IO BS.ByteString
-strictGetContents handle = do
-    bytes <- BS.hGetContents handle
-    _ <- evaluate (BS.length bytes)
-    pure bytes
 
 -- | Read the handle in chunks so a live snapshot can see output before EOF.
 drainHandle :: Handle -> IORef BS.ByteString -> IO BS.ByteString

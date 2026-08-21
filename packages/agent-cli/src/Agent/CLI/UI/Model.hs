@@ -271,6 +271,8 @@ reduceLoop event state = case event of
         in appendBlock kind (summarizeToolCall call) "" ""
             BlockRunning (Just call.callId)
             state { uiActivity = summarizeToolCall call }
+    ToolOutputUpdated callId output ->
+        updateToolOutput callId output state
     ToolFinished result ->
         completeTool result state
             { uiActivity = "Thinking…" }
@@ -350,6 +352,19 @@ completeTool result state =
                             { blockBody = result.output
                             , blockState = toolResultState result.output
                             }
+                        else block)
+                state.uiBlocks
+        }
+
+updateToolOutput :: Text -> Text -> UiState -> UiState
+updateToolOutput callId output state =
+    state
+        { uiBlocks =
+            fmap
+                (\block ->
+                    if block.blockCallId == Just callId
+                        && block.blockState == BlockRunning
+                        then block { blockBody = output }
                         else block)
                 state.uiBlocks
         }
