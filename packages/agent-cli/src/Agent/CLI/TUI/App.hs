@@ -13,6 +13,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , fullscreenVtyConfig
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     ) where
@@ -44,6 +45,7 @@ import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Options (reasoningEfforts)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Terminal (shiftEnterCsiBodies)
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.TUI.Markdown
@@ -330,6 +332,22 @@ readFullscreenLine runtime skills prompt initial = do
                 Nothing -> UiSetAwaitingInput False
     pure input.fullscreenInputLine
 
+-- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
+-- are not present in the default terminfo input table. Without these entries,
+-- Vty emits the payload of Shift+Enter sequences as printable characters.
+fullscreenVtyConfig :: V.VtyUserConfig
+fullscreenVtyConfig =
+    V.defaultConfig
+        { V.configPreferredColorMode = Just V.FullColor
+        , V.configInputMap =
+            [ ( Nothing
+              , "\ESC[" <> body
+              , V.EvKey V.KEnter [V.MShift]
+              )
+            | body <- shiftEnterCsiBodies
+            ]
+        }
+
 requestFullscreenPermission
     :: FullscreenRuntime
     -> ToolCall
@@ -384,12 +402,8 @@ runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
-    let vtyConfig =
-            V.defaultConfig
-                { V.configPreferredColorMode = Just V.FullColor
-                }
-        buildVty = do
-            vty <- Vty.mkVty vtyConfig
+    let buildVty = do
+            vty <- Vty.mkVty fullscreenVtyConfig
             let output = V.outputIface vty
             -- Without this mode terminals paste image clipboard fallbacks
             -- (paths, URLs, or other text representations) as ordinary key
