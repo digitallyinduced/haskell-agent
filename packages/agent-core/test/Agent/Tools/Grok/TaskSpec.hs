@@ -30,16 +30,18 @@ spec = describe "Agent.Tools.Grok.Task" do
                 })
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-            tool = taskTool ctx typesRef
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing Nothing
+            tool = taskTool "/tmp" ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
-                "{\"prompt\":\"hello\",\"description\":\"test task\"}")
+                "{\"prompt\":\"hello\",\"description\":\"test task\",\"model\":\"grok-4.5-mini\"}")
         result.output `shouldSatisfy` Text.isInfixOf "Subagent started in background"
         result.output `shouldSatisfy` Text.isInfixOf "subagent_id: agent-"
+        specs <- Map.elems <$> readIORef typesRef
+        map (\entry -> entry.modelOverride) specs `shouldBe` [Just "grok-4.5-mini"]
         closeSubagentRegistry registry
 
-    it "filters explore tools to a read-mostly set" do
+    it "filters explore tools to the Grok Build read-only set" do
         let tools =
                 [ fake "read_file"
                 , fake "search_replace"
@@ -48,21 +50,28 @@ spec = describe "Agent.Tools.Grok.Task" do
                 , fake "run_terminal_cmd"
                 ]
             names = map (.appToolName) (filterGrokToolsForType "explore" tools)
-        names `shouldBe` ["read_file", "grep", "run_terminal_cmd"]
+        names `shouldBe` ["read_file", "grep"]
         names `shouldNotContain` ["search_replace"]
         names `shouldNotContain` ["task"]
 
-    it "rejects worktree isolation" do
+    it "filters task out of general-purpose children" do
+        let tools = [fake "read_file", fake "task"]
+            names = map (.appToolName) (filterGrokToolsForType "general-purpose" tools)
+        names `shouldBe` ["read_file"]
+
+    it "uses the host worktree hook for isolated children" do
         registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
-            tool = taskTool ctx typesRef
+        let createIsolated _ = pure (Right "/tmp")
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot Nothing
+                (Just createIsolated)
+            tool = taskTool "/tmp" ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"x\",\"description\":\"y\",\"isolation\":\"worktree\"}")
-        result.output `shouldSatisfy` Text.isInfixOf "worktree"
+        result.output `shouldSatisfy` Text.isInfixOf "worktree_path: /tmp"
         closeSubagentRegistry registry
 
 fake :: Text -> AppTool

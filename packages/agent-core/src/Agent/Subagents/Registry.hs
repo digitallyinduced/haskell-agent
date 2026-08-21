@@ -11,8 +11,10 @@ module Agent.Subagents.Registry
     , closeSubagentRegistry
     , resetSubagentRegistry
     , spawnSubagent
+    , spawnSubagentWithCwd
     , spawnSubagentAt
     , restoreSubagent
+    , restoreSubagentWithCwd
     , waitSubagents
     , waitAnyLive
     , sendInput
@@ -22,6 +24,7 @@ module Agent.Subagents.Registry
     , resumeSubagent
     , getStatus
     , getPreviousResponseId
+    , getSubagentCwd
     , getTaskPath
     , resolveAgentTarget
     , listLive
@@ -76,6 +79,7 @@ data SubagentRecord = SubagentRecord
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordTaskPath :: !TaskPath
+    , recordCwd :: !FilePath
     }
 
 data SubagentRegistry = SubagentRegistry
@@ -152,7 +156,18 @@ spawnSubagent
     -> Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-spawnSubagent registry parentId parentDepth message nickname = do
+spawnSubagent registry =
+    spawnSubagentWithCwd registry registry.registryCwd
+
+spawnSubagentWithCwd
+    :: SubagentRegistry
+    -> FilePath
+    -> Maybe SubagentId
+    -> Int
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnSubagentWithCwd registry childCwd parentId parentDepth message nickname = do
     parentPath <- case parentId of
         Nothing -> pure taskPathRoot
         Just pid -> do
@@ -165,7 +180,8 @@ spawnSubagent registry parentId parentDepth message nickname = do
     -- Reuse the generated id by spawning with an explicit path helper that
     -- still allocates internally; uniqueness comes from the id-derived name.
     fmap (fmap fst) $
-        spawnSubagentAt registry parentId parentPath parentDepth taskName message nickname
+        spawnSubagentAtWithCwd
+            registry childCwd parentId parentPath parentDepth taskName message nickname
 
 -- | Spawn with an explicit parent path and task_name (Codex multi-agent v2).
 spawnSubagentAt
@@ -177,7 +193,20 @@ spawnSubagentAt
     -> Text
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
-spawnSubagentAt registry parentId parentPath parentDepth taskName message nickname = do
+spawnSubagentAt registry =
+    spawnSubagentAtWithCwd registry registry.registryCwd
+
+spawnSubagentAtWithCwd
+    :: SubagentRegistry
+    -> FilePath
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtWithCwd registry childCwd parentId parentPath parentDepth taskName message nickname = do
     let nextDepth = parentDepth + 1
         cfg = registry.registryConfig
     case cfg.maxDepth of
@@ -205,6 +234,7 @@ spawnSubagentAt registry parentId parentPath parentDepth taskName message nickna
                         , recordSlotHeld = slotHeld
                         , recordPreviousResponseId = previousVar
                         , recordTaskPath = childPath
+                        , recordCwd = childCwd
                         }
                 admitted <- atomically do
                     closed <- readTVar registry.registryClosed
@@ -241,7 +271,7 @@ runWorker registry record firstPrompt = do
             { subId = record.recordId
             , subDepth = record.recordDepth
             , subParentId = record.recordParent
-            , subCwd = registry.registryCwd
+            , subCwd = record.recordCwd
             , subCancel = record.recordCancel
             }
         onEvent = registry.registryOnEvent record.recordId
@@ -458,7 +488,19 @@ restoreSubagent
     -> Maybe Text
     -> Maybe Text
     -> IO (Either Text SubagentId)
-restoreSubagent registry agentId parentId depth nickname previous = do
+restoreSubagent registry =
+    restoreSubagentWithCwd registry registry.registryCwd
+
+restoreSubagentWithCwd
+    :: SubagentRegistry
+    -> FilePath
+    -> SubagentId
+    -> Maybe SubagentId
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+restoreSubagentWithCwd registry childCwd agentId parentId depth nickname previous = do
     existing <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
     case existing of
         Just record -> do
@@ -487,6 +529,7 @@ restoreSubagent registry agentId parentId depth nickname previous = do
                     , recordSlotHeld = slotHeld
                     , recordPreviousResponseId = previousVar
                     , recordTaskPath = taskPathRoot
+                    , recordCwd = childCwd
                     }
             atomically do
                 closed <- readTVar registry.registryClosed
@@ -523,6 +566,11 @@ getPreviousResponseId registry agentId = atomically do
     case Map.lookup agentId agents of
         Nothing -> pure Nothing
         Just record -> readTVar record.recordPreviousResponseId
+
+getSubagentCwd :: SubagentRegistry -> SubagentId -> IO (Maybe FilePath)
+getSubagentCwd registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    pure ((.recordCwd) <$> Map.lookup agentId agents)
 
 readStatusSTM :: SubagentRegistry -> SubagentId -> STM SubagentStatus
 readStatusSTM registry agentId = do

@@ -17,15 +17,14 @@ module Agent.Tools
     ) where
 
 import Agent.Provider (Provider(..))
-import Agent.Subagents (SubagentId)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.Grok (closeGrokSession, filterGrokToolsForType, grokTools, newGrokSession)
+import Agent.Tools.Grok.Task (GrokSubagentSpecs)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
 import Data.IORef
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 
@@ -34,8 +33,8 @@ data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
     , codingPlanMode :: !PlanModeEnv
     , codingClose :: !(IO ())
-      -- | Grok/OpenRouter: maps spawned agent ids to subagent_type.
-    , codingAgentTypes :: !(IORef (Map SubagentId Text))
+      -- | Grok/OpenRouter: model-facing type and runtime overrides per child.
+    , codingAgentTypes :: !GrokSubagentSpecs
     }
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
@@ -59,7 +58,7 @@ codingToolsForWithTypes
     -> ToolEnv
     -> Maybe PlanModeHooks
     -> Maybe MultiAgentContext
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> IO CodingTools
 codingToolsForWithTypes provider env hooks multi typesRef = do
     plan <- newPlanModeEnv env.toolCwd hooks
