@@ -8,10 +8,11 @@ module Agent.Tools.Types
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
+import Agent.OsPath (OsPath)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolCall, ToolHandler)
 import Data.Text (Text)
-import System.FilePath (dropTrailingPathSeparator)
+import System.OsPath (dropTrailingPathSeparator)
 
 data AppToolKind
     = JsonFunction
@@ -31,13 +32,13 @@ data AppTool = AppTool
     }
 
 data ToolEnv = ToolEnv
-    { toolCwd :: !FilePath
+    { toolCwd :: !OsPath
     , toolStdoutCap :: !Int
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
     }
 
-defaultToolEnv :: FilePath -> IO ToolEnv
+defaultToolEnv :: OsPath -> IO ToolEnv
 defaultToolEnv cwd = do
     cancel <- newCancelFlag
     pure ToolEnv

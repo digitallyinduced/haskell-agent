@@ -1,6 +1,7 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
+import Agent.OsPath (fromFilePath)
 import Agent.Provider (Provider(..))
 import Test.Hspec
 
@@ -26,7 +27,7 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optProvider = Just XAIProvider
                     , optModel = Just "grok-4.6"
-                    , optCwd = Just "/tmp/work"
+                    , optCwd = Just (fromFilePath "/tmp/work")
                     , optYolo = True
                     , optMaxTurns = 3
                     , optEffort = Just "high"
@@ -38,19 +39,23 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions { optWorktree = True })
             parseArgs ["--cwd", "/tmp/work", "--worktree", "-p", "hello"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optCwd = Just "/tmp/work"
+                    { optCwd = Just (fromFilePath "/tmp/work")
                     , optWorktree = True
                     , optPrompt = Just "hello"
                     })
 
-        it "accepts xhigh effort" do
+        it "accepts none, xhigh, and max effort" do
+            parseArgs ["--effort", "none"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "none" })
             parseArgs ["--effort", "xhigh"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "xhigh" })
+            parseArgs ["--effort", "max"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "max" })
             parseArgs ["--effort", "HIGH"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
 
         it "rejects unknown effort levels" do
-            parseArgs ["--effort", "max"] `shouldSatisfy` isLeft
+            parseArgs ["--effort", "extreme"] `shouldSatisfy` isLeft
 
         it "accepts openrouter as a provider" do
             parseArgs ["--provider", "openrouter", "-p", "hi"]
@@ -65,8 +70,9 @@ spec = do
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
 
-        it "explains that login is not in this slice" do
-            parseArgs ["login"] `shouldSatisfy` isLeft
+        it "opens the credential manager without starting an agent" do
+            parseArgs ["login"] `shouldBe` Right Login
+            parseArgs ["login", "openai"] `shouldSatisfy` isLeft
 
 
         it "parses sessions list and show" do
@@ -142,7 +148,7 @@ spec = do
         it "is true for -p and --prompt-file" do
             isOneShot defaultCliOptions `shouldBe` False
             isOneShot defaultCliOptions { optPrompt = Just "x" } `shouldBe` True
-            isOneShot defaultCliOptions { optPromptFile = Just "x.md" } `shouldBe` True
+            isOneShot defaultCliOptions { optPromptFile = Just (fromFilePath "x.md") } `shouldBe` True
 
 isLeft :: Either a b -> Bool
 isLeft = \case

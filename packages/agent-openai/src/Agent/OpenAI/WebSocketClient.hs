@@ -297,6 +297,7 @@ buildWsPayloadWithOptions options request previousResponseId =
         Aeson.Object object -> Aeson.Object
             $ addContextManagement
             $ addPreviousResponseId
+            $ KeyMap.insert "store" (Aeson.Bool False)
             $ KeyMap.insert "type" (Aeson.String "response.create") object
         other -> other
   where
@@ -401,19 +402,23 @@ receiveWsResponse cc onEvent = do
 --
 -- We lift typed server errors into 'ProviderError', carrying the exact
 -- @resets_in_seconds@ (if present), so the caller can pass rate-limit windows
--- straight through to 'Agent.OpenAI.Auth.reportRateLimit'. Error events without a
--- server type still fall back to 'ConnectionError' unless their code/message
--- identifies a missing @previous_response_id@.
+-- straight through to 'Agent.OpenAI.Auth.reportRateLimit'. A code-only event
+-- is also typed; only events with neither a type nor a code fall back to
+-- 'ConnectionError' (apart from previous-response wording).
 parseWsErrorEvent :: ResponseStreamError -> ApiError
 parseWsErrorEvent streamError =
     let parsedError = mkOpenAIError
-            (maybe (UnknownErrorType "") errorTypeFromText streamError.errorType)
+            (maybe
+                (maybe (UnknownErrorType "") errorTypeFromText streamError.code)
+                errorTypeFromText
+                streamError.errorType)
             streamError.message
             streamError.code
             streamError.retryAfter
-    in case streamError.errorType of
-        Just _ -> parsedError
-        Nothing
+    in case (streamError.errorType, streamError.code) of
+        (Just _, _) -> parsedError
+        (Nothing, Just _) -> parsedError
+        (Nothing, Nothing)
             | isPreviousResponseIdError parsedError -> parsedError
             | otherwise -> ConnectionError
                 ("WebSocket error (no type): "

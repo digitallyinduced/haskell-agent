@@ -1,7 +1,7 @@
 module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
@@ -21,20 +21,24 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "summarizeToolCall" do
-        it "includes JSON argument highlights" do
+        it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
-                `shouldBe` "read_file src/A.hs"
+                `shouldBe` "Read src/A.hs"
             summarizeToolCall (functionToolCall "c2" "shell_command" "{\"command\":\"ls -l\"}")
-                `shouldBe` "shell_command ls -l"
+                `shouldBe` "$ ls -l"
             summarizeToolCall (functionToolCall "c3" "run_terminal_cmd" "{\"command\":\"git status\"}")
-                `shouldBe` "run_terminal_cmd git status"
+                `shouldBe` "$ git status"
             summarizeToolCall (functionToolCall "c3b" "run_ghci" "{\"expression\":\"1 + 1\"}")
-                `shouldBe` "run_ghci 1 + 1"
+                `shouldBe` "$ 1 + 1"
+            summarizeToolCall (functionToolCall "c3c" "list_dir" "{\"target_directory\":\"packages\"}")
+                `shouldBe` "Listed packages"
+            summarizeToolCall (functionToolCall "c3d" "grep" "{\"pattern\":\"foo\"}")
+                `shouldBe` "Searched foo"
 
         it "pulls the first path out of an apply_patch body" do
             let patch = "*** Begin Patch\n*** Update File: src/Foo.hs\n@@\n-a\n+b\n*** End Patch"
             summarizeToolCall (customToolCall "c4" "apply_patch" patch)
-                `shouldBe` "apply_patch src/Foo.hs"
+                `shouldBe` "Edited src/Foo.hs"
 
     describe "truncateToolOutput" do
         it "keeps the first line and marks empty output" do
@@ -55,8 +59,21 @@ spec = do
 
     describe "formatActivityLine" do
         it "joins spinner, activity, and elapsed" do
-            formatActivityLine False "⠋" "thinking…" 1.2
-                `shouldBe` "⠋ thinking…  1.2s"
+            formatActivityLine False "⠋" "Thinking…" 1.2
+                `shouldBe` "⠋ Thinking…  1.2s"
+
+    describe "formatToolStarted" do
+        it "renders English verbs for known tools" do
+            formatToolStarted False (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
+                `shouldBe` "◆ Read src/A.hs"
+            formatToolStarted False (functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"git status\"}")
+                `shouldBe` "◆ $ git status"
+            formatToolStarted False (functionToolCall "c3" "search_replace" "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe` "◆ Edited src/A.hs"
+
+        it "keeps unknown tool names" do
+            formatToolStarted False (functionToolCall "c4" "custom_tool" "{\"x\":1}")
+                `shouldBe` "◆ custom_tool"
 
     describe "formatSearchReplaceDiff" do
         it "renders a compact unified diff" do
@@ -80,6 +97,7 @@ spec = do
                 { responseId = "r"
                 , toolCalls = []
                 , assistantText = Just "almost"
+                , tokenUsage = emptyTokenUsage
                 })
                 `shouldSatisfy` (/= "")
 
@@ -102,7 +120,7 @@ spec = do
                 let lines_ = filter (not . Text.null) (Text.lines body)
                 length lines_ `shouldBe` 80
                 lines_ `shouldMatchList`
-                    [ "◆ list_dir packages/agent-" <> Text.pack (show i)
+                    [ "◆ Listed packages/agent-" <> Text.pack (show i)
                     | i <- [1 :: Int .. 80]
                     ]
 
@@ -115,21 +133,59 @@ spec = do
                 visibleAfter <- readIORef config.renderThinkingVisible
                 visibleAfter `shouldBe` True
                 activity <- readIORef config.renderActivityRef
-                activity `shouldBe` "list_dir ."
+                activity `shouldBe` "Listed ."
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
-                body `shouldSatisfy` ("◆ list_dir ." `Text.isInfixOf`)
+                body `shouldSatisfy` (Text.isInfixOf "Thinking…")
+                body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
 
-        it "ignores reasoning deltas" do
+        it "buffers reasoning summaries and commits one thinking block" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
                 renderEvent config (ReasoningDelta "secret plan")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
+                body `shouldSatisfy` (Text.isInfixOf "Thinking")
+                body `shouldSatisfy` (Text.isInfixOf "secret plan")
+                body `shouldSatisfy` (Text.isInfixOf "Thought for")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 
-        it "streams styled TextDelta live in color mode" do
+        it "commits the thinking block before the first tool" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "look at src")
+                renderEvent config
+                    (ToolStarted (functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"))
+                hClose handle
+                body <- Text.readFile path
+                let thoughtIdx = Text.length (fst (Text.breakOn "Thought for" body))
+                    toolIdx = Text.length (fst (Text.breakOn "Listed" body))
+                thoughtIdx `shouldSatisfy` (< toolIdx)
+                body `shouldSatisfy` (Text.isInfixOf "look at src")
+
+        it "hides reasoning when thinking chrome is off" do
+            withRenderConfig False False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "secret plan")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` (not . Text.isInfixOf "secret plan")
+                body `shouldSatisfy` (not . Text.isInfixOf "Thought for")
+
+        it "streams TextDelta append-only in color mode" do
             withRenderConfig False True \config handle path -> do
                 renderEvent config (TextDelta "see `file.txt`")
                 buffered <- readIORef config.renderTextBuffer
@@ -142,28 +198,28 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
                 body `shouldSatisfy` Text.isInfixOf "file.txt"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
-                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                body `shouldSatisfy` Text.isInfixOf "`file.txt`"
                 readIORef config.renderLiveActive `shouldReturn` False
 
-        it "restyles growing markdown across deltas" do
+        it "does not repaint earlier content across deltas" do
             withRenderConfig False True \config handle path -> do
                 renderEvent config (TextDelta "see `fi")
                 renderEvent config (TextDelta "le.txt`")
                 hClose handle
                 body <- Text.readFile path
-                -- Second delta should restore saved cursor and redraw; final
-                -- body styles the closed code span (no raw backticks left).
-                body `shouldSatisfy` Text.isInfixOf "file.txt"
-                body `shouldSatisfy` (not . Text.isInfixOf "`file.txt`")
+                body `shouldSatisfy` Text.isInfixOf "see `fi"
+                body `shouldSatisfy` Text.isInfixOf "le.txt`"
+                Text.count "see " body `shouldBe` 1
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
-                body `shouldSatisfy` Text.isInfixOf "\ESC7"  -- DECSC
-                body `shouldSatisfy` Text.isInfixOf "\ESC8"  -- DECRC
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
@@ -173,6 +229,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = [call]
                     , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -186,6 +243,7 @@ spec = do
                     { responseId = "r1"
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
+                    , tokenUsage = emptyTokenUsage
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -204,7 +262,7 @@ spec = do
                     })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "list_dir"
+                body `shouldSatisfy` Text.isInfixOf "Listed"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
 
@@ -213,7 +271,41 @@ spec = do
                 renderEvent config TurnStarted
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` (Text.isInfixOf "thinking…")
+                body `shouldSatisfy` (Text.isInfixOf "Thinking…")
+                body `shouldSatisfy` (not . Text.isInfixOf "\ESC]9;4;")
+
+        it "emits Ghostty OSC 9;4 while thinking and clears it after" do
+            withRenderConfigNative True False True \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "plan")
+                clearThinking config
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` containsOsc9 3
+                body `shouldSatisfy` containsOsc9 0
+
+    describe "formatThinkingBlock" do
+        it "headers a live preview and a finished duration" do
+            formatThinkingBlock False True 1.2 "secret plan"
+                `shouldSatisfy` Text.isInfixOf "Thinking"
+            let finished = formatThinkingBlock False False 1.2 "secret plan"
+            finished `shouldSatisfy` Text.isInfixOf "Thought for 1.2s"
+            finished `shouldSatisfy` Text.isInfixOf "secret plan"
+
+        it "truncates live preview to three wrapped lines" do
+            let raw = Text.unlines (replicate 8 "word")
+                live = formatThinkingBlock False True 0.4 raw
+            Text.count "word" live `shouldBe` 3
+            live `shouldSatisfy` Text.isInfixOf "more"
+
+    describe "wrapThinkingLines" do
+        it "wraps at the thoughts width" do
+            wrapThinkingLines 8 "hello world friends"
+                `shouldBe` ["hello", "world", "friends"]
+
+        it "splits an overlong token" do
+            wrapThinkingLines 4 "abcdefgh"
+                `shouldBe` ["abcd", "efgh"]
 
     describe "visibleDisplayRows" do
         it "counts soft-wrapped rows without ANSI" do
@@ -224,17 +316,33 @@ spec = do
             let painted = "\ESC[1mabcdefghij\ESC[0m"
             visibleDisplayRows 5 painted `shouldBe` 2
 
+containsOsc9 :: Int -> Text.Text -> Bool
+containsOsc9 state body =
+    let raw = "\ESC]9;4;" <> Text.pack (show state) <> "\BEL"
+        wrapped = "\ESCPtmux;\ESC" <> raw <> "\ESC\\"
+    in raw `Text.isInfixOf` body || wrapped `Text.isInfixOf` body
+
 withRenderConfig
     :: Bool
     -> Bool
     -> (RenderConfig -> Handle -> FilePath -> IO ())
     -> IO ()
-withRenderConfig showThinking color action = do
+withRenderConfig showThinking color =
+    withRenderConfigNative showThinking color False
+
+withRenderConfigNative
+    :: Bool
+    -> Bool
+    -> Bool
+    -> (RenderConfig -> Handle -> FilePath -> IO ())
+    -> IO ()
+withRenderConfigNative showThinking color native action = do
     printed <- newIORef False
     thinking <- newIORef False
     spinner <- newIORef Nothing
+    reasoningBuffer <- newIORef ""
     modelRef <- newIORef "test-model"
-    activityRef <- newIORef "thinking…"
+    activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
     textBuffer <- newIORef ""
     liveActive <- newIORef False
@@ -247,6 +355,7 @@ withRenderConfig showThinking color action = do
                 { renderShowThinking = showThinking
                 , renderThinkingVisible = thinking
                 , renderThinkingSpinner = spinner
+                , renderReasoningBuffer = reasoningBuffer
                 , renderColor = color
                 , renderPrintedText = printed
                 , renderTextBuffer = textBuffer
@@ -257,6 +366,7 @@ withRenderConfig showThinking color action = do
                 , renderModelRef = modelRef
                 , renderActivityRef = activityRef
                 , renderStartedAt = startedAt
+                , renderNativeProgress = native
                 }
         action config handle path
         clearThinking config

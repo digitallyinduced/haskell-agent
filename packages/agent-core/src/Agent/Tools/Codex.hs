@@ -8,6 +8,7 @@ module Agent.Tools.Codex
     ( codexTools
     ) where
 
+import Agent.OsPath (fromText)
 import Agent.ToolArgs
     ( objectArgs
     , optInt
@@ -26,6 +27,8 @@ import Agent.Tools.IO (CommandResult(..), resolveUnderCwd, runShellCommand)
 import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
+    , askUserQuestionTool
+    , enterPlanModeTool
     , isPlanModeActive
     )
 import Agent.Tools.Types
@@ -55,6 +58,8 @@ codexTools env ghci planMode multi = do
         , applyPatchTool env
         , updatePlanTool planMode planRef
         , runGhciTool ghci
+        , enterPlanModeTool planMode
+        , askUserQuestionTool planMode
         ]
         ++ maybe [] multiAgentTools multi
 
@@ -126,7 +131,7 @@ runShell env args
         let timeoutMs = min 300000 (max 1 (fromMaybe 10000 args.timeoutMs))
         workdir <- case args.workdir of
             Nothing -> pure (Right env.toolCwd)
-            Just dir -> resolveUnderCwd env (Text.unpack dir)
+            Just dir -> resolveUnderCwd env (fromText dir)
         case workdir of
             Left err -> pure (Left err)
             Right dir -> do

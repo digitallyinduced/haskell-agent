@@ -2,10 +2,12 @@
 module Agent.Broker
     ( BrokerOptions(..)
     , newBrokerTokenProvider
+    , newBrokerTokenProviderFor
     , newBrokerTokenProviderWith
     , newBrokerTokenProviderWithClock
     ) where
 
+import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider
     ( AccountFailure(..)
@@ -72,8 +74,16 @@ instance Aeson.FromJSON BrokerToken where
 -- lease-aware broker can include a @lease_id@ without changing transport call
 -- sites.
 newBrokerTokenProvider :: BrokerOptions -> IO TokenProvider
-newBrokerTokenProvider options =
-    newBrokerTokenProviderWith (fetchBrokerCredentialExcluding options)
+newBrokerTokenProvider options = newBrokerTokenProviderFor options
+    [OpenAIProvider, XAIProvider, OpenRouterProvider]
+
+-- | Build a broker-backed provider restricted to the transports the caller is
+-- prepared to use. This keeps every failover credential on the same transport
+-- after a CLI session explicitly selects a provider.
+newBrokerTokenProviderFor :: BrokerOptions -> [Provider] -> IO TokenProvider
+newBrokerTokenProviderFor options supportedProviders =
+    newBrokerTokenProviderWith
+        (fetchBrokerCredentialExcluding options supportedProviders)
 
 -- | Construct a broker provider around a credential-fetch callback. This is
 -- useful for custom broker transports and deterministic integration tests.
@@ -151,13 +161,14 @@ instance Aeson.FromJSON BrokerError where
 
 fetchBrokerCredentialExcluding
     :: BrokerOptions
+    -> [Provider]
     -> Maybe FailedCredential
     -> [Text]
     -> IO (Either ApiError (Maybe Credential))
-fetchBrokerCredentialExcluding options failed excludedAccountIds =
+fetchBrokerCredentialExcluding options supportedProviders failed excludedAccountIds =
     fmap (fmap brokerCredential)
         <$> fetchBrokerTokenExcluding options
-            [OpenAIProvider, XAIProvider, OpenRouterProvider]
+            supportedProviders
             failed excludedAccountIds
   where
     brokerCredential BrokerToken { accessToken, accountId, brokerLeaseId, brokerProvider } =
@@ -192,7 +203,7 @@ fetchBrokerTokenExcluding options supportedProviders failed excludedAccountIds =
                     Right token -> pure (Right (Just token))
   where
     requestToken = do
-        request <- parseRequest (trimSlash options.baseUrl <> "/api/v1/token")
+        request <- parseRequest (trimTrailingSlash options.baseUrl <> "/api/v1/token")
         httpLBS
             $ addFailureHeaders failed
             $ setRequestMethod "POST"
@@ -237,6 +248,3 @@ brokerHttpError status body
         , brokerRetryAt = Just retryAt
         } <- Aeson.eitherDecode body = CredentialsExhausted retryAt
     | otherwise = HttpError status "broker could not issue an access token"
-
-trimSlash :: String -> String
-trimSlash = reverse . dropWhile (== '/') . reverse

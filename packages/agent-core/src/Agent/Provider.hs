@@ -116,6 +116,7 @@ accountFailureFromApiError err = case err of
     HttpError 429 _ -> rateLimited
     ProviderError RateLimitError _ _ -> rateLimited
     ProviderError UsageLimitReached _ _ -> rateLimited
+    ProviderError UsageBalanceExhausted _ _ -> rateLimited
     HttpError 401 _ -> authenticationRejected
     HttpError 403 _ -> authenticationRejected
     ProviderError AuthenticationError _ _ -> authenticationRejected

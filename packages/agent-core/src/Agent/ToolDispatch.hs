@@ -7,10 +7,12 @@ module Agent.ToolDispatch
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
+    , typedToolWithCall
     , noArgsTool
     , functionToolCall
     , customToolCall
     , dispatchToolCall
+    , canonicalToolName
     , toolArgumentsValue
     , decodeToolArguments
     ) where
@@ -40,6 +42,7 @@ data ToolCall = ToolCall
     , name :: !Text
     , arguments :: !Text
     , callKind :: !ToolCallKind
+    , argumentsEncrypted :: !Bool
     } deriving (Eq, Show)
 
 -- | Provider-neutral result ready for a transport adapter to encode.
@@ -55,6 +58,7 @@ functionToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = FunctionCallKind
+    , argumentsEncrypted = False
     }
 
 customToolCall :: Text -> Text -> Text -> ToolCall
@@ -63,6 +67,7 @@ customToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = CustomCallKind
+    , argumentsEncrypted = False
     }
 
 data ToolDispatchConfig = ToolDispatchConfig
@@ -74,10 +79,14 @@ data ToolDispatchConfig = ToolDispatchConfig
 
 data ToolHandler
     = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
+    | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
 typedTool :: FromJSON args => Text -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool = TypedTool
+
+typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
+typedToolWithCall = TypedToolWithCall
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -87,7 +96,7 @@ dispatchToolCall config handlers call = do
     let callName = call.name
         input = toolArgumentsValue call.arguments
         runTool = case findHandler callName handlers of
-            Just handler -> runHandler input handler
+            Just handler -> runHandler call input handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- Exception.try @SomeException runTool
     resultOutput <- case result of
@@ -117,35 +126,50 @@ decodeToolArguments value =
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
 findHandler name handlers =
     find ((== name) . handlerName) handlers
-        <|> find ((== stripNamespace name) . handlerName) handlers
+        <|> find ((== canonicalToolName name) . handlerName) handlers
 
--- | Codex namespaced tools may arrive as @multi_agent_v1.spawn_agent@ or
--- @multi_agent_v1spawn_agent@ (concatenated Display form). Match the bare
--- function name either way.
-stripNamespace :: Text -> Text
-stripNamespace name
+-- | Codex namespaced tools may arrive as @collaboration.spawn_agent@ or
+-- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
+canonicalToolName :: Text -> Text
+canonicalToolName name
+    | Just rest <- Text.stripPrefix "collaboration." name = rest
+    | Just rest <- Text.stripPrefix "collaboration" name
+    , rest `elem` multiAgentBareNames =
+        rest
     | Just rest <- Text.stripPrefix "multi_agent_v1." name = rest
     | Just rest <- Text.stripPrefix "multi_agent_v1" name
-    , rest `elem`
-        [ "spawn_agent"
-        , "wait_agent"
-        , "send_input"
-        , "close_agent"
-        , "resume_agent"
-        ] =
+    , rest `elem` multiAgentBareNames =
         rest
     | otherwise = name
+
+multiAgentBareNames :: [Text]
+multiAgentBareNames =
+    [ "spawn_agent"
+    , "wait_agent"
+    , "send_message"
+    , "followup_task"
+    , "list_agents"
+    , "interrupt_agent"
+    , "send_input"
+    , "close_agent"
+    , "resume_agent"
+    ]
 
 handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ -> name
+    TypedToolWithCall name _ -> name
     NoArgsTool name _ -> name
 
-runHandler :: Value -> ToolHandler -> IO (Either Text Text)
-runHandler value = \case
+runHandler :: ToolCall -> Value -> ToolHandler -> IO (Either Text Text)
+runHandler call value = \case
     TypedTool _ run ->
         case decodeToolArguments value of
             Right args -> run args
+            Left err -> pure (Left err)
+    TypedToolWithCall _ run ->
+        case decodeToolArguments value of
+            Right args -> run call args
             Left err -> pure (Left err)
     NoArgsTool _ run ->
         run

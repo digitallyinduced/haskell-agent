@@ -1,7 +1,9 @@
 module Agent.Tools.CodexSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
+import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
@@ -10,13 +12,16 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.ApplyPatch (parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.PlanMode (newPlanModeEnv)
+import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -36,7 +41,14 @@ spec = describe "Agent.Tools.Codex" do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
             coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
-            names `shouldBe` ["shell_command", "apply_patch", "update_plan", "run_ghci"]
+            names `shouldBe`
+                [ "shell_command"
+                , "apply_patch"
+                , "update_plan"
+                , "run_ghci"
+                , "enter_plan_mode"
+                , "ask_user_question"
+                ]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
@@ -51,13 +63,50 @@ spec = describe "Agent.Tools.Codex" do
                     { multiRegistry = registry
                     , multiSelfId = Nothing
                     , multiDepth = 0
+                    , multiTaskPath = taskPathRoot
                     , multiResumeFromDisk = Nothing
+                    , multiCreateWorktree = Nothing
+                    , multiSendToRoot = Nothing
                     }
             coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools
-            names `shouldContain` ["spawn_agent", "wait_agent", "send_input", "close_agent", "resume_agent"]
+            names `shouldContain` ["spawn_agent", "wait_agent", "send_message", "followup_task", "list_agents", "interrupt_agent"]
+            let parameters name =
+                    [ property
+                    | tool <- coding.codingAppTools
+                    , tool.appToolName == name
+                    , property <- tool.appToolParameters
+                    ]
+            map (.propertyName) (parameters "spawn_agent") `shouldBe`
+                [ "task_name"
+                , "message"
+                , "model"
+                , "reasoning_effort"
+                , "fork_turns"
+                ]
+            map (.propertyType) (parameters "wait_agent") `shouldBe`
+                [PropertyNumber]
+            case map (.propertyType) (parameters "spawn_agent") of
+                _ : PropertyRaw (Aeson.Object messageSchema) : _ ->
+                    KeyMap.lookup "encrypted" messageSchema
+                        `shouldBe` Just (Aeson.Bool True)
+                other -> expectationFailure
+                    ("expected encrypted spawn message schema, got " <> show other)
             coding.codingClose
             closeSubagentRegistry registry
+
+    it "lets the OpenAI agent enter plan mode proactively" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            plan <- newPlanModeEnv env.toolCwd Nothing
+            tools <- codexTools env ghci plan Nothing
+            (do
+                result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+                    (functionToolCall "call-enter-plan" "enter_plan_mode"
+                        "{\"explanation\":\"The user requested a design plan.\"}")
+                result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
+                isPlanModeActive plan `shouldReturn` True)
+                `finally` closeGhciSession ghci
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do
@@ -70,7 +119,7 @@ spec = describe "Agent.Tools.Codex" do
                 ]
             added `shouldSatisfy` Text.isInfixOf "Success."
             added `shouldSatisfy` Text.isInfixOf "A hello.txt"
-            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nworld\n"
+            Text.readFile (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` "hello\nworld\n"
 
             updated <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
@@ -82,7 +131,7 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             updated `shouldSatisfy` Text.isInfixOf "M hello.txt"
-            Text.readFile (env.toolCwd </> "hello.txt") `shouldReturn` "hello\nthere\n"
+            Text.readFile (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` "hello\nthere\n"
 
             deleted <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
@@ -90,11 +139,11 @@ spec = describe "Agent.Tools.Codex" do
                 , "*** End Patch"
                 ]
             deleted `shouldSatisfy` Text.isInfixOf "D hello.txt"
-            doesFileExist (env.toolCwd </> "hello.txt") `shouldReturn` False
+            doesFileExist (toFilePath env.toolCwd </> "hello.txt") `shouldReturn` False
 
     it "rejects apply_patch paths that escape cwd" do
         withTempEnv \env -> do
-            let name = takeFileName env.toolCwd <> "-outside.txt"
+            let name = takeFileName (toFilePath env.toolCwd) <> "-outside.txt"
             output <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
                 , "*** Add File: ../" <> Text.pack name
@@ -105,7 +154,7 @@ spec = describe "Agent.Tools.Codex" do
 
     it "rejects a patch whose context does not match the file" do
         withTempEnv \env -> do
-            Text.writeFile (env.toolCwd </> "a.txt") "foo\n"
+            Text.writeFile (toFilePath env.toolCwd </> "a.txt") "foo\n"
             output <- runPatch env $ Text.unlines
                 [ "*** Begin Patch"
                 , "*** Update File: a.txt"
@@ -188,4 +237,4 @@ withTempEnv action = do
     bracket
         (mkdtemp (tmp </> "agent-codex-XXXXXX"))
         removeDirectoryRecursive
-        (\dir -> defaultToolEnv dir >>= action)
+        (\dir -> defaultToolEnv (fromFilePath dir) >>= action)

@@ -39,6 +39,7 @@ library
                     , Agent.XAI.Options
                     , Agent.XAI.Request
                     , Agent.XAI.Stream
+                    , Agent.XAI.Usage
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
@@ -51,6 +52,8 @@ library
                     , base64-bytestring
                     , retry
                     , safe-exceptions
+                    , scientific
+                    , time
 
 test-suite agent-xai-test
     import:           common-opts
@@ -62,6 +65,7 @@ test-suite agent-xai-test
                     , Agent.XAI.FunctionalSpec
                     , Agent.XAI.LoopBackendSpec
                     , Agent.XAI.ResponsesSpec
+                    , Agent.XAI.UsageSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core

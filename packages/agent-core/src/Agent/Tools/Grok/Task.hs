@@ -1,4 +1,4 @@
--- | Grok-build @task@ tool — spawn nestable subagents.
+-- | Grok-build @task@ tool — spawn one level of subagents.
 --
 -- Wire names and defaults follow xai-org/grok-build TaskToolInput /
 -- build_task_description. Runtime reuses 'Agent.Subagents'.
@@ -7,20 +7,25 @@ module Agent.Tools.Grok.Task
     , filterGrokToolsForType
     , knownSubagentTypes
     , defaultSubagentType
+    , GrokSubagentSpec(..)
+    , GrokSubagentSpecs
     , isSubagentIdText
     , formatTaskStarted
     , formatTaskCompleted
+    , recordAgentSpec
     , recordAgentType
     , lookupAgentType
+    , lookupAgentModel
     ) where
 
+import Agent.OsPath (OsPath, fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , getStatus
     , sendInput
-    , spawnSubagent
+    , spawnSubagentWithCwd
     , waitSubagents
     )
 import Agent.ToolArgs
@@ -33,7 +38,7 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (typedTool)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool(..)
@@ -46,12 +51,21 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Directory.OsPath (doesDirectoryExist)
+import System.OsPath (isAbsolute, normalise, (</>))
 
 defaultSubagentType :: Text
 defaultSubagentType = "general-purpose"
 
 knownSubagentTypes :: [Text]
 knownSubagentTypes = ["general-purpose", "explore", "plan"]
+
+data GrokSubagentSpec = GrokSubagentSpec
+    { agentType :: !Text
+    , modelOverride :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+type GrokSubagentSpecs = IORef (Map SubagentId GrokSubagentSpec)
 
 -- | True when the id looks like a registry subagent id (not a shell @tN@ id).
 isSubagentIdText :: Text -> Bool
@@ -74,10 +88,10 @@ instance FromJSON TaskArgs where
         description <- reqText object "description"
         subagentType <- fromMaybe defaultSubagentType <$> optText object "subagent_type"
         runInBackground <- fromMaybe True <$> optBool object "run_in_background"
-        resumeFrom <- optText object "resume_from"
-        cwd <- optText object "cwd"
-        model <- optText object "model"
-        isolation <- optText object "isolation"
+        resumeFrom <- sanitizeOptional <$> optText object "resume_from"
+        cwd <- sanitizeOptional <$> optText object "cwd"
+        model <- sanitizeOptional <$> optText object "model"
+        isolation <- sanitizeOptional <$> optText object "isolation"
         pure TaskArgs
             { prompt
             , description
@@ -89,8 +103,16 @@ instance FromJSON TaskArgs where
             , isolation
             }
 
-taskTool :: MultiAgentContext -> IORef (Map SubagentId Text) -> AppTool
-taskTool ctx typesRef = AppTool
+sanitizeOptional :: Maybe Text -> Maybe Text
+sanitizeOptional value = value >>= \raw ->
+    let stripped = Text.strip raw
+        lowered = Text.toLower stripped
+    in if Text.null stripped || lowered `elem` ["null", "none", "undefined"]
+        then Nothing
+        else Just stripped
+
+taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
+taskTool baseCwd ctx specsRef = AppTool
     { appToolName = "task"
     , appToolDescription = taskDescription
     , appToolParameters =
@@ -109,9 +131,9 @@ taskTool ctx typesRef = AppTool
         , PropertySchema "model" PropertyString False $ Just
             "Optional model slug. Omit to inherit the parent model."
         , PropertySchema "isolation" PropertyString False $ Just
-            "Isolation mode: \"none\" (default) or \"worktree\". Worktree isolation is not supported yet."
+            "Isolation mode: \"none\" (default) or \"worktree\". Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
-    , appToolHandler = typedTool "task" (runTask ctx typesRef)
+    , appToolHandler = typedTool "task" (runTask baseCwd ctx specsRef)
     , appToolKind = JsonFunction
     , appToolReadOnly = False
     , appToolIsReadOnlyCall = Nothing
@@ -121,26 +143,28 @@ taskDescription :: Text
 taskDescription =
     "Start a subagent that works on a task independently and reports back.\n\n\
     \Agent types:\n\n\
-    \- **general-purpose**: General purpose agent for multi-step tasks. Has access to all tools including task.\n\
+    \- **general-purpose**: General purpose agent for multi-step tasks. Has access to all parent tools except task.\n\
     \- **explore**: Fast, read-only agent specialized for codebase exploration. Read-only — has access to: read_file, list_dir, grep.\n\
-    \- **plan**: Software architect for planning implementation strategies. Read-only — has access to: read_file, list_dir, grep, enter_plan_mode, exit_plan_mode, ask_user_question.\n\n\
+    \- **plan**: Software architect for planning implementation strategies. Read-only — has access to: read_file, list_dir, grep, web_search, enter_plan_mode, exit_plan_mode, ask_user_question.\n\n\
     \## Usage notes\n\
     \- When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
     \- run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. This is set to true by default.\n\
+    \- Subagents receive project instructions from AGENTS.md. Include any especially important task-specific conventions directly in the prompt.\n\
     \- When using the task tool, you must specify a subagent_type parameter to select which agent type to use.\n\
     \- When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
     \Resuming a previous agent (resume_from):\n\
-    \- Use resume_from to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior task call.\n\
+    \- Use resume_from to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior task call. A resumed agent keeps its transcript, so only describe what changed since the last run.\n\
     \- The resumed agent must use the same subagent_type as the source.\n\n\
     \Isolation mode:\n\
-    \- isolation=\"worktree\" is not supported yet; use the default shared workspace."
+    \- Use isolation=\"worktree\" to run the child in an isolated git worktree. The worktree is preserved after completion and its path is returned in the output."
 
 runTask
-    :: MultiAgentContext
-    -> IORef (Map SubagentId Text)
+    :: OsPath
+    -> MultiAgentContext
+    -> GrokSubagentSpecs
     -> TaskArgs
     -> IO (Either Text Text)
-runTask ctx typesRef args
+runTask baseCwd ctx typesRef args
     | Text.null (Text.strip args.prompt) =
         pure (Left "task requires a non-empty prompt")
     | Text.null (Text.strip args.description) =
@@ -151,30 +175,27 @@ runTask ctx typesRef args
                 <> args.subagentType
                 <> ". Known types: "
                 <> Text.intercalate ", " knownSubagentTypes
-    | Just iso <- args.isolation
-    , Text.toLower (Text.strip iso) `elem` ["worktree", "work_tree", "work-tree"] =
-        pure (Left "isolation=\"worktree\" is not supported yet. Omit isolation or use \"none\".")
+    | Just resumeId <- args.resumeFrom = resumeTask ctx typesRef args resumeId
     | Just _ <- args.cwd
     , Just iso <- args.isolation
-    , Text.toLower (Text.strip iso) `notElem` ["none", ""] =
+    , isWorktreeIsolation iso =
         pure (Left "cwd and isolation are mutually exclusive.")
-    | Just _ <- args.cwd =
-        -- Explicit cwd overrides are accepted later; for v1 reject to avoid
-        -- surprising ToolEnv mismatches until child cwd wiring exists.
-        pure (Left "task cwd overrides are not supported yet. Omit cwd to use the parent working directory.")
-    | Just resumeId <- args.resumeFrom = resumeTask ctx typesRef args resumeId
-    | otherwise = spawnFresh ctx typesRef args
+    | otherwise = resolveTaskWorkspace baseCwd ctx args >>= \case
+        Left err -> pure (Left err)
+        Right (childCwd, worktreePath) ->
+            spawnFresh childCwd worktreePath ctx typesRef args
 
 spawnFresh
-    :: MultiAgentContext
-    -> IORef (Map SubagentId Text)
+    :: OsPath
+    -> Maybe OsPath
+    -> MultiAgentContext
+    -> GrokSubagentSpecs
     -> TaskArgs
     -> IO (Either Text Text)
-spawnFresh ctx typesRef args = do
-    -- model override accepted but unused until child runners plumb it.
-    _ <- pure args.model
-    result <- spawnSubagent
+spawnFresh childCwd worktreePath ctx typesRef args = do
+    result <- spawnSubagentWithCwd
         ctx.multiRegistry
+        childCwd
         ctx.multiSelfId
         ctx.multiDepth
         args.prompt
@@ -182,18 +203,59 @@ spawnFresh ctx typesRef args = do
     case result of
         Left err -> pure (Left err)
         Right agentId -> do
-            recordAgentType typesRef agentId args.subagentType
+            recordAgentSpec typesRef agentId GrokSubagentSpec
+                { agentType = args.subagentType
+                , modelOverride = args.model
+                }
             if args.runInBackground
-                then pure $ Right $ formatTaskStarted agentId args
+                then pure $ Right $ formatTaskStarted agentId args worktreePath
                 else do
                     (statuses, timedOut) <-
                         waitSubagents ctx.multiRegistry [agentId] defaultWaitTimeoutMs
-                    pure $ Right $ formatTaskCompleted agentId args timedOut
+                    pure $ Right $ formatTaskCompleted agentId args worktreePath timedOut
                         (Map.lookup agentId statuses)
+
+resolveTaskWorkspace
+    :: OsPath
+    -> MultiAgentContext
+    -> TaskArgs
+    -> IO (Either Text (OsPath, Maybe OsPath))
+resolveTaskWorkspace baseCwd ctx args
+    | maybe False isWorktreeIsolation args.isolation =
+        case ctx.multiCreateWorktree of
+            Nothing -> pure (Left "isolation=\"worktree\" is unavailable in this host.")
+            Just create ->
+                create baseCwd >>= \case
+                    Left err -> pure (Left err)
+                    Right path -> pure (Right (path, Just path))
+    | otherwise = do
+        resolved <- resolveTaskCwd baseCwd args.cwd
+        pure $ case resolved of
+            Left err -> Left err
+            Right path -> Right (path, Nothing)
+
+isWorktreeIsolation :: Text -> Bool
+isWorktreeIsolation isolation =
+    Text.toLower (Text.strip isolation)
+        `elem` ["worktree", "work_tree", "work-tree"]
+
+resolveTaskCwd :: OsPath -> Maybe Text -> IO (Either Text OsPath)
+resolveTaskCwd baseCwd requested = do
+    let path = case requested of
+            Nothing -> baseCwd
+            Just raw ->
+                let supplied = fromText (Text.strip raw)
+                in if isAbsolute supplied
+                    then normalise supplied
+                    else normalise (baseCwd </> supplied)
+    exists <- doesDirectoryExist path
+    pure $ if exists
+        then Right path
+        else Left ("task cwd is not an existing directory: " <> toText path)
 
 resumeTask
     :: MultiAgentContext
-    -> IORef (Map SubagentId Text)
+    -> GrokSubagentSpecs
     -> TaskArgs
     -> Text
     -> IO (Either Text Text)
@@ -225,15 +287,15 @@ resumeTask ctx typesRef args resumeId = do
                         Left err -> pure (Left err)
                         Right _ ->
                             if args.runInBackground
-                                then pure $ Right $ formatTaskStarted agentId args
+                                then pure $ Right $ formatTaskStarted agentId args Nothing
                                 else do
                                     (statuses, timedOut) <-
                                         waitSubagents ctx.multiRegistry [agentId] defaultWaitTimeoutMs
-                                    pure $ Right $ formatTaskCompleted agentId args timedOut
+                                    pure $ Right $ formatTaskCompleted agentId args Nothing timedOut
                                         (Map.lookup agentId statuses)
 
-formatTaskStarted :: SubagentId -> TaskArgs -> Text
-formatTaskStarted agentId args =
+formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
+formatTaskStarted agentId args worktreePath =
     "Subagent started in background.\n\
     \subagent_id: "
         <> agentId.unSubagentId
@@ -243,16 +305,20 @@ formatTaskStarted agentId args =
         <> "\n\
         \description: "
         <> args.description
-        <> "\n\
-        \Use get_task_output with this subagent_id to retrieve results. Do not poll in a loop."
+        <> maybe "" (\path -> "\nworktree_path: " <> toText path) worktreePath
+        <> "\n\n\
+        \When you need its result, use get_task_output with task_ids=[\""
+        <> agentId.unSubagentId
+        <> "\"] and a positive timeout_ms."
 
 formatTaskCompleted
     :: SubagentId
     -> TaskArgs
+    -> Maybe OsPath
     -> Bool
     -> Maybe SubagentStatus
     -> Text
-formatTaskCompleted agentId args timedOut mstatus =
+formatTaskCompleted agentId args worktreePath timedOut mstatus =
     let header =
             "subagent_id: "
                 <> agentId.unSubagentId
@@ -260,6 +326,7 @@ formatTaskCompleted agentId args timedOut mstatus =
                 <> args.subagentType
                 <> "\ndescription: "
                 <> args.description
+                <> maybe "" (\path -> "\nworktree_path: " <> toText path) worktreePath
                 <> "\n"
         body = case mstatus of
             Just (Completed (Just text)) -> "status: completed\nfinal:\n" <> text
@@ -275,37 +342,44 @@ formatTaskCompleted agentId args timedOut mstatus =
             Nothing -> "status: unknown"
     in header <> body
 
-recordAgentType :: IORef (Map SubagentId Text) -> SubagentId -> Text -> IO ()
-recordAgentType typesRef agentId agentType =
-    atomicModifyIORef' typesRef \m -> (Map.insert agentId agentType m, ())
+recordAgentSpec :: GrokSubagentSpecs -> SubagentId -> GrokSubagentSpec -> IO ()
+recordAgentSpec specsRef agentId spec =
+    atomicModifyIORef' specsRef update
+  where
+    update specs = (Map.insert agentId spec specs, ())
 
-lookupAgentType :: IORef (Map SubagentId Text) -> SubagentId -> IO (Maybe Text)
-lookupAgentType typesRef agentId = Map.lookup agentId <$> readIORef typesRef
+recordAgentType :: GrokSubagentSpecs -> SubagentId -> Text -> IO ()
+recordAgentType specsRef agentId agentType = do
+    specs <- readIORef specsRef
+    let model = maybe Nothing (\spec -> spec.modelOverride) (Map.lookup agentId specs)
+    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model)
+
+lookupAgentType :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
+lookupAgentType specsRef agentId = do
+    specs <- readIORef specsRef
+    pure ((\spec -> spec.agentType) <$> Map.lookup agentId specs)
+
+lookupAgentModel :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
+lookupAgentModel specsRef agentId = do
+    specs <- readIORef specsRef
+    pure (Map.lookup agentId specs >>= \spec -> spec.modelOverride)
 
 -- | Restrict the child tool surface by subagent type.
 filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]
 filterGrokToolsForType agentType tools = case agentType of
     "explore" -> filter ((`elem` exploreNames) . (.appToolName)) tools
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
-    _ -> tools
+    _ -> filter ((/= "task") . (.appToolName)) tools
   where
     exploreNames =
         [ "read_file"
         , "list_dir"
         , "grep"
-        , "run_terminal_cmd"
-        , "run_ghci"
-        , "get_task_output"
-        , "kill_task"
         ]
     planNames =
         [ "read_file"
         , "list_dir"
         , "grep"
-        , "run_terminal_cmd"
-        , "run_ghci"
-        , "get_task_output"
-        , "kill_task"
         , "enter_plan_mode"
         , "exit_plan_mode"
         , "ask_user_question"

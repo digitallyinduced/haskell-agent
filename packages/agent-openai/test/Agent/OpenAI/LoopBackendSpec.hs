@@ -1,6 +1,7 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.Responses.Types
@@ -22,6 +23,37 @@ spec = do
                     message.content `shouldBe`
                         MessageContentParts [InputTextPart "hello" Nothing KeyMap.empty]
                 other -> expectationFailure ("expected one user message, got " <> show other)
+
+        it "preserves encrypted collaboration payloads as agent_message content" do
+            let message = InterAgentMessage
+                    { messageAuthor = "/root"
+                    , messageRecipient = "/root/worker"
+                    , messageType = NewTaskMessage
+                    , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
+                    }
+            case turnInputsToItems [AgentMessage message] of
+                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
+                    [ "type" Aeson..= ("agent_message" :: Text)
+                    , "author" Aeson..= ("/root" :: Text)
+                    , "recipient" Aeson..= ("/root/worker" :: Text)
+                    , "content" Aeson..=
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text)
+                            , "text" Aeson..=
+                                ("Message Type: NEW_TASK\n\
+                                \Task name: /root/worker\n\
+                                \Sender: /root\n\
+                                \Payload:\n" :: Text)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("encrypted_content" :: Text)
+                            , "encrypted_content" Aeson..=
+                                ("gAAAAA-ciphertext" :: Text)
+                            ]
+                        ]
+                    ]
+                other ->
+                    expectationFailure ("expected one agent_message, got " <> show other)
 
         it "encodes multimodal turns as input_text plus input_image data URLs" do
             let image = ImageAttachment "image/png" "png-bytes"
@@ -76,14 +108,27 @@ spec = do
                     , assistantItem "working"
                     , customCallItem "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
                     ]
-            turn `shouldBe` TurnOutput
-                { responseId = "resp-9"
-                , toolCalls =
-                    [ functionToolCall "fc1" "shell_command" "{\"command\":\"ls\"}"
-                    , customToolCall "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
-                    ]
-                , assistantText = Just "working"
-                }
+            turn `shouldBe` emptyTurnOutput "resp-9"
+                [ functionToolCall "fc1" "shell_command" "{\"command\":\"ls\"}"
+                , customToolCall "cc1" "apply_patch" "*** Begin Patch\n*** End Patch"
+                ]
+                (Just "working")
+
+        it "marks encrypted collaboration arguments and honors plaintext override" do
+            let encrypted = responseToTurnOutput $ testResponse "resp-encrypted"
+                    [functionCallItemWithExtras "fc1" "spawn_agent"
+                        "{\"task_name\":\"worker\",\"message\":\"gAAAAA\"}"
+                        (KeyMap.fromList
+                            [(Key.fromText "namespace", Aeson.String "collaboration")])]
+                plaintext = responseToTurnOutput $ testResponse "resp-plaintext"
+                    [functionCallItemWithExtras "fc2" "spawn_agent"
+                        "{\"task_name\":\"worker\",\"message\":\"hello\"}"
+                        (KeyMap.fromList
+                            [ (Key.fromText "namespace", Aeson.String "collaboration")
+                            , (Key.fromText "encrypted_function_args", Aeson.Array mempty)
+                            ])]
+            map (.argumentsEncrypted) encrypted.toolCalls `shouldBe` [True]
+            map (.argumentsEncrypted) plaintext.toolCalls `shouldBe` [False]
 
         it "joins multiple assistant messages" do
             let turn = responseToTurnOutput $ testResponse "resp-text"
@@ -92,6 +137,23 @@ spec = do
                     , assistantItem "second"
                     ]
             turn.assistantText `shouldBe` Just "first\nsecond"
+
+        it "copies provider usage including cached input tokens" do
+            let turn = responseToTurnOutput $ testResponseWithUsage "resp-u"
+                    [assistantItem "ok"]
+                    (Aeson.object
+                        [ "input_tokens" Aeson..= (120 :: Int)
+                        , "output_tokens" Aeson..= (30 :: Int)
+                        , "total_tokens" Aeson..= (150 :: Int)
+                        , "input_tokens_details" Aeson..= Aeson.object
+                            [ "cached_tokens" Aeson..= (80 :: Int)
+                            ]
+                        ])
+            turn.tokenUsage `shouldBe` TokenUsage
+                { inputTokens = 120
+                , outputTokens = 30
+                , cachedTokens = 80
+                }
 
     describe "streamEventToLoopEvent" do
         it "maps output_text.delta and reasoning deltas" do
@@ -123,11 +185,7 @@ spec = do
             result <- backend.submitTurn (Just "resp-prev")
                 [UserMessage "hello"]
                 (modifyIORef' events . (:))
-            result `shouldBe` Right TurnOutput
-                { responseId = "resp-1"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            result `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "ok"))
             [(request, previous)] <- readIORef seen
             previous `shouldBe` Just "resp-prev"
             request.model `shouldBe` Just "gpt-5.6-luna"
@@ -177,17 +235,73 @@ spec = do
             result <- backend.submitTurn (Just "resp-missing")
                 [UserMessage "new"]
                 (const (pure ()))
-            result `shouldBe` Right TurnOutput
-                { responseId = "resp-2"
-                , toolCalls = []
-                , assistantText = Just "ok"
-                }
+            result `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "ok"))
             requests <- readIORef seen
             map snd requests `shouldBe` [Just "resp-missing", Nothing]
             map (inputItems . fst) requests `shouldBe`
                 [ turnInputsToItems [UserMessage "new"]
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
+
+    describe "openAiBackendWithConnectionRecovery" do
+        it "replays on a fresh connection when the reusable socket dies before output" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure $ Left $ ConnectionError "socket closed"
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            first <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            second <- backend.submitTurn (Just "resp-fresh")
+                [UserMessage "two"] (const (pure ()))
+            first `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            second `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 2
+
+        it "does not replay after loop-visible output was already streamed" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            events <- newIORef []
+            let sendCurrent _request _previous onEvent = do
+                    onEvent (deltaEvent EventOutputTextDelta "partial")
+                    pure $ Left $ ConnectionError "socket closed"
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                streamingBackend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- streamingBackend.submitTurn Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Left (ConnectionError "socket closed")
+            reverse <$> readIORef events `shouldReturn` [TextDelta "partial"]
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 0
+
+        it "does not treat provider errors as a dead connection" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent =
+                    pure $ Left $ ProviderError OverloadedError "busy" Nothing
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                providerErrorBackend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- providerErrorBackend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (ProviderError OverloadedError "busy" Nothing)
+            readIORef healthy `shouldReturn` True
+            readIORef freshCalls `shouldReturn` 0
 
 --------------------------------------------------------------------------------
 -- Fixtures
@@ -239,13 +353,23 @@ customResult callId output = ToolCallResult
     }
 
 functionCallItem :: Text -> Text -> Text -> ResponseItem
-functionCallItem callId name arguments = FunctionCallItem FunctionCall
+functionCallItem callId name arguments =
+    functionCallItemWithExtras callId name arguments KeyMap.empty
+
+functionCallItemWithExtras
+    :: Text
+    -> Text
+    -> Text
+    -> Aeson.Object
+    -> ResponseItem
+functionCallItemWithExtras callId name arguments extraFields =
+    FunctionCallItem FunctionCall
     { itemId = Nothing
     , callId
     , name
     , arguments
     , status = Just ItemCompleted
-    , extraFields = KeyMap.empty
+    , extraFields
     }
 
 customCallItem :: Text -> Text -> Text -> ResponseItem
@@ -276,15 +400,23 @@ deltaEvent otherEventType delta = OtherResponseStreamEvent
     }
 
 testResponse :: Text -> [ResponseItem] -> Response
-testResponse responseId output = case Aeson.fromJSON $ Aeson.object
+testResponse responseId output = testResponseWithUsage responseId output Aeson.Null
+
+testResponseWithUsage :: Text -> [ResponseItem] -> Aeson.Value -> Response
+testResponseWithUsage responseId output usage = case Aeson.fromJSON $ Aeson.object $
     [ "id" Aeson..= responseId
     , "created_at" Aeson..= (0 :: Int)
     , "model" Aeson..= ("test-model" :: Text)
     , "status" Aeson..= ("completed" :: Text)
     , "output" Aeson..= output
-    ] of
+    ] <> usageField
+  of
     Aeson.Success response -> response
     Aeson.Error err -> error err
+  where
+    usageField = case usage of
+        Aeson.Null -> []
+        value -> ["usage" Aeson..= value]
 
 itemType :: Aeson.ToJSON a => a -> Text
 itemType value = case Aeson.toJSON value of

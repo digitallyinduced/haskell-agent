@@ -23,16 +23,24 @@ spec = do
             parseReplLine "list the files" `shouldBe` ReplPrompt "list the files"
             parseReplLine ":status" `shouldBe` ReplPrompt ":status"
 
+        it "preserves ordinary prompt whitespace exactly" do
+            parseReplLine "  indented prompt  "
+                `shouldBe` ReplPrompt "  indented prompt  "
+            parseReplLine "\n    code\n"
+                `shouldBe` ReplPrompt "\n    code\n"
+            parseReplLine "  :status  "
+                `shouldBe` ReplPrompt "  :status  "
+
         it "shows the current effort with a bare /effort" do
             parseReplLine "/effort" `shouldBe` ReplShowEffort
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
 
         it "sets a valid effort level" do
+            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
             parseReplLine "/effort high" `shouldBe` ReplSetEffort "high"
             parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
-            parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
-            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
             parseReplLine "/effort MAX" `shouldBe` ReplSetEffort "max"
+            parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
 
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
@@ -58,6 +66,12 @@ spec = do
             parseReplLine "/reload-auth now"
                 `shouldBe` ReplCommandError "usage: /reload-auth"
 
+        it "opens the credential manager" do
+            parseReplLine "/login" `shouldBe` ReplLogin
+            parseReplLine "/accounts" `shouldBe` ReplLogin
+            parseReplLine "/login openai"
+                `shouldBe` ReplCommandError "usage: /login"
+
         it "clears or starts a new session" do
             parseReplLine "/clear" `shouldBe` ReplClear
             parseReplLine "/new" `shouldBe` ReplNew
@@ -71,7 +85,7 @@ spec = do
             parseReplLine "/compact focus auth"
                 `shouldBe` ReplCompact (Just "focus auth")
 
-        it "prints account usage" do
+        it "shows account usage without arguments" do
             parseReplLine "/usage" `shouldBe` ReplUsage
             parseReplLine "/usage extra"
                 `shouldBe` ReplCommandError "usage: /usage"
@@ -113,6 +127,12 @@ spec = do
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
+        it "opens the agent hierarchy" do
+            parseReplLine "/agents" `shouldBe` ReplAgents
+            parseReplLine "/a" `shouldBe` ReplAgents
+            parseReplLine "/agents now"
+                `shouldBe` ReplCommandError "usage: /agents"
+
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing
             parseReplLine "/help model" `shouldBe` ReplHelp (Just "model")
@@ -132,12 +152,21 @@ spec = do
             parseReplLine "/plan   keep  spaces"
                 `shouldBe` ReplPlan (Just "keep  spaces")
 
+        it "asks a side question with the full suffix" do
+            parseReplLine "/btw why this file?"
+                `shouldBe` ReplBtw "why this file?"
+            parseReplLine "/BTW   keep  spaces"
+                `shouldBe` ReplBtw "keep  spaces"
+            parseReplLine "/btw"
+                `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
                     "effort must be none, low, medium, high, xhigh, or max (got bogus)"
             parseReplLine "/effort high extra"
-                `shouldBe` ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
+                `shouldBe` ReplCommandError
+                    "usage: /effort [none|low|medium|high|xhigh|max]"
             parseReplLine "/bogus"
                 `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
             parseReplLine "/"
@@ -152,7 +181,9 @@ spec = do
                     , "model"
                     , "effort"
                     , "plan"
+                    , "btw"
                     , "session"
+                    , "login"
                     , "resume"
                     , "compact"
                     , "clear"
@@ -162,6 +193,7 @@ spec = do
                     , "paste"
                     , "attachments"
                     , "clear-attachments"
+                    , "agents"
                     , "always-approve"
                     ]
 
@@ -169,15 +201,26 @@ spec = do
             fmap (.slashName) (lookupSlashCommand "m") `shouldBe` Just "model"
             fmap (.slashName) (lookupSlashCommand "/yolo")
                 `shouldBe` Just "always-approve"
+            fmap (.slashName) (lookupSlashCommand "/accounts")
+                `shouldBe` Just "login"
+            fmap (.slashName) (lookupSlashCommand "/a")
+                `shouldBe` Just "agents"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
-                `shouldSatisfy` (\xs -> "/help" `elem` xs && "/model" `elem` xs && "/m" `elem` xs)
+                `shouldSatisfy` (\xs ->
+                    "/help" `elem` xs
+                        && "/model" `elem` xs
+                        && "/m" `elem` xs
+                        && "/agents" `elem` xs
+                        && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
 
         it "completes effort and model arguments" do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
+            slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
+            slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
             slashCompletionCandidates "m/" "grok-4"
                 `shouldSatisfy` (\xs ->
                     "grok-4.6" `elem` xs
@@ -188,14 +231,46 @@ spec = do
             slashCompletionCandidates "" "help" `shouldBe` []
             slashCompletionCandidates (reverse "list the ") "files" `shouldBe` []
 
+        it "opens a live menu on slash and fuzzy-filters command names" do
+            let displays text cursor =
+                    maybe [] (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                        (slashMenuFor text cursor)
+            displays "/" 1 `shouldBe` map (("/" <>) . (.slashName)) slashCommands
+            displays "/mo" 3 `shouldBe` ["/model"]
+            displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
+            displays "look at /mo" 11 `shouldBe` []
+
+        it "offers argument rows" do
+            let menu = slashMenuFor "/effort h" 9
+            fmap (.slashMenuReplaceStart) menu `shouldBe` Just 8
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions)) menu
+                `shouldBe` Just ["high", "xhigh"]
+
+        it "replaces the whole token when completing from the middle" do
+            fmap (\menu -> (menu.slashMenuReplaceStart, menu.slashMenuReplaceEnd))
+                (slashMenuFor "/mofoo" 3)
+                `shouldBe` Just (0, 6)
+            fmap (\menu -> (menu.slashMenuReplaceStart, menu.slashMenuReplaceEnd))
+                (slashMenuFor "/effort hi" 9)
+                `shouldBe` Just (8, 10)
+
+        it "does not offer single-argument completions in later slots" do
+            slashMenuFor "/effort high " 13 `shouldBe` Nothing
+            slashMenuFor "/help model " 12 `shouldBe` Nothing
+            slashMenuFor "/paste --send " 14 `shouldBe` Nothing
+
         it "renders /help with usage and summary" do
             let listing = Text.unpack (formatSlashHelp False Nothing)
             listing `shouldSatisfy` ("/model [NAME]" `isInfixOf`)
             listing `shouldSatisfy` ("Open the model picker" `isInfixOf`)
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
+            listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
+            listing `shouldSatisfy` ("/agents" `isInfixOf`)
+            listing `shouldSatisfy` ("/usage" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
-                `shouldSatisfy` ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
+                `shouldSatisfy`
+                    ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

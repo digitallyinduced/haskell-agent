@@ -1,5 +1,6 @@
 module Agent.ToolDSLSpec (spec) where
 
+import Agent.OsPath (fromFilePath)
 import Agent.ToolDSL
 import Agent.Tools.Grok.Prompt
 import qualified Data.Aeson as Aeson
@@ -35,7 +36,7 @@ spec = do
 
     describe "grokSystemPrompt" do
         it "names grok-build tools including background task helpers" do
-            let prompt = grokSystemPrompt codingGrokPromptTools "/tmp/repo"
+            let prompt = grokSystemPrompt codingGrokPromptTools (fromFilePath "/tmp/repo")
                     (fromGregorian 2026 8 20) False
             prompt `shouldSatisfy` Text.isInfixOf "read_file"
             prompt `shouldSatisfy` Text.isInfixOf "search_replace"
@@ -53,7 +54,7 @@ spec = do
             prompt `shouldSatisfy` Text.isInfixOf "2026-08-20"
 
         it "uses the autonomous identity for one-shot sessions" do
-            let prompt = grokSystemPrompt codingGrokPromptTools "/tmp/repo"
+            let prompt = grokSystemPrompt codingGrokPromptTools (fromFilePath "/tmp/repo")
                     (fromGregorian 2026 8 20) True
             prompt `shouldSatisfy` Text.isInfixOf "no human operator"
 

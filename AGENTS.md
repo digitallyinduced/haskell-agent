@@ -21,10 +21,10 @@ we follow the tool defintions that are used by the first party lab harnesses. e.
 
 use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
 
-From `nix develop`, run `repl` to open the agent under GHCi. On first open it
-passes `--worktree` when the cwd is not already under
-`~/.haskell-agent/worktrees`. Agent `:reload` returns to GHCi, reloads
-modules, and resumes the previous session.
+From `nix develop`, run `repl` to open the agent under GHCi. It defaults to
+OpenAI `gpt-5.6-sol` with `--yolo`. On first open it passes `--worktree` when
+the cwd is not already under `~/.haskell-agent/worktrees`. Agent `:reload`
+returns to GHCi, reloads modules, and resumes the previous session.
 
 ## development feedback loop
 
@@ -104,3 +104,7 @@ cabal run agent-cli -- +RTS -M16G -RTS
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception
+- Never use bare `Control.Concurrent.Async.async`. Prefer structured
+  concurrency (`withAsync`, `race`, `concurrently`, etc.) so child lifetimes
+  are scoped. If work must outlive the current call, track its lifecycle and
+  completion explicitly, and cancel and join it when its owner closes.

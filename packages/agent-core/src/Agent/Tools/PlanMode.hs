@@ -19,6 +19,7 @@ module Agent.Tools.PlanMode
     , readPlanMarkdown
     , writePlanMarkdown
     , planModeReminder
+    , planApprovedContinuation
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
     , enterPlanModeTool
@@ -26,6 +27,7 @@ module Agent.Tools.PlanMode
     , askUserQuestionTool
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.ToolArgs (objectArgs, optText, reqText)
 import Agent.ToolDSL
     ( PropertySchema(..)
@@ -43,8 +45,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath (takeDirectory, (</>))
+import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
+import System.OsPath (equalFilePath, takeDirectory, takeFileName, (</>))
 
 data PlanModeState
     = PlanInactive
@@ -63,8 +65,8 @@ data PlanDecision
 -- directory when known; otherwise plans live under the tool cwd.
 data PlanModeEnv = PlanModeEnv
     { planStateRef :: !(IORef PlanModeState)
-    , planSessionDir :: !(IORef (Maybe FilePath))
-    , planFallbackDir :: !FilePath
+    , planSessionDir :: !(IORef (Maybe OsPath))
+    , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
     }
 
@@ -77,8 +79,8 @@ data PlanModeHooks = PlanModeHooks
     -- ^ Optional multiple-choice style question during planning.
     }
 
-planFileName :: FilePath
-planFileName = "plan.md"
+planFileName :: OsPath
+planFileName = fromFilePath "plan.md"
 
 defaultHooks :: PlanModeHooks
 defaultHooks = PlanModeHooks
@@ -87,7 +89,7 @@ defaultHooks = PlanModeHooks
     , planAskQuestion = \_ _ -> pure Nothing
     }
 
-newPlanModeEnv :: FilePath -> Maybe PlanModeHooks -> IO PlanModeEnv
+newPlanModeEnv :: OsPath -> Maybe PlanModeHooks -> IO PlanModeEnv
 newPlanModeEnv fallbackDir hooks = do
     stateRef <- newIORef PlanInactive
     sessionRef <- newIORef Nothing
@@ -98,7 +100,7 @@ newPlanModeEnv fallbackDir hooks = do
         , planHooks = fromMaybe defaultHooks hooks
         }
 
-planFilePath :: PlanModeEnv -> IO FilePath
+planFilePath :: PlanModeEnv -> IO OsPath
 planFilePath env = do
     sessionDir <- readIORef env.planSessionDir
     pure $ case sessionDir of
@@ -120,50 +122,47 @@ readPlanMarkdown env = do
     exists <- doesFileExist path
     if not exists
         then pure ""
-        else either (const "") id <$> tryAny (Text.readFile path)
+        else either (const "") id <$> tryAny (Text.readFile (toFilePath path))
 
 writePlanMarkdown :: PlanModeEnv -> Text -> IO (Either Text ())
 writePlanMarkdown env content = do
     path <- planFilePath env
     createDirectoryIfMissing True (takeDirectory path)
-    result <- tryAny (Text.writeFile path content)
+    result <- tryAny (Text.writeFile (toFilePath path) content)
     pure $ case result of
         Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
         Right () -> Right ()
 
-planModeReminder :: FilePath -> Text
+planModeReminder :: OsPath -> Text
 planModeReminder path =
     Text.unlines
         [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
         , ""
         , "## Plan File"
-        , "Write your plan to `" <> Text.pack path <> "` using the edit tool."
+        , "Write your plan to `" <> toText path <> "` using the edit tool."
         , "That is the only file you may create or modify."
         , ""
         , "When the plan is ready, call `exit_plan_mode` (Grok/OpenRouter) or end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block (OpenAI/Codex) so the user can approve, request changes, or cancel."
         ]
 
-planModeBlockedEditMessage :: FilePath -> Text
+planApprovedContinuation :: Text
+planApprovedContinuation =
+    "The user approved the plan. Plan mode is now off. "
+        <> "Begin implementing the approved plan immediately. "
+        <> "Do not wait for another user message."
+
+planModeBlockedEditMessage :: OsPath -> Text
 planModeBlockedEditMessage path =
     "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file ("
-        <> Text.pack path
+        <> toText path
         <> ")."
 
 -- | True when @target@ refers to this session's plan.md (absolute or basename).
-isPlanFileEditTarget :: FilePath -> FilePath -> Bool
+isPlanFileEditTarget :: OsPath -> OsPath -> Bool
 isPlanFileEditTarget planPath target =
-    let norm = Text.pack . dropTrailingSlash
-        plan = norm planPath
-        tgt = norm target
-        planBase = Text.pack planFileName
-    in tgt == plan
-        || Text.isSuffixOf ("/" <> planBase) tgt
-        || tgt == planBase
-  where
-    dropTrailingSlash p =
-        case reverse p of
-            '/' : rest -> reverse rest
-            _ -> p
+    equalFilePath planPath target
+        || equalFilePath planFileName target
+        || equalFilePath planFileName (takeFileName target)
 
 --------------------------------------------------------------------------------
 -- Grok-build tools
@@ -199,7 +198,9 @@ enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional reason this task needs a planning phase before implementation."
     ]
-    False
+    -- The tool performs its own explicit user confirmation through
+    -- planConfirmEnter, so it must not also trigger generic tool approval.
+    True
     (typedTool "enter_plan_mode" (runEnterPlanMode env))
 
 enterPlanDescription :: Text
@@ -223,7 +224,7 @@ runEnterPlanMode env args = do
                     activatePlanMode env
                     pure $ Right $
                         "You have entered plan mode. Explore the codebase and write an implementation plan to "
-                            <> Text.pack path
+                            <> toText path
                             <> ". Call exit_plan_mode when ready for approval."
 
 data ExitPlanArgs = ExitPlanArgs
@@ -259,7 +260,7 @@ runExitPlanMode env args = do
             path <- planFilePath env
             let body
                     | Text.null (Text.strip content) =
-                        "No plan written yet.\n\n(expected plan file: " <> Text.pack path <> ")"
+                        "No plan written yet.\n\n(expected plan file: " <> toText path <> ")"
                     | otherwise = content
                 header = case args.summary of
                     Just s | not (Text.null (Text.strip s)) -> s <> "\n\n"
@@ -268,8 +269,7 @@ runExitPlanMode env args = do
             case decision of
                 PlanApprove -> do
                     deactivatePlanMode env
-                    pure $ Right
-                        "Your plan has been approved. You can now start coding."
+                    pure (Right planApprovedContinuation)
                 PlanRequestChanges notes ->
                     pure $ Right $
                         "The user requested changes to the plan. Stay in plan mode and revise plan.md.\n"

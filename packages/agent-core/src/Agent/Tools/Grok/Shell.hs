@@ -15,6 +15,7 @@ module Agent.Tools.Grok.Shell
     , hasUnwaitedBackgroundOp
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
@@ -36,16 +37,16 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Directory (doesDirectoryExist, getTemporaryDirectory, removeFile)
+import System.Directory.OsPath (doesDirectoryExist, getTemporaryDirectory, removeFile)
 import System.IO (hClose)
-import System.FilePath ((</>))
+import System.OsPath ((<.>), (</>))
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
 import System.Posix.Temp (mkstemp)
 import System.Process (interruptProcessGroupOf)
 
 data PersistentShell = PersistentShell
-    { shellCwd :: !FilePath
-    , shellEnvFile :: !FilePath
+    { shellCwd :: !OsPath
+    , shellEnvFile :: !OsPath
     }
 
 data BackgroundTask = BackgroundTask
@@ -63,10 +64,12 @@ data GrokSession = GrokSession
 newGrokSession :: ToolEnv -> IO GrokSession
 newGrokSession env = do
     tmp <- getTemporaryDirectory
-    (envFile, handle) <- mkstemp (tmp </> "agent-grok-env")
+    (envFileRaw, handle) <-
+        mkstemp (toFilePath (tmp </> fromFilePath "agent-grok-env"))
+    let envFile = fromFilePath envFileRaw
     hClose handle
-    setFileMode envFile (unionFileModes ownerReadMode ownerWriteMode)
-    Text.writeFile envFile ""
+    setFileMode envFileRaw (unionFileModes ownerReadMode ownerWriteMode)
+    Text.writeFile envFileRaw ""
     shell <- newMVar PersistentShell
         { shellCwd = env.toolCwd
         , shellEnvFile = envFile
@@ -174,7 +177,7 @@ nextTaskId session = atomicModifyIORef' session.grokNextId \n ->
 -- | Run the persist wrapper under bash so `export -p` dumps (`declare -x`)
 -- can be sourced on the next call.
 bashWrap :: String -> String
-bashWrap script = "bash -c " ++ quote script
+bashWrap script = "bash -c " ++ quoteString script
 
 wrapScript :: PersistentShell -> Bool -> String -> String
 wrapScript shell persist command =
@@ -194,16 +197,16 @@ wrapScript shell persist command =
         , "exit $STATUS"
         ]
 
-cwdFile :: PersistentShell -> FilePath
-cwdFile shell = shell.shellEnvFile <> ".cwd"
+cwdFile :: PersistentShell -> OsPath
+cwdFile shell = shell.shellEnvFile <.> fromFilePath "cwd"
 
 refreshCwd :: ToolEnv -> PersistentShell -> IO PersistentShell
 refreshCwd env shell = do
-    contents <- try @SomeException (Text.readFile (cwdFile shell))
+    contents <- try @SomeException (Text.readFile (toFilePath (cwdFile shell)))
     case contents of
         Left _ -> pure shell
         Right raw -> do
-            let candidate = Text.unpack (Text.strip raw)
+            let candidate = fromText (Text.strip raw)
             dirOk <- doesDirectoryExist candidate
             if not dirOk
                 then pure shell
@@ -211,8 +214,11 @@ refreshCwd env shell = do
                     Left _ -> pure shell
                     Right resolved -> pure shell { shellCwd = resolved }
 
-quote :: FilePath -> String
-quote path = "'" <> concatMap escape path <> "'"
+quote :: OsPath -> String
+quote = quoteString . toFilePath
+
+quoteString :: String -> String
+quoteString path = "'" <> concatMap escape path <> "'"
   where
     escape '\'' = "'\\''"
     escape c = [c]

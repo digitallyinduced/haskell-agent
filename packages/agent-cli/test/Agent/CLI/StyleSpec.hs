@@ -1,6 +1,7 @@
 module Agent.CLI.StyleSpec (spec) where
 
 import Agent.CLI.Style
+import Agent.OsPath (fromFilePath)
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -33,7 +34,9 @@ spec = do
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
-            roleToolName False "read_file" `shouldBe` "read_file"
+            roleToolName False "Read" `shouldBe` "Read"
+            roleToolPath False "src/A.hs" `shouldBe` "src/A.hs"
+            roleToolCommand False "git status" `shouldBe` "git status"
             roleError False "boom" `shouldBe` "boom"
             roleMuted False "session: 1" `shouldBe` "session: 1"
 
@@ -52,19 +55,19 @@ spec = do
             glyphWarn `shouldSatisfy` (`elem` ["⚠ ", "! "])
             glyphCancel `shouldSatisfy` (`elem` ["⊘ ", "o "])
             glyphSession `shouldSatisfy` (`elem` ["⧉ ", "# "])
-            glyphThink `shouldSatisfy` (`elem` ["◌ ", ". "])
+            glyphThink `shouldSatisfy` (`elem` ["◆ ", "* "])
             glyphToolOut `shouldSatisfy` (`elem` ["┊ ", "| "])
             spinnerFrames `shouldSatisfy` (not . null)
 
     describe "cliWindowTitle" do
         it "uses the cwd basename when no session title is set" do
-            cliWindowTitle "/tmp/haskell-agent" Nothing
+            cliWindowTitle (fromFilePath "/tmp/haskell-agent") Nothing
                 `shouldBe` "haskell-agent"
 
         it "prefers a real session title over cwd" do
-            cliWindowTitle "/tmp/haskell-agent" (Just "fix the title")
+            cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "fix the title")
                 `shouldBe` "fix the title"
 
         it "ignores untitled placeholders" do
-            cliWindowTitle "/tmp/haskell-agent" (Just "untitled")
+            cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "untitled")
                 `shouldBe` "haskell-agent"

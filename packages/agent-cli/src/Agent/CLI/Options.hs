@@ -10,10 +10,12 @@ module Agent.CLI.Options
     , parseApprovalAnswer
     , parseArgs
     , parseEffort
+    , reasoningEfforts
     , resolveApprovalPolicy
     , usage
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath)
 import Agent.Provider (Provider(..), parseProvider)
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -22,6 +24,7 @@ import qualified Data.Text as Text
 data Command
     = ShowHelp
     | ShowVersion
+    | Login
     | ListSessions
     | ShowSession Text
     | RunAgent CliOptions
@@ -53,7 +56,7 @@ parseApprovalAnswer raw = case Text.toLower (Text.strip raw) of
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
-    , optCwd :: !(Maybe FilePath)
+    , optCwd :: !(Maybe OsPath)
     , optWorktree :: !Bool
     , optYolo :: !Bool
     , optNoYolo :: !Bool
@@ -61,7 +64,7 @@ data CliOptions = CliOptions
     , optEffort :: !(Maybe Text)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optPrompt :: !(Maybe Text)
-    , optPromptFile :: !(Maybe FilePath)
+    , optPromptFile :: !(Maybe OsPath)
     , optResume :: !(Maybe Text)
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
@@ -111,7 +114,10 @@ parseArgs :: [String] -> Either String Command
 parseArgs args
     | any (`elem` ["--help", "-h"]) args = Right ShowHelp
     | "--version" `elem` args = Right ShowVersion
-    | take 1 args == ["login"] = Left loginHint
+    | take 1 args == ["login"] =
+        if length args == 1
+            then Right Login
+            else Left "usage: agent-cli login"
     | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
     | otherwise = RunAgent <$> parseOptions defaultCliOptions args
 
@@ -139,7 +145,7 @@ parseOptions options = \case
     "--model" : value : rest ->
         parseOptions options { optModel = Just (Text.pack value) } rest
     "--cwd" : value : rest ->
-        parseOptions options { optCwd = Just value } rest
+        parseOptions options { optCwd = Just (fromFilePath value) } rest
     "--worktree" : rest ->
         parseOptions options { optWorktree = True } rest
     "--yolo" : rest ->
@@ -157,7 +163,7 @@ parseOptions options = \case
     "--prompt" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt-file" : value : rest ->
-        parseOptions options { optPromptFile = Just value } rest
+        parseOptions options { optPromptFile = Just (fromFilePath value) } rest
     "--resume" : value : rest ->
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->
@@ -189,23 +195,24 @@ parseInt flag value = case reads value of
     [(n, "")] | n >= 1 -> Right n
     _ -> Left (flag <> " expects a positive integer, got " <> value)
 
-parseEffort :: Text -> Either String Text
-parseEffort raw = case Text.toLower (Text.strip raw) of
-    "low" -> Right "low"
-    "medium" -> Right "medium"
-    "high" -> Right "high"
-    "xhigh" -> Right "xhigh"
-    other ->
-        Left ("effort must be low, medium, high, or xhigh (got " <> Text.unpack other <> ")")
+reasoningEfforts :: [Text]
+reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
 
-loginHint :: String
-loginHint =
-    "login is not in this slice. Place credentials in ~/.codex/auth.json \
-    \or ~/.grok/auth.json, or set CODEX_ACCESS_TOKEN / GROK_ACCESS_TOKEN."
+parseEffort :: Text -> Either String Text
+parseEffort raw =
+    let effort = Text.toLower (Text.strip raw)
+    in if effort `elem` reasoningEfforts
+        then Right effort
+        else Left
+            ( "effort must be none, low, medium, high, xhigh, or max (got "
+                <> Text.unpack effort
+                <> ")"
+            )
 
 usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
+    , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
     , ""
@@ -222,7 +229,7 @@ usage = unlines
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
-    , "      --effort LEVEL      Reasoning effort: low, medium, high, xhigh"
+    , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: high for xai/grok, medium otherwise)"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
@@ -231,14 +238,17 @@ usage = unlines
     , "persisted under ~/.haskell-agent/sessions. /effort [LEVEL] changes"
     , "reasoning effort. /model (alias /m) opens the model picker; /model NAME"
     , "sets it. /help [NAME] lists slash commands. Tab completes / commands."
+    , "Shift+Tab cycles idle mode: ask (normal) → plan → always-approve → ask."
     , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
     , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"
     , "when a plan is presented, approve (a), request changes (s), or cancel (q)."
+    , "/btw <QUESTION> asks a one-shot side question without changing or"
+    , "persisting the main conversation."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
-    , "/resume [ID] prints a --resume hint (TTY: session picker)."
+    , "/resume [ID] resumes a persisted session (TTY: two-pane picker)."
     , "/paste [TEXT] attaches a clipboard image to the next"
     , "message and draws an in-terminal preview (Kitty/Ghostty/WezTerm/iTerm2);"
     , "/paste --send [TEXT] sends immediately. Cmd+V of a Finder image path also"

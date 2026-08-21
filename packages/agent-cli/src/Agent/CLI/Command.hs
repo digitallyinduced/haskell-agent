@@ -2,6 +2,8 @@
 module Agent.CLI.Command
     ( ReplAction(..)
     , SlashCommand(..)
+    , SlashMenu(..)
+    , SlashSuggestion(..)
     , currentEffort
     , currentModel
     , formatSlashHelp
@@ -11,17 +13,19 @@ module Agent.CLI.Command
     , setReasoningEffort
     , slashCommands
     , slashCompletionCandidates
+    , slashMenuFor
     ) where
 
 import Agent.CLI.Models (catalogModelIds)
-import Agent.CLI.Options (parseEffort)
+import Agent.CLI.Options (parseEffort, reasoningEfforts)
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.OpenAI.Responses.Types
 
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Char (isSpace)
-import Data.List (find, isPrefixOf)
-import Data.Maybe (fromMaybe)
+import Data.List (find, isPrefixOf, sortOn)
+import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -36,7 +40,10 @@ data ReplAction
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
+    | ReplBtw Text
+    -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
+    | ReplLogin
     | ReplReloadAuth
     | ReplPaste
         { pasteImmediate :: !Bool
@@ -44,6 +51,7 @@ data ReplAction
         }
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplAgents
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
@@ -65,34 +73,39 @@ data SlashCommand = SlashCommand
     , slashAliases :: ![Text]
     , slashUsage :: !Text
     , slashSummary :: !Text
+    , slashTakesArguments :: !Bool
     }
     deriving (Eq, Show)
 
 slashCommands :: [SlashCommand]
 slashCommands =
-    [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one"
-    , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model"
-    , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort"
-    , cmd "plan" [] "/plan [description]" "Enter plan mode"
-    , cmd "session" [] "/session" "Print the current session id"
-    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or print a --resume hint"
-    , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context"
-    , cmd "clear" [] "/clear" "Reset the live conversation (same session id)"
-    , cmd "new" [] "/new" "Start a fresh persisted session id"
-    , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts"
-    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials"
-    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal"
-    , cmd "attachments" [] "/attachments" "List queued clipboard images"
-    , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images"
-    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve"
+    [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one" True
+    , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
+    , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
+    , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
+    , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "session" [] "/session" "Print the current session id" False
+    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
+    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
+    , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
+    , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
+    , cmd "new" [] "/new" "Start a fresh persisted session id" False
+    , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
+    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials" False
+    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
+    , cmd "attachments" [] "/attachments" "List queued clipboard images" False
+    , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False
+    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     ]
   where
-    cmd name aliases usage summary =
+    cmd name aliases usage summary takesArguments =
         SlashCommand
             { slashName = name
             , slashAliases = aliases
             , slashUsage = usage
             , slashSummary = summary
+            , slashTakesArguments = takesArguments
             }
 
 lookupSlashCommand :: Text -> Maybe SlashCommand
@@ -110,13 +123,13 @@ parseReplLine raw =
             then ReplReload
             else case Text.uncons line of
                 Just ('/', _) -> parseSlash line
-                Just (':', _) -> parseColon line
-                _ -> ReplPrompt line
+                Just (':', _) -> parseColon raw
+                _ -> ReplPrompt raw
 
 parseColon :: Text -> ReplAction
-parseColon line
-    | isAlwaysApproveAlias (Text.drop 1 line) = ReplToggleAlwaysApprove
-    | otherwise = ReplPrompt line
+parseColon raw
+    | isAlwaysApproveAlias (Text.drop 1 (Text.strip raw)) = ReplToggleAlwaysApprove
+    | otherwise = ReplPrompt raw
 
 parseSlash :: Text -> ReplAction
 parseSlash line = case Text.words line of
@@ -132,10 +145,20 @@ parseSlash line = case Text.words line of
                         Text.strip (Text.drop (Text.length command) line)
                 in ReplPlan
                     (if Text.null description then Nothing else Just description)
+            "btw" ->
+                let question =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null question
+                    then ReplCommandError "usage: /btw <QUESTION>"
+                    else ReplBtw question
             "session" ->
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "login" ->
+                if null args
+                    then ReplLogin
+                    else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
             "compact" ->
                 let focus =
@@ -168,6 +191,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplClearAttachments
                     else ReplCommandError "usage: /clear-attachments"
+            "agents" ->
+                if null args
+                    then ReplAgents
+                    else ReplCommandError "usage: /agents"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -329,8 +356,161 @@ completeSlashArgs cmd word =
 
 argCompletions :: SlashCommand -> [Text]
 argCompletions spec = case spec.slashName of
-    "effort" -> ["none", "low", "medium", "high", "xhigh", "max"]
+    "effort" -> reasoningEfforts
     "model" -> catalogModelIds
     "help" -> map (.slashName) slashCommands
     "paste" -> ["--send"]
     _ -> []
+
+-- | One row in the live slash-command dropdown.
+data SlashSuggestion = SlashSuggestion
+    { slashSuggestionDisplay :: !Text
+    , slashSuggestionReplacement :: !Text
+    , slashSuggestionSummary :: !Text
+    , slashSuggestionTakesArguments :: !Bool
+    , slashSuggestionMatchPositions :: ![Int]
+    }
+    deriving (Eq, Show)
+
+-- | Current live slash menu and the character range replaced on acceptance.
+data SlashMenu = SlashMenu
+    { slashMenuReplaceStart :: !Int
+    , slashMenuReplaceEnd :: !Int
+    , slashMenuSuggestions :: ![SlashSuggestion]
+    }
+    deriving (Eq, Show)
+
+-- | Derive a live menu from a leading slash command at the cursor.
+slashMenuFor :: Text -> Int -> Maybe SlashMenu
+slashMenuFor text cursor
+    | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
+    | otherwise =
+        let commandToken = Text.takeWhile (not . isSpace) text
+            commandEnd = Text.length commandToken
+        in if cursor <= commandEnd
+            then commandMenu (Text.take cursor text) commandEnd
+            else argumentMenu commandToken commandEnd text cursor
+
+commandMenu :: Text -> Int -> Maybe SlashMenu
+commandMenu token replaceEnd =
+    let query = Text.toLower (Text.drop 1 token)
+        scored = mapMaybe (scoreCommand query) (zip [0 :: Int ..] slashCommands)
+        ordered
+            | Text.null query = scored
+            | otherwise = sortOn (\(score, order, _, _) -> (Down score, order)) scored
+        rows =
+            [ SlashSuggestion
+                { slashSuggestionDisplay = "/" <> command.slashName
+                , slashSuggestionReplacement =
+                    "/" <> command.slashName
+                        <> if command.slashTakesArguments then " " else ""
+                , slashSuggestionSummary = command.slashSummary
+                , slashSuggestionTakesArguments = command.slashTakesArguments
+                , slashSuggestionMatchPositions = map (+ 1) positions
+                }
+            | (_, _, command, positions) <- ordered
+            ]
+    in if Text.any (== '/') query || null rows
+        then Nothing
+        else Just SlashMenu
+            { slashMenuReplaceStart = 0
+            , slashMenuReplaceEnd = replaceEnd
+            , slashMenuSuggestions = rows
+            }
+
+scoreCommand
+    :: Text
+    -> (Int, SlashCommand)
+    -> Maybe (Int, Int, SlashCommand, [Int])
+scoreCommand query (order, command)
+    | Text.null query = Just (0, order, command, [])
+    | otherwise =
+        case sortOn (Down . fst) $
+            mapMaybe (fuzzyMatch query . Text.toLower)
+                (command.slashName : command.slashAliases) of
+            [] -> Nothing
+            (score, positions) : _ ->
+                Just (score, order, command, positions)
+
+argumentMenu :: Text -> Int -> Text -> Int -> Maybe SlashMenu
+argumentMenu commandToken commandEnd text cursor = do
+    command <- lookupSlashCommand commandToken
+    let before = Text.take cursor text
+        suffix = Text.takeWhileEnd (not . isSpace) before
+        argStart = Text.length before - Text.length suffix
+        tokenEnd =
+            cursor
+                + Text.length
+                    (Text.takeWhile (not . isSpace) (Text.drop cursor text))
+        precedingArgs =
+            Text.words
+                (Text.take (argStart - commandEnd) (Text.drop commandEnd text))
+        options
+            | null precedingArgs = argCompletions command
+            | otherwise = []
+        query = Text.toLower suffix
+        ordered = sortOn (\(score, option, _) -> (Down score, option))
+            [ (score, option, positions)
+            | option <- options
+            , Just (score, positions) <- [fuzzyMatch query (Text.toLower option)]
+            ]
+        rows =
+            [ SlashSuggestion
+                { slashSuggestionDisplay = option
+                , slashSuggestionReplacement = option
+                , slashSuggestionSummary = ""
+                , slashSuggestionTakesArguments = False
+                , slashSuggestionMatchPositions = positions
+                }
+            | (_, option, positions) <- ordered
+            ]
+    if null rows
+        then Nothing
+        else Just SlashMenu
+            { slashMenuReplaceStart = argStart
+            , slashMenuReplaceEnd = tokenEnd
+            , slashMenuSuggestions = rows
+            }
+
+-- | Small deterministic fuzzy matcher for the short command catalog.
+fuzzyMatch :: Text -> Text -> Maybe (Int, [Int])
+fuzzyMatch needle haystack
+    | Text.null needle = Just (0, [])
+    | needle == haystack =
+        Just (10000, [0 .. Text.length needle - 1])
+    | needle `Text.isPrefixOf` haystack =
+        Just (8000 - Text.length haystack, [0 .. Text.length needle - 1])
+    | otherwise = do
+        positions@(firstPos:_) <- subsequencePositions needle haystack
+        lastPos <- safeLast positions
+        let
+            gaps = lastPos - firstPos + 1 - length positions
+            boundaryBonus =
+                sum
+                    [ if pos == 0 || Text.index haystack (pos - 1) == '-'
+                        then 40
+                        else 0
+                    | pos <- positions
+                    ]
+        pure
+            ( 4000
+                + boundaryBonus
+                - firstPos * 10
+                - gaps * 20
+                - Text.length haystack
+            , positions
+            )
+  where
+    safeLast = \case
+        [] -> Nothing
+        first : rest -> Just (foldl (\_ item -> item) first rest)
+
+subsequencePositions :: Text -> Text -> Maybe [Int]
+subsequencePositions needle haystack =
+    go 0 (Text.unpack needle) (Text.unpack haystack)
+  where
+    go _ [] _ = Just []
+    go _ _ [] = Nothing
+    go index wanted@(n:ns) (h:hs)
+        | n == h = (index :) <$> go (index + 1) ns hs
+        | otherwise = go (index + 1) wanted hs

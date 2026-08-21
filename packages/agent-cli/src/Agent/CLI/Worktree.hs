@@ -6,6 +6,7 @@ module Agent.CLI.Worktree
     , worktreeRoot
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd, isInfixOf, isPrefixOf)
 import Data.Time.Calendar (Day)
@@ -13,35 +14,36 @@ import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Numeric (showHex)
-import System.Directory (createDirectoryIfMissing, doesPathExist)
+import System.Directory.OsPath (createDirectoryIfMissing, doesPathExist)
 import System.Exit (ExitCode(..))
-import System.FilePath
-    ( addTrailingPathSeparator
-    , equalFilePath
+import System.OsPath
+    ( equalFilePath
+    , splitDirectories
     , takeFileName
     , (</>)
     )
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
-worktreeRoot :: FilePath -> FilePath
-worktreeRoot home = home </> ".haskell-agent" </> "worktrees"
+worktreeRoot :: OsPath -> OsPath
+worktreeRoot home =
+    home </> fromFilePath ".haskell-agent" </> fromFilePath "worktrees"
 
 -- | True when @path@ is @root@ or a subdirectory of it.
 -- Both paths should already be absolute (or otherwise comparable).
-isUnderWorktreeRoot :: FilePath -> FilePath -> Bool
+isUnderWorktreeRoot :: OsPath -> OsPath -> Bool
 isUnderWorktreeRoot root path =
     equalFilePath root path
-        || addTrailingPathSeparator root `isPrefixOf` path
+        || splitDirectories root `isPrefixOf` splitDirectories path
 
 -- | @root/repo/YYYY-MM-DD-\<hex8\>@.
-worktreePath :: FilePath -> FilePath -> Day -> String -> FilePath
+worktreePath :: OsPath -> OsPath -> Day -> String -> OsPath
 worktreePath root repoName day hex8 =
-    root </> repoName </> (formatDay day <> "-" <> hex8)
+    root </> repoName </> fromFilePath (formatDay day <> "-" <> hex8)
 
 -- | Add a new worktree of @source@ under @root@. @root@ is injected so tests
 -- can use a temp directory instead of the real home.
-createWorktree :: FilePath -> FilePath -> IO (Either String FilePath)
+createWorktree :: OsPath -> OsPath -> IO (Either String OsPath)
 createWorktree source root = do
     gitToplevel source >>= \case
         Left err -> pure (Left err)
@@ -54,13 +56,13 @@ createWorktree source root = do
             addUnique repo root repoName day start 0
 
 addUnique
-    :: FilePath
-    -> FilePath
-    -> FilePath
+    :: OsPath
+    -> OsPath
+    -> OsPath
     -> Day
     -> Integer
     -> Int
-    -> IO (Either String FilePath)
+    -> IO (Either String OsPath)
 addUnique repo root repoName day start attempt
     | attempt >= 32 =
         pure (Left "could not pick a unique worktree path")
@@ -69,26 +71,28 @@ addUnique repo root repoName day start attempt
         exists <- doesPathExist path
         if exists
             then addUnique repo root repoName day start (attempt + 1)
-            else git repo ["worktree", "add", path] >>= \case
+            else git repo ["worktree", "add", toFilePath path] >>= \case
                 Left err
                     | branchTaken err ->
                         addUnique repo root repoName day start (attempt + 1)
                     | otherwise -> pure (Left err)
                 Right _ -> pure (Right path)
 
-gitToplevel :: FilePath -> IO (Either String FilePath)
+gitToplevel :: OsPath -> IO (Either String OsPath)
 gitToplevel source = git source ["rev-parse", "--show-toplevel"] >>= \case
     Left err ->
         pure $ Left $
             "--worktree requires a git repository ("
                 <> trim err
                 <> ")"
-    Right path -> pure (Right (trim path))
+    Right path -> pure (Right (fromFilePath (trim path)))
 
-git :: FilePath -> [String] -> IO (Either String String)
+git :: OsPath -> [String] -> IO (Either String String)
 git dir args = do
     (code, out, err) <-
-        readCreateProcessWithExitCode (proc "git" args) { cwd = Just dir } ""
+        readCreateProcessWithExitCode
+            (proc "git" args) { cwd = Just (toFilePath dir) }
+            ""
     case code of
         ExitSuccess -> pure (Right out)
         ExitFailure _ ->

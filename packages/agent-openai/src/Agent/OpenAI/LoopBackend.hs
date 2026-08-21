@@ -4,7 +4,9 @@
 -- adapter can reuse the same function_call and custom_tool_call encoding.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
+    , openAiBackendReconnecting
     , openAiBackendWith
+    , openAiBackendWithConnectionRecovery
     , turnInputsToItems
     , responseToTurnOutput
     , streamEventToLoopEvent
@@ -13,20 +15,30 @@ module Agent.OpenAI.LoopBackend
     , withRequestInput
     ) where
 
-import Agent.Error (ApiError)
+import Agent.Error (ApiError(..))
+import Agent.InterAgentMessage
+    ( InterAgentMessage(..)
+    , InterAgentMessageContent(..)
+    , renderInterAgentMessage
+    , renderInterAgentMessageHeader
+    )
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
     , ImageAttachment(..)
     , LoopEvent(..)
+    , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , emptyTokenUsage
     )
 import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
+    , withCodexWsRetrying
     )
+import Agent.Provider (TokenProvider)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -39,7 +51,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -59,6 +71,67 @@ openAiBackend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
+
+-- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
+openAiBackendReconnecting
+    :: TokenProvider
+    -> IORef Bool
+    -> CodexConn
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+openAiBackendReconnecting provider connectionHealthy conn =
+    openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh
+  where
+    sendCurrent request previousResponseId onEvent =
+        sendWsRequestWithEvents conn request previousResponseId onEvent
+    sendFresh request previousResponseId onEvent =
+        withCodexWsRetrying provider
+            (sendOnFresh request previousResponseId onEvent)
+    sendOnFresh request previousResponseId onEvent freshConn _credential =
+        sendWsRequestWithEvents freshConn request previousResponseId onEvent
+
+-- | Injectable connection recovery used by the reconnecting backend.
+openAiBackendWithConnectionRecovery
+    :: IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
+    openAiBackendWith sendWithRecovery
+  where
+    sendWithRecovery request previousResponseId onEvent = do
+        healthy <- readIORef connectionHealthy
+        if healthy
+            then tryCurrent request previousResponseId onEvent
+            else sendFresh request previousResponseId onEvent
+
+    tryCurrent request previousResponseId onEvent = do
+        emittedLoopEvent <- newIORef False
+        result <- sendCurrent request previousResponseId
+            (trackOutput emittedLoopEvent onEvent)
+        case result of
+            Left ConnectionError {} -> do
+                writeIORef connectionHealthy False
+                emitted <- readIORef emittedLoopEvent
+                if emitted
+                    then pure result
+                    else sendFresh request previousResponseId onEvent
+            _ -> pure result
+
+    trackOutput emittedLoopEvent onEvent event = do
+        if isJust (streamEventToLoopEvent event)
+            then writeIORef emittedLoopEvent True
+            else pure ()
+        onEvent event
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
 openAiBackendWith
@@ -109,6 +182,7 @@ turnInputsToItems = map turnInputToItem
 turnInputToItem :: TurnInput -> ResponseItem
 turnInputToItem = \case
     UserMessage text -> userMessageItem text
+    AgentMessage message -> agentMessageItem message
     UserMultimodal{userText, userImages} -> multimodalUserItem userText userImages
     CompletedTool result -> toolResultToItem result
 
@@ -121,6 +195,34 @@ userMessageItem text = MessageItem ResponseMessage
     , phase = Nothing
     , extraFields = KeyMap.empty
     }
+
+agentMessageItem :: InterAgentMessage -> ResponseItem
+agentMessageItem message = KnownResponseItem ItemAgentMessage TaggedObject
+    { tag = "agent_message"
+    , fields = KeyMap.fromList
+        [ (Key.fromText "author", Aeson.String message.messageAuthor)
+        , (Key.fromText "recipient", Aeson.String message.messageRecipient)
+        , (Key.fromText "content", Aeson.toJSON (agentMessageContent message))
+        ]
+    }
+
+agentMessageContent :: InterAgentMessage -> [Aeson.Value]
+agentMessageContent message = case message.messageContent of
+    PlainInterAgentContent _ ->
+        [ inputTextValue (renderInterAgentMessage message)
+        ]
+    EncryptedInterAgentContent encrypted ->
+        [ inputTextValue (renderInterAgentMessageHeader message)
+        , Aeson.object
+            [ "type" Aeson..= ("encrypted_content" :: Text)
+            , "encrypted_content" Aeson..= encrypted
+            ]
+        ]
+  where
+    inputTextValue text = Aeson.object
+        [ "type" Aeson..= ("input_text" :: Text)
+        , "text" Aeson..= text
+        ]
 
 multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem
 multimodalUserItem text images = MessageItem ResponseMessage
@@ -172,23 +274,51 @@ responseToTurnOutput response = TurnOutput
     { responseId = response.responseId
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
+    , tokenUsage = tokenUsageFromResponse response.usage
     }
+
+tokenUsageFromResponse :: Maybe ResponseUsage -> TokenUsage
+tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
+    TokenUsage
+        { inputTokens = usage.inputTokens
+        , outputTokens = usage.outputTokens
+        , cachedTokens = fromMaybe 0 (usage.inputTokensDetails >>= (.cachedTokens))
+        }
 
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
-    FunctionCallItem call -> Just ToolCall
-        { callId = call.callId
-        , name = namespacedToolName call.extraFields call.name
-        , arguments = call.arguments
-        , callKind = FunctionCallKind
-        }
+    FunctionCallItem call ->
+        let toolName = namespacedToolName call.extraFields call.name
+        in Just ToolCall
+            { callId = call.callId
+            , name = toolName
+            , arguments = call.arguments
+            , callKind = FunctionCallKind
+            , argumentsEncrypted =
+                encryptedCollaborationArguments toolName call.extraFields
+            }
     CustomToolCallItem call -> Just ToolCall
         { callId = call.callId
         , name = namespacedToolName call.extraFields call.name
         , arguments = call.input
         , callKind = CustomCallKind
+        , argumentsEncrypted = False
         }
     _ -> Nothing
+
+encryptedCollaborationArguments :: Text -> Aeson.Object -> Bool
+encryptedCollaborationArguments toolName extras =
+    toolName `elem`
+        [ "collaboration.spawn_agent"
+        , "collaboration.send_message"
+        , "collaboration.followup_task"
+        ]
+        && not plaintextOverride
+  where
+    plaintextOverride =
+        case KeyMap.lookup (Key.fromText "encrypted_function_args") extras of
+            Just (Aeson.Array values) -> null values
+            _ -> False
 
 -- | Prefer an explicit @namespace@ field when the Responses API emits one for
 -- namespaced tools (Codex multi_agent_v1, …).

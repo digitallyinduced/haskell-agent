@@ -19,17 +19,18 @@ module Agent.ProjectInstructions
     ) where
 
 import Agent.Provider (Provider(..))
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Control.Exception.Safe (tryAny)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Directory (doesFileExist, doesPathExist)
-import System.FilePath (takeDirectory, (</>))
+import System.Directory.OsPath (doesFileExist, doesPathExist)
+import System.OsPath (takeDirectory, (</>))
 
 -- | One loaded instruction file and its absolute path.
 data InstructionFile = InstructionFile
-    { instructionPath :: !FilePath
+    { instructionPath :: !OsPath
     , instructionContent :: !Text
     } deriving (Eq, Show)
 
@@ -47,9 +48,9 @@ data DiscoverOptions = DiscoverOptions
     { discoverMaxBytes :: !Int
       -- ^ Soft budget across all loaded files. Content past the budget is
       -- truncated. Use @0@ to disable discovery.
-    , discoverGlobalDir :: !(Maybe FilePath)
+    , discoverGlobalDir :: !(Maybe OsPath)
       -- ^ Optional home-scope directory (e.g. @~/.codex@ or @~/.grok@).
-    , discoverRootMarkers :: ![FilePath]
+    , discoverRootMarkers :: ![OsPath]
       -- ^ Path segments that mark the project root. Default: @[".git"]@.
     } deriving (Eq, Show)
 
@@ -60,19 +61,19 @@ defaultDiscoverOptions :: DiscoverOptions
 defaultDiscoverOptions = DiscoverOptions
     { discoverMaxBytes = defaultProjectDocMaxBytes
     , discoverGlobalDir = Nothing
-    , discoverRootMarkers = [".git"]
+    , discoverRootMarkers = [fromFilePath ".git"]
     }
 
 -- | Provider-specific directory under the user home for global AGENTS.md.
-globalAgentsHomeDir :: Provider -> FilePath -> FilePath
+globalAgentsHomeDir :: Provider -> OsPath -> OsPath
 globalAgentsHomeDir provider home = case provider of
-    OpenAIProvider -> home </> ".codex"
-    XAIProvider -> home </> ".grok"
-    OpenRouterProvider -> home </> ".grok"
+    OpenAIProvider -> home </> fromFilePath ".codex"
+    XAIProvider -> home </> fromFilePath ".grok"
+    OpenRouterProvider -> home </> fromFilePath ".grok"
 
 -- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
 -- are skipped. Project files are ordered root -> cwd.
-discoverProjectInstructions :: DiscoverOptions -> FilePath -> IO LoadedAgentsMd
+discoverProjectInstructions :: DiscoverOptions -> OsPath -> IO LoadedAgentsMd
 discoverProjectInstructions options cwd
     | options.discoverMaxBytes <= 0 =
         pure LoadedAgentsMd { loadedGlobal = Nothing, loadedProject = [] }
@@ -86,7 +87,7 @@ discoverProjectInstructions options cwd
             , loadedProject = project
             })
 
-findProjectRoot :: [FilePath] -> FilePath -> IO FilePath
+findProjectRoot :: [OsPath] -> OsPath -> IO OsPath
 findProjectRoot markers start = go start
   where
     go dir = do
@@ -99,7 +100,7 @@ findProjectRoot markers start = go start
                     then pure start
                     else go parent
 
-directoryChain :: FilePath -> FilePath -> [FilePath]
+directoryChain :: OsPath -> OsPath -> [OsPath]
 directoryChain root cwd = reverse (go cwd)
   where
     go dir
@@ -108,19 +109,19 @@ directoryChain root cwd = reverse (go cwd)
         | otherwise = dir : go (takeDirectory dir)
 
 -- | Prefer @AGENTS.override.md@ over @AGENTS.md@ in a directory.
-readPreferredAgentsMd :: FilePath -> IO (Maybe InstructionFile)
+readPreferredAgentsMd :: OsPath -> IO (Maybe InstructionFile)
 readPreferredAgentsMd dir = do
-    override <- readAgentsFile (dir </> "AGENTS.override.md")
+    override <- readAgentsFile (dir </> fromFilePath "AGENTS.override.md")
     case override of
         Just file -> pure (Just file)
-        Nothing -> readAgentsFile (dir </> "AGENTS.md")
+        Nothing -> readAgentsFile (dir </> fromFilePath "AGENTS.md")
 
-readAgentsFile :: FilePath -> IO (Maybe InstructionFile)
+readAgentsFile :: OsPath -> IO (Maybe InstructionFile)
 readAgentsFile path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
-        else tryAny (Text.readFile path) >>= \case
+        else tryAny (Text.readFile (toFilePath path)) >>= \case
             Left _ -> pure Nothing
             Right text ->
                 if Text.null (Text.strip text)
@@ -150,21 +151,21 @@ applyByteBudget maxBytes loaded =
                 then file : go (remaining - size) rest
                 else [file { instructionContent = Text.take remaining content }]
 
-formatAgentsMdForProvider :: Provider -> FilePath -> LoadedAgentsMd -> Maybe Text
+formatAgentsMdForProvider :: Provider -> OsPath -> LoadedAgentsMd -> Maybe Text
 formatAgentsMdForProvider provider cwd loaded = case provider of
     OpenAIProvider -> formatCodexAgentsMd cwd loaded
     XAIProvider -> formatGrokAgentsMd loaded
     OpenRouterProvider -> formatGrokAgentsMd loaded
 
 -- | Codex-style contextual user fragment.
-formatCodexAgentsMd :: FilePath -> LoadedAgentsMd -> Maybe Text
+formatCodexAgentsMd :: OsPath -> LoadedAgentsMd -> Maybe Text
 formatCodexAgentsMd cwd loaded =
     case bodies of
         Nothing -> Nothing
         Just body ->
             Just $ Text.concat
                 [ "# AGENTS.md instructions for "
-                , Text.pack cwd
+                , toText cwd
                 , "\n\n<INSTRUCTIONS>\n"
                 , body
                 , "\n</INSTRUCTIONS>"
@@ -205,7 +206,7 @@ formatGrokAgentsMd loaded =
     renderFile :: InstructionFile -> [Text]
     renderFile file =
         [ "\n## From: "
-        , neutralizeReminderTags (Text.pack file.instructionPath)
+        , neutralizeReminderTags (toText file.instructionPath)
         , "\n"
         , neutralizeReminderTags file.instructionContent
         , "\n"

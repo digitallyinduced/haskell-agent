@@ -4,6 +4,7 @@ module Agent.CLI.Models
     , PickerState(..)
     , PickerEvent(..)
     , modelsForProvider
+    , modelCatalog
     , catalogModelIds
     , ensureCurrentInList
     , initialPickerState
@@ -13,14 +14,15 @@ module Agent.CLI.Models
     ) where
 
 import Agent.CLI.Prompt (defaultModelFor)
-import Agent.Provider (Provider(..))
+import Agent.Provider (Provider(..), providerSlug)
 import Data.List (find, nub)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 data ModelOption = ModelOption
-    { modelId :: !Text
+    { modelProvider :: !Provider
+    , modelId :: !Text
     , modelLabel :: !(Maybe Text)
     }
     deriving (Eq, Show)
@@ -66,33 +68,47 @@ modelsForProvider provider =
                 ]
         -- Keep the provider default first even if the table drifts.
         def = defaultModelFor provider
-    in ensureCurrentInList def opts
+    in ensureCurrentInList provider def opts
   where
-    opt mid label = ModelOption { modelId = mid, modelLabel = label }
+    opt mid label = ModelOption
+        { modelProvider = provider
+        , modelId = mid
+        , modelLabel = label
+        }
+
+allProviders :: [Provider]
+allProviders = [OpenAIProvider, XAIProvider, OpenRouterProvider]
+
+-- | Every curated model, grouped by provider.
+modelCatalog :: [ModelOption]
+modelCatalog = concatMap modelsForProvider allProviders
 
 -- | Every curated catalog id across providers, de-duplicated, for completion.
 catalogModelIds :: [Text]
 catalogModelIds =
-    nub $
-        concatMap
-            (map (\opt -> opt.modelId) . modelsForProvider)
-            [XAIProvider, OpenAIProvider, OpenRouterProvider]
+    nub (map (\opt -> opt.modelId) modelCatalog)
 
 -- | Prepend @current@ when it is missing so the active model stays visible.
-ensureCurrentInList :: Text -> [ModelOption] -> [ModelOption]
-ensureCurrentInList current options
+ensureCurrentInList :: Provider -> Text -> [ModelOption] -> [ModelOption]
+ensureCurrentInList provider current options
     | Text.null current || current == "(unset)" = options
-    | any (\opt -> opt.modelId == current) options = options
+    | any (isCurrent provider current) options = options
     | otherwise =
-        ModelOption { modelId = current, modelLabel = Just "current" }
+        ModelOption
+            { modelProvider = provider
+            , modelId = current
+            , modelLabel = Just "current"
+            }
             : options
 
 initialPickerState :: Provider -> Text -> PickerState
 initialPickerState provider current =
-    let allOpts = ensureCurrentInList current (modelsForProvider provider)
+    let providerOrder = provider : filter (/= provider) allProviders
+        allOpts = ensureCurrentInList provider current
+            (concatMap modelsForProvider providerOrder)
         idx = fromMaybe 0 $
             fmap fst $
-                find (\(_, opt) -> opt.modelId == current) (zip [0 ..] allOpts)
+                find (\(_, opt) -> isCurrent provider current opt) (zip [0 ..] allOpts)
     in PickerState
         { pickerProvider = provider
         , pickerCurrent = current
@@ -107,6 +123,7 @@ visibleOptions state
     | otherwise =
         filter
             (\opt -> needle `Text.isInfixOf` Text.toLower opt.modelId
+                || needle `Text.isInfixOf` Text.toLower (providerSlug opt.modelProvider)
                 || maybe
                     False
                     ((needle `Text.isInfixOf`) . Text.toLower)
@@ -123,10 +140,10 @@ selectedOption state =
             let i = clampIndex (length opts) state.pickerIndex
             in Just (opts !! i)
 
-applyPickerEvent :: PickerEvent -> PickerState -> Either (Maybe Text) PickerState
+applyPickerEvent :: PickerEvent -> PickerState -> Either (Maybe ModelOption) PickerState
 applyPickerEvent event state = case event of
     PickerCancel -> Left Nothing
-    PickerConfirm -> Left ((.modelId) <$> selectedOption state)
+    PickerConfirm -> Left (selectedOption state)
     PickerUp -> Right (move (-1) state)
     PickerDown -> Right (move 1 state)
     PickerBackspace ->
@@ -170,3 +187,7 @@ isFilterChar c =
         || (c >= 'a' && c <= 'z')
         || (c >= 'A' && c <= 'Z')
         || (c >= '0' && c <= '9')
+
+isCurrent :: Provider -> Text -> ModelOption -> Bool
+isCurrent provider current option =
+    option.modelProvider == provider && option.modelId == current

@@ -1,7 +1,7 @@
--- | Codex multi-agent v1 tools (spawn_agent, wait_agent, …).
+-- | Codex multi-agent v2 tools (collaboration namespace).
 --
 -- Wire names and schemas follow openai/codex
--- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v1 namespace).
+-- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
 module Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , multiAgentTools
@@ -12,20 +12,34 @@ module Agent.Tools.MultiAgents
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentRegistry
-    , SubagentStatus
-    , closeSubagent
+    , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , encodeStatus
-    , maxWaitTimeoutMs
-    , minWaitTimeoutMs
-    , resumeSubagent
-    , sendInput
-    , spawnSubagent
+    , interruptSubagent
+    , listAgents
+    , queueMessageFrom
+    , resolveAgentTarget
+    , sendInputMessage
+    , spawnSubagentAt
+    , waitAnyLive
     , waitSubagents
     )
+import Agent.Subagents.TaskPath
+    ( TaskPath
+    , resolveTaskPath
+    , taskPathRoot
+    , taskPathText
+    )
+import Agent.InterAgentMessage
+    ( InterAgentMessage(..)
+    , InterAgentMessageContent
+    , InterAgentMessageType(..)
+    , encryptedInterAgentContent
+    , plainInterAgentContent
+    )
+import Agent.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
-    , optBool
     , optInt
     , optText
     , reqText
@@ -35,7 +49,7 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCall)
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolKind(..)
@@ -52,35 +66,42 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
--- | Per-agent identity for nesting depth / parent linkage.
+-- | Per-agent identity for nesting depth / parent linkage / task path.
 data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
     , multiSelfId :: !(Maybe SubagentId)
     , multiDepth :: !Int
+    , multiTaskPath :: !TaskPath
       -- | Optional host hook to rehydrate a closed/missing agent from disk
-      -- before 'resume_agent' / follow-ups. 'Nothing' means in-memory only.
+      -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
+      -- | Optional host hook for Grok-style isolated worktree children.
+    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text OsPath)))
+      -- | Deliver a child message to the root agent's next model turn.
+    , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
     }
 
 multiAgentNamespace :: Text
-multiAgentNamespace = "multi_agent_v1"
+multiAgentNamespace = "collaboration"
 
 multiAgentToolNames :: [Text]
 multiAgentToolNames =
     [ "spawn_agent"
     , "wait_agent"
-    , "send_input"
-    , "close_agent"
-    , "resume_agent"
+    , "send_message"
+    , "followup_task"
+    , "list_agents"
+    , "interrupt_agent"
     ]
 
 multiAgentTools :: MultiAgentContext -> [AppTool]
 multiAgentTools ctx =
     [ spawnAgentTool ctx
     , waitAgentTool ctx
-    , sendInputTool ctx
-    , closeAgentTool ctx
-    , resumeAgentTool ctx
+    , sendMessageTool ctx
+    , followupTaskTool ctx
+    , listAgentsTool ctx
+    , interruptAgentTool ctx
     ]
 
 jsonTool
@@ -105,119 +126,149 @@ jsonTool name description parameters readOnly handler = AppTool
 --------------------------------------------------------------------------------
 
 data SpawnAgentArgs = SpawnAgentArgs
-    { message :: Maybe Text
-    , agentType :: Maybe Text
+    { taskName :: Text
+    , message :: Text
     , model :: Maybe Text
     , reasoningEffort :: Maybe Text
-    , forkContext :: Bool
+    , forkTurns :: Maybe Text
     }
 
 instance FromJSON SpawnAgentArgs where
-    parseJSON = objectArgs \object -> SpawnAgentArgs
-        <$> optText object "message"
-        <*> optText object "agent_type"
-        <*> optText object "model"
-        <*> optText object "reasoning_effort"
-        <*> (fromMaybe False <$> optBool object "fork_context")
+    parseJSON = objectArgs \object_ -> SpawnAgentArgs
+        <$> reqText object_ "task_name"
+        <*> reqText object_ "message"
+        <*> optText object_ "model"
+        <*> optText object_ "reasoning_effort"
+        <*> optText object_ "fork_turns"
 
 spawnAgentTool :: MultiAgentContext -> AppTool
 spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
-    [ PropertySchema "message" PropertyString False $ Just
-        "Initial plain-text task for the new agent."
-    , PropertySchema "agent_type" PropertyString False $ Just
-        "Optional agent type override. Omit to use the default worker."
+    [ PropertySchema "task_name" PropertyString True $ Just
+        "Task name for the new agent. Use lowercase letters, digits, and underscores."
+    , PropertySchema "message"
+        (encryptedString "Initial plain-text task for the new agent.") True Nothing
     , PropertySchema "model" PropertyString False $ Just
         "Model override for the new agent. Omit unless an explicit override is needed."
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Reasoning effort override for the new agent. Omit to inherit the parent effort."
-    , PropertySchema "fork_context" PropertyBoolean False $ Just
-        "True forks the current thread history into the new agent; false or omitted starts with only the initial prompt. Full-history fork is not supported yet."
+    , PropertySchema "fork_turns" PropertyString False $ Just
+        "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
     ]
-    False
-    (typedTool "spawn_agent" (runSpawn ctx))
+    True
+    (typedToolWithCall "spawn_agent" (runSpawn ctx))
 
 spawnAgentDescription :: Text
 spawnAgentDescription =
-    "Spawn a sub-agent for a well-scoped task. Returns the spawned agent id \
-    \plus the user-facing nickname when available. Spawned agents inherit your \
-    \current model by default. Do not spawn sub-agents unless the user or \
-    \applicable AGENTS.md instructions explicitly ask for sub-agents, \
-    \delegation, or parallel agent work. After spawning, prefer useful local \
-    \work over busy-waiting; call wait_agent only when blocked on the result."
+    "Spawns an agent to work on the specified task. If your current task is \
+    \/root/task1 and you spawn_agent with task_name \"task_3\" the agent will \
+    \have canonical task name /root/task1/task_3. You may refer to this agent \
+    \as task_3 or /root/task1/task_3. Returns the canonical task_name."
 
-runSpawn :: MultiAgentContext -> SpawnAgentArgs -> IO (Either Text Text)
-runSpawn ctx args = case args.message of
-    Nothing -> pure (Left "spawn_agent requires message")
-    Just message
-        | Text.null (Text.strip message) ->
-            pure (Left "spawn_agent requires a non-empty message")
-        | args.forkContext ->
-            pure (Left "fork_context is not supported yet; spawn with a fresh prompt.")
-        | otherwise -> do
-            -- model / agent_type / reasoning_effort accepted but unused in v1.
-            _ <- pure (args.agentType, args.model, args.reasoningEffort)
-            result <- spawnSubagent
-                ctx.multiRegistry
-                ctx.multiSelfId
-                ctx.multiDepth
-                message
-                Nothing
-            pure $ case result of
-                Left err -> Left err
-                Right agentId ->
-                    Right $ encodeJson $ object
-                        [ "agent_id" .= agentId.unSubagentId
-                        , "nickname" .= Aeson.Null
-                        ]
+runSpawn :: MultiAgentContext -> ToolCall -> SpawnAgentArgs -> IO (Either Text Text)
+runSpawn ctx call args
+    | Text.null (Text.strip args.message) =
+        pure (Left "spawn_agent requires a non-empty message")
+    | not (validForkTurns args.forkTurns) =
+        pure (Left "fork_turns must be none, all, or a positive integer string")
+    | otherwise = do
+        _ <- pure (args.model, args.reasoningEffort, args.forkTurns)
+        result <- spawnSubagentAt
+            ctx.multiRegistry
+            ctx.multiSelfId
+            ctx.multiTaskPath
+            ctx.multiDepth
+            args.taskName
+            (messageContent call args.message)
+            Nothing
+        pure $ case result of
+            Left err -> Left err
+            Right (_agentId, path) ->
+                Right $ encodeJson $ object
+                    [ "task_name" .= taskPathText path
+                    , "nickname" .= Aeson.Null
+                    ]
+
+validForkTurns :: Maybe Text -> Bool
+validForkTurns = \case
+    Nothing -> True
+    Just turns ->
+        let stripped = Text.toLower (Text.strip turns)
+        in stripped `elem` ["none", "all", ""]
+            || (not (Text.null stripped) && Text.all (\c -> c >= '0' && c <= '9') stripped)
 
 --------------------------------------------------------------------------------
 -- wait_agent
 --------------------------------------------------------------------------------
 
 data WaitAgentArgs = WaitAgentArgs
-    { targets :: [Text]
+    { targets :: Maybe [Text]
     , timeoutMs :: Maybe Int
     }
 
 instance FromJSON WaitAgentArgs where
-    parseJSON = objectArgs \object_ -> WaitAgentArgs
-        <$> reqTextList object_ "targets"
-        <*> optInt object_ "timeout_ms"
+    parseJSON = objectArgs \object_ -> do
+        targets <- case KeyMap.lookup (Key.fromText "targets") object_ of
+            Nothing -> pure Nothing
+            Just _ -> Just <$> reqTextList object_ "targets"
+        timeoutMs <- optInt object_ "timeout_ms"
+        pure WaitAgentArgs { targets, timeoutMs }
 
 waitAgentTool :: MultiAgentContext -> AppTool
 waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
-    [ PropertySchema "targets" (PropertyArray PropertyString) True $ Just
-        "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
-    , PropertySchema "timeout_ms" PropertyInteger False $ Just $
-        "Timeout in milliseconds. Defaults to "
-            <> Text.pack (show defaultWaitTimeoutMs)
-            <> ", min "
-            <> Text.pack (show minWaitTimeoutMs)
-            <> ", max "
-            <> Text.pack (show maxWaitTimeoutMs)
-            <> ". Prefer longer waits (minutes) to avoid busy polling."
+    [ PropertySchema "timeout_ms" PropertyNumber False $ Just
+        "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True
     (typedTool "wait_agent" (runWait ctx))
 
 waitAgentDescription :: Text
 waitAgentDescription =
-    "Wait for agents to reach a final status. Completed statuses may include \
-    \the agent's final message. Returns empty status when timed out. Once the \
-    \agent reaches a final status, a notification message will be received \
-    \containing the same completed status."
+    "Wait for a mailbox update from live agents, including final-status \
+    \notifications. Returns a summary of which agents have updates, or a \
+    \timeout summary if no activity arrives before the deadline."
 
 runWait :: MultiAgentContext -> WaitAgentArgs -> IO (Either Text Text)
-runWait ctx args
-    | null args.targets = pure (Left "agent ids must be non-empty")
-    | otherwise = do
-        let ids = map SubagentId args.targets
-            timeoutMs = fromMaybe defaultWaitTimeoutMs args.timeoutMs
-        (statuses, timedOut) <- waitSubagents ctx.multiRegistry ids timeoutMs
-        pure $ Right $ encodeJson $ object
-            [ "status" .= statusObject statuses
-            , "timed_out" .= timedOut
-            ]
+runWait ctx args = do
+    let timeoutMs = fromMaybe defaultWaitTimeoutMs args.timeoutMs
+    case args.targets of
+        Nothing -> do
+            (statuses, timedOut) <- waitAnyLive ctx.multiRegistry timeoutMs
+            pure $ Right $ encodeJson $ object
+                [ "message" .= waitSummary timedOut statuses
+                , "timed_out" .= timedOut
+                ]
+        Just [] -> pure (Left "targets must be non-empty when provided")
+        Just targets -> do
+            resolved <- mapM (resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath) targets
+            case sequence resolved of
+                Left err -> pure (Left err)
+                Right ids -> do
+                    (statuses, timedOut) <- waitSubagents ctx.multiRegistry ids timeoutMs
+                    pure $ Right $ encodeJson $ object
+                        [ "message" .= waitSummary timedOut statuses
+                        , "timed_out" .= timedOut
+                        , "status" .= statusObject statuses
+                        ]
+
+waitSummary :: Bool -> Map SubagentId SubagentStatus -> Text
+waitSummary timedOut statuses
+    | timedOut = "timed out waiting for agent updates"
+    | otherwise =
+        let finals =
+                [ agentId.unSubagentId <> "=" <> shortStatus status
+                | (agentId, status) <- Map.toList statuses
+                ]
+        in "agent updates: " <> Text.intercalate ", " finals
+
+shortStatus :: SubagentStatus -> Text
+shortStatus = \case
+    Completed _ -> "completed"
+    Errored _ -> "errored"
+    Interrupted -> "interrupted"
+    Closed -> "shutdown"
+    Running -> "running"
+    Pending -> "pending"
+    NotFound -> "not_found"
 
 statusObject :: Map SubagentId SubagentStatus -> Value
 statusObject =
@@ -227,128 +278,197 @@ statusObject =
         . Map.toList
 
 --------------------------------------------------------------------------------
--- send_input
+-- send_message / followup_task
 --------------------------------------------------------------------------------
 
-data SendInputArgs = SendInputArgs
+data MessageArgs = MessageArgs
     { target :: Text
-    , message :: Maybe Text
-    , interrupt :: Bool
+    , message :: Text
     }
 
-instance FromJSON SendInputArgs where
-    parseJSON = objectArgs \object_ -> SendInputArgs
+instance FromJSON MessageArgs where
+    parseJSON = objectArgs \object_ -> MessageArgs
         <$> reqText object_ "target"
-        <*> optText object_ "message"
-        <*> (fromMaybe False <$> optBool object_ "interrupt")
+        <*> reqText object_ "message"
 
-sendInputTool :: MultiAgentContext -> AppTool
-sendInputTool ctx = jsonTool "send_input" sendInputDescription
+sendMessageTool :: MultiAgentContext -> AppTool
+sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
-        "Agent id to message (from spawn_agent)."
-    , PropertySchema "message" PropertyString False $ Just
-        "Plain-text message to send to the agent."
-    , PropertySchema "interrupt" PropertyBoolean False $ Just
-        "True interrupts the current task and handles this message immediately; false or omitted queues it."
+        "Relative or canonical task name to message (from spawn_agent)."
+    , PropertySchema "message"
+        (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
-    False
-    (typedTool "send_input" (runSendInput ctx))
+    True
+    (typedToolWithCall "send_message" (runSendMessage ctx))
 
-sendInputDescription :: Text
-sendInputDescription =
-    "Send a message to an existing agent. Use interrupt=true to redirect work \
-    \immediately. You should reuse the agent by send_input if you believe your \
-    \assigned task is highly dependent on the context of a previous task."
+sendMessageDescription :: Text
+sendMessageDescription =
+    "Send a message to an existing agent. The message will be delivered \
+    \promptly. Does not trigger a new turn."
 
-runSendInput :: MultiAgentContext -> SendInputArgs -> IO (Either Text Text)
-runSendInput ctx args = case args.message of
-    Nothing -> pure (Left "send_input requires message")
-    Just message
-        | Text.null (Text.strip message) ->
-            pure (Left "send_input requires a non-empty message")
-        | otherwise -> do
-            result <- sendInput
-                ctx.multiRegistry
-                (SubagentId args.target)
-                message
-                args.interrupt
+runSendMessage :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
+runSendMessage ctx call args
+    | Text.null (Text.strip args.message) =
+        pure (Left "send_message requires a non-empty message")
+    | otherwise = do
+        case resolveTaskPath ctx.multiTaskPath args.target of
+            Right targetPath | targetPath == taskPathRoot ->
+                sendToRoot ctx (messageContent call args.message)
+            _ -> do
+                _ <- maybeRestore ctx args.target
+                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
+                case resolved of
+                    Left err -> pure (Left err)
+                    Right agentId ->
+                        queueMessageFrom ctx.multiRegistry ctx.multiTaskPath agentId
+                            (messageContent call args.message)
+
+followupTaskTool :: MultiAgentContext -> AppTool
+followupTaskTool ctx = jsonTool "followup_task" followupDescription
+    [ PropertySchema "target" PropertyString True $ Just
+        "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+    , PropertySchema "message"
+        (encryptedString "Message text to send to the target agent.") True Nothing
+    ]
+    True
+    (typedToolWithCall "followup_task" (runFollowup ctx))
+
+followupDescription :: Text
+followupDescription =
+    "Send a follow-up task to an existing non-root target agent and trigger a \
+    \turn if it is idle. If the target is already running, deliver the task \
+    \promptly at message boundaries."
+
+runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
+runFollowup ctx call args
+    | Text.null (Text.strip args.message) =
+        pure (Left "followup_task requires a non-empty message")
+    | otherwise = do
+        case resolveTaskPath ctx.multiTaskPath args.target of
+            Right targetPath | targetPath == taskPathRoot ->
+                pure (Left "followup_task cannot target the root agent; use send_message")
+            _ -> do
+                _ <- maybeRestore ctx args.target
+                resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
+                case resolved of
+                    Left err -> pure (Left err)
+                    Right agentId ->
+                        sendInputMessage ctx.multiRegistry ctx.multiTaskPath agentId
+                            (messageContent call args.message) False
+
+sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
+sendToRoot ctx content =
+    if ctx.multiTaskPath == taskPathRoot
+        then pure (Left "root agent cannot send_message to itself")
+        else case ctx.multiSendToRoot of
+            Nothing -> pure (Left "root agent mailbox is unavailable")
+            Just deliver -> deliver (rootMessage ctx content)
+
+rootMessage :: MultiAgentContext -> InterAgentMessageContent -> InterAgentMessage
+rootMessage ctx content = InterAgentMessage
+    { messageAuthor = taskPathText ctx.multiTaskPath
+    , messageRecipient = taskPathText taskPathRoot
+    , messageType = QueuedMessage
+    , messageContent = content
+    }
+
+messageContent :: ToolCall -> Text -> InterAgentMessageContent
+messageContent call
+    | call.argumentsEncrypted = encryptedInterAgentContent
+    | otherwise = plainInterAgentContent
+
+maybeRestore :: MultiAgentContext -> Text -> IO (Either Text ())
+maybeRestore ctx target = case ctx.multiResumeFromDisk of
+    Nothing -> pure (Right ())
+    Just restore ->
+        resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath target >>= \case
+            Left _ ->
+                -- Target may only exist on disk as agent id.
+                if "agent-" `Text.isPrefixOf` target
+                    then restore (SubagentId target)
+                    else pure (Right ())
+            Right agentId -> restore agentId
+
+--------------------------------------------------------------------------------
+-- list_agents
+--------------------------------------------------------------------------------
+
+data ListAgentsArgs = ListAgentsArgs
+    { pathPrefix :: Maybe Text
+    }
+
+instance FromJSON ListAgentsArgs where
+    parseJSON = objectArgs \object_ -> ListAgentsArgs
+        <$> optText object_ "path_prefix"
+
+listAgentsTool :: MultiAgentContext -> AppTool
+listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
+    [ PropertySchema "path_prefix" PropertyString False $ Just
+        "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+    ]
+    True
+    (typedTool "list_agents" (runListAgents ctx))
+
+listAgentsDescription :: Text
+listAgentsDescription =
+    "List live agents in the current root thread tree. Optionally filter by \
+    \task-path prefix."
+
+runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
+runListAgents ctx args = do
+    agents <- listAgents ctx.multiRegistry args.pathPrefix
+    let payload =
+            [ object
+                [ "agent_name" .= taskPathText path
+                , "agent_id" .= agentId.unSubagentId
+                , "agent_status" .= encodeStatus status
+                ]
+            | (path, agentId, status) <- agents
+            ]
+    pure $ Right $ encodeJson $ object [ "agents" .= payload ]
+
+--------------------------------------------------------------------------------
+-- interrupt_agent
+--------------------------------------------------------------------------------
+
+newtype InterruptAgentArgs = InterruptAgentArgs { target :: Text }
+
+instance FromJSON InterruptAgentArgs where
+    parseJSON = objectArgs \object_ -> InterruptAgentArgs <$> reqText object_ "target"
+
+interruptAgentTool :: MultiAgentContext -> AppTool
+interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
+    [ PropertySchema "target" PropertyString True $ Just
+        "Agent id or canonical task name to interrupt (from spawn_agent)."
+    ]
+    True
+    (typedTool "interrupt_agent" (runInterrupt ctx))
+
+interruptDescription :: Text
+interruptDescription =
+    "Interrupt an agent's current turn, if any, and return its previous status. \
+    \The agent remains available for messages and follow-up tasks."
+
+encryptedString :: Text -> PropertyType
+encryptedString description = PropertyRaw $ object
+    [ "type" .= ("string" :: Text)
+    , "description" .= description
+    , "encrypted" .= True
+    ]
+
+runInterrupt :: MultiAgentContext -> InterruptAgentArgs -> IO (Either Text Text)
+runInterrupt ctx args = do
+    resolved <- resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath args.target
+    case resolved of
+        Left err -> pure (Left err)
+        Right agentId -> do
+            result <- interruptSubagent ctx.multiRegistry agentId
             pure $ case result of
                 Left err -> Left err
-                Right _ ->
+                Right previous ->
                     Right $ encodeJson $ object
-                        [ "submission_id" .= ("queued" :: Text)
+                        [ "previous_status" .= encodeStatus previous
                         ]
-
---------------------------------------------------------------------------------
--- close_agent
---------------------------------------------------------------------------------
-
-newtype CloseAgentArgs = CloseAgentArgs { target :: Text }
-
-instance FromJSON CloseAgentArgs where
-    parseJSON = objectArgs \object_ -> CloseAgentArgs <$> reqText object_ "target"
-
-closeAgentTool :: MultiAgentContext -> AppTool
-closeAgentTool ctx = jsonTool "close_agent" closeAgentDescription
-    [ PropertySchema "target" PropertyString True $ Just
-        "Agent id to close (from spawn_agent)."
-    ]
-    False
-    (typedTool "close_agent" (runClose ctx))
-
-closeAgentDescription :: Text
-closeAgentDescription =
-    "Close an agent and any open descendants when they are no longer needed, \
-    \and return the target agent's previous status before shutdown was \
-    \requested. Completed agents remain open and count toward the concurrency \
-    \limit until closed. Don't keep agents open for too long if they are not \
-    \needed anymore."
-
-runClose :: MultiAgentContext -> CloseAgentArgs -> IO (Either Text Text)
-runClose ctx args = do
-    result <- closeSubagent ctx.multiRegistry (SubagentId args.target)
-    pure $ case result of
-        Left err -> Left err
-        Right previous ->
-            Right $ encodeJson $ object
-                [ "previous_status" .= encodeStatus previous
-                ]
-
---------------------------------------------------------------------------------
--- resume_agent
---------------------------------------------------------------------------------
-
-newtype ResumeAgentArgs = ResumeAgentArgs { resumeId :: Text }
-
-instance FromJSON ResumeAgentArgs where
-    parseJSON = objectArgs \object_ -> ResumeAgentArgs <$> reqText object_ "id"
-
-resumeAgentTool :: MultiAgentContext -> AppTool
-resumeAgentTool ctx = jsonTool "resume_agent" resumeAgentDescription
-    [ PropertySchema "id" PropertyString True $ Just
-        "Agent id to resume."
-    ]
-    False
-    (typedTool "resume_agent" (runResume ctx))
-
-resumeAgentDescription :: Text
-resumeAgentDescription =
-    "Resume a previously closed agent by id so it can receive send_input and \
-    \wait_agent calls."
-
-runResume :: MultiAgentContext -> ResumeAgentArgs -> IO (Either Text Text)
-runResume ctx args = do
-    let agentId = SubagentId args.resumeId
-    _ <- case ctx.multiResumeFromDisk of
-        Just restore -> restore agentId
-        Nothing -> pure (Right ())
-    result <- resumeSubagent ctx.multiRegistry agentId
-    pure $ case result of
-        Left err -> Left err
-        Right status ->
-            Right $ encodeJson $ object
-                [ "status" .= encodeStatus status
-                ]
 
 encodeJson :: Value -> Text
 encodeJson = Text.decodeUtf8 . LBS.toStrict . Aeson.encode

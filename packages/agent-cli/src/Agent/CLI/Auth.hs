@@ -7,11 +7,19 @@ module Agent.CLI.Auth
     , reloadableFileCredentialProvider
     ) where
 
-import Agent.Broker (BrokerOptions(..), newBrokerTokenProvider)
+import Agent.Broker (BrokerOptions(..), newBrokerTokenProviderFor)
+import Agent.CLI.CredentialStore
+    ( ManagedAuthKind(..)
+    , ManagedCredential(..)
+    , ManagedSecret(..)
+    , loadManagedCredentials
+    , upsertManagedCredential
+    )
 import Agent.Error (ApiError(..), ErrorType(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider
     ( AccountFailure(..)
     , Credential(..)
@@ -35,15 +43,14 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import System.Directory (doesFileExist, getHomeDirectory)
+import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
-    -- | OpenAI OAuth pool when the process loaded ~/.codex/auth.json.
-    -- Static CODEX_ACCESS_TOKEN / xAI / OpenRouter leave this empty.
+    -- | Live OpenAI OAuth pool, when authentication uses one.
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
 
@@ -80,10 +87,15 @@ loadBroker url requested = do
     case token of
         Nothing -> pure (Left "AGENT_BROKER_URL is set; also set AGENT_BROKER_TOKEN")
         Just serviceToken -> do
-            provider <- newBrokerTokenProvider BrokerOptions
-                { baseUrl = Text.unpack url
-                , serviceToken
-                }
+            let supportedProviders = case requested of
+                    Just selected -> [selected]
+                    Nothing -> [OpenAIProvider, XAIProvider, OpenRouterProvider]
+            provider <- newBrokerTokenProviderFor
+                BrokerOptions
+                    { baseUrl = Text.unpack url
+                    , serviceToken
+                    }
+                supportedProviders
             first <- getNextToken provider Nothing
             case first of
                 Left err -> pure (Left ("broker: " <> show err))
@@ -103,26 +115,42 @@ loadBroker url requested = do
 
 loadXai :: IO (Either String LoadedAuth)
 loadXai = do
-    credential <- loadGrokCredential
+    credential <- loadXaiCredential
     case credential of
         Nothing -> pure (Left noAuthHint)
         Just loaded -> do
-            provider <- reloadableFileCredentialProvider XAIProvider loaded loadGrokCredential
+            provider <- reloadableFileCredentialProvider
+                XAIProvider loaded loadXaiCredential
             pure $ Right LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider = provider
                 , loadedOpenAiPool = Nothing
                 }
 
+loadXaiCredential :: IO (Maybe Credential)
+loadXaiCredential = do
+    managed <- loadManagedCredential XAIProvider
+    case managed of
+        Just (metadata, secret) ->
+            pure $ managedBearerCredential metadata secret
+        Nothing -> loadGrokCredential
+
+loadOpenRouterKey :: IO (Maybe Text)
+loadOpenRouterKey = do
+    managed <- loadManagedCredential OpenRouterProvider
+    case managed of
+        Just (_, secret) -> pure (Just secret.secretPayload)
+        Nothing -> lookupNonEmpty "OPENROUTER_API_KEY"
+
 loadOpenRouter :: IO (Either String LoadedAuth)
 loadOpenRouter = do
-    key <- lookupNonEmpty "OPENROUTER_API_KEY"
+    key <- loadOpenRouterKey
     case key of
         Nothing -> pure (Left noAuthHint)
         Just apiKey -> do
             let initial = credentialFromApiKey apiKey
             provider <- reloadableFileCredentialProvider OpenRouterProvider initial
-                (fmap (fmap credentialFromApiKey) (lookupNonEmpty "OPENROUTER_API_KEY"))
+                (fmap (fmap credentialFromApiKey) loadOpenRouterKey)
             pure $ Right LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
@@ -131,50 +159,151 @@ loadOpenRouter = do
 
 loadOpenAi :: IO (Either String LoadedAuth)
 loadOpenAi = do
+    managed <- loadManagedCredential OpenAIProvider
     fromEnvToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     fromEnvJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     home <- getHomeDirectory
-    let filePath = home </> ".codex" </> "auth.json"
+    let filePath =
+            home </> fromFilePath ".codex" </> fromFilePath "auth.json"
     fileExists <- doesFileExist filePath
-    fileBytes <- if fileExists then Just <$> LBS.readFile filePath else pure Nothing
+    fileBytes <- if fileExists
+        then Just <$> LBS.readFile (toFilePath filePath)
+        else pure Nothing
     now <- getCurrentTime
-    case fromEnvToken of
-        Just token -> do
-            accountId <- openaiAccountIdForToken token
+    case managed of
+        Just (metadata, secret) ->
+            loadManagedOpenAI now metadata secret
+        Nothing ->
+            case fromEnvToken of
+                Just token -> do
+                    accountId <- openaiAccountIdForToken token
+                    pure $ Right LoadedAuth
+                        { loadedProvider = OpenAIProvider
+                        , loadedTokenProvider = staticCredentialProvider Credential
+                            { accessToken = token
+                            , accountId
+                            , leaseId = Nothing
+                            , provider = OpenAIProvider
+                            }
+                        , loadedOpenAiPool = Nothing
+                        }
+                Nothing -> case envOrFileState now fromEnvJson fileBytes of
+                    Nothing -> pure (Left noAuthHint)
+                    Just state ->
+                        openAiPoolAuth fileExists filePath state
+
+loadManagedOpenAI
+    :: UTCTime
+    -> ManagedCredential
+    -> ManagedSecret
+    -> IO (Either String LoadedAuth)
+loadManagedOpenAI now metadata secret =
+    case metadata.managedAuthKind of
+        ManagedOpenAIAuthJson ->
+            case openaiAuthStateFromJson now
+                (LBS.fromStrict (TextEncoding.encodeUtf8 secret.secretPayload)) of
+                Nothing ->
+                    pure $ Left
+                        "managed OpenAI OAuth credential contains invalid auth JSON"
+                Just state -> do
+                    clientId <- lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+                    let refresh stale = case clientId of
+                            Nothing ->
+                                pure $ Left $ ProviderError AuthenticationError
+                                    "OPENAI_OAUTH_CLIENT_ID is required to refresh ChatGPT OAuth"
+                                    Nothing
+                            Just oauthClientId ->
+                                OpenAI.refreshAccessTokenHTTP oauthClientId stale >>= \case
+                                    Left err -> pure (Left err)
+                                    Right newState -> do
+                                        stamped <- authStateToJson newState <$> getCurrentTime
+                                        let payload =
+                                                TextEncoding.decodeUtf8
+                                                    (LBS.toStrict (Aeson.encode stamped))
+                                        upsertManagedCredential
+                                            metadata
+                                            secret { secretPayload = payload }
+                                            >>= \case
+                                                Left err ->
+                                                    pure $ Left $ ConnectionError err
+                                                Right () -> pure (Right newState)
+                    pool <- OpenAI.newPool [state] refresh
+                    tokenProvider <- OpenAICredential.poolTokenProvider pool
+                    pure $ Right LoadedAuth
+                        { loadedProvider = OpenAIProvider
+                        , loadedTokenProvider = tokenProvider
+                        , loadedOpenAiPool = Just pool
+                        }
+        _ ->
             pure $ Right LoadedAuth
                 { loadedProvider = OpenAIProvider
-                , loadedTokenProvider = staticCredentialProvider Credential
-                    { accessToken = token
-                    , accountId
-                    , leaseId = Nothing
-                    , provider = OpenAIProvider
-                    }
+                , loadedTokenProvider =
+                    staticCredentialProvider Credential
+                        { accessToken = secret.secretPayload
+                        , accountId = metadata.managedAccountId
+                        , leaseId = Nothing
+                        , provider = OpenAIProvider
+                        }
                 , loadedOpenAiPool = Nothing
                 }
-        Nothing -> case envOrFileState now fromEnvJson fileBytes of
-            Nothing -> pure (Left noAuthHint)
-            Just state -> do
-                clientId <- lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-                let refresh stale = case clientId of
-                        Nothing -> pure $ Left $ ProviderError AuthenticationError
-                            "OPENAI_OAUTH_CLIENT_ID is required to refresh ~/.codex/auth.json"
-                            Nothing
-                        Just oauthClientId ->
-                            OpenAI.refreshAccessTokenHTTP oauthClientId stale >>= \case
-                                Left err -> pure (Left err)
-                                Right newState
-                                    | fileExists -> do
-                                        stamped <- authStateToJson newState <$> getCurrentTime
-                                        OpenAILogin.writeAuthFile filePath stamped
-                                        pure (Right newState)
-                                    | otherwise -> pure (Right newState)
-                pool <- OpenAI.newPool [state] refresh
-                tokenProvider <- OpenAICredential.poolTokenProvider pool
-                pure $ Right LoadedAuth
-                    { loadedProvider = OpenAIProvider
-                    , loadedTokenProvider = tokenProvider
-                    , loadedOpenAiPool = Just pool
-                    }
+
+openAiPoolAuth
+    :: Bool
+    -> OsPath
+    -> OpenAI.AuthState
+    -> IO (Either String LoadedAuth)
+openAiPoolAuth persistRefresh filePath state = do
+    clientId <- lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    let refresh stale = case clientId of
+            Nothing -> pure $ Left $ ProviderError AuthenticationError
+                "OPENAI_OAUTH_CLIENT_ID is required to refresh ChatGPT OAuth"
+                Nothing
+            Just oauthClientId ->
+                OpenAI.refreshAccessTokenHTTP oauthClientId stale >>= \case
+                    Left err -> pure (Left err)
+                    Right newState
+                        | persistRefresh -> do
+                            stamped <- authStateToJson newState <$> getCurrentTime
+                            OpenAILogin.writeAuthFile filePath stamped
+                            pure (Right newState)
+                        | otherwise -> pure (Right newState)
+    pool <- OpenAI.newPool [state] refresh
+    tokenProvider <- OpenAICredential.poolTokenProvider pool
+    pure $ Right LoadedAuth
+        { loadedProvider = OpenAIProvider
+        , loadedTokenProvider = tokenProvider
+        , loadedOpenAiPool = Just pool
+        }
+
+loadManagedCredential
+    :: Provider
+    -> IO (Maybe (ManagedCredential, ManagedSecret))
+loadManagedCredential provider =
+    loadManagedCredentials >>= \case
+        Left _ -> pure Nothing
+        Right credentials ->
+            pure $ listToMaybe
+                [ (metadata, secret)
+                | (metadata, secret) <- credentials
+                , metadata.managedEnabled
+                , metadata.managedProvider == provider
+                ]
+
+managedBearerCredential
+    :: ManagedCredential
+    -> ManagedSecret
+    -> Maybe Credential
+managedBearerCredential metadata secret =
+    let token = case metadata.managedAuthKind of
+            ManagedGrokAuthJson ->
+                grokCredentialFromAuthJson secret.secretPayload
+            _ -> Just secret.secretPayload
+    in (\accessToken -> Credential
+        { accessToken
+        , accountId = metadata.managedAccountId
+        , leaseId = Nothing
+        , provider = metadata.managedProvider
+        }) <$> token
 
 envOrFileState
     :: UTCTime
@@ -231,10 +360,12 @@ loadGrokCredential = do
     fromJson <- lookupNonEmpty "GROK_AUTH_JSON"
     fromToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
-    let filePath = home </> ".grok" </> "auth.json"
+    let filePath =
+            home </> fromFilePath ".grok" </> fromFilePath "auth.json"
     fileExists <- doesFileExist filePath
     fileJson <- if fileExists
-        then Just . TextEncoding.decodeUtf8 . LBS.toStrict <$> LBS.readFile filePath
+        then Just . TextEncoding.decodeUtf8 . LBS.toStrict
+            <$> LBS.readFile (toFilePath filePath)
         else pure Nothing
     let token =
             (fromJson >>= grokCredentialFromAuthJson)
@@ -281,19 +412,30 @@ hasGrokAuth = do
     envJson <- lookupNonEmpty "GROK_AUTH_JSON"
     envToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
-    file <- doesFileExist (home </> ".grok" </> "auth.json")
-    pure (isJust envJson || isJust envToken || file)
+    file <- doesFileExist
+        (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
+    managed <- hasManagedProvider XAIProvider
+    pure (isJust envJson || isJust envToken || file || managed)
 
 hasOpenAiAuth :: IO Bool
 hasOpenAiAuth = do
     envJson <- lookupNonEmpty "CODEX_AUTH_JSON"
     envToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     home <- getHomeDirectory
-    file <- doesFileExist (home </> ".codex" </> "auth.json")
-    pure (isJust envJson || isJust envToken || file)
+    file <- doesFileExist
+        (home </> fromFilePath ".codex" </> fromFilePath "auth.json")
+    managed <- hasManagedProvider OpenAIProvider
+    pure (isJust envJson || isJust envToken || file || managed)
 
 hasOpenRouterAuth :: IO Bool
-hasOpenRouterAuth = isJust <$> lookupNonEmpty "OPENROUTER_API_KEY"
+hasOpenRouterAuth = do
+    environment <- isJust <$> lookupNonEmpty "OPENROUTER_API_KEY"
+    managed <- hasManagedProvider OpenRouterProvider
+    pure (environment || managed)
+
+hasManagedProvider :: Provider -> IO Bool
+hasManagedProvider provider =
+    isJust <$> loadManagedCredential provider
 
 -- | Cache one credential and only re-read disk/env after the provider rejects
 -- it for authentication. Rate-limit failures stay exhausted rather than

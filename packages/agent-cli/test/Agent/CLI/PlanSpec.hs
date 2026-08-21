@@ -2,6 +2,7 @@ module Agent.CLI.PlanSpec (spec) where
 
 import Agent.CLI.Plan
 import Agent.Tools.PlanMode (PlanDecision(..))
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -22,6 +23,16 @@ spec = do
                 "before\n<proposed_plan>\nplan\n</proposed_plan>\nafter"
                 `shouldBe` "before\n\nafter"
 
+    describe "renderPlanMarkdown" do
+        it "leaves plan Markdown unchanged when color is off" do
+            let plan = "# Plan\n\n- edit `Plan.hs`"
+            renderPlanMarkdown False plan `shouldBe` plan
+
+        it "styles plan Markdown when color is on" do
+            let out = renderPlanMarkdown True "# Plan"
+            out `shouldSatisfy` Text.isInfixOf "Plan"
+            out `shouldSatisfy` (not . Text.isInfixOf "# Plan")
+
     describe "parsePlanDecisionAnswer" do
         it "maps approve / changes / cancel aliases" do
             parsePlanDecisionAnswer "a" `shouldBe` Just PlanApprove
@@ -31,3 +42,15 @@ spec = do
             parsePlanDecisionAnswer "q" `shouldBe` Just PlanCancel
             parsePlanDecisionAnswer "cancel" `shouldBe` Just PlanCancel
             parsePlanDecisionAnswer "maybe" `shouldBe` Nothing
+
+    describe "planDecisionFollowUp" do
+        it "continues immediately when the plan is approved" do
+            planDecisionFollowUp PlanApprove
+                `shouldSatisfy` maybe False (Text.isInfixOf "Begin implementing")
+
+        it "keeps revising when changes are requested" do
+            planDecisionFollowUp (PlanRequestChanges "cover retries")
+                `shouldSatisfy` maybe False (Text.isInfixOf "cover retries")
+
+        it "does not continue after cancellation" do
+            planDecisionFollowUp PlanCancel `shouldBe` Nothing

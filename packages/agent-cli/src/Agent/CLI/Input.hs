@@ -1,51 +1,64 @@
--- | Line editing for interactive prompts. TTY sessions use haskeline so
--- arrow keys move the cursor / recall history instead of echoing escape
--- sequences; non-TTY falls back to plain 'getLine'.
+-- | First-party line editing for interactive prompts. TTY sessions use a raw
+-- inline editor with live slash-command completion; non-TTY falls back to
+-- plain 'getLine'.
 module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
+    , readReplLineWithInitial
     , readApprovalLine
     , readChoiceSelection
     , approvalKeyText
     , ChoiceKey(..)
     , parseChoiceKey
     , choiceMoveIndex
+    , classifyPastedText
+    , displayEditorText
+    , formatPasteChip
+    , isClipboardPasteKey
     , replHistoryPath
+    , terminalTextWidth
+    , truncateDisplayText
+    , visibleEditorText
     ) where
 
-import Agent.CLI.Command (slashCompletionCandidates)
+import Agent.CLI.Command
+    ( SlashMenu(..)
+    , SlashSuggestion(..)
+    , slashMenuFor
+    )
 import Agent.CLI.Interrupt
     ( IdleCtrlCResult(..)
     , InterruptState
     , noteIdleCtrlC
     )
 import Control.Exception.Safe (bracket, catchIO, throwIO, tryIO)
-import Control.Monad (when)
-import Data.Char (ord)
+import Control.Monad (unless, when)
+import Data.Char
+    ( GeneralCategory(..)
+    , chr
+    , generalCategory
+    , isSpace
+    , ord
+    )
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Console.ANSI
-    ( hHideCursor
+    ( getTerminalSize
+    , hHideCursor
     , hShowCursor
     )
 import System.Console.ANSI.Codes
     ( clearLineCode
     , cursorUpCode
     )
-import System.Console.Haskeline
-    ( Settings(..)
-    , defaultSettings
-    , getInputLine
-    , handleInterrupt
-    , runInputT
-    , setComplete
-    , withInterrupt
-    )
-import System.Console.Haskeline.Completion
-    ( Completion(..)
-    , CompletionFunc
-    , completeWordWithPrev
+import System.Console.Haskeline.History
+    ( addHistory
+    , emptyHistory
+    , historyLines
+    , readHistory
+    , writeHistory
     )
 import System.Directory
     ( createDirectoryIfMissing
@@ -85,8 +98,51 @@ import System.Posix.Types (FileMode)
 data ReplLine
     = ReplEof
     | ReplText Text
+    -- | Submitted text that arrived as a paste (bracketed paste, or a
+    -- multi-line / burst heuristic). @replText@ is the payload with CSI
+    -- paste wrappers stripped.
+    | ReplPasted Text
+    -- | Attach a native clipboard image while keeping the current draft.
+    | ReplClipboardPaste Text
+    | ReplCycleMode Text
+    -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
+
+-- | Strip terminal bracketed-paste wrappers (raw @CSI 200~@ / @CSI 201~@,
+-- or the printable sentinels used by older history/input versions) and decide
+-- whether the buffer looks pasted rather than typed.
+classifyPastedText :: Text -> (Text, Bool)
+classifyPastedText raw =
+    let stripped = stripBracketedPaste raw
+        looksPasted =
+            raw /= stripped
+                || Text.count "\n" stripped >= 3
+    in (stripped, looksPasted)
+
+-- | Compact prompt chip for a multi-line paste. Single-line pastes stay inline.
+formatPasteChip :: Text -> Text
+formatPasteChip text =
+    let n = max 1 (length (Text.lines text))
+    in if n < 4
+        then text
+        else "[Pasted: " <> Text.pack (show n) <> " lines]"
+
+stripBracketedPaste :: Text -> Text
+stripBracketedPaste text =
+    Text.filter (not . isPasteSentinel)
+        (Text.replace pasteEnd "" (Text.replace pasteStart "" text))
+  where
+    pasteStart = "\ESC[200~"
+    pasteEnd = "\ESC[201~"
+
+pasteStartSentinel, pasteEndSentinel :: Char
+pasteStartSentinel = '\x27E6'
+pasteEndSentinel = '\x27E7'
+
+isPasteSentinel :: Char -> Bool
+isPasteSentinel char =
+    char == pasteStartSentinel || char == pasteEndSentinel
 
 -- | @~/.haskell-agent/history@ given the user's home directory.
 replHistoryPath :: FilePath -> FilePath
@@ -134,29 +190,703 @@ choiceMoveIndex len idx key
 -- stdin is a TTY. 'ReplEof' means EOF; 'ReplQuitInterrupt' means a confirmed
 -- double Ctrl-C. The prompt is drawn on stdout.
 --
--- Haskeline installs its own SIGINT handler while reading, so idle Ctrl-C
--- goes through 'noteIdleCtrlC' rather than the outer signal handler.
+-- The raw editor reads Ctrl-C as an input byte, so idle Ctrl-C goes through
+-- 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
-readReplLine interrupt prompt = do
+readReplLine interrupt prompt =
+    readReplLineConfigured False interrupt prompt ""
+
+-- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
+readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
+readReplLineWithInitial =
+    readReplLineConfigured True
+
+readReplLineConfigured :: Bool -> InterruptState -> Text -> Text -> IO ReplLine
+readReplLineConfigured slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
             home <- getHomeDirectory
             let path = replHistoryPath home
             ensureHistoryParent path
-            readEditedLine interrupt
-                (setComplete completeSlash
-                    defaultSettings
-                        { historyFile = Just path
-                        , autoAddHistory = True
-                        })
-                prompt
+            classifyLine <$>
+                readInlineEditor slashEnabled interrupt path prompt initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            fmap (maybe ReplEof ReplText) readAnswerOnly
+            fmap (maybe ReplEof classifySubmitted) readRawLine
+  where
+    classifyLine = \case
+        ReplText text -> classifySubmitted text
+        other -> other
+    classifySubmitted text =
+        let (stripped, pasted) = classifyPastedText text
+        in if pasted then ReplPasted stripped else ReplText stripped
+
+data EditorState = EditorState
+    { editorText :: !Text
+    , editorCursor :: !Int
+    , editorSelected :: !Int
+    , editorHistoryIndex :: !(Maybe Int)
+    , editorHistoryDraft :: !Text
+    , editorKillBuffer :: !Text
+    , editorPasted :: !Bool
+    , editorSlashEnabled :: !Bool
+    , editorSlashDismissed :: !Bool
+    }
+
+data DisplayCell = DisplayCell
+    { displayCellText :: !Text
+    , displayCellWidth :: !Int
+    }
+
+terminalTextWidth :: Text -> Int
+terminalTextWidth = cellsWidth . displayCells
+
+displayCells :: Text -> [DisplayCell]
+displayCells = map displayCell . Text.unpack
+
+displayCell :: Char -> DisplayCell
+displayCell char =
+    let shown = safeDisplayChar char
+    in DisplayCell
+        { displayCellText = shown
+        , displayCellWidth = textColumns shown
+        }
+
+safeDisplayChar :: Char -> Text
+safeDisplayChar char
+    | char == '\n' || char == '\r' = "↵"
+    | char == '\t' = "⇥"
+    | code >= 0 && code <= 0x1f =
+        Text.singleton (chr (0x2400 + code))
+    | code == 0x7f = "␡"
+    | code >= 0x80 && code <= 0x9f = "�"
+    | generalCategory char == Format = "�"
+    | otherwise = Text.singleton char
+  where
+    code = ord char
+
+textColumns :: Text -> Int
+textColumns = sum . map charColumns . Text.unpack
+
+charColumns :: Char -> Int
+charColumns char
+    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
+    | category `elem` [Control, Surrogate, NotAssigned] = 0
+    | isWideCharacter char = 2
+    | otherwise = 1
+  where
+    category = generalCategory char
+
+isWideCharacter :: Char -> Bool
+isWideCharacter char =
+    let code = ord char
+    in code >= 0x1100
+        && ( code <= 0x115f
+            || code == 0x2329
+            || code == 0x232a
+            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
+            || (code >= 0xac00 && code <= 0xd7a3)
+            || (code >= 0xf900 && code <= 0xfaff)
+            || (code >= 0xfe10 && code <= 0xfe19)
+            || (code >= 0xfe30 && code <= 0xfe6f)
+            || (code >= 0xff00 && code <= 0xff60)
+            || (code >= 0xffe0 && code <= 0xffe6)
+            || (code >= 0x1f300 && code <= 0x1faff)
+            || (code >= 0x20000 && code <= 0x3fffd)
+           )
+
+cellsWidth :: [DisplayCell] -> Int
+cellsWidth = sum . map (.displayCellWidth)
+
+renderCells :: [DisplayCell] -> Text
+renderCells = Text.concat . map (.displayCellText)
+
+takeColumns :: Int -> [DisplayCell] -> [DisplayCell]
+takeColumns width = go 0
+  where
+    go _ [] = []
+    go used (cell:rest)
+        | used + cell.displayCellWidth > width = []
+        | otherwise = cell : go (used + cell.displayCellWidth) rest
+
+takeSuffixColumns :: Int -> [DisplayCell] -> [DisplayCell]
+takeSuffixColumns width = reverse . takeColumns width . reverse
+
+data EditorKey
+    = EditorChar !Char
+    | EditorEnter
+    | EditorBackspace
+    | EditorDelete
+    | EditorLeft
+    | EditorRight
+    | EditorHome
+    | EditorEnd
+    | EditorUp
+    | EditorDown
+    | EditorTab
+    | EditorEscape
+    | EditorInterrupt
+    | EditorEof
+    | EditorKillStart
+    | EditorKillEnd
+    | EditorKillWord
+    | EditorYank
+    | EditorClearScreen
+    | EditorCycleMode
+    | EditorClipboardPaste
+    | EditorPaste !Text
+    | EditorIgnore
+    deriving (Eq, Show)
+
+-- | First-party inline editor for the interactive TTY path. It owns the
+-- prompt redraw so slash suggestions can update after every keystroke.
+readInlineEditor
+    :: Bool
+    -> InterruptState
+    -> FilePath
+    -> Text
+    -> Text
+    -> IO ReplLine
+readInlineEditor slashEnabled interrupt historyPath prompt initial = do
+    withBracketedPaste $
+        withEditorRawStdin $
+            bracket
+                (hHideCursor stdout)
+                (\_ -> hShowCursor stdout >> hFlush stdout)
+                \() -> do
+                    history <- readHistory historyPath `catchIO` \_ -> pure emptyHistory
+                    let entries = map Text.pack (historyLines history)
+                        state = EditorState
+                            { editorText = initial
+                            , editorCursor = Text.length initial
+                            , editorSelected = 0
+                            , editorHistoryIndex = Nothing
+                            , editorHistoryDraft = initial
+                            , editorKillBuffer = ""
+                            , editorPasted = False
+                            , editorSlashEnabled = slashEnabled
+                            , editorSlashDismissed = False
+                            }
+                    redrawEditor prompt state
+                    editorLoop history entries state
+  where
+    editorLoop history entries state = do
+        key <- readEditorKey
+        let menu = currentMenu state
+        case key of
+            EditorEnter ->
+                case selectedSuggestion state menu of
+                    Just suggestion
+                        | not (exactCommandSelected state suggestion) -> do
+                            let accepted = acceptSuggestion state menu suggestion
+                            if suggestion.slashSuggestionTakesArguments
+                                then redrawEditor prompt accepted
+                                    >> editorLoop history entries accepted
+                                else finish history accepted
+                    _ -> finish history state
+            EditorCycleMode -> do
+                finishEditorLine prompt state
+                pure (ReplCycleMode state.editorText)
+            EditorClipboardPaste -> do
+                finishEditorLine prompt state
+                pure (ReplClipboardPaste state.editorText)
+            EditorInterrupt ->
+                noteIdleCtrlC interrupt >>= \case
+                    ContinuePrompt -> do
+                        finishEditorLine prompt state
+                        Text.putStrLn "^C"
+                        redrawEditor prompt state
+                        editorLoop history entries state
+                    QuitProcess -> do
+                        finishEditorLine prompt state
+                        pure ReplQuitInterrupt
+            EditorEof
+                | Text.null state.editorText -> do
+                    finishEditorLine prompt state
+                    pure ReplEof
+                | otherwise ->
+                    continue history entries (deleteAtCursor state)
+            EditorUp
+                | menuHasRows menu ->
+                    continue history entries (moveMenuSelection (-1) menu state)
+                | otherwise ->
+                    continue history entries (historyMove (-1) entries state)
+            EditorDown
+                | menuHasRows menu ->
+                    continue history entries (moveMenuSelection 1 menu state)
+                | otherwise ->
+                    continue history entries (historyMove 1 entries state)
+            EditorTab ->
+                case selectedSuggestion state menu of
+                    Nothing -> editorLoop history entries state
+                    Just suggestion ->
+                        continue history entries (acceptSuggestion state menu suggestion)
+            EditorEscape
+                | menuHasRows menu ->
+                    continue history entries state
+                        { editorSelected = 0
+                        , editorSlashDismissed = True
+                        }
+                | otherwise ->
+                    editorLoop history entries state
+            EditorBackspace -> continue history entries (backspace state)
+            EditorDelete -> continue history entries (deleteAtCursor state)
+            EditorLeft -> continue history entries state
+                { editorCursor = max 0 (state.editorCursor - 1)
+                , editorSelected = 0
+                , editorSlashDismissed = False
+                }
+            EditorRight -> continue history entries state
+                { editorCursor = min (Text.length state.editorText) (state.editorCursor + 1)
+                , editorSelected = 0
+                , editorSlashDismissed = False
+                }
+            EditorHome -> continue history entries state
+                { editorCursor = 0, editorSelected = 0, editorSlashDismissed = False }
+            EditorEnd -> continue history entries state
+                { editorCursor = Text.length state.editorText
+                , editorSelected = 0
+                , editorSlashDismissed = False
+                }
+            EditorKillStart -> continue history entries (killStart state)
+            EditorKillEnd -> continue history entries (killEnd state)
+            EditorKillWord -> continue history entries (killWord state)
+            EditorYank -> continue history entries (insertText state.editorKillBuffer state)
+            EditorClearScreen -> do
+                Text.hPutStr stdout "\ESC[2J\ESC[H"
+                redrawEditor prompt state
+                editorLoop history entries state
+            EditorPaste pasted ->
+                continue history entries
+                    (insertText pasted state) { editorPasted = True }
+            EditorChar char ->
+                continue history entries (insertText (Text.singleton char) state)
+            EditorIgnore -> editorLoop history entries state
+      where
+        continue history' entries' state' = do
+            let normalized = normalizeSelection state'
+            redrawEditor prompt normalized
+            editorLoop history' entries' normalized
+
+        finish history' state' = do
+            finishEditorLine prompt state'
+            let text = state'.editorText
+            unless (Text.all (== ' ') text) $
+                writeHistory historyPath (addHistory (Text.unpack text) history')
+                    `catchIO` \_ -> pure ()
+            pure $
+                if state'.editorPasted
+                    then ReplPasted text
+                    else ReplText text
+
+menuHasRows :: Maybe SlashMenu -> Bool
+menuHasRows = maybe False (not . null . (.slashMenuSuggestions))
+
+currentMenu :: EditorState -> Maybe SlashMenu
+currentMenu state
+    | not state.editorSlashEnabled = Nothing
+    | state.editorSlashDismissed = Nothing
+    | otherwise = slashMenuFor state.editorText state.editorCursor
+
+normalizeSelection :: EditorState -> EditorState
+normalizeSelection state =
+    case currentMenu state of
+        Nothing -> state { editorSelected = 0 }
+        Just menu ->
+            let count = length menu.slashMenuSuggestions
+            in state
+                { editorSelected =
+                    if count == 0 then 0 else state.editorSelected `mod` count
+                }
+
+moveMenuSelection :: Int -> Maybe SlashMenu -> EditorState -> EditorState
+moveMenuSelection delta menu state =
+    case menu of
+        Nothing -> state
+        Just SlashMenu{slashMenuSuggestions}
+            | null slashMenuSuggestions -> state
+            | otherwise ->
+                let count = length slashMenuSuggestions
+                    selected = (state.editorSelected + delta) `mod` count
+                in state { editorSelected = selected }
+
+selectedSuggestion :: EditorState -> Maybe SlashMenu -> Maybe SlashSuggestion
+selectedSuggestion state menu = do
+    SlashMenu{slashMenuSuggestions} <- menu
+    if null slashMenuSuggestions
+        then Nothing
+        else Just (slashMenuSuggestions !! (state.editorSelected `mod` length slashMenuSuggestions))
+
+exactCommandSelected :: EditorState -> SlashSuggestion -> Bool
+exactCommandSelected state suggestion =
+    Text.strip state.editorText == suggestion.slashSuggestionDisplay
+
+acceptSuggestion
+    :: EditorState
+    -> Maybe SlashMenu
+    -> SlashSuggestion
+    -> EditorState
+acceptSuggestion state menu suggestion =
+    case menu of
+        Nothing -> state
+        Just SlashMenu{slashMenuReplaceStart, slashMenuReplaceEnd} ->
+            let (before, rest) = Text.splitAt slashMenuReplaceStart state.editorText
+                (_, after) = Text.splitAt
+                    (slashMenuReplaceEnd - slashMenuReplaceStart)
+                    rest
+                replacement = suggestion.slashSuggestionReplacement
+                text = before <> replacement <> after
+            in state
+                { editorText = text
+                , editorCursor = slashMenuReplaceStart + Text.length replacement
+                , editorSelected = 0
+                , editorHistoryIndex = Nothing
+                , editorHistoryDraft = text
+                , editorSlashDismissed = False
+                }
+
+insertText :: Text -> EditorState -> EditorState
+insertText inserted state =
+    let (before, after) = Text.splitAt state.editorCursor state.editorText
+        text = before <> inserted <> after
+    in state
+        { editorText = text
+        , editorCursor = state.editorCursor + Text.length inserted
+        , editorSelected = 0
+        , editorHistoryIndex = Nothing
+        , editorHistoryDraft = text
+        , editorSlashDismissed = False
+        }
+
+backspace :: EditorState -> EditorState
+backspace state
+    | state.editorCursor <= 0 = state
+    | otherwise =
+        let start = state.editorCursor - 1
+            (before, rest) = Text.splitAt start state.editorText
+            (_, after) = Text.splitAt 1 rest
+            text = before <> after
+        in state
+            { editorText = text
+            , editorCursor = start
+            , editorSelected = 0
+            , editorHistoryIndex = Nothing
+            , editorHistoryDraft = text
+            , editorSlashDismissed = False
+            }
+
+deleteAtCursor :: EditorState -> EditorState
+deleteAtCursor state
+    | state.editorCursor >= Text.length state.editorText = state
+    | otherwise =
+        let (before, rest) = Text.splitAt state.editorCursor state.editorText
+            (_, after) = Text.splitAt 1 rest
+            text = before <> after
+        in state
+            { editorText = text
+            , editorSelected = 0
+            , editorHistoryIndex = Nothing
+            , editorHistoryDraft = text
+            , editorSlashDismissed = False
+            }
+
+killStart :: EditorState -> EditorState
+killStart state =
+    let (killed, after) = Text.splitAt state.editorCursor state.editorText
+    in state
+        { editorText = after
+        , editorCursor = 0
+        , editorSelected = 0
+        , editorHistoryIndex = Nothing
+        , editorHistoryDraft = after
+        , editorKillBuffer = killed
+        , editorSlashDismissed = False
+        }
+
+killEnd :: EditorState -> EditorState
+killEnd state =
+    let (before, killed) = Text.splitAt state.editorCursor state.editorText
+    in state
+        { editorText = before
+        , editorSelected = 0
+        , editorHistoryIndex = Nothing
+        , editorHistoryDraft = before
+        , editorKillBuffer = killed
+        , editorSlashDismissed = False
+        }
+
+killWord :: EditorState -> EditorState
+killWord state
+    | state.editorCursor <= 0 = state
+    | otherwise =
+        let before = Text.take state.editorCursor state.editorText
+            trailingSpaces = Text.length (Text.takeWhileEnd isSpace before)
+            withoutSpaces = Text.dropEnd trailingSpaces before
+            wordLength = Text.length (Text.takeWhileEnd (not . isSpace) withoutSpaces)
+            start = state.editorCursor - trailingSpaces - wordLength
+            killed = Text.take (state.editorCursor - start) (Text.drop start state.editorText)
+            text = Text.take start state.editorText <> Text.drop state.editorCursor state.editorText
+        in state
+            { editorText = text
+            , editorCursor = start
+            , editorSelected = 0
+            , editorHistoryIndex = Nothing
+            , editorHistoryDraft = text
+            , editorKillBuffer = killed
+            , editorSlashDismissed = False
+            }
+
+historyMove :: Int -> [Text] -> EditorState -> EditorState
+historyMove delta entries state
+    | null entries = state
+    | otherwise =
+        let current = fromMaybe (-1) state.editorHistoryIndex
+            next = current - delta
+        in if next < 0
+            then state
+                { editorText = state.editorHistoryDraft
+                , editorCursor = Text.length state.editorHistoryDraft
+                , editorHistoryIndex = Nothing
+                , editorSelected = 0
+                , editorSlashDismissed = False
+                }
+            else if next >= length entries
+                then state
+                else
+                    let text = entries !! next
+                        draft = case state.editorHistoryIndex of
+                            Nothing -> state.editorText
+                            Just _ -> state.editorHistoryDraft
+                    in state
+                        { editorText = text
+                        , editorCursor = Text.length text
+                        , editorHistoryIndex = Just next
+                        , editorHistoryDraft = draft
+                        , editorSelected = 0
+                        , editorSlashDismissed = False
+                        }
+
+readEditorKey :: IO EditorKey
+readEditorKey = do
+    result <- tryIO (hGetChar stdin)
+    case result of
+        Left err
+            | isEOFError err -> pure EditorEof
+            | otherwise -> throwIO err
+        Right char
+            | isClipboardPasteKey char -> pure EditorClipboardPaste
+            | otherwise -> case char of
+                '\n' -> pure EditorEnter
+                '\r' -> pure EditorEnter
+                '\DEL' -> pure EditorBackspace
+                '\BS' -> pure EditorBackspace
+                '\t' -> pure EditorTab
+                '\ESC' -> readEscapeKey
+                '\ETX' -> pure EditorInterrupt
+                '\EOT' -> pure EditorEof
+                '\SOH' -> pure EditorHome
+                '\ENQ' -> pure EditorEnd
+                '\STX' -> pure EditorLeft
+                '\ACK' -> pure EditorRight
+                '\DLE' -> pure EditorUp
+                '\SO' -> pure EditorDown
+                '\NAK' -> pure EditorKillStart
+                '\VT' -> pure EditorKillEnd
+                '\ETB' -> pure EditorKillWord
+                '\EM' -> pure EditorYank
+                '\FF' -> pure EditorClearScreen
+                _
+                    | char >= ' ' -> pure (EditorChar char)
+                    | otherwise -> pure EditorIgnore
+
+isClipboardPasteKey :: Char -> Bool
+isClipboardPasteKey = (== '\SYN')
+
+readEscapeKey :: IO EditorKey
+readEscapeKey = do
+    ready <- hWaitForInput stdin 25
+    if not ready
+        then pure EditorEscape
+        else do
+            second <- hGetChar stdin
+            case second of
+                '[' -> readCsiKey
+                'O' -> do
+                    third <- hGetChar stdin
+                    pure $ case third of
+                        'A' -> EditorUp
+                        'B' -> EditorDown
+                        'C' -> EditorRight
+                        'D' -> EditorLeft
+                        'H' -> EditorHome
+                        'F' -> EditorEnd
+                        'Z' -> EditorCycleMode
+                        _ -> EditorIgnore
+                '\n' -> pure (EditorChar '\n')
+                '\r' -> pure (EditorChar '\n')
+                _ -> pure EditorIgnore
+
+readCsiKey :: IO EditorKey
+readCsiKey = do
+    body <- readCsiBody ""
+    case body of
+        "A" -> pure EditorUp
+        "B" -> pure EditorDown
+        "C" -> pure EditorRight
+        "D" -> pure EditorLeft
+        "H" -> pure EditorHome
+        "F" -> pure EditorEnd
+        "Z" -> pure EditorCycleMode
+        "1~" -> pure EditorHome
+        "4~" -> pure EditorEnd
+        "3~" -> pure EditorDelete
+        "1;2Z" -> pure EditorCycleMode
+        "200~" -> EditorPaste <$> readBracketedPaste
+        _ -> pure EditorIgnore
+
+readCsiBody :: String -> IO String
+readCsiBody reversed = do
+    char <- hGetChar stdin
+    let next = char : reversed
+    if char >= '@' && char <= '~'
+        then pure (reverse next)
+        else readCsiBody next
+
+readBracketedPaste :: IO Text
+readBracketedPaste = go ""
+  where
+    end = "\ESC[201~"
+    go acc = do
+        char <- hGetChar stdin
+        let next = Text.snoc acc char
+        if end `Text.isSuffixOf` next
+            then pure (Text.dropEnd (Text.length end) next)
+            else go next
+
+withEditorRawStdin :: IO a -> IO a
+withEditorRawStdin action = do
+    oldTerm <- getTerminalAttributes stdInput
+    oldBuf <- hGetBuffering stdin
+    let enter = do
+            let raw =
+                    flip withMinInput 1
+                        . flip withTime 0
+                        . flip withoutMode EnableEcho
+                        . flip withoutMode ProcessInput
+                        . flip withoutMode ExtendedFunctions
+                        . flip withoutMode KeyboardInterrupts
+                        $ oldTerm
+            setTerminalAttributes stdInput raw Immediately
+            hSetBuffering stdin NoBuffering
+        restore = do
+            setTerminalAttributes stdInput oldTerm Immediately
+            hSetBuffering stdin oldBuf
+    bracket enter (const restore) \() -> action
+
+redrawEditor :: Text -> EditorState -> IO ()
+redrawEditor prompt state = do
+    width <- maybe 80 snd <$> getTerminalSize
+    let menu = currentMenu state
+        rows = visibleMenuRows width state menu
+        (shown, cursorColumn) =
+            visibleEditorText
+                (max 1 (width - visibleWidth prompt))
+                state.editorText
+                state.editorCursor
+    Text.hPutStr stdout "\r\ESC[J"
+    Text.hPutStr stdout prompt
+    Text.hPutStr stdout shown
+    Text.hPutStr stdout "\ESC[K\ESC[0m"
+    mapM_ (\row -> Text.hPutStr stdout ("\n" <> row <> "\ESC[K")) rows
+    when (not (null rows)) $
+        Text.hPutStr stdout (Text.pack (cursorUpCode (length rows)))
+    Text.hPutStr stdout "\r"
+    let target = visibleWidth prompt + cursorColumn
+    when (target > 0) $
+        Text.hPutStr stdout ("\ESC[" <> Text.pack (show target) <> "C")
+    hFlush stdout
+
+finishEditorLine :: Text -> EditorState -> IO ()
+finishEditorLine prompt state = do
+    Text.hPutStr stdout "\r\ESC[J"
+    Text.hPutStr stdout prompt
+    Text.hPutStr stdout (displayEditorText state.editorText)
+    Text.hPutStr stdout "\ESC[K\ESC[0m\n"
+    hFlush stdout
+
+visibleMenuRows :: Int -> EditorState -> Maybe SlashMenu -> [Text]
+visibleMenuRows width state = \case
+    Nothing -> []
+    Just SlashMenu{slashMenuSuggestions} ->
+        let count = length slashMenuSuggestions
+            selected
+                | count == 0 = 0
+                | otherwise = state.editorSelected `mod` count
+            start = max 0 (min selected (max 0 (count - maxMenuRows)))
+            visible = take maxMenuRows (drop start slashMenuSuggestions)
+        in zipWith (renderMenuRow width selected start) [0 ..] visible
+  where
+    maxMenuRows = 6
+
+renderMenuRow :: Int -> Int -> Int -> Int -> SlashSuggestion -> Text
+renderMenuRow width selected start localIndex suggestion =
+    let absoluteIndex = start + localIndex
+        marker = if absoluteIndex == selected then "❯ " else "  "
+        label = suggestion.slashSuggestionDisplay
+        available =
+            max 0
+                (width - terminalTextWidth marker - terminalTextWidth label - 2)
+        summary = truncateDisplayText available suggestion.slashSuggestionSummary
+        gap = if Text.null summary then "" else "  "
+        row = truncateDisplayText width (marker <> label <> gap <> summary)
+    in if absoluteIndex == selected
+        then "\ESC[1;36m" <> row <> "\ESC[0m"
+        else "\ESC[2m" <> row <> "\ESC[0m"
+
+visibleEditorText :: Int -> Text -> Int -> (Text, Int)
+visibleEditorText available raw cursor =
+    let cells = displayCells raw
+        before = take cursor cells
+    in if cellsWidth cells <= available
+        then (renderCells cells, cellsWidth before)
+        else
+            let leftRoom = max 1 (available * 2 `div` 3)
+                visibleBefore = takeSuffixColumns leftRoom before
+                start = length before - length visibleBefore
+                shownCells = takeColumns available (drop start cells)
+            in (renderCells shownCells, cellsWidth visibleBefore)
+
+displayEditorText :: Text -> Text
+displayEditorText = renderCells . displayCells
+
+truncateDisplayText :: Int -> Text -> Text
+truncateDisplayText width text
+    | width <= 0 = ""
+    | cellsWidth cells <= width = renderCells cells
+    | width == 1 = "…"
+    | otherwise = renderCells (takeColumns (width - 1) cells) <> "…"
+  where
+    cells = displayCells text
+
+visibleWidth :: Text -> Int
+visibleWidth = terminalTextWidth . stripAnsi
+
+stripAnsi :: Text -> Text
+stripAnsi = Text.pack . goNormal . Text.unpack
+  where
+    goNormal = \case
+        [] -> []
+        '\ESC' : '[' : rest -> goCsi rest
+        char : rest -> char : goNormal rest
+    goCsi = \case
+        [] -> []
+        char : rest
+            | char >= '@' && char <= '~' -> goNormal rest
+            | otherwise -> goCsi rest
 -- | Read a one-shot approval answer. The question is always written to
--- stderr (matching the pre-haskeline behavior) so redirected stdout does
+-- stderr (matching the historical behavior) so redirected stdout does
 -- not swallow the prompt. Does not touch REPL history.
 --
 -- On a TTY, a single keypress submits immediately (@y@ / @n@ / @a@, or
@@ -366,42 +1096,33 @@ withChoiceRawStdin action = do
             hSetBuffering stdin oldBuf
     bracket enter (const restore) \() -> action
 
-readEditedLine :: InterruptState -> Settings IO -> Text -> IO ReplLine
-readEditedLine interrupt settings prompt = go
+-- | Ask the terminal to wrap pastes in CSI 200~ … CSI 201~ so we can
+-- distinguish them from typed keystrokes. Restored on exit.
+withBracketedPaste :: IO a -> IO a
+withBracketedPaste action = do
+    isTty <- hIsTerminalDevice stdin
+    if not isTty
+        then action
+        else bracket enable disable (const action)
   where
-    go =
-        -- Haskeline turns Ctrl-C into 'Interrupt' and replaces our SIGINT
-        -- handler for the duration of the prompt. Soft-warn / double-quit
-        -- are applied here via 'noteIdleCtrlC'.
-        handleInterrupt onInterrupt $
-            runInputT settings $
-                withInterrupt $
-                    fmap (maybe ReplEof (ReplText . Text.pack))
-                        (getInputLine (Text.unpack prompt))
-    onInterrupt = do
-        noteIdleCtrlC interrupt >>= \case
-            ContinuePrompt -> go
-            QuitProcess -> pure ReplQuitInterrupt
-
--- | Tab-complete slash command names and a few known argument tokens.
-completeSlash :: CompletionFunc IO
-completeSlash =
-    completeWordWithPrev Nothing " \t" \reversedPrev word ->
-        pure $ map toCompletion (slashCompletionCandidates reversedPrev word)
-  where
-    toCompletion replacement =
-        Completion
-            { replacement
-            , display = replacement
-            , isFinished = True
-            }
+    enable = do
+        Text.hPutStr stdout "\ESC[?2004h"
+        hFlush stdout
+    disable _ = do
+        Text.hPutStr stdout "\ESC[?2004l"
+        hFlush stdout
 
 readAnswerOnly :: IO (Maybe Text)
-readAnswerOnly = do
+readAnswerOnly = fmap (fmap Text.strip) readRawLine
+
+-- | Read one line without changing whitespace. Prompt payloads can contain
+-- indentation or trailing blank data; approval answers normalize separately.
+readRawLine :: IO (Maybe Text)
+readRawLine = do
     done <- isEOF
     if done
         then pure Nothing
-        else Just . Text.strip <$> Text.getLine
+        else Just <$> Text.getLine
 
 ensureHistoryParent :: FilePath -> IO ()
 ensureHistoryParent path = do

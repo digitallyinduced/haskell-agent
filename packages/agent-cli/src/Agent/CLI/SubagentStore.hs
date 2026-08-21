@@ -14,6 +14,7 @@ module Agent.CLI.SubagentStore
     , loadSubagentState
     ) where
 
+import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.OpenAI.Responses.Types (ResponseItem)
 import Agent.Subagents (SubagentId(..))
 import Control.Exception.Safe (tryAny)
@@ -23,23 +24,27 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory
+import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
     , renameFile
     )
-import System.FilePath ((</>))
+import System.OsPath ((</>))
 import System.Posix.Files (setFileMode)
 
 data SubagentDiskMeta = SubagentDiskMeta
     { diskPreviousResponseId :: !(Maybe Text)
     , diskAgentType :: !(Maybe Text)
+    , diskAgentModel :: !(Maybe Text)
+    , diskCwd :: !(Maybe OsPath)
     } deriving (Eq, Show)
 
 instance ToJSON SubagentDiskMeta where
     toJSON meta = object
         [ "previousResponseId" .= meta.diskPreviousResponseId
         , "agentType" .= meta.diskAgentType
+        , "agentModel" .= meta.diskAgentModel
+        , "cwd" .= fmap toFilePath meta.diskCwd
         ]
 
 instance FromJSON SubagentDiskMeta where
@@ -47,6 +52,8 @@ instance FromJSON SubagentDiskMeta where
         SubagentDiskMeta
             <$> o .:? "previousResponseId"
             <*> o .:? "agentType"
+            <*> o .:? "agentModel"
+            <*> (fmap fromFilePath <$> o .:? "cwd")
 
 -- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
 -- traversal so resume paths cannot escape @agents/@.
@@ -61,51 +68,59 @@ isValidSubagentStoreId (SubagentId text) =
   where
     isSafeNameChar c = isAlphaNum c || c == '-' || c == '_'
 
-subagentStoreDir :: FilePath -> SubagentId -> Either Text FilePath
+subagentStoreDir :: OsPath -> SubagentId -> Either Text OsPath
 subagentStoreDir sessionDir agentId
     | not (isValidSubagentStoreId agentId) =
         Left ("invalid subagent id for store path: " <> agentId.unSubagentId)
     | otherwise =
-        Right (sessionDir </> "agents" </> Text.unpack agentId.unSubagentId)
+        Right
+            ( sessionDir
+                </> fromFilePath "agents"
+                </> fromFilePath (Text.unpack agentId.unSubagentId)
+            )
 
 saveSubagentState
-    :: FilePath
+    :: OsPath
     -> SubagentId
     -> [ResponseItem]
     -> Maybe Text
     -> Maybe Text
+    -> Maybe Text
+    -> Maybe OsPath
     -> IO (Either Text ())
-saveSubagentState sessionDir agentId items previous agentType =
+saveSubagentState sessionDir agentId items previous agentType agentModel cwd =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
-            let metaPath = dir </> "meta.json"
-                transcriptPath = dir </> "transcript.json"
-                metaTmp = metaPath <> ".tmp"
-                transcriptTmp = transcriptPath <> ".tmp"
+            let metaPath = dir </> fromFilePath "meta.json"
+                transcriptPath = dir </> fromFilePath "transcript.json"
+                metaTmp = metaPath <> fromFilePath ".tmp"
+                transcriptTmp = transcriptPath <> fromFilePath ".tmp"
             createDirectoryIfMissing True dir
-            _ <- tryAny (setFileMode dir 0o700)
-            LBS.writeFile metaTmp $ Aeson.encode SubagentDiskMeta
+            _ <- tryAny (setFileMode (toFilePath dir) 0o700)
+            LBS.writeFile (toFilePath metaTmp) $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
                 , diskAgentType = agentType
+                , diskAgentModel = agentModel
+                , diskCwd = cwd
                 }
-            _ <- tryAny (setFileMode metaTmp 0o600)
-            LBS.writeFile transcriptTmp (Aeson.encode items)
-            _ <- tryAny (setFileMode transcriptTmp 0o600)
+            _ <- tryAny (setFileMode (toFilePath metaTmp) 0o600)
+            LBS.writeFile (toFilePath transcriptTmp) (Aeson.encode items)
+            _ <- tryAny (setFileMode (toFilePath transcriptTmp) 0o600)
             renameFile metaTmp metaPath
             renameFile transcriptTmp transcriptPath
             pure (Right ())
 
 loadSubagentState
-    :: FilePath
+    :: OsPath
     -> SubagentId
     -> IO (Either Text (Maybe ([ResponseItem], SubagentDiskMeta)))
 loadSubagentState sessionDir agentId =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
-            let metaPath = dir </> "meta.json"
-                transcriptPath = dir </> "transcript.json"
+            let metaPath = dir </> fromFilePath "meta.json"
+                transcriptPath = dir </> fromFilePath "transcript.json"
             hasMeta <- doesFileExist metaPath
             hasTranscript <- doesFileExist transcriptPath
             if not (hasMeta || hasTranscript)
@@ -113,7 +128,7 @@ loadSubagentState sessionDir agentId =
                 else do
                     metaResult <- if hasMeta
                         then decodeFile metaPath
-                        else pure (Right (SubagentDiskMeta Nothing Nothing))
+                        else pure (Right (SubagentDiskMeta Nothing Nothing Nothing Nothing))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])
@@ -124,12 +139,12 @@ loadSubagentState sessionDir agentId =
                             Right (Just (items, meta))
   where
     decodeFile path = do
-        raw <- LBS.readFile path
+        raw <- LBS.readFile (toFilePath path)
         case Aeson.eitherDecode raw of
             Left err ->
                 pure $ Left $
                     "failed to decode "
-                        <> Text.pack path
+                        <> toText path
                         <> ": "
                         <> Text.pack err
             Right value -> pure (Right value)

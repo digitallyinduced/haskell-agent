@@ -42,45 +42,25 @@ module Agent.OpenAI.Auth
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
-import Control.Applicative ((<|>))
+import Agent.OpenAI.Auth.JWT
+    ( deriveAccountId
+    , needsRefresh
+    , parseJwtExp
+    )
+import Agent.OpenAI.Auth.Refresh (refreshAccessTokenHTTP)
+import Agent.OpenAI.Auth.Types (AuthState(..))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception (SomeException, try)
 import Control.Monad (forM, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.List (find)
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime, getCurrentTime, utctDayTime)
-import Network.HTTP.Simple
-    ( getResponseBody
-    , getResponseStatusCode
-    , httpLBS
-    , parseRequest_
-    , setRequestBodyLBS
-    , setRequestHeader
-    )
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime, utctDayTime)
 
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
-
--- | In-memory auth state for a single ChatGPT account.
-data AuthState = AuthState
-    { accessToken  :: !Text
-    , refreshToken :: !Text
-    , accountId    :: !Text
-    , idToken      :: !(Maybe Text)
-    , lastRefresh  :: !UTCTime
-    } deriving (Show)
 
 -- | Per-account mutable state in the pool.
 data AccountEntry = AccountEntry
@@ -116,18 +96,12 @@ data Pool = Pool
 -- Configuration
 --------------------------------------------------------------------------------
 
-tokenEndpoint :: String
-tokenEndpoint = "https://auth.openai.com/oauth/token"
-
 -- | Refresh when the access-token JWT has less than this many seconds left.
 -- ChatGPT Codex access tokens are long-lived (~9 days), so this is the only
 -- trigger the pool uses — no periodic wall-clock refresh. A looser
 -- interval-based refresh would just burn through refresh tokens
 -- unnecessarily, and an exhausted refresh-token family can't be recovered
 -- without re-running @npx \@openai/codex login@ interactively.
-refreshMarginSeconds :: Int
-refreshMarginSeconds = 10 * 60
-
 -- | How long to mark an account as unavailable after a rate-limit error
 -- when the server does not provide @resets_in_seconds@.
 rateLimitCooldownSeconds :: Int
@@ -498,135 +472,3 @@ findEntry :: Pool -> Text -> IO (Maybe AccountEntry)
 findEntry pool targetAccountId = do
     entries <- readIORef pool.poolEntries
     pure (find ((== targetAccountId) . (.entryAccountId)) entries)
-
---------------------------------------------------------------------------------
--- Refresh
---------------------------------------------------------------------------------
-
--- | Pure HTTP call to OpenAI's @/oauth/token@ endpoint to rotate the access
--- and refresh tokens for a single account. The OAuth public client id is
--- supplied at runtime and is never embedded in this package.
---
--- Does NOT persist the result anywhere — callers are expected to handle
--- persistence and cross-process locking themselves. This is the default
--- callback for 'newPool'; wrap it with your own transaction logic if you
--- run multiple workers against a shared token store (OpenAI rotates the
--- refresh token on every use, so concurrent POSTs of the same refresh token
--- fail with @refresh_token_reused@).
-refreshAccessTokenHTTP :: Text -> AuthState -> IO (Either ApiError AuthState)
-refreshAccessTokenHTTP oauthClientId state = do
-    let body = Aeson.encode $ Aeson.object
-            [ "grant_type"    Aeson..= ("refresh_token" :: Text)
-            , "refresh_token" Aeson..= state.refreshToken
-            , "client_id"     Aeson..= oauthClientId
-            , "scope"         Aeson..= ("openid profile email offline_access" :: Text)
-            ]
-    let request = setRequestBodyLBS body
-            $ setRequestHeader "Content-Type" ["application/json"]
-            $ parseRequest_ ("POST " <> tokenEndpoint)
-    eResponse <- try @SomeException (httpLBS request)
-    case eResponse of
-        Left e -> pure $ Left (ConnectionError (Text.pack (show e)))
-        Right response -> do
-            let status = getResponseStatusCode response
-            if status < 200 || status >= 300
-                then pure $ Left $ ProviderError AuthenticationError
-                    ("Codex token refresh failed with HTTP "
-                        <> Text.pack (show status) <> ": "
-                        <> Text.decodeUtf8 (LBS.toStrict (LBS.take 500 (getResponseBody response))))
-                    Nothing
-                else case Aeson.eitherDecode (getResponseBody response) of
-                    Left err ->
-                        pure $ Left $ ProviderError AuthenticationError
-                            ("Failed to parse token refresh response: " <> Text.pack err)
-                            Nothing
-                    Right (obj :: Aeson.Value) ->
-                        case jsonTextMaybe obj "access_token" of
-                            Nothing ->
-                                pure $ Left $ ProviderError AuthenticationError
-                                    "Token refresh response missing access_token"
-                                    Nothing
-                            Just newAccessToken -> do
-                                let newRefreshToken = fromMaybe state.refreshToken (jsonTextMaybe obj "refresh_token")
-                                    newIdToken = jsonTextMaybe obj "id_token"
-                                    newAccountId = fromMaybe state.accountId (newIdToken >>= deriveAccountId)
-                                now <- getCurrentTime
-                                pure $ Right state
-                                    { accessToken  = newAccessToken
-                                    , refreshToken = newRefreshToken
-                                    , accountId    = newAccountId
-                                    , idToken      = newIdToken <|> state.idToken
-                                    , lastRefresh  = now
-                                    }
-
---------------------------------------------------------------------------------
--- JWT helpers
---------------------------------------------------------------------------------
-
--- | Refresh only when the access-token JWT is about to expire. We
--- intentionally do NOT refresh on any wall-clock interval — rotating healthy
--- tokens early is the fastest way to exhaust a refresh-token family, and the
--- only recovery path is interactive re-login.
-needsRefresh :: AuthState -> UTCTime -> Bool
-needsRefresh state now =
-    case parseJwtExp state.accessToken of
-        Nothing    -> True  -- can't parse, refresh to be safe
-        Just expAt -> diffUTCTime expAt now < fromIntegral refreshMarginSeconds
-
--- | Parse the @exp@ claim from a JWT (no signature verification).
-parseJwtExp :: Text -> Maybe UTCTime
-parseJwtExp token = do
-    let parts = Text.splitOn "." token
-    payloadB64 <- parts !!? 1
-    let padded = base64UrlToBase64 payloadB64
-    payloadBytes <- either (const Nothing) Just (Base64.decode (Text.encodeUtf8 padded))
-    obj <- Aeson.decode (LBS.fromStrict payloadBytes)
-    expAt <- jsonIntMaybe obj "exp"
-    let epoch = UTCTime (fromGregorian 1970 1 1) 0
-    pure $ addUTCTime (fromIntegral expAt) epoch
-
--- | Derive the ChatGPT @accountId@ from the @id_token@ JWT claims
--- (specifically the @https://api.openai.com/auth.chatgpt_account_id@ claim).
-deriveAccountId :: Text -> Maybe Text
-deriveAccountId idTok = do
-    let parts = Text.splitOn "." idTok
-    payloadB64 <- parts !!? 1
-    let padded = base64UrlToBase64 payloadB64
-    payloadBytes <- either (const Nothing) Just (Base64.decode (Text.encodeUtf8 padded))
-    Aeson.Object km <- Aeson.decode (LBS.fromStrict payloadBytes)
-    Aeson.Object authKm <- KeyMap.lookup "https://api.openai.com/auth" km
-    Aeson.String accId <- KeyMap.lookup "chatgpt_account_id" authKm
-    pure accId
-
---------------------------------------------------------------------------------
--- Internal helpers
---------------------------------------------------------------------------------
-
-base64UrlToBase64 :: Text -> Text
-base64UrlToBase64 t =
-    let replaced = Text.replace "-" "+" (Text.replace "_" "/" t)
-        padLen = (4 - Text.length replaced `mod` 4) `mod` 4
-    in replaced <> Text.replicate padLen "="
-
-(!!?) :: [a] -> Int -> Maybe a
-(!!?) xs i
-    | i < 0     = Nothing
-    | otherwise = go xs i
-  where
-    go [] _     = Nothing
-    go (x:_) 0  = Just x
-    go (_:rest) n = go rest (n - 1)
-
-jsonTextMaybe :: Aeson.Value -> Text -> Maybe Text
-jsonTextMaybe (Aeson.Object obj) key =
-    case KeyMap.lookup (Key.fromText key) obj of
-        Just (Aeson.String t) -> Just t
-        _ -> Nothing
-jsonTextMaybe _ _ = Nothing
-
-jsonIntMaybe :: Aeson.Value -> Text -> Maybe Int
-jsonIntMaybe (Aeson.Object obj) key =
-    case KeyMap.lookup (Key.fromText key) obj of
-        Just (Aeson.Number n) -> Just (round n)
-        _ -> Nothing
-jsonIntMaybe _ _ = Nothing

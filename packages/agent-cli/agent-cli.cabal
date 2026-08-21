@@ -36,30 +36,45 @@ library
     import:           common-options
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AgentViewport
+                    , Agent.CLI.Approval
                     , Agent.CLI.Auth
+                    , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
                     , Agent.CLI.Command
+                    , Agent.CLI.CredentialStore
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
                     , Agent.CLI.Interrupt
+                    , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.Models
+                    , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
+                    , Agent.CLI.PendingInputs
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
+                    , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
+                    , Agent.CLI.ProviderFallback
+                    , Agent.CLI.ProviderTransition
                     , Agent.CLI.Render
+                    , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.SessionEnv
+                    , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Style
+                    , Agent.CLI.Terminal
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
+                    , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
@@ -68,6 +83,7 @@ library
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
+                    , async
                     , base >= 4.17 && < 5
                     , base64-bytestring
                     , bytestring
@@ -80,6 +96,7 @@ library
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
+                    , transformers
                     , unix
 
 executable agent-cli
@@ -95,21 +112,32 @@ test-suite agent-cli-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.CLI.AuthSpec
+    other-modules:    Agent.CLI.ApprovalSpec
+                    , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.AuthSpec
+                    , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.CompactionSpec
+                    , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
+                    , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
                     , Agent.CLI.ProjectSpec
                     , Agent.CLI.PermissionSpec
+                    , Agent.CLI.PendingInputsSpec
+                    , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
+                    , Agent.CLI.ProviderFallbackSpec
+                    , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
@@ -134,6 +162,7 @@ test-suite agent-cli-test
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
                     , process
+                    , safe-exceptions
                     , text
                     , time
                     , unix

@@ -2,27 +2,37 @@
 module Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
+    , commitThinking
     , formatActivityLine
     , formatElapsed
     , formatLoopError
     , formatLoopErrorColored
     , formatSearchReplaceDiff
+    , formatThinkingBlock
     , formatToolStarted
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
     , summarizeToolCall
+    , thinkingMaxWidth
     , truncateToolOutput
     , visibleDisplayRows
+    , wrapThinkingLines
     ) where
 
 import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Progress
+    ( osc9ProgressIndeterminate
+    , osc9ProgressRemove
+    , wrapOscForTmux
+    )
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
     , glyphErr
     , glyphOk
+    , glyphThink
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
@@ -32,46 +42,43 @@ import Agent.CLI.Style
     , roleSuccess
     , roleThinking
     , roleToolArrow
+    , roleToolCommand
     , roleToolDetail
     , roleToolName
     , roleToolOutput
+    , roleToolPath
     , solarizedGreen
     , solarizedRed
     , spinnerFrames
     , style
     )
+import Agent.JsonText (jsonTextFieldDefault)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.Console.ANSI (ConsoleLayer(..), SGR(..))
-import System.Console.ANSI.Codes
-    ( clearFromCursorToScreenEndCode
-    , setCursorColumnCode
-    )
+import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
     , renderThinkingVisible :: !(IORef Bool)
     , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
+    -- | Accumulated reasoning-summary text for the current model round.
+    , renderReasoningBuffer :: !(IORef Text)
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
     , renderTextBuffer :: !(IORef Text)
-    -- | True after a live color-mode paint; next redraw restores the saved
-    -- cursor and clears from there before restyling the buffer.
+    -- | True after assistant text has been streamed for the current round.
     , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
@@ -79,7 +86,12 @@ data RenderConfig = RenderConfig
     , renderModelRef :: !(IORef Text)
     , renderActivityRef :: !(IORef Text)
     , renderStartedAt :: !(IORef (Maybe UTCTime))
+    , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     }
+
+-- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
+thinkingMaxWidth :: Int
+thinkingMaxWidth = 120
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
 renderEvent config event =
@@ -87,23 +99,23 @@ renderEvent config event =
 
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
-    TextDelta delta ->
+    TextDelta delta -> do
+        commitThinkingUnlocked config
         if config.renderColor
             then do
-                clearThinkingUnlocked config
                 modifyIORef' config.renderTextBuffer (<> delta)
-                buffered <- readIORef config.renderTextBuffer
-                redrawLiveAssistant config buffered
+                streamAssistantDelta config delta
             else do
-                clearThinkingUnlocked config
                 writeIORef config.renderPrintedText True
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
-    ReasoningDelta _ -> pure ()
+    ReasoningDelta delta ->
+        appendReasoningUnlocked config delta
     TurnStarted -> do
         writeIORef config.renderTextBuffer ""
         writeIORef config.renderLiveActive False
-        writeIORef config.renderActivityRef "thinking…"
+        writeIORef config.renderReasoningBuffer ""
+        writeIORef config.renderActivityRef "Thinking…"
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
         startThinkingSpinnerUnlocked config
@@ -111,12 +123,13 @@ renderEventUnlocked config = \case
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
     -- tool-free turn is the main answer.
     TurnFinished turn -> do
-        clearThinkingUnlocked config
+        commitThinkingUnlocked config
         when config.renderColor do
             didPrint <- finalizeAssistantBuffer config turn.assistantText
             when (didPrint && not (null turn.toolCalls)) do
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
+        commitThinkingUnlocked config
         writeIORef config.renderActivityRef (summarizeToolCall call)
         putTextLn config.renderStderr (formatToolStarted config.renderColor call)
         let extra = formatToolBody config.renderColor call
@@ -137,23 +150,22 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
--- | Live color-mode redraw: restyle the full buffer and replace the previous
--- painted region in-place so tokens appear as they stream.
+-- | Stream assistant text append-only.
 --
--- Uses DECSC/DECRC (ESC 7 / ESC 8) instead of counting display rows. Row
--- counting breaks on soft-wrap, wide glyphs, and background erase sequences
--- from 'paintBackgroundLines', which left garbled leftover text on redraw.
-redrawLiveAssistant :: RenderConfig -> Text -> IO ()
-redrawLiveAssistant config raw
-    | Text.null raw = pure ()
+-- Repainting the full accumulated response with DECSC/DECRC looks correct
+-- inside the current viewport, but once a repaint scrolls the terminal the
+-- previous frame has already entered scrollback and cannot be erased. Long
+-- responses therefore appeared there many times. Markdown styling that needs
+-- future context is reserved for non-streaming responses.
+streamAssistantDelta :: RenderConfig -> Text -> IO ()
+streamAssistantDelta config delta
+    | Text.null delta = pure ()
     | otherwise = do
-        let painted = renderAssistantText True raw
-        eraseLiveAssistant config
-        -- Save cursor at the start of this paint so the next delta can return.
-        Text.hPutStr config.renderStdout "\ESC7"
+        let safe = Text.filter (/= '\ESC') delta
         writeIORef config.renderPrintedText True
         writeIORef config.renderLiveActive True
-        Text.hPutStr config.renderStdout painted
+        Text.hPutStr config.renderStdout
+            (paintBackgroundLines True agentBackground safe)
         hFlush config.renderStdout
 
 -- | End-of-turn: keep live paint when deltas already drew; otherwise paint
@@ -180,20 +192,6 @@ finalizeAssistantBuffer config assistantText = do
                     Text.hPutStr config.renderStdout (renderAssistantText True raw)
                     hFlush config.renderStdout
                     pure True
-
-eraseLiveAssistant :: RenderConfig -> IO ()
-eraseLiveAssistant config = do
-    live <- readIORef config.renderLiveActive
-    when live do
-        -- Restore to the saved start of the previous live paint, then clear
-        -- everything below so soft-wrapped leftovers disappear.
-        Text.hPutStr config.renderStdout $
-            "\ESC8"
-                <> Text.pack (setCursorColumnCode 0)
-                <> Text.pack clearFromCursorToScreenEndCode
-        hFlush config.renderStdout
-    writeIORef config.renderLiveActive False
-
 
 -- | How many terminal rows a painted assistant block occupies, accounting for
 -- soft wrap at @width@. ANSI/OSC sequences do not consume columns.
@@ -243,14 +241,22 @@ isCsiFinal :: Char -> Bool
 isCsiFinal c = c >= '@' && c <= '~'
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
+-- Commits a streamed reasoning block first so cancel/error still leave the
+-- summary in the transcript.
 clearThinking :: RenderConfig -> IO ()
 clearThinking config =
-    withMVar config.renderLock \_ -> clearThinkingUnlocked config
+    withMVar config.renderLock \_ -> commitThinkingUnlocked config
+
+-- | Flush a completed reasoning block to stderr. Safe when none is pending.
+commitThinking :: RenderConfig -> IO ()
+commitThinking config =
+    withMVar config.renderLock \_ -> commitThinkingUnlocked config
 
 startThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
+        emitNativeProgress config True
         visible <- readIORef config.renderThinkingVisible
         if visible
             then paintThinkingFrame config 0
@@ -260,8 +266,10 @@ startThinkingSpinnerUnlocked config
                 tid <- forkIO (spinnerLoop config 0)
                 writeIORef config.renderThinkingSpinner (Just tid)
 
-clearThinkingUnlocked :: RenderConfig -> IO ()
-clearThinkingUnlocked config = do
+-- | Stop the spinner and erase its in-place status line. Does not commit a
+-- reasoning block; callers that need that use 'commitThinkingUnlocked'.
+stopThinkingSpinnerUnlocked :: RenderConfig -> IO ()
+stopThinkingSpinnerUnlocked config = do
     mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
     case mtid of
         Just tid -> killThread tid
@@ -273,6 +281,20 @@ clearThinkingUnlocked config = do
             hFlush config.renderStderr
         writeIORef config.renderThinkingVisible False
 
+-- | Ghostty (and Windows Terminal / ConEmu) native loading indicator.
+-- Harmless no-op on terminals that do not implement OSC 9;4.
+emitNativeProgress :: RenderConfig -> Bool -> IO ()
+emitNativeProgress config active
+    | not config.renderNativeProgress = pure ()
+    | otherwise = do
+        inTmux <- isJust <$> lookupEnv "TMUX"
+        let seq_ =
+                wrapOscForTmux inTmux $
+                    if active then osc9ProgressIndeterminate else osc9ProgressRemove
+        void $ tryIO do
+            Text.hPutStr config.renderStderr seq_
+            hFlush config.renderStderr
+
 spinnerLoop :: RenderConfig -> Int -> IO ()
 spinnerLoop config frame = do
     threadDelay 80000
@@ -282,28 +304,122 @@ spinnerLoop config frame = do
             next = (frame + 1) `mod` length frames
         withMVar config.renderLock \_ -> do
             still <- readIORef config.renderThinkingVisible
-            when still (paintThinkingFrame config next)
+            when still do
+                -- Ghostty hides OSC 9;4 after ~15s without an update.
+                when (next == 0) (emitNativeProgress config True)
+                paintThinkingFrame config next
         spinnerLoop config next
 
 paintThinkingFrame :: RenderConfig -> Int -> IO ()
 paintThinkingFrame config frame = do
     activity <- readIORef config.renderActivityRef
-    started <- readIORef config.renderStartedAt
-    now <- getCurrentTime
-    let seconds = case started of
-            Nothing -> 0
-            Just t0 -> realToFrac (diffUTCTime now t0)
-        frames = spinnerFrames
+    elapsed <- thinkingElapsed config
+    let frames = spinnerFrames
         glyph = frames !! (frame `mod` length frames)
         line =
             formatActivityLine
                 config.renderColor
                 glyph
                 activity
-                seconds
+                elapsed
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
+
+thinkingElapsed :: RenderConfig -> IO Double
+thinkingElapsed config = do
+    started <- readIORef config.renderStartedAt
+    now <- getCurrentTime
+    pure $ case started of
+        Nothing -> 0
+        Just t0 -> realToFrac (diffUTCTime now t0)
+
+appendReasoningUnlocked :: RenderConfig -> Text -> IO ()
+appendReasoningUnlocked config delta
+    | Text.null delta = pure ()
+    | not config.renderShowThinking = pure ()
+    | otherwise =
+        -- Keep the one-line spinner while buffering. Repainting even a bounded
+        -- multi-line preview can scroll old frames into terminal scrollback.
+        modifyIORef' config.renderReasoningBuffer (<> delta)
+
+commitThinkingUnlocked :: RenderConfig -> IO ()
+commitThinkingUnlocked config = do
+    stopThinkingSpinnerUnlocked config
+    emitNativeProgress config False
+    buffered <- readIORef config.renderReasoningBuffer
+    writeIORef config.renderReasoningBuffer ""
+    if Text.null (Text.strip buffered)
+        then pure ()
+        else do
+            elapsed <- thinkingElapsed config
+            let painted =
+                    formatThinkingBlock
+                        config.renderColor
+                        False
+                        elapsed
+                        buffered
+            Text.hPutStr config.renderStderr painted
+            unless (Text.isSuffixOf "\n" painted) do
+                Text.hPutStr config.renderStderr "\n"
+            hFlush config.renderStderr
+
+-- | Thinking/reasoning block: accented header plus wrapped summary, matching
+-- grok-build's collapsible thought chrome in a linear CLI.
+--
+-- Live (@streaming@) shows a truncated preview so the block cannot grow
+-- without bound while tokens arrive; the committed form keeps the full text
+-- wrapped at 'thinkingMaxWidth'.
+formatThinkingBlock :: Bool -> Bool -> Double -> Text -> Text
+formatThinkingBlock color streaming elapsed raw =
+    let header =
+            if streaming
+                then roleThinking color (glyphThink <> "Thinking…")
+                    <> roleMuted color ("  " <> formatElapsed elapsed)
+                else
+                    roleThinking color (glyphThink <> "Thought")
+                        <> roleMuted color (" for " <> formatElapsed elapsed)
+        wrapped = wrapThinkingLines thinkingMaxWidth (Text.strip raw)
+        preview
+            | streaming = take thinkingPreviewLines wrapped
+            | otherwise = wrapped
+        hidden = length wrapped - length preview
+        more
+            | streaming && hidden > 0 =
+                [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
+            | otherwise = []
+        body =
+            map (\line -> roleMuted color (glyphToolAccent <> line)) preview
+                <> more
+    in Text.intercalate "\n" (header : body)
+
+thinkingPreviewLines :: Int
+thinkingPreviewLines = 3
+
+-- | Wrap reasoning text at @width@, splitting on spaces when possible.
+wrapThinkingLines :: Int -> Text -> [Text]
+wrapThinkingLines width text
+    | Text.null text = []
+    | otherwise =
+        concatMap (wrapOne (max 1 width)) (Text.splitOn "\n" text)
+
+wrapOne :: Int -> Text -> [Text]
+wrapOne width line
+    | Text.null line = [""]
+    | Text.length line <= width = [line]
+    | otherwise = go (Text.words line) ""
+  where
+    go [] acc
+        | Text.null acc = []
+        | otherwise = [acc]
+    go (word : rest) acc
+        | Text.null acc && Text.length word > width =
+            let (chunk, leftover) = Text.splitAt width word
+            in chunk : go (leftover : rest) ""
+        | Text.null acc = go rest word
+        | Text.length acc + 1 + Text.length word <= width =
+            go rest (acc <> " " <> word)
+        | otherwise = acc : go (word : rest) ""
 
 -- | One-line live status: spinner, current activity, elapsed time.
 formatActivityLine :: Bool -> Text -> Text -> Double -> Text
@@ -355,18 +471,80 @@ putTextLn handle text = do
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =
-    let detail = toolDetail call
-    in if Text.null detail then call.name else call.name <> " " <> detail
+    let verb = toolVerb call.name
+        detail = toolDetail call
+    in if Text.null detail then verb else verb <> " " <> detail
 
 -- | Colored tool-start line for stderr chrome.
+--
+-- Known coding tools use English verbs (Read / Listed / $) instead of
+-- wire names, matching grok-build's linear chrome while staying Solarized.
 formatToolStarted :: Bool -> ToolCall -> Text
 formatToolStarted color call =
-    let detail = toolDetail call
-        arrow = roleToolArrow color glyphTool
-        name = roleToolName color call.name
-    in if Text.null detail
-        then arrow <> name
-        else arrow <> name <> " " <> roleToolDetail color detail
+    let arrow = roleToolArrow color glyphTool
+        detail = toolDetail call
+    in case toolChrome call.name of
+        ToolChromeShell ->
+            let prompt = roleMuted color "$ "
+                command =
+                    if Text.null detail
+                        then roleMuted color "…"
+                        else roleToolCommand color detail
+            in arrow <> prompt <> command
+        ToolChrome verb kind ->
+            let name = roleToolName color verb
+                paintedDetail = case kind of
+                    ToolDetailNone -> ""
+                    ToolDetailMuted
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolDetail color detail
+                    ToolDetailPath
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolPath color detail
+                    ToolDetailCommand
+                        | Text.null detail -> ""
+                        | otherwise -> " " <> roleToolCommand color detail
+            in arrow <> name <> paintedDetail
+
+data ToolChrome
+    = ToolChromeShell
+    | ToolChrome Text ToolDetailKind
+
+data ToolDetailKind
+    = ToolDetailNone
+    | ToolDetailMuted
+    | ToolDetailPath
+    | ToolDetailCommand
+
+toolChrome :: Text -> ToolChrome
+toolChrome = \case
+    "read_file" -> ToolChrome "Read" ToolDetailPath
+    "list_dir" -> ToolChrome "Listed" ToolDetailPath
+    "grep" -> ToolChrome "Searched" ToolDetailMuted
+    "search_replace" -> ToolChrome "Edited" ToolDetailPath
+    "apply_patch" -> ToolChrome "Edited" ToolDetailPath
+    "run_terminal_cmd" -> ToolChromeShell
+    "shell_command" -> ToolChromeShell
+    "run_ghci" -> ToolChromeShell
+    "get_task_output" -> ToolChrome "Read" ToolDetailMuted
+    "kill_task" -> ToolChrome "Killed" ToolDetailMuted
+    "task" -> ToolChrome "Ran" ToolDetailMuted
+    "spawn_agent" -> ToolChrome "Spawned" ToolDetailMuted
+    "wait_agent" -> ToolChrome "Waited" ToolDetailMuted
+    "send_message" -> ToolChrome "Sent" ToolDetailMuted
+    "followup_task" -> ToolChrome "Followed up" ToolDetailMuted
+    "list_agents" -> ToolChrome "Listed" ToolDetailMuted
+    "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
+    "update_plan" -> ToolChrome "Updated" ToolDetailMuted
+    "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
+    "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
+    "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
+    name -> ToolChrome name ToolDetailMuted
+
+toolVerb :: Text -> Text
+toolVerb name = case toolChrome name of
+    ToolChromeShell -> "$"
+    ToolChrome verb _ -> verb
 
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case call.name of
@@ -376,12 +554,14 @@ formatToolBody color call = case call.name of
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
 formatSearchReplaceDiff color arguments =
-    let path = jsonField "file_path" arguments
-        oldText = jsonField "old_string" arguments
-        newText = jsonField "new_string" arguments
+    let path = jsonTextFieldDefault "file_path" arguments
+        oldText = jsonTextFieldDefault "old_string" arguments
+        newText = jsonTextFieldDefault "new_string" arguments
         header = case (Text.null oldText, Text.null newText) of
-            (True, False) -> roleMuted color ("  create " <> path)
-            (False, True) -> roleMuted color ("  delete " <> path)
+            (True, False) ->
+                roleMuted color "  create " <> roleToolPath color path
+            (False, True) ->
+                roleMuted color "  delete " <> roleToolPath color path
             _ -> ""
         oldLines = Text.lines oldText
         newLines = Text.lines newText
@@ -400,25 +580,18 @@ formatSearchReplaceDiff color arguments =
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case call.name of
-    "read_file" -> jsonField "target_file" call.arguments
-    "list_dir" -> jsonField "target_directory" call.arguments
-    "search_replace" -> jsonField "file_path" call.arguments
-    "grep" -> jsonField "pattern" call.arguments
-    "run_terminal_cmd" -> firstLine (jsonField "command" call.arguments)
-    "run_ghci" -> firstLine (jsonField "expression" call.arguments)
-    "shell_command" -> firstLine (jsonField "command" call.arguments)
+    "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+    "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
+    "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
+    "grep" -> jsonTextFieldDefault "pattern" call.arguments
+    "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
+    "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
-    "ask_user_question" -> firstLine (jsonField "question" call.arguments)
-    _ -> ""
-
-jsonField :: Text -> Text -> Text
-jsonField key arguments = case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
+    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
     _ -> ""
 
 firstPatchPath :: Text -> Maybe Text

@@ -9,7 +9,9 @@ module Agent.OpenAI.Login
     , writeAuthFile
     ) where
 
+import Agent.Http.Url (trimTrailingSlash)
 import Agent.OpenAI.Auth (deriveAccountId)
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (unless)
@@ -23,8 +25,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Simple
-import System.Directory (createDirectoryIfMissing, renameFile)
-import System.FilePath (takeDirectory)
+import System.Directory.OsPath (createDirectoryIfMissing, renameFile)
+import System.OsPath ((<.>), takeDirectory)
 import System.Posix.Files (setFileMode)
 
 data LoginOptions = LoginOptions
@@ -55,7 +57,7 @@ data Tokens = Tokens
 
 requestDeviceCode :: LoginOptions -> IO (Either Text DeviceCode)
 requestDeviceCode options = safely do
-    request <- parseRequest (trimIssuer options.issuer <> "/api/accounts/deviceauth/usercode")
+    request <- parseRequest (trimTrailingSlash options.issuer <> "/api/accounts/deviceauth/usercode")
     response <- httpLBS
         $ setRequestMethod "POST"
         $ setRequestHeader "Content-Type" ["application/json"]
@@ -66,7 +68,7 @@ requestDeviceCode options = safely do
     authId <- field "device_auth_id" object
     interval <- intervalField object
     pure DeviceCode
-        { verificationUrl = trimIssuer options.issuer <> "/codex/device"
+        { verificationUrl = trimTrailingSlash options.issuer <> "/codex/device"
         , userCode = code
         , deviceAuthId = authId
         , pollIntervalSeconds = max 1 interval
@@ -111,7 +113,7 @@ authValue tokens = do
         ]
 pollOnce :: LoginOptions -> DeviceCode -> IO (Maybe Tokens)
 pollOnce options deviceCode = do
-    request <- parseRequest (trimIssuer options.issuer <> "/api/accounts/deviceauth/token")
+    request <- parseRequest (trimTrailingSlash options.issuer <> "/api/accounts/deviceauth/token")
     response <- httpLBS
         $ setRequestMethod "POST"
         $ setRequestHeader "Content-Type" ["application/json"]
@@ -130,14 +132,14 @@ pollOnce options deviceCode = do
         status -> fail ("device authorization failed with HTTP " <> show status)
   where
     exchange authorizationCode codeVerifier = do
-        request <- parseRequest (trimIssuer options.issuer <> "/oauth/token")
+        request <- parseRequest (trimTrailingSlash options.issuer <> "/oauth/token")
         response <- httpLBS
             $ setRequestMethod "POST"
             $ setRequestHeader "Content-Type" ["application/x-www-form-urlencoded"]
             $ setRequestBodyURLEncoded
                 [ ("grant_type", "authorization_code")
                 , ("code", encode authorizationCode)
-                , ("redirect_uri", encode (Text.pack (trimIssuer options.issuer <> "/deviceauth/callback")))
+                , ("redirect_uri", encode (Text.pack (trimTrailingSlash options.issuer <> "/deviceauth/callback")))
                 , ("client_id", encode options.clientId)
                 , ("code_verifier", encode codeVerifier)
                 ] request
@@ -145,12 +147,12 @@ pollOnce options deviceCode = do
         object <- decodeObject "OAuth token response" response
         Tokens <$> field "id_token" object <*> field "access_token" object <*> field "refresh_token" object
 
-writeAuthFile :: FilePath -> Aeson.Value -> IO ()
+writeAuthFile :: OsPath -> Aeson.Value -> IO ()
 writeAuthFile path value = do
     createDirectoryIfMissing True (takeDirectory path)
-    let temporary = path <> ".tmp"
-    LBS.writeFile temporary (Aeson.encode value)
-    setFileMode temporary 0o600
+    let temporary = path <.> fromFilePath "tmp"
+    LBS.writeFile (toFilePath temporary) (Aeson.encode value)
+    setFileMode (toFilePath temporary) 0o600
     renameFile temporary path
 
 safely :: IO a -> IO (Either Text a)
@@ -183,7 +185,6 @@ intervalField object = case KeyMap.lookup "interval" object of
 
 encode = Text.encodeUtf8
 
-trimIssuer = reverse . dropWhile (== '/') . reverse
 
 readMaybeInt value = case reads (Text.unpack value) of
     [(number, "")] -> Just number

@@ -1,6 +1,8 @@
 module Agent.Tools.PlanModeSpec (spec) where
 
+import Agent.OsPath (fromFilePath, toText)
 import Agent.Tools.PlanMode
+import Agent.Tools.Types (AppTool(..))
 import Test.Hspec
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
@@ -10,6 +12,10 @@ import Control.Exception.Safe (bracket)
 
 spec :: Spec
 spec = describe "Agent.Tools.PlanMode" do
+    it "uses its dedicated confirmation instead of generic tool approval" do
+        withTempPlan \env ->
+            (enterPlanModeTool env).appToolReadOnly `shouldBe` True
+
     it "activates and deactivates plan mode" do
         withTempPlan \env -> do
             isPlanModeActive env `shouldReturn` False
@@ -24,12 +30,15 @@ spec = describe "Agent.Tools.PlanMode" do
             content <- readPlanMarkdown env
             content `shouldBe` "# Hello\n"
             path <- planFilePath env
-            path `shouldSatisfy` Text.isSuffixOf "plan.md" . Text.pack
+            path `shouldSatisfy` Text.isSuffixOf "plan.md" . toText
 
     it "recognizes plan.md edit targets" do
-        isPlanFileEditTarget "/tmp/sess/plan.md" "/tmp/sess/plan.md" `shouldBe` True
-        isPlanFileEditTarget "/tmp/sess/plan.md" "plan.md" `shouldBe` True
-        isPlanFileEditTarget "/tmp/sess/plan.md" "/tmp/sess/other.hs" `shouldBe` False
+        isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
+            (fromFilePath "/tmp/sess/plan.md") `shouldBe` True
+        isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
+            (fromFilePath "plan.md") `shouldBe` True
+        isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
+            (fromFilePath "/tmp/sess/other.hs") `shouldBe` False
 
 withTempPlan :: (PlanModeEnv -> IO a) -> IO a
 withTempPlan action = do
@@ -37,4 +46,4 @@ withTempPlan action = do
     bracket
         (mkdtemp (tmp </> "agent-plan-XXXXXX"))
         removeDirectoryRecursive
-        (\dir -> newPlanModeEnv dir Nothing >>= action)
+        (\dir -> newPlanModeEnv (fromFilePath dir) Nothing >>= action)

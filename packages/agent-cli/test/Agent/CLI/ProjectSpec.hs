@@ -1,18 +1,19 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import System.Directory
+import qualified System.Directory as Directory
+import System.Directory.OsPath
     ( canonicalizePath
     , createDirectoryIfMissing
     , doesFileExist
-    , getTemporaryDirectory
-    , removeDirectoryRecursive
     )
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>))
+import qualified System.FilePath as FilePath
+import System.OsPath ((</>))
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (FileMode)
@@ -23,8 +24,8 @@ spec :: Spec
 spec = describe "Agent.CLI.Project" do
     describe "projectSettingsPath" do
         it "is <project>/.haskell-agent/settings.json" do
-            projectSettingsPath "/tmp/repo"
-                `shouldBe` "/tmp/repo" </> ".haskell-agent" </> "settings.json"
+            projectSettingsPath (fromFilePath "/tmp/repo")
+                `shouldBe` fromFilePath "/tmp/repo/.haskell-agent/settings.json"
 
     describe "loadProjectSettings/saveProjectAutoApprove" do
         it "defaults when settings are missing" $
@@ -40,7 +41,7 @@ spec = describe "Agent.CLI.Project" do
                 modeOf path `shouldReturn` 0o600
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
-                bytes <- LBS.readFile path
+                bytes <- LBS.readFile (toFilePath path)
                 Aeson.eitherDecode' bytes
                     `shouldBe` Right (defaultProjectSettings { settingsAutoApprove = True })
 
@@ -50,10 +51,10 @@ spec = describe "Agent.CLI.Project" do
 
         it "ignores corrupt settings files" $
             withTempDir "agent-project-" \root -> do
-                let dir = root </> ".haskell-agent"
+                let dir = root </> fromFilePath ".haskell-agent"
                     path = projectSettingsPath root
                 createDirectoryIfMissing True dir
-                LBS.writeFile path "{not-json"
+                LBS.writeFile (toFilePath path) "{not-json"
                 loadProjectSettings root `shouldReturn` defaultProjectSettings
 
     describe "resolveProjectRoot" do
@@ -61,46 +62,52 @@ spec = describe "Agent.CLI.Project" do
             withTempDir "agent-git-" \root -> do
                 git_ root ["init"]
                 expected <- canonicalizePath root
-                let nested = root </> "packages" </> "cli"
+                let nested = root </> fromFilePath "packages" </> fromFilePath "cli"
                 createDirectoryIfMissing True nested
                 resolveProjectRoot nested `shouldReturn` expected
 
-        it "uses the primary worktree for linked worktrees" $
+        it "stays in a linked worktree instead of the primary checkout" $
             withTempDir "agent-wt-" \root -> do
-                let mainRepo = root </> "main"
-                    linked = root </> "linked"
+                let mainRepo = root </> fromFilePath "main"
+                    linked = root </> fromFilePath "linked"
                 createDirectoryIfMissing True mainRepo
                 git_ mainRepo ["init"]
                 git_ mainRepo ["config", "user.email", "test@example.com"]
                 git_ mainRepo ["config", "user.name", "Test"]
                 git_ mainRepo ["config", "commit.gpgsign", "false"]
                 git_ mainRepo ["commit", "--allow-empty", "-m", "init"]
-                git_ mainRepo ["worktree", "add", "--detach", linked]
-                expected <- canonicalizePath mainRepo
+                git_ mainRepo ["worktree", "add", "--detach", toFilePath linked]
+                expected <- canonicalizePath linked
                 resolveProjectRoot linked `shouldReturn` expected
                 saveProjectAutoApprove expected True
                 settings <- loadProjectSettings =<< resolveProjectRoot linked
                 settings.settingsAutoApprove `shouldBe` True
+                primarySettings <- loadProjectSettings =<< canonicalizePath mainRepo
+                primarySettings.settingsAutoApprove `shouldBe` False
 
         it "falls back to cwd outside a git repo" $
             withTempDir "agent-nogit-" \root -> do
                 expected <- canonicalizePath root
                 resolveProjectRoot root `shouldReturn` expected
 
-withTempDir :: String -> (FilePath -> IO a) -> IO a
+withTempDir :: String -> (OsPath -> IO a) -> IO a
 withTempDir prefix action = do
-    tmp <- getTemporaryDirectory
-    bracket (mkdtemp (tmp </> prefix)) removeDirectoryRecursive action
+    tmp <- Directory.getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp FilePath.</> prefix))
+        Directory.removeDirectoryRecursive
+        (action . fromFilePath)
 
-modeOf :: FilePath -> IO FileMode
+modeOf :: OsPath -> IO FileMode
 modeOf path = do
-    status <- getFileStatus path
+    status <- getFileStatus (toFilePath path)
     pure (fileMode status `mod` 0o1000)
 
-git_ :: FilePath -> [String] -> IO ()
+git_ :: OsPath -> [String] -> IO ()
 git_ dir args = do
     (code, _out, err) <-
-        readCreateProcessWithExitCode (proc "git" args) { cwd = Just dir } ""
+        readCreateProcessWithExitCode
+            (proc "git" args) { cwd = Just (toFilePath dir) } ""
     case code of
         ExitSuccess -> pure ()
         ExitFailure _ -> expectationFailure ("git " <> unwords args <> ": " <> err)

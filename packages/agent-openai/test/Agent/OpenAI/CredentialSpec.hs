@@ -43,6 +43,9 @@ spec = do
             accountFailureFromApiError
                 (ProviderError UsageLimitReached "limited" (Just 120))
                 `shouldBe` Just (AccountRateLimited (Just 120))
+            accountFailureFromApiError
+                (ProviderError UsageBalanceExhausted "balance exhausted" (Just 3600))
+                `shouldBe` Just (AccountRateLimited (Just 3600))
 
         it "classifies authentication failures but not connection errors" do
             accountFailureFromApiError (HttpError 401 "rejected")

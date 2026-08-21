@@ -45,12 +45,14 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "body"
             out `shouldSatisfy` (not . Text.isInfixOf "~~~")
 
-        it "colors heading markers by level" do
+        it "hides heading markers and colors titles by level" do
             let h1 = renderMarkdown True "# Title"
                 h2 = renderMarkdown True "## Title"
             h1 `shouldSatisfy` Text.isInfixOf "Title"
             h1 `shouldSatisfy` Text.isInfixOf "\ESC["
+            h1 `shouldSatisfy` (not . Text.isInfixOf "# Title")
             h2 `shouldSatisfy` Text.isInfixOf "Title"
+            h2 `shouldSatisfy` (not . Text.isInfixOf "## Title")
             h1 `shouldSatisfy` (/= h2)
 
         it "colors unordered and ordered list markers" do
@@ -61,6 +63,11 @@ spec = do
             ul `shouldSatisfy` (not . Text.isInfixOf "- item")
             ol `shouldSatisfy` Text.isInfixOf "item"
             ol `shouldSatisfy` Text.isInfixOf "\ESC["
+
+        it "preserves indentation for nested lists" do
+            let out = renderMarkdown True "- parent\n  - child\n    1. grandchild"
+                cleaned = Text.lines (stripAnsi out)
+            cleaned `shouldBe` ["• parent", "  • child", "    1. grandchild"]
 
         it "mutes plain blockquotes" do
             let out = renderMarkdown True "> note"

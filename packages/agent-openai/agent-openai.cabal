@@ -45,6 +45,9 @@ library
                     , Agent.OpenAI.Error
                     , Agent.OpenAI.Http
                     , Agent.OpenAI.Auth
+                    , Agent.OpenAI.Auth.JWT
+                    , Agent.OpenAI.Auth.Refresh
+                    , Agent.OpenAI.Auth.Types
                     , Agent.OpenAI.Credential
                     , Agent.OpenAI.Login
                     , Agent.OpenAI.Usage
@@ -89,6 +92,7 @@ executable agent-openai-login
     hs-source-dirs:   app
     main-is:          Login.hs
     build-depends:    base >= 4.14 && < 5
+                    , agent-core
                     , agent-openai
                     , directory
                     , filepath

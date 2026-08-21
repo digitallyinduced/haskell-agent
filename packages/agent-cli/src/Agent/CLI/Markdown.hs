@@ -65,16 +65,17 @@ renderBlocks = go
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
-            let marker = Text.replicate level "#"
-                prefix = md (headingPrefixStyle level) (marker <> " ")
-            in (prefix <> styleInline title) : go rest
-        | Just item <- unorderedItem line =
-            ( md listMarkerStyle "• "
+            -- Hide the markdown `#` markers (grok pretty mode); color the title.
+            md (headingPrefixStyle level) (styleInline title) : go rest
+        | Just (indent, item) <- unorderedItemParts line =
+            ( indent
+                <> md listMarkerStyle "• "
                 <> styleInline item
             )
                 : go rest
-        | Just (digits, item) <- orderedItemParts line =
-            ( md listMarkerStyle (digits <> ". ")
+        | Just (indent, digits, item) <- orderedItemParts line =
+            ( indent
+                <> md listMarkerStyle (digits <> ". ")
                 <> styleInline item
             )
                 : go rest
@@ -90,12 +91,10 @@ renderBlocks = go
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
 
--- | Heading marker style: bold + underline + level color.
+-- | Heading title style: bold + level color. Markdown `#` markers are hidden.
 headingPrefixStyle :: Int -> [SGR]
 headingPrefixStyle level =
-    SetConsoleIntensity BoldIntensity
-        : SetUnderlining SingleUnderline
-        : headingColor level
+    SetConsoleIntensity BoldIntensity : headingColor level
 
 headingColor :: Int -> [SGR]
 headingColor = \case
@@ -165,26 +164,26 @@ startsWithSpace t = case Text.uncons t of
     Just (c, _) -> isSpace c
     Nothing -> False
 
-unorderedItem :: Text -> Maybe Text
-unorderedItem line =
-    let stripped = Text.stripStart line
+unorderedItemParts :: Text -> Maybe (Text, Text)
+unorderedItemParts line =
+    let (indent, stripped) = Text.span isSpace line
     in case Text.uncons stripped of
         Just (c, rest)
             | c `elem` ['-', '*', '+']
             , Just (sp, after) <- Text.uncons rest
             , isSpace sp ->
-                Just (Text.strip after)
+                Just (indent, Text.strip after)
         _ -> Nothing
 
 -- | Ordered list: number marker and item body separately so the marker can
 -- be colored without restyling the whole line twice.
-orderedItemParts :: Text -> Maybe (Text, Text)
+orderedItemParts :: Text -> Maybe (Text, Text, Text)
 orderedItemParts line =
-    let stripped = Text.stripStart line
+    let (indent, stripped) = Text.span isSpace line
         (digits, after) = Text.span isDigit stripped
     in if not (Text.null digits)
         then case Text.stripPrefix ". " after of
-            Just item -> Just (digits, Text.strip item)
+            Just item -> Just (indent, digits, Text.strip item)
             Nothing -> Nothing
         else Nothing
 

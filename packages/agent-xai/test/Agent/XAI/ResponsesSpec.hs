@@ -1,6 +1,11 @@
 module Agent.XAI.ResponsesSpec (spec) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , ErrorType(..)
+    , RetryDisposition(..)
+    , retryDisposition
+    )
 import Agent.XAI.Error
 import Agent.XAI.Options
 import Agent.XAI.Request
@@ -100,6 +105,10 @@ spec = do
                 >>= (`shouldBe` Just (Aeson.String "medium"))
             effortOf (withEffort "low" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "low"))
+            effortOf (withEffort "xhigh" sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "high"))
+            effortOf (withEffort "max" sampleRequest)
+                >>= (`shouldBe` Just (Aeson.String "high"))
             -- Unset effort defaults to high for Grok.
             effortOf (clearEffort sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))
@@ -123,6 +132,20 @@ spec = do
                 ProviderError UsageLimitReached _ _ -> pure ()
                 other -> expectationFailure ("expected UsageLimitReached, got " <> show other)
 
+        it "recognises an exhausted Grok Build usage balance" do
+            let body = "{\"error\":\"Grok Build usage balance exhausted\"}"
+            classifyFailure 402 Nothing body
+                `shouldBe` ProviderError UsageBalanceExhausted body Nothing
+            retryDisposition (classifyFailure 402 (Just 3600) body)
+                `shouldBe` RetryAfterLimitReset
+
+        it "types Grok's flat invalid-image envelope" do
+            classifyFailure 400 Nothing
+                "{\"code\":\"invalid_image\",\"error\":\"Invalid PNG image.\"}"
+                `shouldBe` ProviderError InvalidImageError
+                    "Invalid PNG image. (code: invalid_image)"
+                    Nothing
+
         it "leaves other statuses as plain HTTP errors" do
             classifyFailure 503 Nothing "unavailable"
                 `shouldBe` HttpError 503 "unavailable"
@@ -139,6 +162,20 @@ spec = do
                 `shouldBe` ProviderError OverloadedError body (Just 12)
 
     describe "classifyStreamError" do
+        it "uses a code-only stream error as the typed discriminator" do
+            let streamError = ResponseStreamError
+                    { errorType = Nothing
+                    , code = Just "context_length_exceeded"
+                    , message = "prompt is too long"
+                    , param = Nothing
+                    , retryAfter = Nothing
+                    , extraFields = mempty
+                    }
+            classifyStreamError streamError
+                `shouldBe` ProviderError ContextWindowExceeded
+                    "prompt is too long (code: context_length_exceeded)"
+                    Nothing
+
         it "types unstructured capacity stream errors as OverloadedError" do
             let message =
                     "The model is currently at capacity due to high demand. \

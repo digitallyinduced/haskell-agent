@@ -1,7 +1,9 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Responses.Types
+import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
@@ -10,14 +12,13 @@ import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
-import System.Directory
+import qualified System.Directory as Directory
+import System.Directory.OsPath
     ( doesDirectoryExist
     , doesFileExist
-    , getTemporaryDirectory
     , listDirectory
-    , removeDirectoryRecursive
     )
-import System.FilePath ((</>))
+import qualified System.FilePath as FilePath
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
@@ -26,8 +27,8 @@ spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "sessionsRoot" do
         it "is ~/.haskell-agent/sessions" do
-            sessionsRoot "/home/marc"
-                `shouldBe` "/home/marc" </> ".haskell-agent" </> "sessions"
+            sessionsRoot (fromFilePath "/home/marc")
+                `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"
 
     describe "dev resume pointer" do
         it "round-trips and clears under ~/.haskell-agent/dev-resume" $
@@ -81,12 +82,21 @@ spec = describe "Agent.CLI.Session" do
                         { turnAt = fixedTime
                         , turnUserText = "hi there"
                         , turnAssistantText = Just "hello"
+                        , turnError = Nothing
                         , turnResponseId = Just "resp-1"
                         , turnItems = [item]
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 10
+                            , outputTokens = 4
+                            , cachedTokens = 2
+                            }
                         }
                 handle' <- appendTurn handle turn
                 handle'.sessionMeta.metaTitle `shouldBe` "hi there"
                 handle'.sessionMeta.metaLastResponseId `shouldBe` Just "resp-1"
+                handle'.sessionMeta.metaInputTokens `shouldBe` 10
+                handle'.sessionMeta.metaOutputTokens `shouldBe` 4
+                handle'.sessionMeta.metaCachedTokens `shouldBe` 2
                 modeOf handle.sessionTranscriptPath `shouldReturn` 0o600
 
                 loaded <- loadSession root handle.sessionMeta.metaId
@@ -96,11 +106,21 @@ spec = describe "Agent.CLI.Session" do
                         meta.metaId `shouldBe` handle.sessionMeta.metaId
                         meta.metaProvider `shouldBe` XAIProvider
                         meta.metaModel `shouldBe` "grok-4"
-                        meta.metaCwd `shouldBe` "/tmp/work"
+                        meta.metaCwd `shouldBe` fromFilePath "/tmp/work"
                         case turns of
                             [loadedTurn] -> do
                                 loadedTurn.turnUserText `shouldBe` "hi there"
                                 loadedTurn.turnItems `shouldBe` [item]
+                                loadedTurn.turnUsage `shouldBe` Just TokenUsage
+                                    { inputTokens = 10
+                                    , outputTokens = 4
+                                    , cachedTokens = 2
+                                    }
+                                sessionUsageFromTurns meta turns `shouldBe` TokenUsage
+                                    { inputTokens = 10
+                                    , outputTokens = 4
+                                    , cachedTokens = 2
+                                    }
                             other ->
                                 expectationFailure
                                     ("expected one turn, got " <> show (length other))
@@ -133,17 +153,19 @@ spec = describe "Agent.CLI.Session" do
                     { turnAt = fixedTime
                     , turnUserText = "q"
                     , turnAssistantText = Nothing
+                    , turnError = Just "cancelled"
                     , turnResponseId = Nothing
                     , turnItems = []
+                    , turnUsage = Nothing
                     }
             Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
 
-testCreate :: FilePath -> SessionCreate
+testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
     , createProvider = XAIProvider
     , createModel = "grok-4"
-    , createCwd = "/tmp/work"
+    , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
     }
@@ -151,12 +173,15 @@ testCreate root = SessionCreate
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)
 
-modeOf :: FilePath -> IO Integer
+modeOf :: OsPath -> IO Integer
 modeOf path = do
-    status <- getFileStatus path
+    status <- getFileStatus (toFilePath path)
     pure (fromIntegral (fileMode status `mod` 0o1000))
 
-withTempDir :: String -> (FilePath -> IO a) -> IO a
+withTempDir :: String -> (OsPath -> IO a) -> IO a
 withTempDir prefix action = do
-    tmp <- getTemporaryDirectory
-    bracket (mkdtemp (tmp </> prefix)) removeDirectoryRecursive action
+    tmp <- Directory.getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp FilePath.</> prefix))
+        Directory.removeDirectoryRecursive
+        (action . fromFilePath)

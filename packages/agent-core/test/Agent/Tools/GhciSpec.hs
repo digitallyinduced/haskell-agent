@@ -1,30 +1,36 @@
 module Agent.Tools.GhciSpec (spec) where
 
+import Agent.Cancel (requestCancel, resetCancel)
 import Agent.Loop (defaultLoopDispatch)
-import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
+import Agent.OsPath (fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
+import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
-import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
-import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Ghci
     ( GhciClass(..)
+    , GhciOutcome(..)
     , GhciResult(..)
     , GhciSession
     , classifyGhci
     , classifyGhciInput
     , closeGhciSession
+    , defaultGhciExtensions
     , evalGhci
     , newGhciSession
     , typeLooksEffectful
     )
+import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Exception.Safe (bracket)
+import Data.IORef
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
-import Data.IORef
-import qualified Data.Map.Strict as Map
 import Test.Hspec
 
 spec :: Spec
@@ -46,6 +52,19 @@ spec = describe "Agent.Tools.Ghci" do
             typeLooksEffectful "id :: a -> a" `shouldBe` False
             typeLooksEffectful "getLine :: IO String" `shouldBe` True
 
+    describe "defaultGhciExtensions" do
+        it "covers the extra extensions this repo enables on top of GHC2021" do
+            defaultGhciExtensions
+                `shouldBe`
+                    [ "BlockArguments"
+                    , "OverloadedStrings"
+                    , "OverloadedRecordDot"
+                    , "DuplicateRecordFields"
+                    , "NoFieldSelectors"
+                    , "LambdaCase"
+                    , "RecordWildCards"
+                    ]
+
     it "persists bindings across evalGhci calls" do
         withTempGhci \ghci -> do
             bind <- evalGhci ghci "let x = 41 + 1" 10000
@@ -54,6 +73,45 @@ spec = describe "Agent.Tools.Ghci" do
             value <- evalGhci ghci "x" 10000
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "supports multiline bindings and do blocks" do
+        withTempGhci \ghci -> do
+            bind <- evalGhci ghci "let addOne x =\n  x + 1" 10000
+            bind.ghciOk `shouldBe` True
+            value <- evalGhci ghci "addOne 41" 10000
+            value.ghciOk `shouldBe` True
+            value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+            action <- evalGhci ghci "do\n  let x = 1\n  print (x + 1)" 10000
+            action.ghciOk `shouldBe` True
+            action.ghciOutput `shouldSatisfy` Text.isInfixOf "2"
+
+    it "evaluates OverloadedStrings and LambdaCase without LANGUAGE pragmas" do
+        withTempGhci \ghci -> do
+            str <- evalGhci ghci "\"hello\"" 10000
+            str.ghciOk `shouldBe` True
+            str.ghciOutput `shouldSatisfy` Text.isInfixOf "hello"
+            lam <- evalGhci ghci "(\\case 1 -> True; _ -> False) 1" 10000
+            lam.ghciOk `shouldBe` True
+            lam.ghciOutput `shouldSatisfy` Text.isInfixOf "True"
+            shown <- evalGhci ghci ":show language" 10000
+            shown.ghciOk `shouldBe` True
+            mapM_
+                (\ext -> shown.ghciOutput `shouldSatisfy` Text.isInfixOf (Text.pack ext))
+                defaultGhciExtensions
+
+    it "does not mistake ordinary output for diagnostics" do
+        withTempGhci \ghci -> do
+            result <- evalGhci ghci "\"error: Exception: <interactive>:\"" 10000
+            result.ghciOk `shouldBe` True
+            result.ghciStdout
+                `shouldSatisfy` Text.isInfixOf "error: Exception: <interactive>:"
+            result.ghciStderr `shouldBe` ""
+
+    it "captures runtime exceptions from stderr" do
+        withTempGhci \ghci -> do
+            result <- evalGhci ghci "error \"boom\"" 10000
+            result.ghciOk `shouldBe` False
+            result.ghciStderr `shouldSatisfy` Text.isInfixOf "*** Exception: boom"
 
     it "classifies putStrLn as effectful and 1+1 as pure" do
         withTempGhci \ghci -> do
@@ -69,6 +127,64 @@ spec = describe "Agent.Tools.Ghci" do
             recovered.ghciOk `shouldBe` True
             recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "4"
 
+    it "honors cancellation and recovers the persistent process" do
+        withTempEnv \env ->
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                withAsync (evalGhci ghci "last [1..]" 10000) \running -> do
+                    threadDelay 100000
+                    requestCancel env.toolCancel
+                    cancelled <- wait running
+                    cancelled.ghciOutcome `shouldBe` GhciCancelled
+                resetCancel env.toolCancel
+                recovered <- evalGhci ghci "2 + 3" 10000
+                recovered.ghciOk `shouldBe` True
+                recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "5"
+
+    it "caps retained output and reports truncation" do
+        withTempEnv \baseEnv -> do
+            let env = baseEnv { toolStdoutCap = 32 }
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci "replicate 200 'x'" 10000
+                result.ghciOk `shouldBe` True
+                result.ghciTruncated `shouldBe` True
+                result.ghciOutput `shouldSatisfy` Text.isInfixOf "[truncated"
+                Text.length result.ghciStdout `shouldSatisfy` (< 100)
+
+    it "ignores repository .ghci files" do
+        withTempEnv \env -> do
+            writeFile (toFilePath env.toolCwd </> ".ghci")
+                "let injectedByDotGhci = (99 :: Int)\n"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci "injectedByDotGhci" 10000
+                result.ghciOk `shouldBe` False
+                result.ghciOutput
+                    `shouldSatisfy` Text.isInfixOf "Variable not in scope"
+
+    it "keeps its framing working after NoImplicitPrelude" do
+        withTempGhci \ghci -> do
+            changed <- evalGhci ghci ":set -XNoImplicitPrelude" 10000
+            changed.ghciOk `shouldBe` True
+            result <- evalGhci ghci "1 + 1" 10000
+            result.ghciOk `shouldBe` True
+            result.ghciOutput `shouldSatisfy` Text.isInfixOf "2"
+
+    it "restarts after the evaluated command exits GHCi" do
+        withTempGhci \ghci -> do
+            exited <- evalGhci ghci ":quit" 10000
+            exited.ghciOutcome `shouldBe` GhciProcessFailed
+            recovered <- evalGhci ghci "6 * 7" 10000
+            recovered.ghciOk `shouldBe` True
+            recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "is terminal and idempotent after close" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            closeGhciSession ghci
+            closeGhciSession ghci
+            result <- evalGhci ghci "1 + 1" 10000
+            result.ghciOutcome `shouldBe` GhciProcessFailed
+            result.ghciOutput `shouldSatisfy` Text.isInfixOf "closed"
+
     it "exposes run_ghci through grokTools dispatch" do
         withTempTools \tools -> do
             let handlers = appToolHandlers tools
@@ -80,7 +196,6 @@ spec = describe "Agent.Tools.Ghci" do
             let names = map (.appToolName) tools
             names `shouldContain` ["run_ghci"]
 
-
     it "is registered for OpenAI via codingToolsFor" do
         withTempEnv \env -> do
             coding <- codingToolsFor OpenAIProvider env Nothing Nothing
@@ -89,7 +204,7 @@ spec = describe "Agent.Tools.Ghci" do
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =
-    bracket acquire release \dir -> defaultToolEnv dir >>= action
+    bracket acquire release \dir -> defaultToolEnv (fromFilePath dir) >>= action
   where
     acquire = do
         tmp <- getTemporaryDirectory
@@ -103,7 +218,7 @@ withTempGhci action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-")
-        env <- defaultToolEnv dir
+        env <- defaultToolEnv (fromFilePath dir)
         ghci <- newGhciSession env
         pure (dir, ghci)
     release (dir, ghci) = do
@@ -117,7 +232,7 @@ withTempTools action =
     acquire = do
         tmp <- getTemporaryDirectory
         dir <- mkdtemp (tmp </> "agent-ghci-tools-")
-        env <- defaultToolEnv dir
+        env <- defaultToolEnv (fromFilePath dir)
         session <- newGrokSession env
         ghci <- newGhciSession env
         plan <- newPlanModeEnv env.toolCwd Nothing

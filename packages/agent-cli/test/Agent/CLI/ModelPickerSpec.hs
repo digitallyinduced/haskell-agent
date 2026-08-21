@@ -27,20 +27,24 @@ spec = do
             decodePickerKey "g" `shouldBe` Just (PickerType 'g')
 
     describe "renderPickerFrame" do
-        it "mentions provider, current model, and controls" do
+        it "mentions all providers, current model, and controls" do
             let frame =
                     renderPickerFrame False $
                         initialPickerState XAIProvider (defaultModelFor XAIProvider)
             frame `shouldSatisfy` Text.isInfixOf "xai"
+            frame `shouldSatisfy` Text.isInfixOf "openai"
+            frame `shouldSatisfy` Text.isInfixOf "openrouter"
             frame `shouldSatisfy` Text.isInfixOf (defaultModelFor XAIProvider)
             frame `shouldSatisfy` Text.isInfixOf "enter"
             frame `shouldSatisfy` Text.isInfixOf "filter"
 
     describe "formatCatalogListing" do
-        it "lists the current model and catalog entries" do
+        it "lists the current model and entries from every provider" do
             let listing =
                     formatCatalogListing False OpenAIProvider "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
             listing `shouldSatisfy` Text.isInfixOf "openai"
+            listing `shouldSatisfy` Text.isInfixOf "grok-4.6"
+            listing `shouldSatisfy` Text.isInfixOf "openrouter"

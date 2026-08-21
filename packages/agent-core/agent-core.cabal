@@ -33,11 +33,19 @@ library
     import:           common-opts
     exposed-modules:  Agent.Cancel
                     , Agent.Error
+                    , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Broker
                     , Agent.Loop
+                    , Agent.JsonText
+                    , Agent.OsPath
+                    , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.Subagents
+                    , Agent.Subagents.Format
+                    , Agent.Subagents.Registry
+                    , Agent.Subagents.TaskPath
+                    , Agent.Subagents.Types
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -45,11 +53,22 @@ library
                     , Agent.Tools.ApplyPatch
                     , Agent.Tools.Codex
                     , Agent.Tools.Dangerous
+                    , Agent.Tools.FileSystem
                     , Agent.Tools.Grok
+                    , Agent.Tools.Grok.Common
+                    , Agent.Tools.Grok.Grep
+                    , Agent.Tools.Grok.ListDir
                     , Agent.Tools.Grok.Prompt
+                    , Agent.Tools.Grok.ReadFile
+                    , Agent.Tools.Grok.SearchReplace
                     , Agent.Tools.Grok.Shell
                     , Agent.Tools.Grok.Task
+                    , Agent.Tools.Grok.TaskControl
+                    , Agent.Tools.Grok.Terminal
                     , Agent.Tools.Ghci
+                    , Agent.Tools.Ghci.Classify
+                    , Agent.Tools.Ghci.Runtime
+                    , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
@@ -81,8 +100,10 @@ test-suite agent-core-test
     other-modules:    Agent.CancelSpec
                     , Agent.ErrorSpec
                     , Agent.LoopSpec
+                    , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
                     , Agent.SubagentsSpec
+                    , Agent.Subagents.TaskPathSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec
@@ -91,6 +112,7 @@ test-suite agent-core-test
                     , Agent.Tools.Grok.TaskSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
+                    , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec

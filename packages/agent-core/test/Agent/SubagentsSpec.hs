@@ -1,9 +1,13 @@
 module Agent.SubagentsSpec (spec) where
 
-import Agent.Loop (LoopError(..), LoopResult(..))
+import Agent.InterAgentMessage
+import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
+import Agent.OsPath (fromFilePath)
 import Agent.Subagents
+import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
+import Control.Exception.Safe (finally)
 import Control.Monad (unless)
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -12,14 +16,24 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
 
+messagePayload :: InterAgentMessage -> Text
+messagePayload message = case message.messageContent of
+    PlainInterAgentContent text -> text
+    EncryptedInterAgentContent text -> text
+
+blockingRunner started cleanedUp _ _ _ _ =
+    (atomically (putTMVar started ()) >> atomically retry)
+        `finally` atomically (putTMVar cleanedUp ())
+
 spec :: Spec
 spec = describe "Agent.Subagents" do
     it "spawns a child, waits for completion, and returns final text" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "child"
-                , finalText = Just ("done:" <> prompt)
+                , finalText = Just ("done:" <> messagePayload prompt)
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "hello" Nothing
@@ -29,11 +43,12 @@ spec = describe "Agent.Subagents" do
 
     it "rejects spawn past maxDepth" do
         let config = defaultSubagentConfig { maxDepth = Just 1 }
-        registry <- newSubagentRegistry config "/tmp"
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Right LoopResult
                 { finalResponseId = "x"
                 , finalText = Just "ok"
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right child <- spawnSubagent registry Nothing 0 "one" Nothing
@@ -44,13 +59,14 @@ spec = describe "Agent.Subagents" do
     it "enforces maxConcurrent until agents are closed" do
         gate <- newTVarIO False
         let config = defaultSubagentConfig { maxConcurrent = 1 }
-        registry <- newSubagentRegistry config "/tmp"
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
             (\_ _ _ _ -> do
                 atomically $ readTVar gate >>= \ready -> unless ready retry
                 pure $ Right LoopResult
                     { finalResponseId = "x"
                     , finalText = Just "ok"
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right first <- spawnSubagent registry Nothing 0 "a" Nothing
@@ -69,7 +85,7 @@ spec = describe "Agent.Subagents" do
         pure ()
 
     it "supports nested spawn when depth is unlimited" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         setSubagentRunner registry \env _previous prompt _ ->
@@ -81,12 +97,14 @@ spec = describe "Agent.Subagents" do
                         { finalResponseId = "child"
                         , finalText = Just ("parent-of-" <> gid.unSubagentId)
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
                 else
                     pure $ Right LoopResult
                         { finalResponseId = "grand"
-                        , finalText = Just ("leaf:" <> prompt)
+                        , finalText = Just ("leaf:" <> messagePayload prompt)
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
         Right child <- spawnSubagent registry Nothing 0 "root-task" Nothing
         (statuses, timedOut) <- waitSubagents registry [child] 20000
@@ -98,12 +116,13 @@ spec = describe "Agent.Subagents" do
 
     it "waitSubagents returns when any target finishes" do
         gate <- newTVarIO False
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
-            (\_ _ prompt _ -> case prompt of
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> case messagePayload prompt of
                 "fast" -> pure $ Right LoopResult
                     { finalResponseId = "fast"
                     , finalText = Just "done-fast"
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     }
                 _ -> do
                     atomically $ readTVar gate >>= \ready -> unless ready retry
@@ -111,6 +130,7 @@ spec = describe "Agent.Subagents" do
                         { finalResponseId = "slow"
                         , finalText = Just "done-slow"
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         })
             (\_ _ -> pure ())
         Right fast <- spawnSubagent registry Nothing 0 "fast" Nothing
@@ -130,13 +150,14 @@ spec = describe "Agent.Subagents" do
 
     it "passes previous response id on send_input follow-ups" do
         seen <- newIORef ([] :: [Maybe Text])
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ previous prompt _ -> do
                 atomicModifyIORef' seen \xs -> (xs <> [previous], ())
                 pure $ Right LoopResult
-                    { finalResponseId = "resp-" <> prompt
-                    , finalText = Just prompt
+                    { finalResponseId = "resp-" <> messagePayload prompt
+                    , finalText = Just (messagePayload prompt)
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
@@ -149,19 +170,21 @@ spec = describe "Agent.Subagents" do
     it "does not leave Running when send_input admission fails" do
         gate <- newTVarIO False
         let config = defaultSubagentConfig { maxConcurrent = 2 }
-        registry <- newSubagentRegistry config "/tmp"
-            (\_ _ prompt _ -> case prompt of
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ prompt _ -> case messagePayload prompt of
                 "hold" -> do
                     atomically $ readTVar gate >>= \ready -> unless ready retry
                     pure $ Right LoopResult
                         { finalResponseId = "hold"
                         , finalText = Just "holding"
                         , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
                         }
                 other -> pure $ Right LoopResult
                     { finalResponseId = "done"
                     , finalText = Just other
                     , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
                     })
             (\_ _ -> pure ())
         Right idle <- spawnSubagent registry Nothing 0 "idle" Nothing
@@ -185,11 +208,12 @@ spec = describe "Agent.Subagents" do
 
     it "invokes onComplete when a child finishes" do
         notices <- newIORef ([] :: [(SubagentId, SubagentStatus)])
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "c"
-                , finalText = Just prompt
+                , finalText = Just (messagePayload prompt)
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         setSubagentOnComplete registry \agentId status ->
@@ -201,12 +225,24 @@ spec = describe "Agent.Subagents" do
         seen <- readIORef notices
         seen `shouldBe` [(agentId, Completed (Just "notify-me"))]
 
+    it "cancels and joins a running worker when the registry closes" do
+        started <- newEmptyTMVarIO
+        cleanedUp <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (blockingRunner started cleanedUp)
+            (\_ _ -> pure ())
+        Right _ <- spawnSubagent registry Nothing 0 "wait" Nothing
+        atomically $ takeTMVar started
+        closeSubagentRegistry registry
+        atomically $ readTMVar cleanedUp
+
     it "restores a missing agent id into the registry" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ previous prompt _ -> pure $ Right LoopResult
                 { finalResponseId = fromMaybe "resp" previous
-                , finalText = Just prompt
+                , finalText = Just (messagePayload prompt)
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         let agentId = SubagentId "agent-restored-1"
@@ -221,11 +257,12 @@ spec = describe "Agent.Subagents" do
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "follow"))
 
     it "reopens a closed agent via restoreSubagent" do
-        registry <- newSubagentRegistry defaultSubagentConfig "/tmp"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "r"
-                , finalText = Just prompt
+                , finalText = Just (messagePayload prompt)
                 , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
         Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
@@ -238,3 +275,75 @@ spec = describe "Agent.Subagents" do
         status1 `shouldBe` Completed Nothing
         previous <- getPreviousResponseId registry agentId
         previous `shouldBe` Just "prev"
+
+    it "spawns at a task path and resolves relative targets" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure $ Right LoopResult
+                { finalResponseId = "c"
+                , finalText = Just (messagePayload prompt)
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                })
+            (\_ _ -> pure ())
+        Right (agentId, path) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "worker"
+                (plainInterAgentContent "do it") Nothing
+        taskPathText path `shouldBe` "/root/worker"
+        resolved <- resolveAgentTarget registry taskPathRoot "worker"
+        resolved `shouldBe` Right agentId
+        agents <- listAgents registry (Just "/root")
+        map (\(p, _, _) -> taskPathText p) agents `shouldContain` ["/root/worker"]
+        closeSubagentRegistry registry
+
+    it "queueMessage does not kick an idle agent" do
+        started <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> do
+                atomicModifyIORef' started \n -> (n + 1, ())
+                pure $ Right LoopResult
+                    { finalResponseId = "c"
+                    , finalText = Just (messagePayload prompt)
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "one" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        before <- readIORef started
+        Right _ <- queueMessage registry agentId "queued-only"
+        threadDelay 50000
+        after <- readIORef started
+        after `shouldBe` before
+        status <- getStatus registry agentId
+        status `shouldBe` Completed (Just "one")
+
+    it "interrupts active descendants and keeps the registry reusable" do
+        started <- newEmptyTMVarIO
+        blocker <- newEmptyTMVarIO
+        notices <- newIORef ([] :: [(SubagentId, SubagentStatus)])
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> do
+                atomically $ putTMVar started ()
+                atomically $ takeTMVar blocker
+                pure $ Right LoopResult
+                    { finalResponseId = "late"
+                    , finalText = Just "late"
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+            (\_ _ -> pure ())
+        setSubagentOnComplete registry \agentId status ->
+            atomicModifyIORef' notices \xs -> (xs <> [(agentId, status)], ())
+        Right active <- spawnSubagent registry Nothing 0 "active" Nothing
+        atomically $ takeTMVar started
+
+        interruptActiveSubagents registry
+
+        getStatus registry active `shouldReturn` Interrupted
+        readIORef notices `shouldReturn` []
+        replacement <- spawnSubagent registry Nothing 0 "replacement" Nothing
+        replacement `shouldSatisfy` \case
+            Right _ -> True
+            Left _ -> False
+        closeSubagentRegistry registry

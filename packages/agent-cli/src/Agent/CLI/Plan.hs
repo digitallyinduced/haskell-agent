@@ -4,7 +4,9 @@ module Agent.CLI.Plan
     ( cliPlanHooks
     , extractProposedPlan
     , stripProposedPlan
+    , renderPlanMarkdown
     , parsePlanDecisionAnswer
+    , planDecisionFollowUp
     ) where
 
 import Agent.CLI.CancelWatch (withStdinPaused)
@@ -15,15 +17,26 @@ import Agent.CLI.Input
     , readReplLine
     )
 import Agent.CLI.Interrupt (InterruptState)
+import Agent.CLI.Markdown (renderMarkdown)
+import Agent.CLI.Notification
+    ( AttentionRequest(InputRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Style
-    ( roleMuted
+    ( agentBackground
+    , paintBackgroundLines
+    , roleMuted
     , rolePrompt
     , roleSuccess
     , roleWarn
     , solarizedCyan
     , style
     )
-import Agent.Tools.PlanMode (PlanDecision(..), PlanModeHooks(..))
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeHooks(..)
+    , planApprovedContinuation
+    )
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.IORef (IORef)
@@ -56,6 +69,7 @@ confirmEnter resolveColor reason = do
         then pure False
         else do
             putTextLn stderr (roleMuted color reason)
+            notifyAttention stderr InputRequested
             let question = roleWarn color "Enter plan mode? [y/N] "
             readApprovalLine question >>= \case
                 Nothing -> pure False
@@ -68,12 +82,14 @@ decideExit interrupt resolveColor planBody = do
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
     putTextLn stderr (roleMuted color "── plan ──")
-    Text.hPutStrLn stderr planBody
+    Text.hPutStrLn stderr (renderPlanMarkdown color planBody)
     hFlush stderr
     putTextLn stderr (roleMuted color "──────────")
     if not isTty
         then pure PlanCancel
-        else promptDecision interrupt color
+        else do
+            notifyAttention stderr InputRequested
+            promptDecision interrupt color
 
 promptDecision :: InterruptState -> Bool -> IO PlanDecision
 promptDecision interrupt color = do
@@ -98,6 +114,7 @@ promptDecision interrupt color = do
 
 readChangeNotes :: InterruptState -> Bool -> IO Text
 readChangeNotes interrupt color = do
+    notifyAttention stderr InputRequested
     let chrome =
             rolePrompt color "changes> "
                 <> if color
@@ -106,6 +123,15 @@ readChangeNotes interrupt color = do
     readReplLine interrupt chrome >>= \case
         ReplEof -> pure "(no notes)"
         ReplQuitInterrupt -> throwIO UserInterrupt
+        ReplPasted text ->
+            if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
+        ReplClipboardPaste text ->
+            if Text.null (Text.strip text)
+                then readChangeNotes interrupt color
+                else pure (Text.strip text)
+        ReplCycleMode _ ->
+            -- Shift+Tab is idle-prompt only; keep asking for notes.
+            readChangeNotes interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
@@ -117,21 +143,33 @@ askQuestion interrupt resolveColor question options = do
     putTextLn stderr (roleMuted color question)
     if not isTty
         then pure Nothing
-        else case options of
-            [] -> do
-                let chrome =
-                        rolePrompt color "answer> "
-                            <> if color
-                                then Text.pack clearFromCursorToLineEndCode
-                                else mempty
-                readReplLine interrupt chrome >>= \case
-                    ReplEof -> pure Nothing
-                    ReplQuitInterrupt -> throwIO UserInterrupt
-                    ReplText text
-                        | Text.null (Text.strip text) -> pure Nothing
-                        | otherwise -> pure (Just (Text.strip text))
-            opts ->
-                readChoiceSelection (formatChoiceLine color) opts
+        else do
+            notifyAttention stderr InputRequested
+            case options of
+                [] -> do
+                    let chrome =
+                            rolePrompt color "answer> "
+                                <> if color
+                                    then Text.pack clearFromCursorToLineEndCode
+                                    else mempty
+                    readReplLine interrupt chrome >>= \case
+                        ReplEof -> pure Nothing
+                        ReplQuitInterrupt -> throwIO UserInterrupt
+                        ReplPasted text ->
+                            if Text.null (Text.strip text)
+                                then pure Nothing
+                                else pure (Just (Text.strip text))
+                        ReplClipboardPaste text ->
+                            if Text.null (Text.strip text)
+                                then askQuestion interrupt resolveColor question []
+                                else pure (Just (Text.strip text))
+                        ReplCycleMode _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplText text
+                            | Text.null (Text.strip text) -> pure Nothing
+                            | otherwise -> pure (Just (Text.strip text))
+                opts ->
+                    readChoiceSelection (formatChoiceLine color) opts
 
 formatChoiceLine :: Bool -> Bool -> Text -> Text
 formatChoiceLine color selected label
@@ -142,6 +180,10 @@ formatChoiceLine color selected label
             ]
             label
     | otherwise = roleMuted color label
+
+renderPlanMarkdown :: Bool -> Text -> Text
+renderPlanMarkdown color text =
+    paintBackgroundLines color agentBackground (renderMarkdown color text)
 
 parsePlanDecisionAnswer :: Text -> Maybe PlanDecision
 parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of
@@ -158,6 +200,18 @@ parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of
     "n" -> Just PlanCancel
     "no" -> Just PlanCancel
     _ -> Nothing
+
+-- | Build the synthetic turn that follows a plan decision.
+-- Approval and requested changes continue immediately; cancellation stops.
+planDecisionFollowUp :: PlanDecision -> Maybe Text
+planDecisionFollowUp PlanApprove = Just planApprovedContinuation
+planDecisionFollowUp (PlanRequestChanges notes) =
+    Just $ Text.intercalate "\n"
+        [ "The user requested changes to the plan. Stay in plan mode and revise."
+        , "Feedback:"
+        , notes
+        ]
+planDecisionFollowUp PlanCancel = Nothing
 
 -- | Pull the first @\<proposed_plan\>…\</proposed_plan\>@ block (Codex).
 extractProposedPlan :: Text -> Maybe Text
