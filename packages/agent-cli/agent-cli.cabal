@@ -70,6 +70,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.SessionTitle
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
@@ -77,6 +78,10 @@ library
                     , Agent.CLI.Terminal
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
+                    , Agent.CLI.TUI.App
+                    , Agent.CLI.TUI.Markdown
+                    , Agent.CLI.TUI.Theme
+                    , Agent.CLI.UI.Model
                     , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
@@ -90,18 +95,23 @@ library
                     , async
                     , base >= 4.17 && < 5
                     , base64-bytestring
+                    , brick >= 2.9 && < 3
                     , bytestring
                     , colour >= 2.3
                     , containers
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
+                    , mtl
                     , process >= 1.6.26
                     , safe-exceptions
+                    , stm
                     , text >= 2.0 && < 2.2
                     , time
                     , transformers
                     , unix
+                    , vty >= 6.4 && < 7
+                    , vty-crossplatform >= 0.4 && < 0.5
 
 executable agent-cli
     import:           common-options
@@ -152,9 +162,11 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.UIModelSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli

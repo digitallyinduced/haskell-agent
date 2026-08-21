@@ -12,6 +12,7 @@ import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 
 poolTokenProvider :: Auth.Pool -> IO TokenProvider
@@ -27,16 +28,34 @@ poolTokenProvider pool = do
                             (max 1 <$> retryAfterSeconds)
                         acquireFromPool pool
                     AccountAuthenticationRejected -> do
-                        shouldRefresh <- takeAuthRecoverySlot
-                            authRecoveryAttempts
-                            credential.accountId
-                        if shouldRefresh
-                            then Auth.refreshAfterAuthFailure pool credential.accountId >>= \case
-                                Right state -> pure $ Right $ credentialFromAuthState state
-                                Left _ -> acquireFromPool pool
+                        state <- Auth.readAccountState pool credential.accountId
+                        if maybe False (Text.null . (.refreshToken)) state
+                            then rejectStaticCredential pool credential.accountId
                             else do
-                                Auth.reportAuthBroken pool credential.accountId
-                                acquireFromPool pool
+                                shouldRefresh <- takeAuthRecoverySlot
+                                    authRecoveryAttempts
+                                    credential.accountId
+                                if shouldRefresh
+                                    then Auth.refreshAfterAuthFailure pool credential.accountId >>= \case
+                                        Right refreshed ->
+                                            pure $ Right $
+                                                credentialFromAuthState refreshed
+                                        Left _ -> acquireFromPool pool
+                                    else do
+                                        Auth.reportAuthBroken pool credential.accountId
+                                        acquireFromPool pool
+
+rejectStaticCredential :: Auth.Pool -> Text -> IO (Either ApiError Credential)
+rejectStaticCredential pool accountId = do
+    accountIds <- Auth.allAccountIds pool
+    Auth.reportAuthBroken pool accountId
+    acquireFromPool pool >>= \case
+        Left CredentialsExhausted{}
+            | accountIds == [accountId] ->
+                pure $ Left $ ProviderError AuthenticationError
+                    "static bearer token was rejected"
+                    Nothing
+        result -> pure result
 
 takeAuthRecoverySlot
     :: IORef (Map.Map Text UTCTime)

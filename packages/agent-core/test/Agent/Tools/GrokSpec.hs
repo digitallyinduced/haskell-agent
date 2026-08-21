@@ -28,6 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory
     ( createDirectoryIfMissing
+    , createDirectoryLink
     , doesFileExist
     , getTemporaryDirectory
     )
@@ -113,6 +114,17 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
+
+    it "does not descend through directory symlinks" do
+        withTempSession \(session, ghci) -> do
+            let cwd = toFilePath session.grokEnv.toolCwd
+                outside = cwd </> ".outside"
+            createDirectoryIfMissing True outside
+            Text.writeFile (outside </> "secret.txt") "secret"
+            createDirectoryLink outside (cwd </> "outside-link")
+            output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
+            output `shouldSatisfy` Text.isInfixOf "outside-link"
+            output `shouldNotSatisfy` Text.isInfixOf "secret.txt"
 
     it "creates a file with empty old_string and replaces a unique match" do
         withTempSession \(session, ghci) -> do

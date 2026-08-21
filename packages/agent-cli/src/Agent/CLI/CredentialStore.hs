@@ -10,13 +10,15 @@ module Agent.CLI.CredentialStore
     , managedSecretsPath
     , newManagedCredentialId
     , setManagedCredentialEnabled
+    , updateManagedCredentialSecret
     , upsertManagedCredential
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
-import Control.Exception.Safe (tryIO)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Exception.Safe (bracket, bracket_, tryIO)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LBS
@@ -30,6 +32,18 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.OsPath (takeDirectory, (</>))
+import System.IO (SeekMode(AbsoluteSeek))
+import System.IO.Unsafe (unsafePerformIO)
+import System.Posix.IO
+    ( LockRequest(Unlock, WriteLock)
+    , OpenFileFlags(..)
+    , OpenMode(ReadWrite)
+    , closeFd
+    , defaultFileFlags
+    , openFd
+    , setLock
+    , waitToSetLock
+    )
 import System.Posix.Files (setFileMode)
 
 data ManagedAuthKind
@@ -177,10 +191,23 @@ managedSecretsPath home =
         </> fromFilePath "credentials"
         </> fromFilePath "secrets.json"
 
+managedCredentialsLockPath :: OsPath -> OsPath
+managedCredentialsLockPath home =
+    home
+        </> fromFilePath ".haskell-agent"
+        </> fromFilePath "credentials"
+        </> fromFilePath "store.lock"
+
 loadManagedCredentials
     :: IO (Either Text [(ManagedCredential, ManagedSecret)])
 loadManagedCredentials = do
     home <- getHomeDirectory
+    withCredentialStoreLock home (loadManagedCredentialsUnlocked home)
+
+loadManagedCredentialsUnlocked
+    :: OsPath
+    -> IO (Either Text [(ManagedCredential, ManagedSecret)])
+loadManagedCredentialsUnlocked home = do
     metadataResult <- decodeFileOrEmpty
         (managedCredentialsPath home)
         (MetadataFile 1 [])
@@ -206,10 +233,14 @@ upsertManagedCredential
     :: ManagedCredential
     -> ManagedSecret
     -> IO (Either Text ())
-upsertManagedCredential credential secret = mutateStore \accounts secrets ->
-    ( upsertBy (.managedId) credential accounts
-    , upsertBy (.secretManagedId) secret secrets
-    )
+upsertManagedCredential credential secret
+    | credential.managedId /= secret.secretManagedId =
+        pure $ Left "managed credential metadata and secret ids do not match"
+    | otherwise =
+        mutateStore \accounts secrets ->
+            ( upsertBy (.managedId) credential accounts
+            , upsertBy (.secretManagedId) secret secrets
+            )
 
 setManagedCredentialEnabled :: Text -> Bool -> IO (Either Text ())
 setManagedCredentialEnabled credentialId enabled =
@@ -222,6 +253,23 @@ setManagedCredentialEnabled credentialId enabled =
             accounts
         , secrets
         )
+
+updateManagedCredentialSecret :: Text -> Text -> IO (Either Text ())
+updateManagedCredentialSecret credentialId payload =
+    mutateStoreChecked \accounts secrets ->
+        if any ((== credentialId) . (.secretManagedId)) secrets
+            then Right
+                ( accounts
+                , map updateSecret secrets
+                )
+            else Left
+                ("managed credential secret " <> credentialId
+                    <> " no longer exists")
+  where
+    updateSecret secret
+        | secret.secretManagedId == credentialId =
+            secret { secretPayload = payload }
+        | otherwise = secret
 
 deleteManagedCredential :: Text -> IO (Either Text ())
 deleteManagedCredential credentialId =
@@ -250,23 +298,66 @@ newManagedCredentialId provider accountId = do
 mutateStore
     :: ([ManagedCredential] -> [ManagedSecret] -> ([ManagedCredential], [ManagedSecret]))
     -> IO (Either Text ())
-mutateStore update = do
+mutateStore update =
+    mutateStoreChecked \accounts secrets ->
+        Right (update accounts secrets)
+
+mutateStoreChecked
+    :: ( [ManagedCredential]
+        -> [ManagedSecret]
+        -> Either Text ([ManagedCredential], [ManagedSecret])
+       )
+    -> IO (Either Text ())
+mutateStoreChecked update = do
     home <- getHomeDirectory
-    loaded <- loadManagedCredentials
-    case loaded of
-        Left err -> pure (Left err)
-        Right entries -> do
-            let (accounts, secrets) = unzip entries
-                (accounts', secrets') = update accounts secrets
-            writeResult <- writePrivateJson
-                (managedCredentialsPath home)
-                (MetadataFile 1 accounts')
-            case writeResult of
-                Left err -> pure (Left err)
-                Right () ->
-                    writePrivateJson
-                        (managedSecretsPath home)
-                        (SecretsFile 1 secrets')
+    withCredentialStoreLock home do
+        loaded <- loadManagedCredentialsUnlocked home
+        case loaded of
+            Left err -> pure (Left err)
+            Right entries -> do
+                let (accounts, secrets) = unzip entries
+                case update accounts secrets of
+                    Left err -> pure (Left err)
+                    Right (accounts', secrets') -> do
+                        writeResult <- writePrivateJson
+                            (managedCredentialsPath home)
+                            (MetadataFile 1 accounts')
+                        case writeResult of
+                            Left err -> pure (Left err)
+                            Right () ->
+                                writePrivateJson
+                                    (managedSecretsPath home)
+                                    (SecretsFile 1 secrets')
+
+withCredentialStoreLock :: OsPath -> IO a -> IO a
+withCredentialStoreLock home action =
+    withMVar credentialStoreProcessLock \_ ->
+        withCredentialStoreFileLock home action
+
+withCredentialStoreFileLock :: OsPath -> IO a -> IO a
+withCredentialStoreFileLock home action = do
+    let path = managedCredentialsLockPath home
+        directoryPath = takeDirectory path
+        lock = (WriteLock, AbsoluteSeek, 0, 0)
+        unlock = (Unlock, AbsoluteSeek, 0, 0)
+        flags = defaultFileFlags
+            { creat = Just 0o600
+            , cloexec = True
+            }
+    createDirectoryIfMissing True directoryPath
+    setFileMode (toFilePath directoryPath) 0o700
+    bracket
+        (openFd (toFilePath path) ReadWrite flags)
+        closeFd
+        (\fd ->
+            bracket_
+                (waitToSetLock fd lock)
+                (setLock fd unlock)
+                action)
+
+credentialStoreProcessLock :: MVar ()
+credentialStoreProcessLock = unsafePerformIO (newMVar ())
+{-# NOINLINE credentialStoreProcessLock #-}
 
 decodeFileOrEmpty :: Aeson.FromJSON value => OsPath -> value -> IO (Either Text value)
 decodeFileOrEmpty path empty = do

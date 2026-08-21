@@ -337,6 +337,26 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "starts fresh replay at the latest automatic compaction checkpoint" do
+            seen <- newIORef []
+            let checkpoint = compactionItem "opaque"
+                history =
+                    turnInputsToItems [UserMessage "old"]
+                        <> [checkpoint]
+                        <> turnInputsToItems [UserMessage "recent"]
+            transcript <- newIORef history
+            let backend = openAiBackendWith
+                    (recordingSend seen)
+                    (pure baseParams)
+                    transcript
+            _ <- backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            inputItems request `shouldBe`
+                [checkpoint]
+                    <> turnInputsToItems [UserMessage "recent"]
+                    <> turnInputsToItems [UserMessage "new"]
+
         it "retries transient Codex server errors before visible output" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
@@ -452,6 +472,24 @@ spec = do
             readIORef healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 
+        it "reacquires a credential after an in-band usage-limit error" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent =
+                    pure $ Left $ ProviderError UsageLimitReached
+                        "usage limit reached" (Just 120)
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 1
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
@@ -556,6 +594,12 @@ assistantItem text = MessageItem ResponseMessage
     , status = Just ItemCompleted
     , phase = Nothing
     , extraFields = KeyMap.empty
+    }
+
+compactionItem :: Text -> ResponseItem
+compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
+    { tag = "compaction"
+    , fields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent

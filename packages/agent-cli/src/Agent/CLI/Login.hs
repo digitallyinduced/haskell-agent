@@ -17,6 +17,7 @@ module Agent.CLI.Login
 
 import Agent.CLI.Auth
     ( grokCredentialFromAuthJson
+    , grokEmailFromAuthJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
@@ -316,8 +317,7 @@ managedLoginAccount now (metadata, secret) =
         { loginManagedId = Just metadata.managedId
         , loginProvider = metadata.managedProvider
         , loginAccountId = metadata.managedAccountId
-        , loginLabel = fromMaybe metadata.managedLabel
-            (openAIAccountEmail =<< openAIAuth)
+        , loginLabel = fromMaybe metadata.managedLabel managedAccountEmail
         , loginBilling = case metadata.managedBilling of
             ManagedSubscription -> SubscriptionBilling Nothing
             ManagedApiCredits -> ApiCreditsBilling
@@ -329,6 +329,15 @@ managedLoginAccount now (metadata, secret) =
         , loginEnabled = metadata.managedEnabled
         }
   where
+    managedAccountEmail = case metadata.managedProvider of
+        OpenAIProvider -> openAIAccountEmail =<< openAIAuth
+        XAIProvider -> case metadata.managedAuthKind of
+            ManagedGrokAuthJson ->
+                grokEmailFromAuthJson secret.secretPayload
+            ManagedBearerToken ->
+                XAIAuth.emailFromToken secret.secretPayload
+            ManagedOpenAIAuthJson -> Nothing
+        OpenRouterProvider -> Nothing
     openAIAuth = case metadata.managedAuthKind of
         ManagedOpenAIAuthJson ->
             openaiAuthStateFromJson now
@@ -504,6 +513,9 @@ connectXAI color = do
                             fromMaybe "grok"
                                 (XAIAuth.accountIdFromAccessToken
                                     tokens.accessToken)
+                        label = fromMaybe "Grok" $
+                            (tokens.idToken >>= XAIAuth.emailFromToken)
+                                <|> XAIAuth.emailFromToken tokens.accessToken
                         authJson = Aeson.object
                             [ "access_token" .= tokens.accessToken
                             , "refresh_token" .= tokens.refreshToken
@@ -512,7 +524,7 @@ connectXAI color = do
                     storeConnectedCredential color
                         XAIProvider
                         accountId
-                        "Grok"
+                        label
                         ManagedSubscription
                         ManagedGrokAuthJson
                         (Text.decodeUtf8
@@ -734,7 +746,9 @@ grokAccount token source authKind payload =
     subscriptionAccount
         XAIProvider
         (fromMaybe "grok" (XAIAuth.accountIdFromAccessToken token))
-        "Grok"
+        (fromMaybe "Grok"
+            (grokEmailFromAuthJson payload
+                <|> XAIAuth.emailFromToken token))
         source
         token
         authKind

@@ -151,6 +151,14 @@ spec = do
                 `shouldBe` Just "principal-9"
             accountIdFromAccessToken "not-a-jwt" `shouldBe` Nothing
 
+    describe "emailFromToken" do
+        it "extracts and trims the standard email claim" do
+            emailFromToken (unsignedJwt (Aeson.object
+                [ "email" Aeson..= (" person@example.com " :: Text) ]))
+                `shouldBe` Just "person@example.com"
+            emailFromToken (unsignedJwt (Aeson.object []))
+                `shouldBe` Nothing
+
 --------------------------------------------------------------------------------
 -- Mock auth server
 --------------------------------------------------------------------------------

@@ -23,13 +23,14 @@ import Agent.Error
     , isInlineRetryableProviderResponseError
     )
 import Agent.Loop (Backend(..), LoopEvent(..))
+import Agent.OpenAI.Compaction (compactTranscriptAtLastCheckpoint)
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
     , withCodexWsRetrying
     )
-import Agent.Provider (TokenProvider)
+import Agent.Provider (TokenProvider, accountFailureFromApiError)
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseToTurnOutput
@@ -41,6 +42,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Control.Concurrent (threadDelay)
+import Control.Exception.Safe (onException)
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -117,13 +119,15 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
         emittedLoopEvent <- newIORef False
         result <- sendCurrent request previousResponseId
             (trackOutput emittedLoopEvent onEvent)
+            `onException` writeIORef connectionHealthy False
         case result of
-            Left ConnectionError {} -> do
-                writeIORef connectionHealthy False
-                emitted <- readIORef emittedLoopEvent
-                if emitted
-                    then pure result
-                    else sendFresh request previousResponseId onEvent
+            Left err
+                | isDeadConnectionOrAccount err -> do
+                    writeIORef connectionHealthy False
+                    emitted <- readIORef emittedLoopEvent
+                    if emitted
+                        then pure result
+                        else sendFresh request previousResponseId onEvent
             _ -> pure result
 
     trackOutput emittedLoopEvent onEvent event = do
@@ -131,6 +135,10 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
             then writeIORef emittedLoopEvent True
             else pure ()
         onEvent event
+
+    isDeadConnectionOrAccount = \case
+        ConnectionError {} -> True
+        err -> isJust (accountFailureFromApiError err)
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
 openAiBackendWith
@@ -162,7 +170,8 @@ openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
         history <- readIORef transcript
         let newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
-            fullRequest = withRequestInput baseParams (history <> newItems)
+            replayHistory = compactTranscriptAtLastCheckpoint history
+            fullRequest = withRequestInput baseParams (replayHistory <> newItems)
             emit event = mapM_ onLoopEvent (streamEventToLoopEvent event)
             (initialRequest, initialPrevious) =
                 case previousResponseId of

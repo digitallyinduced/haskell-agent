@@ -176,9 +176,7 @@ type StreamEventCallback = ResponseStreamEvent -> IO ()
 -- e.g. for compatibility with another streaming event model.
 type RawStreamEventCallback = Text -> Aeson.Value -> IO ()
 
--- | Optional controls for a WebSocket Responses request. Existing callers use
--- 'defaultCodexWsOptions'; long-running agents can opt into server-side
--- compaction without changing the shared 'ResponseCreateParams' type.
+-- | Optional controls for a WebSocket Responses request.
 data CodexWsOptions = CodexWsOptions
     { compactThreshold :: !(Maybe Int)
     } deriving (Eq, Show)
@@ -360,9 +358,14 @@ receiveWsResponse cc onEvent = do
                                 logStreamStats "completed" itemsRef framesRef bytesRef
                                 parseCompletedResponse items (Aeson.toJSON response)
 
+                            ResponseIncompleteEvent { response } -> do
+                                items <- reverse <$> readIORef itemsRef
+                                logStreamStats "incomplete" itemsRef framesRef bytesRef
+                                parseCompletedResponse items (Aeson.toJSON response)
+
                             ResponseFailedEvent { response } -> do
                                 logStreamStats "response_failed" itemsRef framesRef bytesRef
-                                pure $ Left (ConnectionError (failedResponseMessage response))
+                                pure $ Left (failedResponseError response)
 
                             -- Ignore other event variants (created, added,
                             -- content deltas, and future event types).
@@ -393,6 +396,15 @@ receiveWsResponse cc onEvent = do
             Nothing -> case response.incompleteDetails of
                 Just details -> "response.failed: " <> details.reason
                 Nothing -> "response.failed (no details)"
+
+    failedResponseError response = case response.error of
+        Just responseError ->
+            mkOpenAIError
+                (errorTypeFromText responseError.code)
+                responseError.message
+                (Just responseError.code)
+                Nothing
+        Nothing -> ConnectionError (failedResponseMessage response)
 
 -- | Parse a server @type: error@ event into a structured 'ApiError'.
 --
