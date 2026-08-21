@@ -26,6 +26,7 @@ import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.CLI.TUI.Theme as Theme
 import Agent.CLI.TUI.Markdown (markdownWidget)
 import Agent.CLI.UI.Model
+import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
 import Brick.BChan (BChan, newBChan, writeBChan)
@@ -48,7 +49,7 @@ import Control.Concurrent.STM
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (SomeException, throwIO, tryAny)
+import Control.Exception.Safe (SomeException, finally, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
@@ -83,6 +84,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCancel :: !(IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
+    , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeInitial :: !UiState
     }
 
@@ -107,14 +109,21 @@ newFullscreenRuntime
     :: IO ()
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
+    -> (Bool -> IO ())
     -> UiState
     -> IO FullscreenRuntime
-newFullscreenRuntime cancelAction ctrlCAction copyAction initial = FullscreenRuntime
+newFullscreenRuntime
+    cancelAction
+    ctrlCAction
+    copyAction
+    nativeProgress
+    initial = FullscreenRuntime
     <$> newBChan 512
     <*> newTQueueIO
     <*> pure cancelAction
     <*> pure ctrlCAction
     <*> pure copyAction
+    <*> pure nativeProgress
     <*> pure initial
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
@@ -184,12 +193,14 @@ runFullscreen runtime workerAction = do
                 (void (waitCatch worker)
                     >> writeBChan runtime.runtimeEvents AppStop)
                 \_notifier -> do
-                    void $ customMain
-                        initialVty
-                        buildVty
-                        (Just runtime.runtimeEvents)
-                        fullscreenApp
-                        initialState
+                    void
+                        (customMain
+                            initialVty
+                            buildVty
+                            (Just runtime.runtimeEvents)
+                            fullscreenApp
+                            initialState)
+                        `finally` runtime.runtimeNativeProgress False
                     atomically $
                         writeTQueue runtime.runtimeInput ReplEof
                     wait worker
@@ -592,6 +603,10 @@ handleEvent event = case event of
                 _ -> state.appPasted
             }
         state <- get
+        case nativeProgressSignal uiEvent state.appUi of
+            Nothing -> pure ()
+            Just active ->
+                liftIO (state.appRuntime.runtimeNativeProgress active)
         when (eventFollows uiEvent && state.appUi.uiFollow) $
             vScrollToEnd (viewportScroll ConversationViewport)
     AppEvent (AppAskPermission summary reply) ->
@@ -631,6 +646,18 @@ eventFollows = \case
     UiUserSubmitted _ -> True
     UiConversationCleared -> True
     _ -> False
+
+nativeProgressSignal :: UiEvent -> UiState -> Maybe Bool
+nativeProgressSignal event state = case event of
+    UiLoop TurnStarted -> Just True
+    UiLoop (TurnFinished _) -> Just False
+    UiTurnEnded _ -> Just False
+    UiSetAwaitingInput True -> Just False
+    UiTick
+        | state.uiRunning
+        , state.uiFrame == 0 ->
+            Just True
+    _ -> Nothing
 
 handlePermissionKey :: V.Event -> EventM Name AppState ()
 handlePermissionKey = \case
