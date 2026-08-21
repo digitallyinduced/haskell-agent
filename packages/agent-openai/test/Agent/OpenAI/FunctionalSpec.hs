@@ -3,8 +3,8 @@ module Agent.OpenAI.FunctionalSpec where
 import Test.Hspec
 
 import qualified Agent.OpenAI.Auth as Auth
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
-import qualified Agent.OpenAI.Responses.Types as OpenAI
+import qualified Agent.Responses.Codec as ResponsesCodec
+import qualified Agent.Responses.Types as OpenAI
 import Agent.OpenAI.WebSocketClient (CodexConn, sendWsRequestWithRawEvents, withCodexWs)
 
 import Control.Applicative ((<|>))

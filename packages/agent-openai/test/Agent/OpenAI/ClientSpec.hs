@@ -5,7 +5,7 @@ import Agent.OpenAI.Credential (staticBearerProvider)
 import Agent.Error
 import Agent.OpenAI.Http
 import Agent.Provider
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson

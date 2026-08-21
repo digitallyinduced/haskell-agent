@@ -16,7 +16,7 @@ module Agent.CLI.SubagentStore
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
-import Agent.OpenAI.Responses.Types (ResponseItem)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Subagents (SubagentId(..))
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))

@@ -4,7 +4,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.ToolDispatch
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson

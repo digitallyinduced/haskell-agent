@@ -2,7 +2,7 @@ module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
 import Agent.Loop (TokenUsage(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)

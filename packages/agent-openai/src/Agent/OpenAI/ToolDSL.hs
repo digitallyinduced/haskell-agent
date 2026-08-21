@@ -7,7 +7,7 @@ module Agent.OpenAI.ToolDSL
     , PropertyType(..)
     ) where
 
-import Agent.OpenAI.Responses.Types (FunctionTool(..), ResponseTool(..))
+import Agent.Responses.Types (FunctionTool(..), ResponseTool(..))
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)

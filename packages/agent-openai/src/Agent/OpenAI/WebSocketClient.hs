@@ -20,8 +20,8 @@ import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
-import Agent.OpenAI.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.OpenAI.Responses.Codec as ResponsesCodec
+import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
     ( Credential(..)
@@ -29,7 +29,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff

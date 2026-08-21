@@ -45,6 +45,16 @@
                     ];
                 };
 
+                agentResponsesSource = nix-filter.lib {
+                    root = ./packages/agent-responses;
+                    include = [
+                        "src"
+                        "agent-responses.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentCliSource = nix-filter.lib {
                     root = ./packages/agent-cli;
                     include = [
@@ -88,6 +98,9 @@
                                 pkgs.git
                                 pkgs.ripgrep
                             ];
+                        agent-responses = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
+                            src = agentResponsesSource;
+                        };
                         agent-openai = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
                             src = agentOpenaiSource;
                         };
@@ -106,6 +119,7 @@
                 );
 
                 agentCorePackage = haskellPackages.agent-core;
+                agentResponsesPackage = haskellPackages.agent-responses;
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
@@ -157,6 +171,7 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
@@ -175,6 +190,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
@@ -203,6 +219,7 @@
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
                     agent-openrouter = agentOpenrouterPackage;

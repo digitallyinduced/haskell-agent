@@ -42,7 +42,7 @@ request = defaultResponseCreateParams
 main = createResponse credential request >>= print
 ```
 
-`agent-openrouter` depends on `agent-openai` for the canonical Responses
-wire model, error decoding, typed stream events, and response merging.
-Provider credentials and common errors come from `agent-core`.
-`agent-openai` does not depend on `agent-openrouter`.
+`agent-openrouter` depends on `agent-responses` for the canonical Responses
+wire model, error decoding, typed stream events, response merging, and
+stateless loop adaptation. Provider credentials and common errors come from
+`agent-core`.

@@ -29,7 +29,7 @@ import Agent.FileRetry
     )
 import Agent.Loop (TokenUsage(..))
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
-import Agent.OpenAI.Responses.Types (ResponseItem)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
 import Control.Exception (try)

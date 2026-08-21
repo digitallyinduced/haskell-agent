@@ -1,7 +1,7 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.CLI.SubagentStore
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Subagents (SubagentId(..))
 import Control.Exception (bracket)

@@ -12,8 +12,8 @@ module Agent.XAI.LoopBackend
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
-import Agent.OpenAI.LoopBackend (statelessResponsesBackend)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.LoopBackend (statelessResponsesBackend)
+import Agent.Responses.Types
 import Agent.Provider
     ( TokenProvider
     , runWithTokenProvider

@@ -5,7 +5,7 @@ module Agent.CLI.Tools
     , webSearchTool
     ) where
 
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.Provider (Provider(..))
 import Agent.ToolDSL (parametersObjectLoose)

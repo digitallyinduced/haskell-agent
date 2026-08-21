@@ -13,7 +13,7 @@ import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
     )
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.XAI.Error
     ( capacityRetryAfterSeconds

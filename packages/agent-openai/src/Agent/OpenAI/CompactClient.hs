@@ -8,7 +8,7 @@ module Agent.OpenAI.CompactClient
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.Client (defaultCodexBaseUrl)
 import Agent.OpenAI.Error (classifyHttpFailure)
-import Agent.OpenAI.Responses.Types hiding (Response)
+import Agent.Responses.Types hiding (Response)
 import Agent.Provider (Credential(..), TokenProvider, runWithTokenProvider)
 import Control.Monad (when)
 import Data.Aeson ((.=))

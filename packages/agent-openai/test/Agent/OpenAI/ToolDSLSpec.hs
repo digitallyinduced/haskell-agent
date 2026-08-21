@@ -1,7 +1,7 @@
 module Agent.OpenAI.ToolDSLSpec (spec) where
 
 import Agent.OpenAI.ToolDSL
-import Agent.OpenAI.Responses.Types (FunctionTool(..), ResponseTool(..))
+import Agent.Responses.Types (FunctionTool(..), ResponseTool(..))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
