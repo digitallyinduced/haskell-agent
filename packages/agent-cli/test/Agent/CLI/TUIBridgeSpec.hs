@@ -1,11 +1,19 @@
 module Agent.CLI.TUIBridgeSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.TUI.App
+    ( emitUiEvent
+    , newFullscreenInputBuffer
+    , newFullscreenRuntime
+    )
 import Agent.CLI.TUI.Bridge
 import Agent.CLI.UI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
+import Control.Monad (replicateM_)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -49,6 +57,52 @@ spec = describe "fullscreen TUI bridge" do
             `shouldBe` Just True
         nativeProgressSignal (UiTurnEnded BlockCancelled) running
             `shouldBe` Just False
+
+    it "coalesces adjacent streaming updates without merging boundaries" do
+        mergeUiEvents
+            (UiLoop (TextDelta "hel"))
+            (UiLoop (TextDelta "lo"))
+            `shouldBe` Just (UiLoop (TextDelta "hello"))
+        mergeUiEvents
+            (UiLoop (ReasoningDelta "look "))
+            (UiLoop (ReasoningDelta "here"))
+            `shouldBe` Just (UiLoop (ReasoningDelta "look here"))
+        mergeUiEvents
+            (UiLoop (ActivityUpdated "connecting"))
+            (UiLoop (ActivityUpdated "streaming"))
+            `shouldBe` Just (UiLoop (ActivityUpdated "streaming"))
+        mergeUiEvents UiTick UiTick `shouldBe` Just UiTick
+        mergeUiEvents
+            (UiLoop (TextDelta "answer"))
+            (UiLoop
+                (ToolStarted
+                    (functionToolCall "tool-1" "read_file" "{}")))
+            `shouldBe` Nothing
+        mergeUiEvents
+            (UiLoop (ReasoningDelta "thought"))
+            (UiLoop (TextDelta "answer"))
+            `shouldBe` Nothing
+
+    it "does not block producers when Brick is not draining events" do
+        input <- newFullscreenInputBuffer
+        runtime <- newFullscreenRuntime
+            input
+            (pure ())
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            False
+            initialUiState
+        completed <- timeout 2000000 $
+            replicateM_ 2000 do
+                emitUiEvent runtime (UiLoop (TextDelta "x"))
+                emitUiEvent runtime (UiLoop TurnStarted)
+        completed `shouldBe` Just ()
 
     it "moves through history and restores the original draft" do
         historyMove 1 ["new", "old"] Nothing "draft" ""
