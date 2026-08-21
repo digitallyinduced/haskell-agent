@@ -465,7 +465,7 @@ runAgent options transition = do
             | otherwise -> makeAbsolute meta.metaCwd
         Nothing
             | options.optWorktree -> do
-                createWorktree source (worktreeRoot home) >>= either die \path -> do
+                createWorktree source (worktreeRoot home) >>= either (die . Text.unpack) \path -> do
                     color <- resolveColor stderr
                     putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> toText path))
                     pure path
@@ -535,12 +535,12 @@ runAgent options transition = do
                 (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
-                    Left err -> pure (Left (Text.pack err))
+                    Left err -> pure (Left err)
                     Right path -> pure $ Right SubagentWorktree
                         { subagentWorktreePath = path
                         , subagentWorktreeCleanup =
                             removeWorktree source path >>= \case
-                                Left err -> pure (Left (Text.pack err))
+                                Left err -> pure (Left err)
                                 Right () -> pure (Right ())
                         }
             , multiSendToRoot = Just sendToRoot
