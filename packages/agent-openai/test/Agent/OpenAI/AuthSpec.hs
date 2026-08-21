@@ -8,7 +8,7 @@ import qualified "base64-bytestring" Data.ByteString.Base64 as B64
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import Data.Time.Calendar (fromGregorian)
@@ -257,6 +257,16 @@ spec = do
             pool <- newPool [mkFreshAuth "known"] neverRefresh
             mState <- readAccountState pool "unknown"
             mState `shouldSatisfy` isNothing
+
+        it "snapshots cooldown alongside auth state" $ do
+            pool <- newPool [mkFreshAuth "paced"] neverRefresh
+            reportRateLimit pool "paced" (Just 120)
+            snaps <- snapshotAccounts pool
+            case snaps of
+                [snap] -> do
+                    snap.snapshotAuth.accountId `shouldBe` "paced"
+                    snap.snapshotCooldownUntil `shouldSatisfy` isJust
+                other -> expectationFailure ("expected one snapshot, got " <> show (length other))
 
 --------------------------------------------------------------------------------
 -- Fixtures and helpers
