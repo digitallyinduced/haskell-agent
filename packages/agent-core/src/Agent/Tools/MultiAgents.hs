@@ -195,6 +195,7 @@ runSpawn ctx call args
             prepare agentId =
                 maybe (pure ()) (\hook -> hook agentId spawnOptions)
                     ctx.multiPrepareSpawn
+                    >> pure mempty
         result <- spawnSubagentAtPreparedForTurn
             ctx.multiRegistry
             rootTurnId

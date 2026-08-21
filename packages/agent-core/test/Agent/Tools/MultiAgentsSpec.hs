@@ -70,7 +70,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             EncryptedInterAgentContent "gAAAAA-task"
         closeSubagentRegistry registry
 
-    it "applies model, effort, and fork overrides before the worker starts" do
+    it "applies model, effort, and fork overrides before the supervisor starts" do
         prepared <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))

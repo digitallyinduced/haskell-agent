@@ -28,6 +28,7 @@ import Agent.Subagents
     , getStatus
     , sendInputMessageForTurn
     , spawnSubagentWithCwdPreparedForTurn
+    , subagentLease
     , waitSubagents
     )
 import Agent.ToolArgs
@@ -47,7 +48,9 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , jsonAppTool
     )
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
+import Control.Monad (void)
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -194,26 +197,33 @@ spawnFresh
     -> TaskArgs
     -> IO (Either Text Text)
 spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
+    ownedWorktree <- traverse makeIdempotentWorktree worktree
     rootTurnId <- ctx.multiRootTurnId
     let spec = GrokSubagentSpec
             { agentType = args.subagentType
             , modelOverride = args.model
             , reasoningEffortOverride = Nothing
             }
-        worktreePath = (.subagentWorktreePath) <$> worktree
+        worktreePath = (.subagentWorktreePath) <$> ownedWorktree
+        prepare agentId = do
+            recordAgentSpec typesRef agentId spec
+            pure $ case ownedWorktree of
+                Nothing -> mempty
+                Just lease ->
+                    subagentLease (void lease.subagentWorktreeCleanup)
     result <- restore
         (spawnSubagentWithCwdPreparedForTurn
             ctx.multiRegistry
             rootTurnId
             childCwd
-            (\agentId -> recordAgentSpec typesRef agentId spec)
+            prepare
             ctx.multiSelfId
             ctx.multiDepth
             args.prompt
             (Just args.description))
-        `onException` cleanupWorktreeQuietly worktree
+        `onException` cleanupWorktreeQuietly ownedWorktree
     case result of
-        Left err -> cleanupFailedWorktree worktree err
+        Left err -> cleanupFailedWorktree ownedWorktree err
         Right agentId -> restore do
             if args.runInBackground
                 then pure $ Right $ formatTaskStarted agentId args worktreePath
@@ -222,6 +232,16 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
                         waitSubagents ctx.multiRegistry [agentId] defaultWaitTimeoutMs
                     pure $ Right $ formatTaskCompleted agentId args worktreePath timedOut
                         (Map.lookup agentId statuses)
+
+makeIdempotentWorktree :: SubagentWorktree -> IO SubagentWorktree
+makeIdempotentWorktree worktree = do
+    resultVar <- newMVar Nothing
+    let cleanup = modifyMVar resultVar \case
+            Just result -> pure (Just result, result)
+            Nothing -> do
+                result <- worktree.subagentWorktreeCleanup
+                pure (Just result, result)
+    pure worktree { subagentWorktreeCleanup = cleanup }
 
 cleanupWorktreeQuietly :: Maybe SubagentWorktree -> IO ()
 cleanupWorktreeQuietly Nothing = pure ()
