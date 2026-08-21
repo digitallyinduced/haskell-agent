@@ -9,6 +9,7 @@ import Agent.OpenAI.Responses.Types
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.Provider (Provider(..))
 import Agent.ToolDSL (parametersObjectLoose)
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types (AppTool(..), AppToolKind(..))
@@ -20,7 +21,8 @@ import Data.List (find, partition)
 import Data.Text (Text)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
-lookupAppTool name = find (\tool -> tool.appToolName == name)
+lookupAppTool name =
+    find (\tool -> tool.appToolName == canonicalToolName name)
 
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.
