@@ -109,6 +109,19 @@ spec = do
             parseReplLine "/attachments" `shouldBe` ReplShowAttachments
             parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
 
+        it "parses terminal clipboard commands" do
+            parseReplLine "/copy" `shouldBe` ReplCopyLast
+            parseReplLine "/copy-last" `shouldBe` ReplCopyLast
+            parseReplLine "/copy-code" `shouldBe` ReplCopyCode 1
+            parseReplLine "/copy-code 3" `shouldBe` ReplCopyCode 3
+            parseReplLine "/copy-diff" `shouldBe` ReplCopyDiff
+            parseReplLine "/copy-path" `shouldBe` ReplCopyPath
+            parseReplLine "/copy-session" `shouldBe` ReplCopySession
+            parseReplLine "/terminal" `shouldBe` ReplShowTerminal
+            parseReplLine "/ghostty" `shouldBe` ReplShowTerminal
+            parseReplLine "/copy-code nope"
+                `shouldBe` ReplCommandError "usage: /copy-code [N]"
+
         it "opens the model picker with a bare /model" do
             parseReplLine "/model" `shouldBe` ReplShowModel
             parseReplLine "  /Model  " `shouldBe` ReplShowModel
@@ -193,6 +206,12 @@ spec = do
                     , "paste"
                     , "attachments"
                     , "clear-attachments"
+                    , "copy"
+                    , "copy-code"
+                    , "copy-diff"
+                    , "copy-path"
+                    , "copy-session"
+                    , "terminal"
                     , "agents"
                     , "always-approve"
                     ]

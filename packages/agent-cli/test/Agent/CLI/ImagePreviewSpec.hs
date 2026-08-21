@@ -35,10 +35,11 @@ spec = do
             previewColumnsFor 30 `shouldBe` 12
 
     describe "kittyImageSequence" do
-        it "transmits PNG with f=100, then places the image" do
+        it "specifies only rows so Kitty preserves the source aspect ratio" do
             let seq_ = kittyImageSequence 7 20 6 "image/png" "png-bytes"
-            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=t,q=2,i=7,f=100,t=d,c=20,r=6,C=1,m=0;"
-            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=p,i=7,c=20,r=6,C=1,q=2\ESC\\"
+            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=t,q=2,i=7,f=100,t=d,r=6,C=1,m=0;"
+            seq_ `shouldSatisfy` Text.isInfixOf "\ESC_Ga=p,i=7,r=6,C=1,q=2\ESC\\"
+            seq_ `shouldSatisfy` (not . Text.isInfixOf ",c=")
             -- payload is base64 of the raw bytes
             seq_ `shouldSatisfy` Text.isInfixOf "cG5nLWJ5dGVz"
 
