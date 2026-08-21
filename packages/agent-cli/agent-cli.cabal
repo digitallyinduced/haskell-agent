@@ -81,6 +81,7 @@ library
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
+                    , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Markdown
                     , Agent.CLI.TUI.Theme
                     , Agent.CLI.UI.Model
@@ -169,6 +170,8 @@ test-suite agent-cli-test
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.TUIBridgeSpec
+                    , Agent.CLI.TUIMarkdownSpec
                     , Agent.CLI.UIModelSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
