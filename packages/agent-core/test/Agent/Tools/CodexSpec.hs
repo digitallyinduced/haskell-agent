@@ -14,6 +14,7 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
@@ -22,6 +23,7 @@ import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -76,7 +78,7 @@ spec = describe "Agent.Tools.Codex" do
                     [ property
                     | tool <- coding.codingAppTools
                     , tool.appToolName == name
-                    , property <- tool.appToolParameters
+                    , property <- fromMaybe [] (jsonToolParameters tool)
                     ]
             map (.propertyName) (parameters "spawn_agent") `shouldBe`
                 [ "task_name"

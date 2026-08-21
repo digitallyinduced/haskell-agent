@@ -75,6 +75,10 @@ spec = do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` (not . Text.isInfixOf "secret-openai")
 
+        it "shows unchecked usage as an in-progress refresh" do
+            renderLoginFrame False (initialLoginState [openai])
+                `shouldSatisfy` Text.isInfixOf "checking usage"
+
 openai :: LoginAccount
 openai = LoginAccount
     { loginManagedId = Nothing

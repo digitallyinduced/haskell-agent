@@ -4,6 +4,10 @@ module Agent.CLI.Session
     , SessionMeta(..)
     , SessionTurn(..)
     , SessionCreate(..)
+    , Persistence(..)
+    , PersistenceState(..)
+    , newPendingPersistence
+    , newActivePersistence
     , createSession
     , appendTurn
     , appendTurnKeepTitle
@@ -209,6 +213,25 @@ data SessionCreate = SessionCreate
     , createTitleHint :: !(Maybe Text)
     } deriving (Eq, Show)
 
+-- | Whether conversation state is stored on disk.
+data Persistence
+    = PersistenceDisabled
+    | PersistenceEnabled (IORef PersistenceState)
+
+-- | An enabled persistence slot, before or after its first use.
+data PersistenceState
+    = PersistencePending SessionCreate
+    | PersistenceActive SessionHandle
+    deriving (Eq, Show)
+
+newPendingPersistence :: SessionCreate -> IO Persistence
+newPendingPersistence spec =
+    PersistenceEnabled <$> newIORef (PersistencePending spec)
+
+newActivePersistence :: SessionHandle -> IO Persistence
+newActivePersistence handle =
+    PersistenceEnabled <$> newIORef (PersistenceActive handle)
+
 createSession :: SessionCreate -> IO SessionHandle
 createSession spec = do
     ensurePrivateDir spec.createRoot
@@ -241,15 +264,15 @@ createSession spec = do
     writeSessionMeta handle.sessionMetaPath meta
     pure handle
 
--- | Create the session directory on first use when the slot is still pending.
-ensureSession :: IORef (Either SessionCreate SessionHandle) -> IO SessionHandle
+-- | Create the session directory on first use when persistence is still pending.
+ensureSession :: IORef PersistenceState -> IO SessionHandle
 ensureSession slotRef = do
     slot <- readIORef slotRef
     case slot of
-        Right handle -> pure handle
-        Left spec -> do
+        PersistenceActive handle -> pure handle
+        PersistencePending spec -> do
             handle <- createSession spec
-            writeIORef slotRef (Right handle)
+            writeIORef slotRef (PersistenceActive handle)
             pure handle
 
 appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle

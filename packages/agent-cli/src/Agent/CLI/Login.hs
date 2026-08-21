@@ -33,7 +33,11 @@ import Agent.CLI.CredentialStore
     , upsertManagedCredential
     )
 import Agent.CLI.Input (readApprovalLine)
-import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.CLI.Picker
+    ( PickerKey(..)
+    , runOverlay
+    , runOverlayWithUpdates
+    )
 import Agent.CLI.Style
     ( glyphErr
     , glyphOk
@@ -53,7 +57,13 @@ import Agent.Provider (Provider(..), providerSlug)
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.XAI.Usage as XAI
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (bracket)
+import Control.Concurrent.Async
+    ( mapConcurrently
+    , mapConcurrently_
+    , withAsync
+    )
+import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (join)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -195,40 +205,76 @@ runLoginManager color = do
     tty <- hIsTerminalDevice stdin
     if not tty
         then do
-            Text.hPutStrLn stderr (formatLoginAccounts color accounts)
+            refreshed <- mapConcurrently refreshLoginAccount accounts
+            Text.hPutStrLn stderr (formatLoginAccounts color refreshed)
             hFlush stderr
-        else loop (initialLoginState accounts)
+        else loop [0 .. length accounts - 1] (initialLoginState accounts)
   where
-    loop state =
-        runOverlay (renderLoginFrame color) applyLoginKey state >>= \case
+    loop refreshIndices state = do
+        updates <- newChan
+        result <- withAsync
+            (refreshSelectedAccounts updates refreshIndices state.loginAccounts)
+            \_ ->
+                runOverlayWithUpdates
+                    (renderLoginFrame color)
+                    applyLoginKey
+                    (readChan updates)
+                    applyRefreshedAccount
+                    state
+        case result of
             Nothing -> pure ()
-            Just LoginClose -> pure ()
-            Just (LoginRefresh index) -> do
-                accounts <- refreshAt index state.loginAccounts
-                loop state
-                    { loginAccounts = accounts
-                    , loginIndex = index
-                    }
-            Just LoginAdd -> do
+            Just (LoginClose, _) -> pure ()
+            Just (LoginRefresh index, state') ->
+                loop [index] state'
+            Just (LoginAdd, _) -> do
                 connectAccount color
-                discoverLoginAccounts >>= loop . initialLoginState
-            Just (LoginToggle index) -> do
-                toggleAt color index state.loginAccounts
-                discoverLoginAccounts >>= loop . initialLoginState
-            Just (LoginDelete index) -> do
-                deleteAt color index state.loginAccounts
-                discoverLoginAccounts >>= loop . initialLoginState
-            Just (LoginImport index) -> do
-                importAt color index state.loginAccounts
-                discoverLoginAccounts >>= loop . initialLoginState
+                rediscover
+            Just (LoginToggle index, state') -> do
+                toggleAt color index state'.loginAccounts
+                rediscover
+            Just (LoginDelete index, state') -> do
+                deleteAt color index state'.loginAccounts
+                rediscover
+            Just (LoginImport index, state') -> do
+                importAt color index state'.loginAccounts
+                rediscover
+      where
+        rediscover = do
+            accounts <- discoverLoginAccounts
+            loop [0 .. length accounts - 1] (initialLoginState accounts)
 
-refreshAt :: Int -> [LoginAccount] -> IO [LoginAccount]
-refreshAt index accounts =
+refreshSelectedAccounts
+    :: Chan (Int, LoginAccount)
+    -> [Int]
+    -> [LoginAccount]
+    -> IO ()
+refreshSelectedAccounts updates indices accounts =
+    mapConcurrently_ refreshOne indices
+  where
+    refreshOne index = case accountAt index accounts of
+        Nothing -> pure ()
+        Just account -> do
+            refreshed <- tryAny (refreshLoginAccount account) >>= \case
+                Left err ->
+                    pure account
+                        { loginUsage =
+                            UsageUnavailable (Text.pack (show err))
+                        }
+                Right result -> pure result
+            writeChan updates (index, refreshed)
+
+applyRefreshedAccount
+    :: (Int, LoginAccount)
+    -> LoginState
+    -> LoginState
+applyRefreshedAccount (index, refreshed) state =
+    state { loginAccounts = replaceAt index refreshed state.loginAccounts }
+
+replaceAt :: Int -> account -> [account] -> [account]
+replaceAt index replacement accounts =
     case splitAt index accounts of
-        (before, account : after) -> do
-            refreshed <- refreshLoginAccount account
-            pure (before <> (refreshed : after))
-        _ -> pure accounts
+        (before, _ : after) -> before <> (replacement : after)
+        _ -> accounts
 
 discoverLoginAccounts :: IO [LoginAccount]
 discoverLoginAccounts = do
@@ -688,7 +734,13 @@ grokAccount token source authKind payload =
 
 refreshLoginAccount :: LoginAccount -> IO LoginAccount
 refreshLoginAccount account
-    | Text.null account.loginAccessToken = pure account
+    | Text.null account.loginAccessToken = pure case account.loginUsage of
+        UsageNotChecked ->
+            account
+                { loginUsage =
+                    UsageUnavailable "access token is unavailable"
+                }
+        _ -> account
     | otherwise = case account.loginProvider of
         OpenAIProvider ->
             if account.loginAccountId == "openai-env"
@@ -833,8 +885,9 @@ renderAccount color selected index account =
     health
         | not account.loginEnabled = roleWarn color "○ "
         | otherwise = case account.loginUsage of
+            UsageNotChecked -> roleMuted color "◌ "
             UsageUnavailable _ -> roleError color glyphErr
-            _ -> roleSuccess color glyphOk
+            UsageAvailable _ -> roleSuccess color glyphOk
     provider = rolePrompt color (providerSlug account.loginProvider)
     label = roleMuted color account.loginLabel
     billing = roleMuted color case account.loginBilling of
@@ -849,7 +902,7 @@ renderAccount color selected index account =
         | otherwise = Text.take 24 account.loginAccountId
     usageLines = case account.loginUsage of
         UsageNotChecked ->
-            ["    " <> roleMuted color "usage not checked"]
+            ["    " <> roleMuted color "checking usage…"]
         UsageUnavailable err ->
             ["    " <> roleError color ("usage unavailable · " <> Text.take 100 err)]
         UsageAvailable usage ->

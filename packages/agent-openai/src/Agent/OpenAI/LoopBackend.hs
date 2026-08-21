@@ -1,4 +1,7 @@
 -- | Map the provider-neutral loop onto the OpenAI Responses WebSocket transport.
+--
+-- Provider-neutral conversion and stateless transport helpers live in
+-- "Agent.Responses.LoopBackend" and are re-exported here for compatibility.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
     , openAiBackendReconnecting
