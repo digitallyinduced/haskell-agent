@@ -41,6 +41,7 @@ library
                     , Agent.ProjectInstructions
                     , Agent.Subagents
                     , Agent.Subagents.Format
+                    , Agent.Subagents.Registry
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
                     , Agent.ToolArgs
