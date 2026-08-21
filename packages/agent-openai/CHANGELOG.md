@@ -43,6 +43,9 @@
 - Added a typed `PreviousResponseNotFound` error classification for missing
   `previous_response_id` failures.
 - Added client-initiated WebSocket pings in `withCodexWs`.
+- Add STM-scoped WebSocket request ownership and poison reusable sessions when
+  an in-flight response is cancelled or exits without a terminal event,
+  preventing abandoned frames from leaking into the next request.
 
 ## 0.1.0.0 — 2026-04-23
 
