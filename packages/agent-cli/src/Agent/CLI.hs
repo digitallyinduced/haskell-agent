@@ -148,7 +148,6 @@ import Agent.CLI.Terminal
     , osc133PromptStart
     , reportTerminalCwd
     , resolveColor
-    , notifyTerminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (schemasFromAppTools)
@@ -588,9 +587,6 @@ runAgent options transition = do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
-                terminal <- detectTerminalCapabilities stderr
-                notifyTerminal terminal stderr
-                    ("Subagent completed: " <> agentId.unSubagentId)
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
