@@ -920,7 +920,10 @@ drawWorkspace state =
         hBox $
             [ withVScrollBars OnRight $
                 viewport ConversationViewport Vertical $
-                    padLeftRight 2 (drawTranscript state.appUi)
+                    padLeftRight 2 $
+                        drawTranscript
+                            state.appRuntime.runtimeColor
+                            state.appUi
             ]
                 <> if length state.appAgentEntries <= 1
                     then []
@@ -1032,24 +1035,31 @@ spinnerFrame frame =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         !! (frame `mod` 10)
 
-drawTranscript :: UiState -> Widget Name
-drawTranscript state
+drawTranscript :: Bool -> UiState -> Widget Name
+drawTranscript color state
     | null blocks =
         withAttr Theme.mutedAttr $
             padTop (Pad 2) $
                 txt "Start by describing what you want to build or change."
     | otherwise =
-        vBox (map (drawBlock state) blocks)
+        vBox (map (drawBlock color state) blocks)
   where
     blocks = toList state.uiBlocks
 
-drawBlock :: UiState -> UiBlock -> Widget Name
-drawBlock state block =
+drawBlock :: Bool -> UiState -> UiBlock -> Widget Name
+drawBlock color state block =
     let selected = state.uiSelectedBlock == Just block.blockId
         highlighted = selected && state.uiFocus == FocusScrollback
         content = case block.blockKind of
             BlockUser ->
-                roundedFill Theme.userAttr (txtWrap block.blockBody)
+                if color
+                    then roundedFill
+                        Theme.userAttr
+                        Theme.userCornerAttr
+                        (txtWrap block.blockBody)
+                    else
+                        withAttr Theme.userAttr $
+                            padAll 1 (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
@@ -1090,13 +1100,21 @@ drawBlock state block =
             rendered
         else rendered
 
-roundedFill :: AttrName -> Widget Name -> Widget Name
-roundedFill attr body =
+roundedFill :: AttrName -> AttrName -> Widget Name -> Widget Name
+roundedFill fillAttr cornerAttr body =
     vBox
-        [ padLeftRight 1 (withAttr attr (vLimit 1 (fill ' ')))
-        , withAttr attr (padLeftRight 1 body)
-        , padLeftRight 1 (withAttr attr (vLimit 1 (fill ' ')))
+        [ roundedRow '▗' '▖'
+        , withAttr fillAttr (padLeftRight 1 body)
+        , roundedRow '▝' '▘'
         ]
+  where
+    roundedRow left right =
+        vLimit 1 $
+            hBox
+                [ withAttr cornerAttr (txt (Text.singleton left))
+                , withAttr fillAttr (fill ' ')
+                , withAttr cornerAttr (txt (Text.singleton right))
+                ]
 
 cacheableBlock :: UiBlock -> Bool
 cacheableBlock block =
