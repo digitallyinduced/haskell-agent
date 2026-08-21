@@ -123,6 +123,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
+    , runtimeFirstFrame :: !(IO ())
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
@@ -170,6 +171,7 @@ newFullscreenRuntime
     -> (Bool -> IO ())
     -> IO (AgentTarget, [AgentEntry])
     -> (AgentTarget -> IO ())
+    -> IO ()
     -> Bool
     -> UiState
     -> IO FullscreenRuntime
@@ -180,6 +182,7 @@ newFullscreenRuntime
     nativeProgress
     agentSnapshot
     agentSelect
+    firstFrame
     color
     initial = FullscreenRuntime
     <$> newBChan 512
@@ -190,6 +193,7 @@ newFullscreenRuntime
     <*> pure nativeProgress
     <*> pure agentSnapshot
     <*> pure agentSelect
+    <*> pure firstFrame
     <*> pure color
     <*> pure initial
 
@@ -573,7 +577,10 @@ fullscreenApp = App
     { appDraw = drawApp
     , appChooseCursor = showFirstCursor
     , appHandleEvent = handleEvent
-    , appStartEvent = vScrollToEnd (viewportScroll ConversationViewport)
+    , appStartEvent = do
+        state <- get
+        liftIO state.appRuntime.runtimeFirstFrame
+        vScrollToEnd (viewportScroll ConversationViewport)
     , appAttrMap = \state ->
         if state.appRuntime.runtimeColor
             then Theme.solarizedDark
