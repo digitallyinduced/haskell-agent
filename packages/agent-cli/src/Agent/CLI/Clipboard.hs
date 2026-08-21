@@ -4,6 +4,7 @@ module Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImage
     , readClipboardImages
+    , nonEmptyClipboardImages
     , loadImagesFromPastedText
     , formatImageSize
     ) where
@@ -74,6 +75,16 @@ readClipboardImage =
         Left err -> pure (Left err)
         Right [] -> pure (Left "no image found on the clipboard")
         Right (img:_) -> pure (Right img)
+
+-- | Keep a successful, non-empty clipboard image read. This is used when a
+-- terminal reports a bracketed paste: image-bearing clipboard contents should
+-- become attachments, while ordinary text pastes should stay in the editor.
+nonEmptyClipboardImages
+    :: Either Text [ImageAttachment]
+    -> Maybe [ImageAttachment]
+nonEmptyClipboardImages = \case
+    Right images@(_:_) -> Just images
+    _ -> Nothing
 
 formatImageSize :: Int -> Text
 formatImageSize n

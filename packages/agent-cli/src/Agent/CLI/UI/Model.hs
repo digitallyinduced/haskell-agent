@@ -22,7 +22,11 @@ module Agent.CLI.UI.Model
     ) where
 
 import Agent.CLI.ReplMode (ReplMode(..))
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render
+    ( formatSearchReplaceDiff
+    , formatToolOutput
+    , summarizeToolCall
+    )
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage
@@ -31,6 +35,7 @@ import Agent.Loop
     )
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
 import Data.Foldable (toList)
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -98,6 +103,7 @@ data UiState = UiState
     , uiNextBlockId :: !Int
     , uiDraft :: !Text
     , uiCursor :: !Int
+    , uiQueuedInputs :: !(Seq Text)
     , uiFocus :: !Focus
     , uiSelectedBlock :: !(Maybe BlockId)
     , uiFollow :: !Bool
@@ -110,19 +116,26 @@ data UiState = UiState
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe Text)
     , uiFrame :: !Int
+    , uiElapsedTenths :: !Int
     , uiTurnStartBlock :: !Int
+    , uiToolCalls :: !(Map.Map Text ToolCall)
     }
     deriving (Eq, Show)
 
 data UiEvent
     = UiLoop !LoopEvent
     | UiUserSubmitted !Text
+    | UiDraftSubmitted
+    | UiInputQueued !Text
+    | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
+    | UiSetPromptEffort !Text
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe Text)
     | UiMoveSelection !Int
+    | UiSelectBlock !BlockId
     | UiToggleSelected
     | UiFocusChanged !Focus
     | UiPermissionShown !Text
@@ -135,6 +148,7 @@ data UiEvent
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
+    | UiTurnRestarted
     | UiTick
     deriving (Eq, Show)
 
@@ -144,6 +158,7 @@ initialUiState = UiState
     , uiNextBlockId = 1
     , uiDraft = ""
     , uiCursor = 0
+    , uiQueuedInputs = Seq.empty
     , uiFocus = FocusComposer
     , uiSelectedBlock = Nothing
     , uiFollow = True
@@ -162,7 +177,9 @@ initialUiState = UiState
     , uiPermission = Nothing
     , uiNotice = Nothing
     , uiFrame = 0
+    , uiElapsedTenths = 0
     , uiTurnStartBlock = 0
+    , uiToolCalls = Map.empty
     }
 
 reduceUi :: UiEvent -> UiState -> UiState
@@ -171,12 +188,30 @@ reduceUi event state = case event of
     UiUserSubmitted text ->
         appendBlock BlockUser "You" text "" BlockComplete Nothing
             state
-                { uiDraft = ""
-                , uiCursor = 0
-                , uiAwaitingInput = False
+                { uiAwaitingInput = False
                 , uiFollow = True
                 , uiNotice = Nothing
                 }
+    UiDraftSubmitted ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
+    UiInputQueued text ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiQueuedInputs = state.uiQueuedInputs Seq.|> text
+            , uiNotice = Nothing
+            }
+    UiQueuedInputStarted ->
+        state
+            { uiQueuedInputs = Seq.drop 1 state.uiQueuedInputs
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
     UiSetDraft text cursor ->
         state
             { uiDraft = text
@@ -184,6 +219,10 @@ reduceUi event state = case event of
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
+    UiSetPromptEffort effort ->
+        state
+            { uiPrompt = state.uiPrompt { promptEffort = effort }
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
@@ -196,6 +235,8 @@ reduceUi event state = case event of
         state { uiNotice = notice }
     UiMoveSelection delta ->
         moveSelection delta state
+    UiSelectBlock ident ->
+        selectBlock ident state
     UiToggleSelected ->
         toggleSelected state
     UiFocusChanged focus ->
@@ -242,11 +283,32 @@ reduceUi event state = case event of
             , uiTurnStartBlock = 0
             }
     UiSetFollow follow ->
-        state { uiFollow = follow }
+        state
+            { uiFollow = follow
+            , uiSelectedBlock =
+                if follow
+                    then (.blockId) <$> Seq.lookup
+                        (Seq.length state.uiBlocks - 1)
+                        state.uiBlocks
+                    else state.uiSelectedBlock
+            }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
-    UiTick ->
-        state { uiFrame = (state.uiFrame + 1) `mod` 10 }
+    UiTurnRestarted ->
+        state
+            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            , uiRunning = False
+            , uiActivity = "Restarting…"
+            , uiNotice = Just "Restarting current turn…"
+            , uiToolCalls = Map.empty
+            }
+    UiTick
+        | not state.uiRunning -> state
+        | otherwise ->
+            state
+                { uiFrame = (state.uiFrame + 1) `mod` 10
+                , uiElapsedTenths = state.uiElapsedTenths + 1
+                }
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -256,7 +318,9 @@ reduceLoop event state = case event of
             , uiAwaitingInput = False
             , uiActivity = "Thinking…"
             , uiNotice = Nothing
+            , uiElapsedTenths = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiToolCalls = Map.empty
             }
     ReasoningDelta delta ->
         appendOrExtend BlockThinking "Thought" delta BlockStreaming state
@@ -267,17 +331,37 @@ reduceLoop event state = case event of
     ActivityUpdated activity ->
         state { uiActivity = activity }
     ToolStarted call ->
-        let kind = toolBlockKind call.name
-        in appendBlock kind (summarizeToolCall call) "" ""
+        let
+            kind = toolBlockKind call.name
+            body = case call.name of
+                "search_replace" ->
+                    formatSearchReplaceDiff False call.arguments
+                _ -> ""
+        in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)
-            state { uiActivity = summarizeToolCall call }
+            state
+                { uiRunning = True
+                , uiAwaitingInput = False
+                , uiActivity = summarizeToolCall call
+                , uiToolCalls = Map.insert call.callId call state.uiToolCalls
+                }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
-        completeTool result state
-            { uiActivity = "Thinking…" }
+        let displayed = case Map.lookup result.callId state.uiToolCalls of
+                Nothing -> result
+                Just call ->
+                    result
+                        { output = formatToolOutput call result.output }
+        in completeTool displayed state
+            { uiRunning = True
+            , uiAwaitingInput = False
+            , uiActivity = "Thinking…"
+            , uiToolCalls = Map.delete result.callId state.uiToolCalls
+            }
     TurnFinished output ->
         let finalized = finalizeStreams state
+            continuing = not (null output.toolCalls)
             withFallback = case output.assistantText of
                 Just text
                     | not (Text.null (Text.strip text))
@@ -289,8 +373,11 @@ reduceLoop event state = case event of
                             BlockComplete Nothing finalized
                 _ -> finalized
         in withFallback
-            { uiRunning = False
-            , uiActivity = "Ready"
+            { uiRunning = continuing
+            , uiActivity =
+                if continuing
+                    then "Running tools…"
+                    else "Ready"
             }
 
 appendOrExtend
@@ -417,6 +504,16 @@ moveSelection delta state =
             in state
                 { uiSelectedBlock = Just (blocks !! next).blockId
                 , uiFollow = next == length blocks - 1
+                }
+
+selectBlock :: BlockId -> UiState -> UiState
+selectBlock ident state =
+    case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
+        Nothing -> state
+        Just index ->
+            state
+                { uiSelectedBlock = Just ident
+                , uiFollow = index == Seq.length state.uiBlocks - 1
                 }
 
 selectedBlockIndex :: UiState -> Int

@@ -11,7 +11,7 @@
   output-item, and error constructors plus a lossless fallback for other and
   future events. The WebSocket receiver now decodes each frame once and
   pattern-matches on `ResponseStreamEvent`.
-- Move provider credentials, broker failover, common errors, tool dispatch,
+- Move provider credentials, common errors, tool dispatch,
   JSON tool-argument parsing, and the reusable WebSocket session pump to
   `agent-core`; move Grok transcript trimming to `agent-xai`. `agent-openai`
   now contains only OpenAI wire, auth, and transport concerns.
@@ -30,12 +30,8 @@
 - Classify `service_unavailable_error` as a typed retryable provider failure.
 - Normalize HTTP-200 `status: failed` responses into typed errors and retry
   transient overload/server failures with bounded exponential backoff.
-- Add a small `TokenProvider` boundary shared by local OAuth pools and central
-  brokers, plus provider-based REST and WebSocket entry points.
-- Add a broker provider that requests the broker's current best account on
-  demand instead of enumerating broker accounts into a second local scheduler.
-- Echo opaque broker lease ids with failure feedback so a broker can ignore
-  delayed authentication failures from an older token generation.
+- Add a small `TokenProvider` boundary shared by credential sources, plus
+  provider-based REST and WebSocket entry points.
 - Share account-failure classification and retry orchestration between REST
   and WebSocket transports, including replay-safe in-band WebSocket failover.
 - Redact bearer and lease tokens from `Credential` debug output and guard local
@@ -47,6 +43,9 @@
 - Added a typed `PreviousResponseNotFound` error classification for missing
   `previous_response_id` failures.
 - Added client-initiated WebSocket pings in `withCodexWs`.
+- Add STM-scoped WebSocket request ownership and poison reusable sessions when
+  an in-flight response is cancelled or exits without a terminal event,
+  preventing abandoned frames from leaking into the next request.
 
 ## 0.1.0.0 — 2026-04-23
 

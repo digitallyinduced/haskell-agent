@@ -27,22 +27,23 @@ spec = describe "Agent.CLI.SessionTitle" do
 
     it "runs a private tool-free title request and returns a tagged result" do
         seenParams <- newIORef Nothing
+        notified <- newEmptyMVar
         paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
         let backendFactory privateParams _privateTranscript =
                 Backend \_ _ _ -> do
                     writeIORef seenParams . Just =<< readIORef privateParams
                     pure (Right (emptyTurnOutput "title-response" [] (Just "Auth race cleanup")))
-        withSessionTitleManager backendFactory paramsRef \manager -> do
+        withSessionTitleManager backendFactory paramsRef (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             results <- waitForResults manager 100
-            results `shouldBe`
-                [ SessionTitleResult
+            let expected = SessionTitleResult
                     { resultSessionId = "session-1"
                     , resultMilestone = 3
                     , resultTitle = "Auth race cleanup"
                     , resultGeneration = 0
                     }
-                ]
+            results `shouldBe` [expected]
+            takeMVar notified `shouldReturn` expected
         Just sent <- readIORef seenParams
         sent.tools `shouldBe` Just []
         sent.parallelToolCalls `shouldBe` Just False
@@ -58,7 +59,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                     putMVar started ()
                     takeMVar release
                     pure (Right (emptyTurnOutput "title-response" [] (Just "Stale title")))
-        withSessionTitleManager backendFactory paramsRef \manager -> do
+        withSessionTitleManager backendFactory paramsRef (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1 "conversation"
             takeMVar started
             invalidateSessionTitles manager "session-1"
@@ -72,7 +73,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                 Backend \_ _ _ -> do
                     threadDelay 20000
                     pure (Right (emptyTurnOutput "title-response" [] (Just "Finished title")))
-        withSessionTitleManager backendFactory paramsRef \manager -> do
+        withSessionTitleManager backendFactory paramsRef (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 6 "conversation"
             waitForSessionTitleResults 1000000 manager
                 `shouldReturn`

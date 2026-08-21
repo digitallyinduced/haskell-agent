@@ -4,15 +4,20 @@ module Agent.CLI.AgentViewport
     , AgentTarget(..)
     , AgentViewportEnv(..)
     , AgentViewportState(..)
+    , agentEntryTreeLabel
     , applyAgentViewportKey
     , formatAgentStatus
     , initialAgentViewportState
     , pickAgentViewport
+    , refreshAgentViewportState
     , renderAgentTree
     , renderAgentViewportPanelFor
     , renderAgentViewportFrame
     , renderAgentViewportFrameFor
     , responseItemLines
+    , responseItemPreviewLines
+    , selectAgentTarget
+    , selectedAgentEntry
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
@@ -71,10 +76,28 @@ initialAgentViewportState selected entries =
   where
     ordered = sortOn (.agentPath) entries
 
-selectedEntry :: AgentViewportState -> Maybe AgentEntry
-selectedEntry state = case state.viewportAll of
+selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
+selectedAgentEntry state = case state.viewportAll of
     [] -> Nothing
     entries -> Just (entries !! clamp (length entries) state.viewportIndex)
+
+refreshAgentViewportState
+    :: [AgentEntry]
+    -> AgentViewportState
+    -> AgentViewportState
+refreshAgentViewportState entries state =
+    initialAgentViewportState selected entries
+  where
+    selected =
+        maybe AgentRoot (.agentTarget) (selectedAgentEntry state)
+
+selectAgentTarget :: AgentTarget -> AgentViewportState -> AgentViewportState
+selectAgentTarget target state =
+    state
+        { viewportIndex =
+            maybe state.viewportIndex id
+                (findIndex ((== target) . (.agentTarget)) state.viewportAll)
+        }
 
 applyAgentViewportKey
     :: PickerKey
@@ -82,7 +105,7 @@ applyAgentViewportKey
     -> Either (Maybe AgentTarget) AgentViewportState
 applyAgentViewportKey key state = case key of
     PickerKeyCancel -> Left Nothing
-    PickerKeyConfirm -> Left ((.agentTarget) <$> selectedEntry state)
+    PickerKeyConfirm -> Left ((.agentTarget) <$> selectedAgentEntry state)
     PickerKeyUp -> Right (move (-1) state)
     PickerKeyDown -> Right (move 1 state)
     _ -> Right state
@@ -118,13 +141,9 @@ renderAgentTree color selected entries
     renderEntry (index, entry) =
         let isSelected = entry.agentTarget == effectiveSelected
             marker = if isSelected then "› " else "  "
-            branch = treePrefix ordered index entry.agentPath
             line =
                 marker
-                    <> branch
-                    <> pathName entry.agentPath
-                    <> "  "
-                    <> entry.agentStatus
+                    <> agentEntryTreeLabel ordered index entry
         in if isSelected then roleSuccess color line else line
 
 renderAgentViewportFrame :: Bool -> AgentViewportState -> Text
@@ -163,7 +182,7 @@ renderAgentViewportPanelFor color terminalCols selected entries
   where
     state = initialAgentViewportState selected entries
     selectedPath =
-        maybe "/root" (.agentPath) (selectedEntry state)
+        maybe "/root" (.agentPath) (selectedAgentEntry state)
 
 renderAgentViewportFor
     :: Bool
@@ -183,7 +202,7 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
     n = length entries
     idx = clamp n state.viewportIndex
     shown = entryWindow bodyRows idx entries
-    selected = selectedEntry state
+    selected = selectedAgentEntry state
     header =
         rolePrompt color "agents"
             <> roleMuted color
@@ -201,10 +220,10 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         map
             (\(absoluteIndex, entry) ->
                 let prefix = if absoluteIndex == idx then "› " else "  "
-                    branch = treePrefix entries absoluteIndex entry.agentPath
                     text = fitCell leftWidth
-                        (prefix <> branch <> pathName entry.agentPath
-                            <> "  " <> entry.agentStatus)
+                        (prefix
+                            <> agentEntryTreeLabel
+                                entries absoluteIndex entry)
                 in if absoluteIndex == idx
                     then roleSuccess color text
                     else text)
@@ -248,48 +267,109 @@ pickAgentViewport color selected entries = do
                 _ -> Nothing
 
 responseItemLines :: [ResponseItem] -> [Text]
-responseItemLines = concatMap itemLines
+responseItemLines = concatMap responseItemLineList
+
+-- | Keep a compact agent preview: the first line for picker context plus
+-- only the most recent logical lines for the live pane. Earlier response
+-- items are traversed only as list spine once the tail is full; their message
+-- bodies are not split or copied.
+responseItemPreviewLines :: Int -> [ResponseItem] -> [Text]
+responseItemPreviewLines count items
+    | count <= 0 = maybe [] pure (responseItemFirstLine items)
+    | remaining > 0 = trailing
+    | otherwise = case responseItemFirstLine items of
+        Nothing -> trailing
+        Just firstLine -> case trailing of
+            trailingFirst : _
+                | trailingFirst == firstLine -> trailing
+            _ -> firstLine : trailing
   where
-    itemLines = \case
-        MessageItem message ->
-            labelled (roleLabel message.role) (messageText message.content)
-        FunctionCallItem call ->
-            ["tool: " <> call.name]
-        CustomToolCallItem call ->
-            ["tool: " <> call.name]
-        FunctionCallOutputItem _ -> ["tool: completed"]
-        CustomToolCallOutputItem _ -> ["tool: completed"]
-        _ -> []
+    (remaining, trailing) =
+        foldr collectTail (count, []) items
+    collectTail item result@(needed, kept)
+        | needed <= 0 = result
+        | otherwise =
+            let rows = responseItemLineList item
+                rowCount = length rows
+                selected = drop (max 0 (rowCount - needed)) rows
+            in (max 0 (needed - rowCount), selected <> kept)
 
-    roleLabel = \case
-        RoleUser -> "user: "
-        RoleAssistant -> "assistant: "
-        RoleSystem -> "system: "
-        RoleDeveloper -> "developer: "
-        RoleUnknown value -> value <> ": "
+responseItemFirstLine :: [ResponseItem] -> Maybe Text
+responseItemFirstLine = go
+  where
+    go [] = Nothing
+    go (item : rest) = case responseItemFirstItemLine item of
+        Just line -> Just line
+        Nothing -> go rest
 
-    messageText = \case
-        MessageContentText text -> text
-        MessageContentParts parts ->
-            Text.intercalate "\n" (concatMap contentText parts)
+responseItemFirstItemLine :: ResponseItem -> Maybe Text
+responseItemFirstItemLine = \case
+    MessageItem message ->
+        labelledFirst
+            (responseRoleLabel message.role)
+            (responseMessageText message.content)
+    FunctionCallItem call ->
+        Just ("tool: " <> call.name)
+    CustomToolCallItem call ->
+        Just ("tool: " <> call.name)
+    FunctionCallOutputItem _ -> Just "tool: completed"
+    CustomToolCallOutputItem _ -> Just "tool: completed"
+    _ -> Nothing
 
-    contentText = \case
-        InputTextPart{text} -> [text]
-        OutputTextPart{text} -> [text]
-        RefusalPart{refusal} -> [refusal]
-        ReasoningTextPart{text} -> [text]
-        SummaryTextPart{text} -> [text]
-        InputImagePart{} -> ["[image]"]
-        InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
-        InputAudioPart{} -> ["[audio]"]
-        UnknownContentPart{} -> []
+responseItemLineList :: ResponseItem -> [Text]
+responseItemLineList = \case
+    MessageItem message ->
+        labelled
+            (responseRoleLabel message.role)
+            (responseMessageText message.content)
+    FunctionCallItem call ->
+        ["tool: " <> call.name]
+    CustomToolCallItem call ->
+        ["tool: " <> call.name]
+    FunctionCallOutputItem _ -> ["tool: completed"]
+    CustomToolCallOutputItem _ -> ["tool: completed"]
+    _ -> []
 
-    labelled prefix raw =
-        case Text.lines (Text.strip raw) of
-            [] -> []
-            firstLine : rest ->
-                (prefix <> firstLine)
-                    : map (Text.replicate (Text.length prefix) " " <>) rest
+responseRoleLabel :: ResponseRole -> Text
+responseRoleLabel = \case
+    RoleUser -> "user: "
+    RoleAssistant -> "assistant: "
+    RoleSystem -> "system: "
+    RoleDeveloper -> "developer: "
+    RoleUnknown value -> value <> ": "
+
+responseMessageText :: MessageContent -> Text
+responseMessageText = \case
+    MessageContentText text -> text
+    MessageContentParts parts ->
+        Text.intercalate "\n" (concatMap responseContentText parts)
+
+responseContentText :: ResponseContentPart -> [Text]
+responseContentText = \case
+    InputTextPart{text} -> [text]
+    OutputTextPart{text} -> [text]
+    RefusalPart{refusal} -> [refusal]
+    ReasoningTextPart{text} -> [text]
+    SummaryTextPart{text} -> [text]
+    InputImagePart{} -> ["[image]"]
+    InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
+    InputAudioPart{} -> ["[audio]"]
+    UnknownContentPart{} -> []
+
+labelled :: Text -> Text -> [Text]
+labelled prefix raw =
+    case Text.lines (Text.strip raw) of
+        [] -> []
+        firstLine : rest ->
+            (prefix <> firstLine)
+                : map (Text.replicate (Text.length prefix) " " <>) rest
+
+labelledFirst :: Text -> Text -> Maybe Text
+labelledFirst prefix raw =
+    let stripped = Text.strip raw
+    in if Text.null stripped
+        then Nothing
+        else Just (prefix <> Text.takeWhile (/= '\n') stripped)
 
 findByTarget :: AgentTarget -> [AgentEntry] -> Maybe AgentEntry
 findByTarget target = go
@@ -298,6 +378,13 @@ findByTarget target = go
     go (entry : rest)
         | entry.agentTarget == target = Just entry
         | otherwise = go rest
+
+agentEntryTreeLabel :: [AgentEntry] -> Int -> AgentEntry -> Text
+agentEntryTreeLabel entries index entry =
+    treePrefix entries index entry.agentPath
+        <> pathName entry.agentPath
+        <> "  "
+        <> entry.agentStatus
 
 pathName :: Text -> Text
 pathName path =

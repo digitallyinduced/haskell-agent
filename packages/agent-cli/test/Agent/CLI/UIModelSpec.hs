@@ -12,6 +12,7 @@ import Agent.ToolDispatch
     )
 import qualified Data.Foldable as Foldable
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -31,6 +32,44 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) blocks
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
+
+    it "retains a draft composed while a turn is running" do
+        let state =
+                apply
+                    [ UiUserSubmitted "first request"
+                    , UiLoop TurnStarted
+                    , UiSetDraft "follow-up while busy" 20
+                    , UiLoop (ReasoningDelta "checking")
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] (Just "done")))
+                    , UiSetAwaitingInput True
+                    ]
+        state.uiDraft `shouldBe` "follow-up while busy"
+        state.uiCursor `shouldBe` 20
+        state.uiAwaitingInput `shouldBe` True
+
+    it "discards partial output and updates effort when restarting a turn" do
+        let initialPrompt =
+                initialUiState.uiPrompt
+                    { promptEffort = "low"
+                    }
+            state =
+                apply
+                    [ UiSetPrompt initialPrompt
+                    , UiUserSubmitted "try this"
+                    , UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "partial thought")
+                    , UiLoop (TextDelta "partial answer")
+                    , UiSetPromptEffort "high"
+                    , UiTurnRestarted
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["try this"]
+        state.uiPrompt.promptEffort `shouldBe` "high"
+        state.uiRunning `shouldBe` False
+        state.uiActivity `shouldBe` "Restarting…"
+        state.uiNotice `shouldBe` Just "Restarting current turn…"
 
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
@@ -125,6 +164,63 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "live output"
             _ -> expectationFailure "expected one running tool block"
 
+    it "tracks elapsed tenths only while a turn is running" do
+        let idle = apply [UiTick, UiTick]
+            running = apply [UiLoop TurnStarted, UiTick, UiTick, UiTick]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] Nothing)))
+                    running
+            after = reduceUi UiTick finished
+        idle.uiElapsedTenths `shouldBe` 0
+        idle.uiFrame `shouldBe` 0
+        running.uiElapsedTenths `shouldBe` 3
+        after.uiElapsedTenths `shouldBe` 3
+
+    it "shows a search-replace diff while the tool is running" do
+        let call =
+                functionToolCall
+                    "edit-1"
+                    "search_replace"
+                    "{\"file_path\":\"A.hs\",\"old_string\":\"old\",\"new_string\":\"new\"}"
+            blocks =
+                Foldable.toList $
+                    (.uiBlocks) $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            ]
+        case blocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockEdit
+                block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
+            _ -> expectationFailure "expected one running edit block"
+
+    it "formats collaboration result JSON for display" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "collaboration.spawn_agent"
+                    "{\"task_name\":\"reviewer\",\"message\":\"review\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "{\"task_name\":\"/root/reviewer\",\"nickname\":null}"
+                , callKind = FunctionCallKind
+                }
+            blocks = Foldable.toList $ (.uiBlocks) $ apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted call)
+                , UiLoop (ToolFinished result)
+                ]
+        case blocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Spawned agent reviewer"
+                block.blockBody `shouldBe` "Agent: /root/reviewer"
+            _ -> expectationFailure "expected one collaboration tool block"
+
     it "only marks structured cancellation results as cancelled" do
         toolStateFor "exit: cancelled\npartial output"
             `shouldBe` BlockCancelled
@@ -148,6 +244,106 @@ spec = describe "fullscreen UI reducer" do
         case blocks of
             block : _ -> block.blockExpanded `shouldBe` False
             [] -> expectationFailure "expected selected blocks"
+
+    it "selects a clicked block and follows only at the tail" do
+        let populated =
+                apply
+                    [ UiUserSubmitted "one"
+                    , UiUserSubmitted "two"
+                    , UiUserSubmitted "three"
+                    ]
+            blocks = Foldable.toList populated.uiBlocks
+        case blocks of
+            first : _ : lastBlock : [] -> do
+                let firstSelected =
+                        reduceUi (UiSelectBlock first.blockId) populated
+                    lastSelected =
+                        reduceUi (UiSelectBlock lastBlock.blockId) firstSelected
+                firstSelected.uiSelectedBlock
+                    `shouldBe` Just first.blockId
+                firstSelected.uiFollow `shouldBe` False
+                lastSelected.uiSelectedBlock
+                    `shouldBe` Just lastBlock.blockId
+                lastSelected.uiFollow `shouldBe` True
+                let resumed = reduceUi (UiSetFollow True) firstSelected
+                resumed.uiSelectedBlock
+                    `shouldBe` Just lastBlock.blockId
+                resumed.uiFollow `shouldBe` True
+            _ -> expectationFailure "expected three blocks"
+
+    it "queues follow-ups in order and preserves the draft typed behind them" do
+        let afterFirstStarted =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetDraft "first follow-up" 15
+                    , UiInputQueued "first follow-up"
+                    , UiSetDraft "second follow-up" 16
+                    , UiInputQueued "second follow-up"
+                    , UiSetDraft "draft for later" 15
+                    , UiQueuedInputStarted
+                    , UiUserSubmitted "first follow-up"
+                    ]
+            afterSecondStarted =
+                reduceUi
+                    (UiUserSubmitted "second follow-up")
+                    (reduceUi UiQueuedInputStarted afterFirstStarted)
+        Foldable.toList afterFirstStarted.uiQueuedInputs
+            `shouldBe` ["second follow-up"]
+        afterFirstStarted.uiDraft `shouldBe` "draft for later"
+        afterFirstStarted.uiCursor `shouldBe` 15
+        map (.blockBody) (Foldable.toList afterFirstStarted.uiBlocks)
+            `shouldBe` ["first follow-up"]
+        Foldable.toList afterSecondStarted.uiQueuedInputs `shouldBe` []
+        afterSecondStarted.uiDraft `shouldBe` "draft for later"
+        map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
+            `shouldBe` ["first follow-up", "second follow-up"]
+
+    it "clears only the draft that was submitted immediately" do
+        let state =
+                apply
+                    [ UiSetAwaitingInput True
+                    , UiSetDraft "send this" 9
+                    , UiDraftSubmitted
+                    , UiUserSubmitted "send this"
+                    ]
+        state.uiDraft `shouldBe` ""
+        state.uiCursor `shouldBe` 0
+        state.uiAwaitingInput `shouldBe` False
+
+    it "stays busy between a model tool request and the next model round" do
+        let call =
+                functionToolCall
+                    "busy-tool"
+                    "run_terminal_cmd"
+                    "{\"command\":\"sleep 1\"}"
+            requestingTool =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [call] Nothing))
+                    ]
+            afterTool =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                { callId = "busy-tool"
+                                , output = "exit: 0"
+                                , callKind = FunctionCallKind
+                                })))
+                    (reduceUi (UiLoop (ToolStarted call)) requestingTool)
+            finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r2" [] (Just "done"))))
+                    (reduceUi (UiLoop TurnStarted) afterTool)
+        requestingTool.uiRunning `shouldBe` True
+        requestingTool.uiActivity `shouldBe` "Running tools…"
+        afterTool.uiRunning `shouldBe` True
+        finished.uiRunning `shouldBe` False
+        finished.uiActivity `shouldBe` "Ready"
 
     it "deletes the previous word for command/option-backspace" do
         deleteWordBefore "hello brave world" 17

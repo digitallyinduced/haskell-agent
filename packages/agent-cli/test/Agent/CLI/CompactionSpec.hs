@@ -5,7 +5,9 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWith
     , codexAutoCompactTokenLimit
     , runProviderCompact
+    , shouldFallbackFromRemoteCompact
     )
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
 import Agent.OpenAI.Compaction (userTextItem)
 import Agent.Responses.Types (defaultResponseCreateParams)
@@ -33,6 +35,29 @@ spec = do
                     error "empty compaction unexpectedly requested credentials"
             runProviderCompact OpenAIProvider (Just provider) params transcript Nothing
                 `shouldReturn` Left "nothing to compact"
+
+    describe "shouldFallbackFromRemoteCompact" do
+        it "falls back when the remote compact endpoint returns Not Found" do
+            shouldFallbackFromRemoteCompact
+                (ProviderError NotFoundError "Not Found" Nothing)
+                `shouldBe` True
+            shouldFallbackFromRemoteCompact
+                (HttpError 404 "{\"detail\":\"Not Found\"}")
+                `shouldBe` True
+
+        it "does not mask account, quota, or context-window failures" do
+            shouldFallbackFromRemoteCompact
+                (ProviderError AuthenticationError "expired" Nothing)
+                `shouldBe` False
+            shouldFallbackFromRemoteCompact
+                (ProviderError InvalidRequestError "bio_policy" Nothing)
+                `shouldBe` False
+            shouldFallbackFromRemoteCompact
+                (ProviderError UsageLimitReached "limit" Nothing)
+                `shouldBe` False
+            shouldFallbackFromRemoteCompact
+                (ProviderError ContextWindowExceeded "too long" Nothing)
+                `shouldBe` False
 
     describe "autoCompactOpenAiBackendWith" do
         it "compacts before the next request at the Codex token limit" do

@@ -51,7 +51,6 @@ import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
     , roleMuted
-    , setCliWindowTitle
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -82,7 +81,6 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
-import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Exception.Safe (onException)
 import Data.IORef
@@ -96,7 +94,7 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import System.IO (hIsTerminalDevice, stderr, stdout)
+import System.IO (stderr, stdout)
 import qualified System.OsPath
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
@@ -108,7 +106,7 @@ runOneTurn env@SessionEnv
     , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
-    , sessionAgentsContext = agentsContext
+    , sessionStartupContext = startupContext
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
@@ -116,6 +114,7 @@ runOneTurn env@SessionEnv
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
+    , sessionSetWindowTitle = setWindowTitle
     , sessionBeginSubagentTurn = beginSubagentTurn
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
@@ -124,6 +123,7 @@ runOneTurn env@SessionEnv
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
   -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
   resetCancel config.loopCancel
+  writeIORef env.sessionRestartEffort Nothing
   withTurnCancel interrupt config.loopCancel $
     (if isJust fullscreen
         then id
@@ -163,36 +163,40 @@ runOneTurn env@SessionEnv
         PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
-    pendingAgents <- atomicModifyIORef' agentsContext \pendingCtx -> (Nothing, pendingCtx)
+    pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     let planReminder =
             if planActive
                 then Just (planModeReminder planPath)
                 else Nothing
-        agentsInput = case pendingAgents of
-            Just agents | null beforeItems && isNothing prev ->
-                Just (UserMessage agents)
-            _ -> Nothing
-        baseInputs = maybe inputs (: inputs) agentsInput
-        restoreAgentsInput = case agentsInput of
-            Just (UserMessage agents) ->
-                atomicModifyIORef' agentsContext \current ->
-                    (current <|> Just agents, ())
-            _ -> pure ()
+        baseInputs = case pendingStartup of
+            Just context -> UserMessage context : inputs
+            Nothing -> inputs
+        restoreStartupContext = case pendingStartup of
+            Nothing -> pure ()
+            Just context ->
+                modifyIORef' startupContext \current ->
+                    Just $ case current of
+                        Nothing -> context
+                        Just newer -> context <> "\n\n" <> newer
         turnInputs0 = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
     turnInputs <- stampTurnInputs turnInputs0
     startedAt <- readIORef render.renderStartedAt
     wallStarted <- getCurrentTime
-    when terminal.terminalSemanticPrompts $
+    when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout osc133CommandStart
     rootTurnId <- beginSubagentTurn
     result <- runLoopInputs config prev turnInputs
-        `onException` abortSubagentTurn rootTurnId
+        `onException`
+            (restoreStartupContext >> abortSubagentTurn rootTurnId)
     clearThinking render
     finishedAt <- getCurrentTime
+    restartEffort <-
+        atomicModifyIORef' env.sessionRestartEffort \requested ->
+            (Nothing, requested)
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
@@ -214,10 +218,26 @@ runOneTurn env@SessionEnv
                         }
                 handle' <- appendTurn handle turn
                 writeIORef slotRef (PersistenceActive handle')
-    case result of
-        Left cancelled@(LoopCancelled _) -> do
-            restoreAgentsInput
-            finishTerminal terminal wallStarted finishedAt 130 "Agent cancelled"
+    case (restartEffort, result) of
+        (Just level, _) -> do
+            restoreStartupContext
+            abortSubagentTurn rootTurnId
+            writeIORef transcriptRef beforeItems
+            planState <- readIORef planMode.planStateRef
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime UiTurnRestarted
+                Nothing -> pure ()
+            pure $ TurnRestartRequested level PendingTurn
+                { pendingPromptText = promptText
+                , pendingInputs = inputs
+                , pendingExitAfter = False
+                , pendingPlanState = planState
+                }
+        (Nothing, Left cancelled@(LoopCancelled _)) -> do
+            restoreStartupContext
+            finishTerminal (isNothing fullscreen)
+                terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
             writeIORef transcriptRef beforeItems
             model <- readIORef render.renderModelRef
@@ -235,8 +255,8 @@ runOneTurn env@SessionEnv
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete "cancelled"
             pure TurnSucceeded
-        Left err -> do
-            restoreAgentsInput
+        (Nothing, Left err) -> do
+            restoreStartupContext
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of
@@ -248,7 +268,8 @@ runOneTurn env@SessionEnv
                             Just runtime ->
                                 emitUiEvent runtime
                                     (UiTurnEnded BlockFailed)
-                        finishTerminal terminal wallStarted finishedAt 1
+                        finishTerminal (isNothing fullscreen)
+                            terminal wallStarted finishedAt 1
                             "Agent provider unavailable"
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
@@ -258,7 +279,8 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
-                    finishTerminal terminal wallStarted finishedAt 1 "Agent turn failed"
+                    finishTerminal (isNothing fullscreen)
+                        terminal wallStarted finishedAt 1 "Agent turn failed"
                     writeIORef transcriptRef beforeItems
                     model <- readIORef render.renderModelRef
                     case fullscreen of
@@ -278,8 +300,9 @@ runOneTurn env@SessionEnv
                                 (formatTurnStatus color "error" (elapsedDetail model))
                     persistIncomplete (Text.pack (show err))
                     pure TurnFailed
-        Right loopResult -> do
-            finishTerminal terminal wallStarted finishedAt 0 "Agent finished"
+        (Nothing, Right loopResult) -> do
+            finishTerminal (isNothing fullscreen)
+                terminal wallStarted finishedAt 0 "Agent finished"
             finishSubagentTurn rootTurnId
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
@@ -348,8 +371,7 @@ runOneTurn env@SessionEnv
                         )
                         (requestConversationTitle env countedHandle titleTurns)
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        tty <- hIsTerminalDevice stdout
-                        setCliWindowTitle tty stdout
+                        setWindowTitle
                             (cliWindowTitle countedMeta.metaCwd
                                 (Just countedMeta.metaTitle))
                     applyPendingSessionTitles env
@@ -396,20 +418,20 @@ applyPendingSessionTitles env =
                                 resultTitle
                                 handle
                             writeIORef slotRef (PersistenceActive updated)
-                            tty <- hIsTerminalDevice stdout
-                            setCliWindowTitle tty stdout
+                            env.sessionSetWindowTitle
                                 (cliWindowTitle updated.sessionMeta.metaCwd
                                     (Just updated.sessionMeta.metaTitle))
 
 finishTerminal
-    :: TerminalCapabilities
+    :: Bool
+    -> TerminalCapabilities
     -> UTCTime
     -> UTCTime
     -> Int
     -> Text
     -> IO ()
-finishTerminal terminal started finished exitCode message = do
-    when terminal.terminalSemanticPrompts $
+finishTerminal semanticPrompts terminal started finished exitCode message = do
+    when (semanticPrompts && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout
             (osc133CommandFinished (Just exitCode))
     let seconds = realToFrac (diffUTCTime finished started) :: Double

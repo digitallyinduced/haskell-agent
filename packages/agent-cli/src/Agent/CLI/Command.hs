@@ -1,19 +1,24 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
     ( ReplAction(..)
+    , SkillCommand(..)
     , SlashCommand(..)
     , SlashMenu(..)
     , SlashSuggestion(..)
     , currentEffort
     , currentModel
     , formatSlashHelp
+    , formatSlashHelpWithSkills
     , lookupSlashCommand
     , parseReplLine
+    , parseReplLineWithSkills
     , setModel
     , setReasoningEffort
     , slashCommands
     , slashCompletionCandidates
+    , slashCompletionCandidatesWithSkills
     , slashMenuFor
+    , slashMenuForWithSkills
     ) where
 
 import Agent.CLI.Models (catalogModelIds)
@@ -60,6 +65,8 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplSkills !Bool
+    | ReplInvokeSkill !Text !Text
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
@@ -72,6 +79,14 @@ data ReplAction
       -- ^ Start a fresh persisted session id with empty history.
     | ReplUsage
     | ReplCommandError Text
+    deriving (Eq, Show)
+
+data SkillCommand = SkillCommand
+    { skillCommandName :: !Text
+    , skillCommandSummary :: !Text
+    , skillCommandArgumentHint :: !(Maybe Text)
+    , skillCommandSource :: !Text
+    }
     deriving (Eq, Show)
 
 -- | One REPL slash command. @slashName@ is the canonical name without a
@@ -111,6 +126,7 @@ slashCommands =
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     ]
   where
@@ -130,14 +146,17 @@ lookupSlashCommand raw =
         slashCommands
 
 parseReplLine :: Text -> ReplAction
-parseReplLine raw =
+parseReplLine = parseReplLineWithSkills []
+
+parseReplLineWithSkills :: [SkillCommand] -> Text -> ReplAction
+parseReplLineWithSkills skills raw =
     let line = Text.strip raw
     in if line == ":q" || line == ":quit"
         then ReplQuit
         else if line == ":reload"
             then ReplReload
             else case Text.uncons line of
-                Just ('/', _) -> parseSlash line
+                Just ('/', _) -> parseSlash skills line
                 Just (':', _) -> parseColon raw
                 _ -> ReplPrompt raw
 
@@ -146,13 +165,18 @@ parseColon raw
     | isAlwaysApproveAlias (Text.drop 1 (Text.strip raw)) = ReplToggleAlwaysApprove
     | otherwise = ReplPrompt raw
 
-parseSlash :: Text -> ReplAction
-parseSlash line = case Text.words line of
+parseSlash :: [SkillCommand] -> Text -> ReplAction
+parseSlash skills line = case Text.words line of
     [] -> unknownCommand "/"
     command : args -> case lookupSlashCommand command of
-        Nothing -> unknownCommand command
+        Nothing -> case lookupSkillCommand skills command of
+            Just skill ->
+                ReplInvokeSkill
+                    skill.skillCommandName
+                    (Text.strip (Text.drop (Text.length command) line))
+            Nothing -> unknownCommand command
         Just spec -> case spec.slashName of
-            "help" -> parseHelpCommand args
+            "help" -> parseHelpCommand skills args
             "effort" -> parseEffortCommand args
             "model" -> parseModelCommand args
             "plan" ->
@@ -241,6 +265,10 @@ parseSlash line = case Text.words line of
                 if null args
                     then ReplAgents
                     else ReplCommandError "usage: /agents"
+            "skills" -> case args of
+                [] -> ReplSkills False
+                ["reload"] -> ReplSkills True
+                _ -> ReplCommandError "usage: /skills [reload]"
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -251,12 +279,19 @@ unknownCommand :: Text -> ReplAction
 unknownCommand command =
     ReplCommandError ("unknown command: " <> command <> " (try /help)")
 
-parseHelpCommand :: [Text] -> ReplAction
-parseHelpCommand = \case
+lookupSkillCommand :: [SkillCommand] -> Text -> Maybe SkillCommand
+lookupSkillCommand skills raw =
+    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
+    in find ((== name) . Text.toLower . (.skillCommandName)) skills
+
+parseHelpCommand :: [SkillCommand] -> [Text] -> ReplAction
+parseHelpCommand skills = \case
     [] -> ReplHelp Nothing
     [name] -> case lookupSlashCommand name of
         Just spec -> ReplHelp (Just spec.slashName)
-        Nothing -> unknownCommand name
+        Nothing -> case lookupSkillCommand skills name of
+            Just skill -> ReplHelp (Just skill.skillCommandName)
+            Nothing -> unknownCommand name
     _ -> ReplCommandError "usage: /help [NAME]"
 
 parseResumeCommand :: [Text] -> ReplAction
@@ -347,13 +382,20 @@ currentModel params =
 
 -- | Help text for @/help@ / @/help NAME@.
 formatSlashHelp :: Bool -> Maybe Text -> Text
-formatSlashHelp color = \case
+formatSlashHelp color = formatSlashHelpWithSkills color []
+
+formatSlashHelpWithSkills :: Bool -> [SkillCommand] -> Maybe Text -> Text
+formatSlashHelpWithSkills color skills = \case
     Nothing ->
-        Text.intercalate "\n" (map (formatSlashHelpRow color) slashCommands)
+        Text.intercalate "\n"
+            (map (formatSlashHelpRow color) slashCommands
+                <> map (formatSkillHelpRow color) skills)
     Just name ->
         case lookupSlashCommand name of
             Just spec -> formatSlashHelpRow color spec
-            Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
+            Nothing -> case lookupSkillCommand skills name of
+                Just skill -> formatSkillHelpRow color skill
+                Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
 
 formatSlashHelpRow :: Bool -> SlashCommand -> Text
 formatSlashHelpRow color spec =
@@ -370,17 +412,35 @@ formatSlashHelpRow color spec =
         <> "\n  "
         <> roleMuted color spec.slashSummary
 
+formatSkillHelpRow :: Bool -> SkillCommand -> Text
+formatSkillHelpRow color skill =
+    let usage =
+            "/"
+                <> skill.skillCommandName
+                <> maybe "" (" " <>) skill.skillCommandArgumentHint
+    in rolePrompt color usage
+        <> "\n  "
+        <> roleMuted color
+            (skill.skillCommandSummary <> " · skill · " <> skill.skillCommandSource)
+
 -- | Haskeline replacements for the word being completed.
 -- @reversedPrev@ is the text before that word, reversed (haskeline's
 -- 'completeWordWithPrev' convention). Empty when the buffer is not a slash
 -- line.
 slashCompletionCandidates :: String -> String -> [String]
-slashCompletionCandidates reversedPrev word =
+slashCompletionCandidates = slashCompletionCandidatesWithSkills []
+
+slashCompletionCandidatesWithSkills
+    :: [SkillCommand]
+    -> String
+    -> String
+    -> [String]
+slashCompletionCandidatesWithSkills skills reversedPrev word =
     let prev = reverse reversedPrev
     in if not (isSlashLine prev word)
         then []
         else case words prev of
-            [] -> completeSlashNames word
+            [] -> completeSlashNames skills word
             cmd : _ -> completeSlashArgs cmd word
 
 isSlashLine :: String -> String -> Bool
@@ -388,15 +448,16 @@ isSlashLine prev word = case dropWhile isSpace prev of
     [] -> "/" `isPrefixOf` word
     rest -> "/" `isPrefixOf` rest
 
-completeSlashNames :: String -> [String]
-completeSlashNames word =
+completeSlashNames :: [SkillCommand] -> String -> [String]
+completeSlashNames skills word =
     let needle = Text.toLower (Text.dropWhile (== '/') (Text.pack word))
         names =
             concatMap
                 (\cmd -> ("/" <> cmd.slashName) : map ("/" <>) cmd.slashAliases)
                 slashCommands
+        skillNames = map (("/" <>) . (.skillCommandName)) skills
     in filter (\name -> needle `Text.isPrefixOf` Text.drop 1 (Text.toLower (Text.pack name)))
-        (map Text.unpack names)
+        (map Text.unpack (names <> skillNames))
 
 completeSlashArgs :: String -> String -> [String]
 completeSlashArgs cmd word =
@@ -437,19 +498,23 @@ data SlashMenu = SlashMenu
 
 -- | Derive a live menu from a leading slash command at the cursor.
 slashMenuFor :: Text -> Int -> Maybe SlashMenu
-slashMenuFor text cursor
+slashMenuFor = slashMenuForWithSkills []
+
+slashMenuForWithSkills :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
+slashMenuForWithSkills skills text cursor
     | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
     | otherwise =
         let commandToken = Text.takeWhile (not . isSpace) text
             commandEnd = Text.length commandToken
         in if cursor <= commandEnd
-            then commandMenu (Text.take cursor text) commandEnd
+            then commandMenu skills (Text.take cursor text) commandEnd
             else argumentMenu commandToken commandEnd text cursor
 
-commandMenu :: Text -> Int -> Maybe SlashMenu
-commandMenu token replaceEnd =
+commandMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
+commandMenu skills token replaceEnd =
     let query = Text.toLower (Text.drop 1 token)
-        scored = mapMaybe (scoreCommand query) (zip [0 :: Int ..] slashCommands)
+        commands = slashCommands <> map skillAsSlashCommand skills
+        scored = mapMaybe (scoreCommand query) (zip [0 :: Int ..] commands)
         ordered
             | Text.null query = scored
             | otherwise = sortOn (\(score, order, _, _) -> (Down score, order)) scored
@@ -472,6 +537,20 @@ commandMenu token replaceEnd =
             , slashMenuReplaceEnd = replaceEnd
             , slashMenuSuggestions = rows
             }
+
+skillAsSlashCommand :: SkillCommand -> SlashCommand
+skillAsSlashCommand skill =
+    SlashCommand
+        { slashName = skill.skillCommandName
+        , slashAliases = []
+        , slashUsage =
+            "/"
+                <> skill.skillCommandName
+                <> maybe "" (" " <>) skill.skillCommandArgumentHint
+        , slashSummary =
+            skill.skillCommandSummary <> " · skill · " <> skill.skillCommandSource
+        , slashTakesArguments = True
+        }
 
 scoreCommand
     :: Text

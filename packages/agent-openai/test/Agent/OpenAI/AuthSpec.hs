@@ -78,6 +78,14 @@ spec = do
             now <- getCurrentTime
             needsRefresh state now `shouldBe` True
 
+        it "does not refresh static bearer credentials" $ do
+            let state = (mkFreshAuth "acc")
+                    { accessToken = "not-a-jwt"
+                    , refreshToken = ""
+                    }
+            now <- getCurrentTime
+            needsRefresh state now `shouldBe` False
+
     describe "newPool + getAccessToken" $ do
         it "dispenses fresh tokens without calling the refresh callback" $ do
             callCounter <- newIORef (0 :: Int)

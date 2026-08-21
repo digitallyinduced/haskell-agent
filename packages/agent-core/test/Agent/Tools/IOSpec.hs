@@ -14,7 +14,9 @@ import Agent.Tools.IO
     , resolveUnderCwd
     , runShellCommand
     , runShellCommandStreaming
+    , runningLiveOutput
     , startShellCommand
+    , stopShellCommand
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
@@ -180,8 +182,17 @@ spec = describe "Agent.Tools.IO" do
             finalSnapshots `shouldSatisfy`
                 any (Text.isInfixOf "firstsecond")
 
+    it "force-kills a process group on timeout" do
+        withTempDir checkTimeoutKillsProcessGroup
+
+    it "caps foreground output" do
+        withTempDir checkForegroundOutputCap
+
     it "collects both output streams from a background shell command" do
         withTempDir checkBackgroundOutput
+
+    it "caps live and final background output" do
+        withTempDir checkBackgroundOutputCap
 
 waitForSnapshot :: IORef [Text.Text] -> (Text.Text -> Bool) -> Int -> IO Bool
 waitForSnapshot _ _ 0 = pure False
@@ -193,6 +204,31 @@ waitForSnapshot ref predicate attempts = do
             threadDelay 50000
             waitForSnapshot ref predicate (attempts - 1)
 
+checkTimeoutKillsProcessGroup dir = do
+    let osDir = fromFilePath dir
+        heartbeatFile = dir </> "heartbeat"
+        command =
+            "trap '' INT TERM; "
+                <> "(trap '' INT TERM; i=0; while :; do "
+                <> "i=$((i + 1)); printf '%s' \"$i\" > "
+                <> show heartbeatFile
+                <> "; sleep 0.02; done) & wait"
+    env <- defaultToolEnv osDir
+    result <- runShellCommand env osDir command 200
+    result.commandTimedOut `shouldBe` True
+    threadDelay 200000
+    before <- readFile heartbeatFile
+    threadDelay 200000
+    readFile heartbeatFile `shouldReturn` before
+
+checkForegroundOutputCap dir = do
+    let osDir = fromFilePath dir
+    base <- defaultToolEnv osDir
+    let env = base { toolStdoutCap = 64 }
+    result <- runShellCommand env osDir "yes x | head -c 262144" 5000
+    Text.length result.commandStdout `shouldSatisfy` (< 128)
+    result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
+
 checkBackgroundOutput dir = do
     let osDir = fromFilePath dir
     env <- defaultToolEnv osDir
@@ -202,6 +238,22 @@ checkBackgroundOutput dir = do
     result.commandExitCode `shouldBe` Just 0
     result.commandStdout `shouldBe` "stdout"
     result.commandStderr `shouldBe` "stderr"
+
+checkBackgroundOutputCap dir = do
+    let osDir = fromFilePath dir
+    base <- defaultToolEnv osDir
+    let env = base { toolStdoutCap = 64 }
+    Right running <-
+        startShellCommand env osDir
+            "yes x | head -c 262144; sleep 30"
+    threadDelay 200000
+    (liveOut, _) <- runningLiveOutput running
+    Text.length liveOut `shouldSatisfy` (< 128)
+    liveOut `shouldSatisfy` Text.isInfixOf "[truncated"
+    stopShellCommand running
+    result <- readMVar running.runningResult
+    Text.length result.commandStdout `shouldSatisfy` (< 128)
+    result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
 
 checkConcurrentAtomicWrites :: FilePath -> IO ()
 checkConcurrentAtomicWrites dir = do

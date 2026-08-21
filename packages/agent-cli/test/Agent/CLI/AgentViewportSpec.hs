@@ -2,7 +2,9 @@ module Agent.CLI.AgentViewportSpec (spec) where
 
 import Agent.CLI.AgentViewport
 import Agent.CLI.Picker (PickerKey(..))
+import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -52,6 +54,23 @@ spec = do
             applyAgentViewportKey PickerKeyCancel moved
                 `shouldBe` Left Nothing
 
+        it "selects clicked targets and preserves them across live refreshes" do
+            let selected =
+                    selectAgentTarget
+                        (AgentChild (SubagentId "alpha"))
+                        state
+                refreshed =
+                    refreshAgentViewportState
+                        [ rootEntry
+                        , child "alpha" "/root/alpha" "done"
+                        , child "gamma" "/root/alpha/gamma" "running"
+                        ]
+                        selected
+            (.agentTarget) <$> selectedAgentEntry refreshed
+                `shouldBe` Just (AgentChild (SubagentId "alpha"))
+            (.agentStatus) <$> selectedAgentEntry refreshed
+                `shouldBe` Just "done"
+
         it "renders hierarchy and transcript panes" do
             let frame = renderAgentViewportFrameFor False 10 70 state
             frame `shouldSatisfy` Text.isInfixOf "hierarchy"
@@ -76,6 +95,26 @@ spec = do
                 ]
                 `shouldBe` ["pending", "running", "done", "error", "interrupted"]
 
+    describe "responseItemPreviewLines" do
+        it "keeps the first line and only the requested transcript tail" do
+            let items =
+                    [ messageItem RoleUser "request"
+                    , messageItem RoleAssistant "one\ntwo\nthree\nfour"
+                    ]
+            responseItemPreviewLines 2 items
+                `shouldBe`
+                    [ "user: request"
+                    , "           three"
+                    , "           four"
+                    ]
+
+        it "uses only the first line when no transcript tail is requested" do
+            responseItemPreviewLines 0
+                [ messageItem RoleUser "request"
+                , messageItem RoleAssistant "answer"
+                ]
+                `shouldBe` ["user: request"]
+
 rootEntry :: AgentEntry
 rootEntry =
     AgentEntry
@@ -93,6 +132,16 @@ child agentId path status =
         , agentStatus = status
         , agentTranscript = ["assistant: working"]
         }
+
+messageItem :: ResponseRole -> Text -> ResponseItem
+messageItem role text = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentText text
+    , role
+    , status = Nothing
+    , phase = Nothing
+    , extraFields = KeyMap.empty
+    }
 
 rightState :: Either (Maybe AgentTarget) AgentViewportState -> IO AgentViewportState
 rightState result = case result of

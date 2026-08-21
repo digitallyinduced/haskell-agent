@@ -11,6 +11,7 @@ module Agent.CLI.Render
     , formatLoopErrorColored
     , formatSearchReplaceDiff
     , formatThinkingBlock
+    , formatToolOutput
     , formatToolStarted
     , formatTurnStatus
     , putTextLn
@@ -60,17 +61,27 @@ import Agent.CLI.Style
     , spinnerFrames
     , style
     )
-import Agent.JsonText (jsonTextFieldDefault)
+import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
-import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallResult(..)
+    , canonicalToolName
+    )
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Foldable as Foldable
 import Data.IORef
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.Console.ANSI (ConsoleLayer(..), SGR(..))
@@ -95,6 +106,7 @@ data RenderConfig = RenderConfig
     , renderModelRef :: !(IORef Text)
     , renderActivityRef :: !(IORef Text)
     , renderStartedAt :: !(IORef (Maybe UTCTime))
+    , renderToolCalls :: !(IORef (Map.Map Text ToolCall))
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     }
 
@@ -142,6 +154,7 @@ renderEventUnlocked config = \case
         writeIORef config.renderLiveActive False
         writeIORef config.renderReasoningBuffer ""
         writeIORef config.renderActivityRef "Thinking…"
+        writeIORef config.renderToolCalls Map.empty
         now <- getCurrentTime
         writeIORef config.renderStartedAt (Just now)
         startThinkingSpinnerUnlocked config
@@ -156,6 +169,7 @@ renderEventUnlocked config = \case
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
         commitThinkingUnlocked config
+        modifyIORef' config.renderToolCalls (Map.insert call.callId call)
         writeIORef config.renderActivityRef (summarizeToolCall call)
         putTextLn config.renderStderr (formatToolStarted config.renderColor call)
         let extra = formatToolBody config.renderColor call
@@ -171,9 +185,14 @@ renderEventUnlocked config = \case
     -- handles these updates; minimal mode prints the final ToolFinished result.
     ToolOutputUpdated _callId _output ->
         pure ()
-    ToolFinished result ->
+    ToolFinished result -> do
+        calls <- readIORef config.renderToolCalls
+        modifyIORef' config.renderToolCalls (Map.delete result.callId)
+        let output = maybe result.output
+                (`formatToolOutput` result.output)
+                (Map.lookup result.callId calls)
         putTextLn config.renderStderr
-            (roleToolOutput config.renderColor (truncateToolOutput result.output))
+            (roleToolOutput config.renderColor (truncateToolOutput output))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- Color mode also paints each line with 'agentBackground'.
@@ -567,7 +586,7 @@ data ToolDetailKind
     | ToolDetailCommand
 
 toolChrome :: Text -> ToolChrome
-toolChrome = \case
+toolChrome name = case canonicalToolName name of
     "read_file" -> ToolChrome "Read" ToolDetailPath
     "list_dir" -> ToolChrome "Listed" ToolDetailPath
     "grep" -> ToolChrome "Searched" ToolDetailMuted
@@ -579,17 +598,17 @@ toolChrome = \case
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
     "task" -> ToolChrome "Ran" ToolDetailMuted
-    "spawn_agent" -> ToolChrome "Spawned" ToolDetailMuted
-    "wait_agent" -> ToolChrome "Waited" ToolDetailMuted
-    "send_message" -> ToolChrome "Sent" ToolDetailMuted
-    "followup_task" -> ToolChrome "Followed up" ToolDetailMuted
-    "list_agents" -> ToolChrome "Listed" ToolDetailMuted
+    "spawn_agent" -> ToolChrome "Spawned agent" ToolDetailMuted
+    "wait_agent" -> ToolChrome "Waited for agent updates" ToolDetailMuted
+    "send_message" -> ToolChrome "Sent message to" ToolDetailMuted
+    "followup_task" -> ToolChrome "Followed up with" ToolDetailMuted
+    "list_agents" -> ToolChrome "Listed agents" ToolDetailMuted
     "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
     "update_plan" -> ToolChrome "Updated" ToolDetailMuted
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
-    name -> ToolChrome name ToolDetailMuted
+    _ -> ToolChrome name ToolDetailMuted
 
 toolVerb :: Text -> Text
 toolVerb name = case toolChrome name of
@@ -597,7 +616,7 @@ toolVerb name = case toolChrome name of
     ToolChrome verb _ -> verb
 
 formatToolBody :: Bool -> ToolCall -> Text
-formatToolBody color call = case call.name of
+formatToolBody color call = case canonicalToolName call.name of
     "search_replace" -> formatSearchReplaceDiff color call.arguments
     _ -> ""
 
@@ -636,7 +655,7 @@ renderToolPath color path =
         else styled
 
 toolDetail :: ToolCall -> Text
-toolDetail call = case call.name of
+toolDetail call = case canonicalToolName call.name of
     "read_file" -> jsonTextFieldDefault "target_file" call.arguments
     "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
     "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
@@ -649,7 +668,64 @@ toolDetail call = case call.name of
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
     "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
+    "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
+    "send_message" -> jsonTextFieldDefault "target" call.arguments
+    "followup_task" -> jsonTextFieldDefault "target" call.arguments
+    "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
+    "list_agents" ->
+        maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
     _ -> ""
+
+-- | Turn structured collaboration results into compact terminal text. The
+-- provider still receives the original JSON result; this is display-only.
+formatToolOutput :: ToolCall -> Text -> Text
+formatToolOutput call output = case canonicalToolName call.name of
+    "spawn_agent" ->
+        maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
+    "wait_agent" ->
+        fromMaybe output (nonEmptyJsonText "message" output)
+    "list_agents" ->
+        fromMaybe output (formatAgentList output)
+    "interrupt_agent" ->
+        maybe output ("Previous status: " <>)
+            (nonEmptyJsonText "previous_status" output)
+    _ -> output
+
+nonEmptyJsonText :: Text -> Text -> Maybe Text
+nonEmptyJsonText key input = jsonTextField key input >>= \value ->
+    let stripped = Text.strip value
+    in if Text.null stripped then Nothing else Just stripped
+
+formatAgentList :: Text -> Maybe Text
+formatAgentList output = do
+    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
+    Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
+    let rows = mapMaybeAgent (Foldable.toList agents)
+    pure $ case rows of
+        [] -> "(no live agents)"
+        _ -> Text.intercalate "\n" rows
+  where
+    mapMaybeAgent = foldr
+        (\value rest ->
+            case value of
+                Aeson.Object agent ->
+                    case
+                        ( jsonObjectText "agent_name" agent
+                        , jsonObjectText "agent_status" agent
+                        ) of
+                        (Just name, Just status) ->
+                            (name <> " · " <> status) : rest
+                        (Just name, Nothing) -> name : rest
+                        _ -> rest
+                _ -> rest)
+        []
+
+jsonObjectText :: Text -> Aeson.Object -> Maybe Text
+jsonObjectText key object =
+    case KeyMap.lookup (Key.fromText key) object of
+        Just (Aeson.String value)
+            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
+        _ -> Nothing
 
 firstPatchPath :: Text -> Maybe Text
 firstPatchPath patch =

@@ -12,6 +12,7 @@ module Agent.ToolDispatch
     , noArgsTool
     , functionToolCall
     , customToolCall
+    , canonicalToolName
     , dispatchToolCall
     , dispatchToolHandler
     , canonicalToolName

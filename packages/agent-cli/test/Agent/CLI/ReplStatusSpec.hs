@@ -1,11 +1,15 @@
 module Agent.CLI.ReplStatusSpec (spec) where
 
 import Agent.CLI
-    ( applyReplMode
+    ( DevResult(..)
+    , afterDev
+    , applyReplMode
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
+    , formatStartupTimings
     , formatTokenUsage
+    , withRestoredCurrentDirectory
     )
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Options (ApprovalPolicy(..))
@@ -18,9 +22,14 @@ import Agent.CLI.ReplMode
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
 import Agent.OsPath (fromFilePath)
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket, throwIO)
 import Data.IORef (newIORef, readIORef)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( getCurrentDirectory
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    , setCurrentDirectory
+    )
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -48,6 +57,32 @@ spec = do
                     [ "--yolo"
                     , "--resume", "2026-08-20-abcd1234"
                     ]
+
+        it "carries reload state in the GHCi continuation" do
+            afterDev (DevReload "2026-08-20-abcd1234")
+                `shouldReturn`
+                    unlines
+                        [ ":reload"
+                        , ":module +Agent.CLI"
+                        , ":cmd afterDev =<< devMainResume (Just \"2026-08-20-abcd1234\")"
+                        ]
+
+    describe "withRestoredCurrentDirectory" do
+        it "restores the GHCi cwd after normal completion" do
+            original <- getCurrentDirectory
+            withTempDir "agent-repl-cwd-" \temporary -> do
+                withRestoredCurrentDirectory (setCurrentDirectory temporary)
+                getCurrentDirectory `shouldReturn` original
+
+        it "restores the GHCi cwd after an exception" do
+            original <- getCurrentDirectory
+            withTempDir "agent-repl-cwd-" \temporary -> do
+                let failAfterChangingDirectory = do
+                        setCurrentDirectory temporary
+                        throwIO (userError "boom")
+                withRestoredCurrentDirectory failAfterChangingDirectory
+                    `shouldThrow` anyIOException
+                getCurrentDirectory `shouldReturn` original
 
     describe "formatReplStatusLine" do
         it "shows model, effort, and interaction mode" do
@@ -84,6 +119,16 @@ spec = do
                         ReplModeNormal emptyTokenUsage
             terminalTextWidth line `shouldBe` 16
             line `shouldBe` "  模型模型 · hi…"
+
+    describe "formatStartupTimings" do
+        it "sorts cumulative startup markers and keeps subsecond precision" do
+            formatStartupTimings
+                [ ("ready", 1.25)
+                , ("first frame", 0.042)
+                , ("Loading tools…", 0.4)
+                ]
+                `shouldBe`
+                    "startup: first frame 42ms · Loading tools… 400ms · ready 1.25s"
 
     describe "cycleReplMode" do
         it "walks ask → plan → always-approve → ask" do

@@ -15,6 +15,12 @@ spec = do
             decodePickerKey "\ESC[1;2A" `shouldBe` Just PickerKeyUp
             decodePickerKey "\ESC[1;5B" `shouldBe` Just PickerKeyDown
 
+        it "ignores Kitty key releases instead of moving twice" do
+            decodePickerKey "\ESC[1;1:1A" `shouldBe` Just PickerKeyUp
+            decodePickerKey "\ESC[1;1:2B" `shouldBe` Just PickerKeyDown
+            decodePickerKey "\ESC[1;1:3A" `shouldBe` Nothing
+            decodePickerKey "\ESC[106;1:3u" `shouldBe` Nothing
+
     describe "decodeMouseEvent" do
         it "decodes SGR clicks, releases, and wheel events" do
             decodeMouseEvent "\ESC[<0;12;7M"

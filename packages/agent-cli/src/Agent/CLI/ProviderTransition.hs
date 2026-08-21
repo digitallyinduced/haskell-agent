@@ -40,6 +40,7 @@ data ProviderTransition = ProviderTransition
 data TurnResult
     = TurnSucceeded
     | TurnFailed
+    | TurnRestartRequested !Text !PendingTurn
     | TurnProviderUnavailable !ApiError !PendingTurn
 
 -- | Rebuild provider-specific state without changing how the invocation was
