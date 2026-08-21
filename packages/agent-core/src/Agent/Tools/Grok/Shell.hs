@@ -114,7 +114,7 @@ newGrokSession env = do
         removeIfExists envFile
         removeIfExists (envFile <.> fromFilePath "cwd")
 
--- | Delete the env/cwd dump and interrupt leftover background tasks.
+-- | Delete the env/cwd dump and stop leftover background tasks.
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
@@ -166,19 +166,23 @@ readTaskOutput session taskId timeoutMs = do
     case Map.lookup taskId tasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
         Just task -> case timeoutMs of
-            Nothing -> snapshotTask task
+            Nothing -> snapshotTask session taskId task
             Just ms -> do
                 raced <- race
                     (threadDelay (max 1 ms * 1000))
                     (readMVar task.backgroundRunning.runningResult)
                 case raced of
-                    Left () -> snapshotTask task
-                    Right result -> pure (formatExit result)
+                    Left () -> snapshotTask session taskId task
+                    Right result -> do
+                        retireTask session taskId task
+                        pure (formatExit result)
 
-snapshotTask :: BackgroundTask -> IO Text
-snapshotTask task =
+snapshotTask :: GrokSession -> Text -> BackgroundTask -> IO Text
+snapshotTask session taskId task =
     tryReadMVar task.backgroundRunning.runningResult >>= \case
-        Just result -> pure (formatExit result)
+        Just result -> do
+            retireTask session taskId task
+            pure (formatExit result)
         Nothing -> do
             (out, err) <- runningLiveOutput task.backgroundRunning
             let body = combinePipes out err
@@ -194,7 +198,16 @@ killTask session taskId = do
         Just task -> do
             releaseResource task.backgroundResource
             result <- readMVar task.backgroundRunning.runningResult
+            forgetTask session taskId
             pure $ "killed " <> taskId <> "\n" <> formatExit result
+
+forgetTask :: GrokSession -> Text -> IO ()
+forgetTask session taskId = modifyMVar_ session.grokTasks (pure . Map.delete taskId)
+
+retireTask :: GrokSession -> Text -> BackgroundTask -> IO ()
+retireTask session taskId task = do
+    releaseResource task.backgroundResource
+    forgetTask session taskId
 
 nextTaskId :: GrokSession -> IO Text
 nextTaskId session = atomicModifyIORef' session.grokNextId \n ->

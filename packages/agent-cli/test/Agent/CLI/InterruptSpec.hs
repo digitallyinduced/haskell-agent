@@ -1,8 +1,13 @@
 module Agent.CLI.InterruptSpec (spec) where
 
 import Agent.CLI.Interrupt
+import Control.Concurrent (threadDelay)
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
-import Control.Exception.Safe (toSyncException)
+import qualified Control.Exception as Exception
+import Control.Exception.Safe (finally, toSyncException)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import System.Exit (ExitCode(..))
+import System.Posix.Signals (Signal, raiseSignal, sigHUP, sigTERM)
 import Test.Hspec
 
 spec :: Spec
@@ -27,3 +32,20 @@ spec = do
 
         it "rejects other wrapped async exceptions" do
             isWrappedUserInterrupt (toSyncException ThreadKilled) `shouldBe` False
+
+    describe "withTerminationHandlers" do
+        it "turns SIGHUP into exit 129 and runs enclosing cleanup" do
+            checkTermination sigHUP 129
+
+        it "turns SIGTERM into exit 143 and runs enclosing cleanup" do
+            checkTermination sigTERM 143
+
+checkTermination :: Signal -> Int -> Expectation
+checkTermination signal expectedCode = do
+    cleaned <- newIORef False
+    result <- Exception.try @ExitCode $
+        withTerminationHandlers $
+            (raiseSignal signal >> threadDelay 1000000)
+                `finally` writeIORef cleaned True
+    result `shouldBe` Left (ExitFailure expectedCode)
+    readIORef cleaned `shouldReturn` True

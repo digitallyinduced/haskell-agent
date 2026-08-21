@@ -9,6 +9,7 @@ module Agent.CLI.Interrupt
     , decideCtrlC
     , newInterruptState
     , withCtrlCHandler
+    , withTerminationHandlers
     , withTurnCancel
     , noteIdleCtrlC
     , isWrappedUserInterrupt
@@ -29,14 +30,24 @@ import Control.Exception.Safe
     , bracket_
     , catchIO
     )
-import Control.Monad (void)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Control.Monad (void, when)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import System.Exit (ExitCode(ExitFailure))
 import System.Posix.Signals
     ( Handler(..)
+    , Signal
     , installHandler
+    , sigHUP
     , sigINT
+    , sigTERM
     )
 
 -- | How long after a warning a second Ctrl-C still means exit.
@@ -101,6 +112,25 @@ withCtrlCHandler state action = do
         (installHandler sigINT handler Nothing)
         (\previous -> void (installHandler sigINT previous Nothing))
         (\_ -> action)
+
+-- | Throw HUP/TERM into the owning thread so enclosing cleanup can run.
+-- SIGINT remains exclusively under 'withCtrlCHandler'.
+withTerminationHandlers :: IO a -> IO a
+withTerminationHandlers action = do
+    mainTid <- myThreadId
+    terminating <- newIORef False
+    withTerminationHandler mainTid terminating sigHUP
+        (withTerminationHandler mainTid terminating sigTERM action)
+
+withTerminationHandler :: ThreadId -> IORef Bool -> Signal -> IO a -> IO a
+withTerminationHandler owner terminating signal action =
+    bracket acquire release run
+  where
+    acquire = installHandler signal
+        (Catch (onTermination owner terminating signal))
+        Nothing
+    release previous = void (installHandler signal previous Nothing)
+    run _ = action
 
 -- | Mark @cancel@ as the in-flight turn target for soft Ctrl-C.
 withTurnCancel :: InterruptState -> CancelFlag -> IO a -> IO a
@@ -172,6 +202,13 @@ onSigInt mainTid state = do
         ForceExit -> do
             writeIORef state.interruptLastWarn Nothing
             throwTo mainTid UserInterrupt
+
+onTermination :: ThreadId -> IORef Bool -> Signal -> IO ()
+onTermination owner terminating signal = do
+    first <- atomicModifyIORef' terminating \seen ->
+        (True, not seen)
+    when first $
+        throwTo owner (ExitFailure (128 + fromIntegral signal))
 
 isWithinWarnWindow :: InterruptState -> UTCTime -> IO Bool
 isWithinWarnWindow state now = do

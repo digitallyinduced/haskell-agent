@@ -24,13 +24,17 @@ import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (SomeException, bracket, try)
+import Data.Either (isRight)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
+import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Types (ProcessID)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -127,13 +131,31 @@ spec = describe "Agent.Tools.Ghci" do
             recovered.ghciOk `shouldBe` True
             recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "4"
 
+    it "returns promptly when timed-out output fills the event queue" do
+        withTempEnv \baseEnv -> do
+            let env = baseEnv { toolStdoutCap = 64 }
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                warmup <- evalGhci ghci "()" 10000
+                warmup.ghciOk `shouldBe` True
+                completed <- timeout 5000000
+                    (evalGhci ghci infiniteOutput 300)
+                timed <- requireCompleted "timed-out output" completed
+                timed.ghciOutcome `shouldBe` GhciTimedOut
+                timed.ghciTruncated `shouldBe` True
+                recovered <- evalGhci ghci "2 + 2" 10000
+                recovered.ghciOk `shouldBe` True
+                recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "4"
+
     it "honors cancellation and recovers the persistent process" do
         withTempEnv \env ->
             bracket (newGhciSession env) closeGhciSession \ghci -> do
-                withAsync (evalGhci ghci "last [1..]" 10000) \running -> do
+                warmup <- evalGhci ghci "()" 10000
+                warmup.ghciOk `shouldBe` True
+                withAsync (evalGhci ghci infiniteOutput 10000) \running -> do
                     threadDelay 100000
                     requestCancel env.toolCancel
-                    cancelled <- wait running
+                    completed <- timeout 5000000 (wait running)
+                    cancelled <- requireCompleted "cancelled output" completed
                     cancelled.ghciOutcome `shouldBe` GhciCancelled
                 resetCancel env.toolCancel
                 recovered <- evalGhci ghci "2 + 3" 10000
@@ -176,6 +198,18 @@ spec = describe "Agent.Tools.Ghci" do
             recovered.ghciOk `shouldBe` True
             recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
 
+    it "kills the old process group after the GHCi leader exits" do
+        withTempEnv \env -> do
+            let pidFile = toFilePath env.toolCwd </> "background.pid"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                spawned <- evalGhci ghci (backgroundCommand pidFile) 10000
+                spawned.ghciOk `shouldBe` True
+                childPid <- read <$> readFile pidFile
+                processAlive childPid `shouldReturn` True
+                exited <- evalGhci ghci ":quit" 10000
+                exited.ghciOutcome `shouldBe` GhciProcessFailed
+                waitForProcessDeath childPid
+
     it "is terminal and idempotent after close" do
         withTempEnv \env -> do
             ghci <- newGhciSession env
@@ -201,6 +235,43 @@ spec = describe "Agent.Tools.Ghci" do
             coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             map (.appToolName) coding.codingAppTools `shouldContain` ["run_ghci"]
             coding.codingClose
+
+infiniteOutput :: Text.Text
+infiniteOutput =
+    "let loop = putStrLn (replicate 4096 'x') >> loop in loop"
+
+backgroundCommand :: FilePath -> Text.Text
+backgroundCommand pidFile =
+    ":! (trap '' INT TERM; while :; do sleep 1; done) "
+        <> "</dev/null >/dev/null 2>&1 & echo $! > "
+        <> Text.pack (show pidFile)
+
+requireCompleted :: String -> Maybe a -> IO a
+requireCompleted label = \case
+    Just value -> pure value
+    Nothing -> do
+        expectationFailure (label <> " did not finish promptly")
+        fail label
+
+waitForProcessDeath :: ProcessID -> IO ()
+waitForProcessDeath pid = go (200 :: Int)
+  where
+    go remaining = do
+        alive <- processAlive pid
+        if not alive
+            then pure ()
+            else retry remaining
+
+    retry remaining
+        | remaining <= 0 =
+            expectationFailure ("process remained alive: " <> show pid)
+        | otherwise = do
+            threadDelay 10000
+            go (remaining - 1)
+
+processAlive :: ProcessID -> IO Bool
+processAlive pid =
+    isRight <$> try @_ @SomeException (signalProcess nullSignal pid)
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =

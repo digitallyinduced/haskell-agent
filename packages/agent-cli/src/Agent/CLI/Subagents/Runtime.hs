@@ -405,12 +405,6 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                 Left _ ->
                     modifyIORef' session.subSessionTranscript
                         trimDanglingToolSuffix
-            persistSubagentSnapshot
-                runtime.subagentStoreRoot
-                runtime.subagentRegistry
-                runtime.subagentTypes
-                env.subId
-                session.subSessionTranscript
             pure result
 
 -- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
@@ -503,12 +497,6 @@ runHttpSubagent runtime provider mkBackend =
                 Left _ ->
                     modifyIORef' session.subSessionTranscript
                         trimDanglingToolSuffix
-            persistSubagentSnapshot
-                runtime.subagentStoreRoot
-                runtime.subagentRegistry
-                runtime.subagentTypes
-                env.subId
-                session.subSessionTranscript
             pure result
 
 grokSubagentSuffix :: Text -> SubagentId -> Text

@@ -79,6 +79,7 @@ import Agent.CLI.Interrupt
     , newInterruptState
     , noteFullscreenCtrlC
     , withCtrlCHandler
+    , withTerminationHandlers
     , withTurnCancel
     )
 import Agent.CLI.Login (runLoginManager)
@@ -666,18 +667,28 @@ runAgent options transition = do
         noteSessionDir dir = do
             writeIORef planMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
-        closeAll = do
+        closeSubagents =
             case multiCtx of
                 Just ctx -> do
                     interruptActiveSubagents ctx.multiRegistry
-                    flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
-                        subagentSessions agentTypesRef
-                    closeSubagentRegistry ctx.multiRegistry
+                        `finally`
+                            (flushAllSubagentSnapshots
+                                subagentStoreRoot
+                                ctx.multiRegistry
+                                subagentSessions
+                                agentTypesRef
+                                `finally`
+                                    closeSubagentRegistry ctx.multiRegistry)
                 Nothing -> pure ()
+        closeSessionResources =
             closeSessionProcessManager sessionProcessManager
-            readIORef activeSessionLock >>= mapM_ releaseSessionLock
-            coding.codingClose
-    flip finally closeAll do
+                `finally`
+                    (readIORef activeSessionLock >>= mapM_ releaseSessionLock)
+        closeAll =
+            closeSubagents
+                `finally`
+                    (closeSessionResources `finally` coding.codingClose)
+    withTerminationCleanup closeAll do
         today <- utctDay <$> getCurrentTime
         let instructions = systemPrompt provider cwd today (isOneShot options)
             params = requestParams model instructions
@@ -759,7 +770,7 @@ runAgent options transition = do
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
+                                    multiCtx rootTurnRef subagentSessions (writeIORef agentTypesRef Map.empty) pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -791,7 +802,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions (writeIORef agentTypesRef Map.empty) pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -815,7 +826,7 @@ runAgent options transition = do
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions (writeIORef agentTypesRef Map.empty) pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
     :: CliOptions
@@ -857,6 +868,12 @@ preparePersistence options root provider model cwd effort prompt resumed =
                     , createTitleIsManual = False
                     }
             | otherwise -> pure PersistenceDisabled
+
+-- | Keep terminal-loss handlers inside the cleanup scope, so the exceptions
+-- they raise unwind through every session-owned resource finalizer.
+withTerminationCleanup :: IO () -> IO a -> IO a
+withTerminationCleanup cleanup action =
+    withTerminationHandlers (action `finally` cleanup)
 
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
@@ -940,6 +957,7 @@ runSession
     -> Maybe MultiAgentContext
     -> IORef (Maybe RootTurnId)
     -> IORef (Map SubagentId SubagentSession)
+    -> IO ()
     -> IORef [TurnInput]
     -> SubagentStoreRoot
     -> IORef TokenUsage
@@ -947,7 +965,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions clearAgentTypes pendingNotices storeRoot usageRef onPersisted backend btwBackend =
   withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -971,31 +989,37 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     let loadAgentEntries = do
-            rootItems <- readIORef transcriptRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
-            let rootEntry = AgentEntry
-                    { agentTarget = AgentRoot
-                    , agentPath = "/root"
-                    , agentStatus = "active"
-                    , agentTranscript = responseItemLines rootItems
-                    }
-            children <- mapM materializeChild agents
-            pure (rootEntry : children)
+            if null agents
+                then pure [rootEntry []]
+                else do
+                    rootItems <- readIORef transcriptRef
+                    children <- mapM materializeChild agents
+                    pure (rootEntry (previewTranscript rootItems) : children)
           where
+            rootEntry transcript = AgentEntry
+                { agentTarget = AgentRoot
+                , agentPath = "/root"
+                , agentStatus = "active"
+                , agentTranscript = transcript
+                }
             materializeChild (path, agentId, status) = do
                 sessions <- readIORef subagentSessions
                 transcript <- case Map.lookup agentId sessions of
                     Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
                     Just session ->
-                        responseItemLines <$> readIORef session.subSessionTranscript
+                        previewTranscript <$> readIORef session.subSessionTranscript
                 pure AgentEntry
                     { agentTarget = AgentChild agentId
                     , agentPath = taskPathText path
                     , agentStatus = formatAgentStatus status
                     , agentTranscript = transcript
                     }
+            previewTranscript items =
+                let kept = drop (max 0 (length items - 200)) items
+                in responseItemLines kept
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
             , viewportEntries = loadAgentEntries
@@ -1006,6 +1030,7 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
             writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
+            clearAgentTypes
             writeIORef selectedAgent AgentRoot
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
