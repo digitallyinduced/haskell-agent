@@ -2,6 +2,7 @@ module Agent.OpenAI.CompactionSpec (spec) where
 
 import Agent.OpenAI.Compaction
 import Agent.OpenAI.Responses.Types
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import Test.Hspec
@@ -29,6 +30,26 @@ spec = do
                 compacted = buildLocalCompactedHistory 3 history "summary"
             let texts = [userOnly m | MessageItem m <- compacted, m.role == RoleUser]
             texts `shouldBe` ["keep me"]
+
+    describe "compactTranscriptAtLastCheckpoint" do
+        it "preserves history without a checkpoint" do
+            let history = [user "one", assistant "two"]
+            compactTranscriptAtLastCheckpoint history `shouldBe` history
+
+        it "keeps the latest checkpoint and following items" do
+            let first = checkpoint "first"
+                latest = checkpoint "latest"
+                history = [user "old", first, assistant "middle", latest, user "recent"]
+            compactTranscriptAtLastCheckpoint history
+                `shouldBe` [latest, user "recent"]
+
+        it "does not treat a compaction trigger as a checkpoint" do
+            let trigger = KnownResponseItem ItemCompactionTrigger TaggedObject
+                    { tag = "compaction_trigger"
+                    , fields = KeyMap.empty
+                    }
+                history = [user "old", trigger, user "recent"]
+            compactTranscriptAtLastCheckpoint history `shouldBe` history
 
     describe "isCompactSessionTurn" do
         it "recognizes compact markers" do
@@ -73,3 +94,7 @@ spec = do
         MessageContentParts (InputTextPart text _ _ : _) -> text
         MessageContentText text -> text
         _ -> ""
+    checkpoint name = KnownResponseItem ItemCompaction TaggedObject
+        { tag = "compaction"
+        , fields = KeyMap.fromList [("name", Aeson.String name)]
+        }

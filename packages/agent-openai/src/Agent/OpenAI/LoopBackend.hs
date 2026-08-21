@@ -27,6 +27,7 @@ import Agent.InterAgentMessage
     , renderInterAgentMessage
     , renderInterAgentMessageHeader
     )
+import Agent.OpenAI.Compaction (compactTranscriptAtLastCheckpoint)
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.Loop
     ( Backend(..)
@@ -178,7 +179,8 @@ openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
         history <- readIORef transcript
         let newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
-            fullRequest = withRequestInput baseParams (history <> newItems)
+            replayHistory = compactTranscriptAtLastCheckpoint history
+            fullRequest = withRequestInput baseParams (replayHistory <> newItems)
             emit event = mapM_ onLoopEvent (streamEventToLoopEvent event)
             -- After compaction (or any cleared chain), previousResponseId is Nothing
             -- but local history is the compacted transcript — send it as a fresh chain.

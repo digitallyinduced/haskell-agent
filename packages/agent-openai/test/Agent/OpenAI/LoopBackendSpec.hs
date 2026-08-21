@@ -244,6 +244,26 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "starts fresh replay at the latest automatic compaction checkpoint" do
+            seen <- newIORef []
+            let checkpoint = compactionItem "opaque"
+                history =
+                    turnInputsToItems [UserMessage "old"]
+                        <> [checkpoint]
+                        <> turnInputsToItems [UserMessage "recent"]
+            transcript <- newIORef history
+            let backend = openAiBackendWith
+                    (recordingSend seen)
+                    (pure baseParams)
+                    transcript
+            _ <- backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            inputItems request `shouldBe`
+                [checkpoint]
+                    <> turnInputsToItems [UserMessage "recent"]
+                    <> turnInputsToItems [UserMessage "new"]
+
         it "retries transient Codex server errors before visible output" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
@@ -446,6 +466,12 @@ assistantItem text = MessageItem ResponseMessage
     , status = Just ItemCompleted
     , phase = Nothing
     , extraFields = KeyMap.empty
+    }
+
+compactionItem :: Text -> ResponseItem
+compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
+    { tag = "compaction"
+    , fields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent

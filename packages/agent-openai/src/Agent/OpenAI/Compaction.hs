@@ -7,6 +7,8 @@ module Agent.OpenAI.Compaction
     , estimateItemsTokens
     , collectRecentUserTexts
     , buildLocalCompactedHistory
+    , compactTranscriptAtLastCheckpoint
+    , hasCompactionCheckpoint
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
@@ -152,3 +154,18 @@ isTranscriptResetTurn text =
     isCompactSessionTurn text
         || isClearSessionTurn text
         || isNewSessionTurn text
+
+-- | An opaque server compaction item replaces every item before it.
+compactTranscriptAtLastCheckpoint :: [ResponseItem] -> [ResponseItem]
+compactTranscriptAtLastCheckpoint items = go [] (reverse items)
+  where
+    go _ [] = items
+    go after (item : before) =
+        case item of
+            KnownResponseItem ItemCompaction _ -> item : after
+            _ -> go (item : after) before
+
+hasCompactionCheckpoint :: [ResponseItem] -> Bool
+hasCompactionCheckpoint = any \case
+    KnownResponseItem ItemCompaction _ -> True
+    _ -> False

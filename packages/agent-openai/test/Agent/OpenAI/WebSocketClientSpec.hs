@@ -19,7 +19,7 @@ spec = do
         field "store" (buildWsPayloadWithOptions defaultCodexWsOptions request Nothing)
             `shouldBe` Just (Aeson.Bool False)
 
-    it "omits context_management by default" do
+    it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
     it "serializes a positive server-side compaction threshold" do
@@ -34,6 +34,7 @@ spec = do
     it "omits non-positive thresholds" do
         let options = CodexWsOptions { compactThreshold = Just 0 }
         contextManagement options `shouldBe` Nothing
+
   describe "retryTransientWsResultWithPolicy" do
     it "retries overloads centrally before returning success" do
         let overload = ProviderError OverloadedError "server_is_overloaded" Nothing
