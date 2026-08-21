@@ -160,7 +160,7 @@
                     # Cap the agent/GHCi heap so a runaway session OOMs itself
                     # instead of the whole machine. Override with GHCRTS=...
                     if [ -z "''${GHCRTS:-}" ]; then
-                      export GHCRTS="-M1G -A64m"
+                      export GHCRTS="-M2G -A64m"
                     fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
@@ -231,7 +231,7 @@
                     # `repl` wrapper sets the same default if GHCRTS is unset.
                     shellHook = ''
                       if [ -z "''${GHCRTS:-}" ]; then
-                        export GHCRTS="-M1G -A64m"
+                        export GHCRTS="-M2G -A64m"
                       fi
                     '';
                 };
