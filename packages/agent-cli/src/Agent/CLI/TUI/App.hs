@@ -47,6 +47,7 @@ import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.CLI.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Markdown (markdownWidget)
+import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.UI.Model
 import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
@@ -75,7 +76,7 @@ import Control.Concurrent.STM
     , retry
     , writeTVar
     )
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (SomeException, finally, throwIO, tryAny)
@@ -103,6 +104,7 @@ import qualified Graphics.Vty.CrossPlatform as Vty
 
 data Name
     = ConversationViewport
+    | ConversationReserve
     | OverlayViewport
     | ConversationBlock !BlockId
     | ConversationBlockCache !BlockId !Bool !Bool
@@ -137,6 +139,7 @@ data AppEvent
     | AppSetSkillCommands ![SkillCommand]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
+    | AppConversationReflow
     | AppStop
 
 data PendingAppEvent
@@ -199,6 +202,8 @@ data AppState = AppState
     , appHoveredControl :: !(Maybe Name)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
+    , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
+    , appConversationReflowQueued :: !Bool
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -410,6 +415,8 @@ runFullscreen runtime workerAction = do
             , appHoveredControl = Nothing
             , appPressedControl = Nothing
             , appWorkerStopped = False
+            , appConversationAnchor = Nothing
+            , appConversationReflowQueued = False
             }
     withAsync workerAction \worker ->
         withAsync uiTicker \_uiTicker ->
@@ -881,20 +888,17 @@ fullscreenApp = App
 
 drawApp :: AppState -> [Widget Name]
 drawApp state =
+    let mainLayers = stickyPromptLayers state <> [drawMain state]
+        dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
+    in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
         (Just prompt, _, _) ->
-            [ drawTextPrompt prompt
-            , forceAttr Theme.dimAttr (drawMain state)
-            ]
+            drawTextPrompt prompt : dimmedMainLayers
         (Nothing, Just choice, _) ->
-            [ drawChoice state choice
-            , forceAttr Theme.dimAttr (drawMain state)
-            ]
+            drawChoice state choice : dimmedMainLayers
         (Nothing, Nothing, Just permission) ->
-            [ drawPermission permission
-            , forceAttr Theme.dimAttr (drawMain state)
-            ]
-        (Nothing, Nothing, Nothing) -> [drawMain state]
+            drawPermission permission : dimmedMainLayers
+        (Nothing, Nothing, Nothing) -> mainLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
@@ -916,7 +920,10 @@ drawWorkspace state =
         hBox $
             [ withVScrollBars OnRight $
                 viewport ConversationViewport Vertical $
-                    padLeftRight 2 (drawTranscript state.appUi)
+                    padLeftRight 2
+                        (drawTranscript
+                            state.appUi
+                            state.appConversationAnchor)
             ]
                 <> if length state.appAgentEntries <= 1
                     then []
@@ -1043,16 +1050,59 @@ spinnerFrame frame =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         !! (frame `mod` 10)
 
-drawTranscript :: UiState -> Widget Name
-drawTranscript state
+drawTranscript
+    :: UiState
+    -> Maybe Scroll.ConversationAnchor
+    -> Widget Name
+drawTranscript state anchor
     | null blocks =
         withAttr Theme.mutedAttr $
             padTop (Pad 2) $
                 txt "Start by describing what you want to build or change."
     | otherwise =
-        vBox (map (drawBlock state) blocks)
+        vBox $
+            [vBox (map (drawBlock state) blocks)]
+                <> conversationReserveWidgets anchor
   where
     blocks = toList state.uiBlocks
+
+stickyPromptLayers :: AppState -> [Widget Name]
+stickyPromptLayers state =
+    case state.appConversationAnchor of
+        Just anchor
+            | Scroll.conversationAnchorSticky anchor ->
+                [ translateBy (Location (0, 2)) $
+                    hLimitPercent conversationWidth $
+                        padLeftRight 2 $
+                            withAttr Theme.userAttr $
+                                vLimit 5 $
+                                    padAll 1 $
+                                        txtWrap
+                                            (stickyPromptPreview
+                                                anchor.anchorText)
+                ]
+        _ -> []
+  where
+    conversationWidth =
+        if length state.appAgentEntries <= 1 then 100 else 68
+
+stickyPromptPreview :: Text -> Text
+stickyPromptPreview text =
+    case splitAt 3 (Text.lines text) of
+        (shown, []) -> Text.intercalate "\n" shown
+        (shown, _ : _) ->
+            Text.intercalate "\n" (take 2 shown <> ["…"])
+
+conversationReserveWidgets
+    :: Maybe Scroll.ConversationAnchor
+    -> [Widget Name]
+conversationReserveWidgets = \case
+    Just anchor
+        | anchor.anchorReserveRows > 0 ->
+            [ reportExtent ConversationReserve $
+                vLimit anchor.anchorReserveRows (fill ' ')
+            ]
+    _ -> []
 
 drawBlock :: UiState -> UiBlock -> Widget Name
 drawBlock state block =
@@ -1528,9 +1578,16 @@ choiceRow appState selected index (label, detail) =
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
     initial <- get
+    renderedContentHeight <-
+        if any isSubmittedPrompt uiEvents
+            then conversationUnpaddedContentHeight
+            else pure 0
     let
         (final, nativeProgress, shouldFollow, shouldInvalidate) =
-            foldl' applyOne (initial, Nothing, False, False) uiEvents
+            foldl'
+                (applyOne renderedContentHeight)
+                (initial, Nothing, False, False)
+                uiEvents
     put final
     liftIO $
         writeIORef
@@ -1542,16 +1599,28 @@ handleUiEvents uiEvents = do
             liftIO (final.appRuntime.runtimeNativeProgress active)
     when shouldInvalidate invalidateCache
     when shouldFollow $
-        vScrollToEnd (viewportScroll ConversationViewport)
+        case final.appConversationAnchor of
+            Just _ -> do
+                when (any isSubmittedPrompt uiEvents) $
+                    vScrollToEnd (viewportScroll ConversationViewport)
+                queueConversationReflow
+            Nothing ->
+                vScrollToEnd (viewportScroll ConversationViewport)
     when
         (all (== UiTick) uiEvents && final.appUi == initial.appUi)
         continueWithoutRedraw
   where
     applyOne
+        renderedContentHeight
         (state, previousProgress, followed, invalidated)
         uiEvent =
             let
-                next = applyUiEvent uiEvent state
+                next =
+                    applyUiEvent uiEvent $
+                        applyConversationUiEvent
+                            renderedContentHeight
+                            uiEvent
+                            state
                 progress =
                     case Bridge.nativeProgressSignal uiEvent next.appUi of
                         Nothing -> previousProgress
@@ -1563,6 +1632,27 @@ handleUiEvents uiEvents = do
                 invalidates =
                     invalidated || uiEvent == UiConversationCleared
             in (next, progress, follows, invalidates)
+
+applyConversationUiEvent :: Int -> UiEvent -> AppState -> AppState
+applyConversationUiEvent renderedContentHeight uiEvent state =
+    case uiEvent of
+        UiUserSubmitted text ->
+            state
+                { appConversationAnchor =
+                    Just $
+                        Scroll.startConversationAnchor
+                            (BlockId state.appUi.uiNextBlockId)
+                            text
+                            (if null state.appUi.uiBlocks
+                                then 0
+                                else renderedContentHeight)
+                }
+        UiConversationCleared ->
+            state
+                { appConversationAnchor = Nothing
+                , appConversationReflowQueued = False
+                }
+        _ -> state
 
 applyUiEvent :: UiEvent -> AppState -> AppState
 applyUiEvent uiEvent state =
@@ -1620,6 +1710,10 @@ handleEvent event = case event of
         handleUiEvents (uiEvent :| [])
     AppEvent (AppUiBatch uiEvents) ->
         handleUiEvents uiEvents
+    AppEvent AppConversationReflow -> do
+        modify' \state ->
+            state { appConversationReflowQueued = False }
+        reflowConversation
     AppEvent (AppAskPermission summary reply) ->
         modify' \state ->
             state
@@ -1829,6 +1923,8 @@ handleNormalKey event
         handleComposerKey event
     | otherwise = do
         case event of
+            V.EvResize _ _ ->
+                queueConversationReflow
             V.EvMouseDown _ _ V.BScrollUp _ ->
                 scrollConversationBy (-mouseScrollLines)
             V.EvMouseDown _ _ V.BScrollDown _ ->
@@ -1894,9 +1990,15 @@ handleScrollbackKey = \case
         | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Up
     V.EvKey (V.KChar 'd') modifiers
         | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Down
-    V.EvKey V.KHome [] -> leaveFollow >> vScrollToBeginning scroll
+    V.EvKey V.KHome [] -> do
+        leaveFollow
+        vScrollToBeginning scroll
+        queueConversationReflow
     V.EvKey V.KEnd [] -> resumeFollow
-    V.EvKey (V.KChar 'g') [] -> leaveFollow >> vScrollToBeginning scroll
+    V.EvKey (V.KChar 'g') [] -> do
+        leaveFollow
+        vScrollToBeginning scroll
+        queueConversationReflow
     V.EvKey (V.KChar 'G') [] -> resumeFollow
     V.EvKey V.KLeft [] -> toggle
     V.EvKey V.KRight [] -> toggle
@@ -1913,11 +2015,14 @@ handleScrollbackKey = \case
             state { appUi = reduceUi (UiMoveSelection delta) state.appUi }
         state <- get
         case state.appUi.uiSelectedBlock of
-            Just ident -> makeVisible (ConversationBlock ident)
+            Just ident -> do
+                makeVisible (ConversationBlock ident)
+                queueConversationReflow
             Nothing -> pure ()
-    toggle =
+    toggle = do
         modify' \state ->
             state { appUi = reduceUi UiToggleSelected state.appUi }
+        queueConversationReflow
     focusComposer =
         modify' \state ->
             state { appUi = reduceUi (UiFocusChanged FocusComposer) state.appUi }
@@ -1926,8 +2031,14 @@ handleScrollbackKey = \case
             state { appUi = reduceUi (UiSetFollow False) state.appUi }
     resumeFollow = do
         modify' \state ->
-            state { appUi = reduceUi (UiSetFollow True) state.appUi }
+            state
+                { appUi = reduceUi (UiSetFollow True) state.appUi
+                , appConversationAnchor =
+                    Scroll.followConversationTail
+                        <$> state.appConversationAnchor
+                }
         vScrollToEnd scroll
+        queueConversationReflow
     copySelected = do
         state <- get
         case state.appUi.uiSelectedBlock >>= selectedBlock state.appUi of
@@ -2377,15 +2488,18 @@ scrollConversationBy amount
     | amount < 0 = do
         setConversationFollow False
         vScrollBy scroll amount
+        queueConversationReflow
     | otherwise =
         lookupViewport ConversationViewport >>= \case
             Just (VP _ top (_, height) (_, contentHeight))
                 | top + height + amount >= contentHeight -> do
                     setConversationFollow True
                     vScrollToEnd scroll
+                    queueConversationReflow
             _ -> do
                 setConversationFollow False
                 vScrollBy scroll amount
+                queueConversationReflow
   where
     scroll = viewportScroll ConversationViewport
 
@@ -2393,6 +2507,65 @@ setConversationFollow :: Bool -> EventM Name AppState ()
 setConversationFollow follow =
     modify' \state ->
         state { appUi = reduceUi (UiSetFollow follow) state.appUi }
+
+conversationUnpaddedContentHeight :: EventM Name AppState Int
+conversationUnpaddedContentHeight =
+    lookupViewport ConversationViewport >>= \case
+        Just (VP _ _ _ (_, contentHeight)) -> do
+            renderedReserveRows <- conversationRenderedReserveRows
+            pure $ max 0 (contentHeight - renderedReserveRows)
+        Nothing -> pure 0
+
+queueConversationReflow :: EventM Name AppState ()
+queueConversationReflow = do
+    state <- get
+    unless state.appConversationReflowQueued do
+        modify' \current ->
+            current { appConversationReflowQueued = True }
+        liftIO $
+            enqueueAppEvent
+                state.appRuntime
+                AppConversationReflow
+
+reflowConversation :: EventM Name AppState ()
+reflowConversation = do
+    state <- get
+    case state.appConversationAnchor of
+        Nothing -> pure ()
+        Just anchor ->
+            lookupViewport ConversationViewport >>= \case
+                Nothing -> pure ()
+                Just (VP _ top (_, height) (_, contentHeight)) -> do
+                    renderedReserveRows <-
+                        conversationRenderedReserveRows
+                    let unpaddedContentHeight =
+                            max 0
+                                (contentHeight - renderedReserveRows)
+                        (next, scrollAction) =
+                            Scroll.reflowConversationAnchor
+                                state.appUi.uiFollow
+                                top
+                                height
+                                unpaddedContentHeight
+                                anchor
+                    modify' \current ->
+                        current { appConversationAnchor = Just next }
+                    case scrollAction of
+                        Scroll.KeepConversationPosition -> pure ()
+                        Scroll.ScrollConversationToEnd ->
+                            vScrollToEnd
+                                (viewportScroll ConversationViewport)
+
+conversationRenderedReserveRows :: EventM Name AppState Int
+conversationRenderedReserveRows =
+    lookupExtent ConversationReserve >>= \case
+        Just (Extent _ _ (_, reserveRows)) -> pure reserveRows
+        Nothing -> pure 0
+
+isSubmittedPrompt :: UiEvent -> Bool
+isSubmittedPrompt = \case
+    UiUserSubmitted _ -> True
+    _ -> False
 
 decodePaste :: ByteString -> Text
 decodePaste =
