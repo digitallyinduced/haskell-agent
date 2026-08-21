@@ -15,6 +15,7 @@ module Agent.CLI.Input
     , decodeBracketedPastePayload
     , displayEditorText
     , formatPasteChip
+    , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , replHistoryPath
     , terminalTextWidth
@@ -32,8 +33,16 @@ import Agent.CLI.Interrupt
     , InterruptState
     , noteIdleCtrlC
     )
-import Control.Exception.Safe (bracket, catchIO, throwIO, tryIO)
+import Agent.CLI.Terminal
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , emitTerminalSequence
+    , kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
+    )
+import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
+import Data.Bits ((.&.))
 import Data.Char
     ( GeneralCategory(..)
     , chr
@@ -354,26 +363,27 @@ readInlineEditor
     -> IO ReplLine
 readInlineEditor slashEnabled interrupt historyPath prompt initial = do
     withBracketedPaste $
-        withEditorRawStdin $
-            bracket
-                (hHideCursor stdout)
-                (\_ -> hShowCursor stdout >> hFlush stdout)
-                \() -> do
-                    history <- readHistory historyPath `catchIO` \_ -> pure emptyHistory
-                    let entries = map Text.pack (historyLines history)
-                        state = EditorState
-                            { editorText = initial
-                            , editorCursor = Text.length initial
-                            , editorSelected = 0
-                            , editorHistoryIndex = Nothing
-                            , editorHistoryDraft = initial
-                            , editorKillBuffer = ""
-                            , editorPasted = False
-                            , editorSlashEnabled = slashEnabled
-                            , editorSlashDismissed = False
-                            }
-                    redrawEditor prompt state
-                    editorLoop history entries state
+        withEditorKittyKeyboard $
+            withEditorRawStdin $
+                bracket
+                    (hHideCursor stdout)
+                    (\_ -> hShowCursor stdout >> hFlush stdout)
+                    \() -> do
+                        history <- readHistory historyPath `catchIO` \_ -> pure emptyHistory
+                        let entries = map Text.pack (historyLines history)
+                            state = EditorState
+                                { editorText = initial
+                                , editorCursor = Text.length initial
+                                , editorSelected = 0
+                                , editorHistoryIndex = Nothing
+                                , editorHistoryDraft = initial
+                                , editorKillBuffer = ""
+                                , editorPasted = False
+                                , editorSlashEnabled = slashEnabled
+                                , editorSlashDismissed = False
+                                }
+                        redrawEditor prompt state
+                        editorLoop history entries state
   where
     editorLoop history entries state = do
         key <- readEditorKey
@@ -712,6 +722,16 @@ readEditorKey = do
 isClipboardPasteKey :: Char -> Bool
 isClipboardPasteKey = (== '\SYN')
 
+isClipboardPasteCsiBody :: String -> Bool
+isClipboardPasteCsiBody body =
+    case parseKittyKey body of
+        Just KittyKey{kittyCodepoint, kittyModifiers, kittyEvent}
+            | kittyEvent /= kittyRelease ->
+                kittyCodepoint == ord 'v'
+                    && (hasModifier kittyCtrl kittyModifiers
+                        || hasModifier kittySuper kittyModifiers)
+        _ -> False
+
 readEscapeKey :: IO EditorKey
 readEscapeKey = do
     ready <- hWaitForInput stdin 25
@@ -744,23 +764,40 @@ readCsiKey :: IO EditorKey
 readCsiKey =
     readCsiBody >>= \case
         Left err -> pure (EditorInputError err)
-        Right body -> case body of
-            "A" -> pure EditorUp
-            "B" -> pure EditorDown
-            "C" -> pure EditorRight
-            "D" -> pure EditorLeft
-            "H" -> pure EditorHome
-            "F" -> pure EditorEnd
-            "Z" -> pure EditorCycleMode
-            "1~" -> pure EditorHome
-            "4~" -> pure EditorEnd
-            "3~" -> pure EditorDelete
-            "1;2Z" -> pure EditorCycleMode
-            "200~" ->
-                readBracketedPaste >>= \case
-                    Left err -> pure (EditorInputError err)
-                    Right pasted -> pure (EditorPaste pasted)
-            _ -> pure EditorIgnore
+        Right body
+            | Just key <- decodeKittyEditorKey body -> pure key
+            | otherwise -> case body of
+                "A" -> pure EditorUp
+                "B" -> pure EditorDown
+                "C" -> pure EditorRight
+                "D" -> pure EditorLeft
+                "H" -> pure EditorHome
+                "F" -> pure EditorEnd
+                "Z" -> pure EditorCycleMode
+                "1~" -> pure EditorHome
+                "4~" -> pure EditorEnd
+                "3~" -> pure EditorDelete
+                "1;2Z" -> pure EditorCycleMode
+                "200~" ->
+                    readBracketedPaste >>= \case
+                        Left err -> pure (EditorInputError err)
+                        Right pasted -> pure (EditorPaste pasted)
+                _ -> pure EditorIgnore
+
+data KittyKey = KittyKey
+    { kittyCodepoint :: !Int
+    , kittyModifiers :: !Int
+    , kittyEvent :: !Int
+    }
+
+kittyShift, kittyCtrl, kittySuper, kittyRelease :: Int
+kittyShift = 1
+kittyCtrl = 4
+kittySuper = 8
+kittyRelease = 3
+
+hasModifier :: Int -> Int -> Bool
+hasModifier modifier modifiers = modifiers .&. modifier /= 0
 
 readCsiBody :: IO (Either Text String)
 readCsiBody = go 0 []
@@ -886,6 +923,17 @@ withEditorRawStdin action = do
             setTerminalAttributes stdInput oldTerm Immediately
             hSetBuffering stdin oldBuf
     bracket enter (const restore) \() -> action
+
+withEditorKittyKeyboard :: IO a -> IO a
+withEditorKittyKeyboard action = do
+    terminal <- detectTerminalCapabilities stdout
+    if terminal.terminalKittyKeyboard
+        then
+            bracket_
+                (emitTerminalSequence terminal stdout kittyKeyboardDisambiguatePush)
+                (emitTerminalSequence terminal stdout kittyKeyboardPop)
+                action
+        else action
 
 redrawEditor :: Text -> EditorState -> IO ()
 redrawEditor prompt state = do
@@ -1232,6 +1280,85 @@ ensureHistoryParent path = do
     createDirectoryIfMissing True dir
     -- Best-effort private mode; ignore failures on filesystems that refuse.
     trySetMode dir 0o700
+
+parseKittyKey :: String -> Maybe KittyKey
+parseKittyKey body = do
+    raw <- stripFinal 'u' body
+    parseKittyKeyFields raw
+
+parseKittyKeyFields :: String -> Maybe KittyKey
+parseKittyKeyFields raw = do
+    let fields = splitFields ';' raw
+    codeField <- listAt 0 fields
+    let modifierField = fromMaybe "1" (listAt 1 fields)
+        modifierParts = splitFields ':' modifierField
+    codepoint <- readDecimal (takeWhile (/= ':') codeField)
+    encodedModifiers <- listAt 0 modifierParts >>= readDecimal
+    event <- maybe (Just 1) readDecimal (listAt 1 modifierParts)
+    pure KittyKey
+        { kittyCodepoint = codepoint
+        , kittyModifiers = max 0 (encodedModifiers - 1)
+        , kittyEvent = event
+        }
+
+decodeKittyEditorKey :: String -> Maybe EditorKey
+decodeKittyEditorKey body
+    | isClipboardPasteCsiBody body = Just EditorClipboardPaste
+    | otherwise = do
+        KittyKey{kittyCodepoint, kittyModifiers, kittyEvent} <- parseKittyKey body
+        if kittyEvent == kittyRelease
+            then Just EditorIgnore
+            else Just (decodeKittyControl kittyModifiers kittyCodepoint)
+
+decodeKittyControl :: Int -> Int -> EditorKey
+decodeKittyControl modifiers codepoint
+    | codepoint == 9 && hasModifier kittyShift modifiers = EditorCycleMode
+    | hasModifier kittyCtrl modifiers = case codepoint of
+        97 -> EditorHome
+        98 -> EditorLeft
+        99 -> EditorInterrupt
+        100 -> EditorEof
+        101 -> EditorEnd
+        102 -> EditorRight
+        107 -> EditorKillEnd
+        108 -> EditorClearScreen
+        110 -> EditorDown
+        112 -> EditorUp
+        117 -> EditorKillStart
+        119 -> EditorKillWord
+        121 -> EditorYank
+        _ -> EditorIgnore
+    | codepoint == 27 = EditorEscape
+    | otherwise = EditorIgnore
+
+splitFields :: Eq a => a -> [a] -> [[a]]
+splitFields separator = go
+  where
+    go xs =
+        let (field, rest) = break (== separator) xs
+        in field : case rest of
+            [] -> []
+            _ : remaining -> go remaining
+
+listAt :: Int -> [a] -> Maybe a
+listAt index xs
+    | index < 0 = Nothing
+    | otherwise = case drop index xs of
+        value : _ -> Just value
+        [] -> Nothing
+
+stripFinal :: Eq a => a -> [a] -> Maybe [a]
+stripFinal suffix xs =
+    case reverse xs of
+        lastValue : rest
+            | lastValue == suffix -> Just (reverse rest)
+        _ -> Nothing
+
+readDecimal :: String -> Maybe Int
+readDecimal input =
+    case reads input of
+        [(value, "")] -> Just value
+        _ -> Nothing
 
 trySetMode :: FilePath -> FileMode -> IO ()
 trySetMode path mode =

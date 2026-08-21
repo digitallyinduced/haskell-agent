@@ -1,6 +1,8 @@
 # agent-openai
 
-Haskell client for OpenAI-compatible Responses APIs, imported from `codex-hs`.
+Haskell client for OpenAI/ChatGPT Responses transports, imported from
+`codex-hs`. Canonical protocol types and provider-neutral adapters live in
+`agent-responses`.
 
 - REST + WebSocket streaming
 - OpenAI credential adapters for local OAuth pools and static API bearers

@@ -1,7 +1,7 @@
 module Agent.OpenAI.ResponseMergeSpec (spec) where
 
-import qualified Agent.OpenAI.Responses.Types as OpenAI
-import Agent.OpenAI.ResponseMerge
+import qualified Agent.Responses.Types as OpenAI
+import Agent.Responses.ResponseMerge
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Data.Text (Text)

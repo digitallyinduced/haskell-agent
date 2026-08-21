@@ -22,16 +22,15 @@ module Agent.Loop
     , runLoopInputs
     ) where
 
-import Agent.Cancel (CancelFlag, isCancelled, resetCancel, waitCancel)
+import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
-    , ToolHandler
-    , dispatchToolCall
     )
+import Agent.Tools.Types (ToolRegistry, dispatchRegisteredToolCall)
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
@@ -64,6 +63,12 @@ data TokenUsage = TokenUsage
     , outputTokens :: !Int
     , cachedTokens :: !Int
     } deriving (Eq, Show)
+
+instance Semigroup TokenUsage where
+    left <> right = addTokenUsage left right
+
+instance Monoid TokenUsage where
+    mempty = emptyTokenUsage
 
 emptyTokenUsage :: TokenUsage
 emptyTokenUsage = TokenUsage
@@ -129,15 +134,16 @@ data LoopEvent
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
-    , loopHandlers :: ![ToolHandler]
+    , loopTools :: !ToolRegistry
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
-      -- | Soft-cancel latch. When set, the loop stops after the current tool
-      -- batch instead of asking the model for another step.
+      -- | Soft-cancel latch. The caller owns resetting it before publishing
+      -- the turn to input/interrupt handlers. When set, the loop stops after
+      -- the current tool batch instead of asking the model for another step.
     , loopCancel :: !CancelFlag
     }
 
@@ -192,7 +198,6 @@ runLoopInputs config0 previousResponseId firstInputs = do
     -- Tools run with mapConcurrently. Serialize onEvent so a printer
     -- (hPutStrLn on String is not atomic) cannot interleave characters.
     eventLock <- newMVar ()
-    resetCancel config0.loopCancel
     let config = config0
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event
@@ -265,6 +270,6 @@ runOne config call = do
                 , callKind = call.callKind
                 }
         Right True ->
-            dispatchToolCall config.loopDispatch config.loopHandlers call
+            dispatchRegisteredToolCall config.loopDispatch config.loopTools call
     config.loopOnEvent (ToolFinished result)
     pure result

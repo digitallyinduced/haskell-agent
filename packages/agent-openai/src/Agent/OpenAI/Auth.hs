@@ -40,11 +40,13 @@ module Agent.OpenAI.Auth
     , parseJwtExp
     , needsRefresh
     , deriveAccountId
+    , deriveEmail
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Auth.JWT
     ( deriveAccountId
+    , deriveEmail
     , needsRefresh
     , parseJwtExp
     )
@@ -401,7 +403,8 @@ setCooldown pool targetAccountId until_ =
     go entry = do
         state <- readIORef entry.entryAuthRef
         when (state.accountId == targetAccountId) $
-            writeIORef entry.entryCooldownUntil (Just until_)
+            atomicModifyIORef' entry.entryCooldownUntil \current ->
+                (Just (maybe until_ (max until_) current), ())
 
 clearCooldown :: Pool -> Text -> IO ()
 clearCooldown pool targetAccountId =

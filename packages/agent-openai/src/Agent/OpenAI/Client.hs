@@ -17,7 +17,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import qualified Agent.OpenAI.Responses.Types as OpenAI
+import qualified Agent.Responses.Types as OpenAI
 import Control.Monad (when)
 import qualified Control.Exception.Safe as Exception
 import Control.Monad.Catch (Handler(..))

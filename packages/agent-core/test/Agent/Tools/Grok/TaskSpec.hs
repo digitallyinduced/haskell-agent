@@ -13,7 +13,11 @@ import Agent.ToolDispatch
 import Agent.Tools.Grok.Task
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , ToolSchema(..)
+    )
 import Control.Concurrent.MVar
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -34,7 +38,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -52,7 +56,7 @@ spec = describe "Agent.Tools.Grok.Task" do
             (observeSpec typesRef observed)
             (\_ _ -> pure ())
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
@@ -87,7 +91,7 @@ spec = describe "Agent.Tools.Grok.Task" do
                 , subagentWorktreeCleanup = pure (Right ())
                 }
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
-                Nothing (Just createIsolated) Nothing
+                Nothing (Just createIsolated) Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -100,7 +104,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing
+                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
@@ -111,11 +115,9 @@ fake :: Text -> AppTool
 fake name = AppTool
     { appToolName = name
     , appToolDescription = name
-    , appToolParameters = []
+    , appToolSchema = JsonFunctionSchema []
     , appToolHandler = noArgsTool name (pure (Right "ok"))
-    , appToolKind = JsonFunction
-    , appToolReadOnly = True
-    , appToolIsReadOnlyCall = Nothing
+    , appToolApproval = AlwaysReadOnly
     }
 
 raceArgs :: Text

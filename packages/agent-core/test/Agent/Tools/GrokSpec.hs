@@ -7,6 +7,7 @@ import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
@@ -19,6 +20,7 @@ import Control.Concurrent (threadDelay)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (bracket, finally)
 import Data.Text (Text)
@@ -26,6 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory
     ( createDirectoryIfMissing
+    , createDirectoryLink
     , doesFileExist
     , getTemporaryDirectory
     )
@@ -57,7 +60,7 @@ spec = describe "Agent.Tools.Grok" do
             names `shouldNotContain` ["apply_patch"]
             names `shouldNotContain` ["shell_command"]
             let outputSchemas =
-                    [ tool.appToolParameters
+                    [ fromMaybe [] (jsonToolParameters tool)
                     | tool <- grokTools session ghci plan Nothing typesRef
                     , tool.appToolName == "get_task_output"
                     ]
@@ -79,7 +82,7 @@ spec = describe "Agent.Tools.Grok" do
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
             let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                    (pure Nothing) Nothing Nothing Nothing
+                    (pure Nothing) Nothing Nothing Nothing Nothing
                 names = map (.appToolName) (grokTools session ghci plan (Just ctx) typesRef)
             names `shouldContain` ["task"]
             closeSubagentRegistry registry
@@ -111,6 +114,17 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
+
+    it "does not descend through directory symlinks" do
+        withTempSession \(session, ghci) -> do
+            let cwd = toFilePath session.grokEnv.toolCwd
+                outside = cwd </> ".outside"
+            createDirectoryIfMissing True outside
+            Text.writeFile (outside </> "secret.txt") "secret"
+            createDirectoryLink outside (cwd </> "outside-link")
+            output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
+            output `shouldSatisfy` Text.isInfixOf "outside-link"
+            output `shouldNotSatisfy` Text.isInfixOf "secret.txt"
 
     it "creates a file with empty old_string and replaces a unique match" do
         withTempSession \(session, ghci) -> do

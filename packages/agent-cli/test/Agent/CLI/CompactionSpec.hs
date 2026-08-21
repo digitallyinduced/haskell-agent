@@ -8,7 +8,7 @@ import Agent.CLI.Compaction
     )
 import Agent.Loop
 import Agent.OpenAI.Compaction (userTextItem)
-import Agent.OpenAI.Responses.Types (defaultResponseCreateParams)
+import Agent.Responses.Types (defaultResponseCreateParams)
 import Agent.Provider (Provider(..), TokenProvider(..))
 import Data.IORef
 import Test.Hspec

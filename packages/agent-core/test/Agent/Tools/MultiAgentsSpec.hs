@@ -17,7 +17,11 @@ import Agent.ToolDispatch
     , dispatchToolCall
     )
 import Agent.Tools.MultiAgents
-import Agent.Tools.Types (AppTool(..), appToolHandlers)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(..)
+    , appToolHandlers
+    )
 import Control.Concurrent.STM
 import Control.Monad (unless)
 import Data.Text (Text)
@@ -31,7 +35,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         let tools = multiAgentTools (rootContext registry Nothing)
-        map (\tool -> (tool.appToolName, tool.appToolReadOnly)) tools
+        map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval)) tools
             `shouldBe`
                 [ ("spawn_agent", True)
                 , ("wait_agent", True)
@@ -64,6 +68,53 @@ spec = describe "Agent.Tools.MultiAgents" do
         message.messageType `shouldBe` NewTaskMessage
         message.messageContent `shouldBe`
             EncryptedInterAgentContent "gAAAAA-task"
+        closeSubagentRegistry registry
+
+    it "applies model, effort, and fork overrides before the worker starts" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let prepare _ options = atomically (putTMVar prepared options)
+            context = (rootContext registry Nothing)
+                { multiPrepareSpawn = Just prepare }
+            call = ToolCall
+                { callId = "spawn-options"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"model\":\"gpt-test\",\"reasoning_effort\":\"high\",\
+                    \\"fork_turns\":\"3\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context)) call
+        result.output `shouldSatisfy` Text.isInfixOf "/root/worker"
+        options <- atomically (takeTMVar prepared)
+        options `shouldBe` CollaborationSpawnOptions
+            { collaborationModel = Just "gpt-test"
+            , collaborationReasoningEffort = Just "high"
+            , collaborationForkTurns = Just "3"
+            }
+        closeSubagentRegistry registry
+
+    it "rejects zero fork turns" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let call = ToolCall
+                { callId = "spawn-zero"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"fork_turns\":\"0\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
+        result.output `shouldSatisfy` Text.isInfixOf "positive integer"
         closeSubagentRegistry registry
 
     it "wait_agent excludes the calling child" do
@@ -124,6 +175,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiRootTurnId = pure Nothing
                 , multiResumeFromDisk = Nothing
                 , multiCreateWorktree = Nothing
+                , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
                 }
         result <- dispatchToolCall defaultLoopDispatch
@@ -138,6 +190,10 @@ spec = describe "Agent.Tools.MultiAgents" do
             EncryptedInterAgentContent "gAAAAA-result"
         closeSubagentRegistry registry
 
+isReadOnly :: ApprovalRule -> Bool
+isReadOnly AlwaysReadOnly = True
+isReadOnly _ = False
+
 rootContext
     :: SubagentRegistry
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
@@ -150,6 +206,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiRootTurnId = pure Nothing
     , multiResumeFromDisk = Nothing
     , multiCreateWorktree = Nothing
+    , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
     }
 

@@ -16,6 +16,7 @@ module Agent.Tools.Grok.Task
     , recordAgentType
     , lookupAgentType
     , lookupAgentModel
+    , lookupAgentReasoningEffort
     ) where
 
 import Agent.InterAgentMessage (plainInterAgentContent)
@@ -43,7 +44,8 @@ import Agent.ToolDispatch (typedTool)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
-    , AppToolKind(..)
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Control.Exception.Safe (mask, onException)
 import Data.Aeson (FromJSON(..))
@@ -65,6 +67,7 @@ knownSubagentTypes = ["general-purpose", "explore", "plan"]
 data GrokSubagentSpec = GrokSubagentSpec
     { agentType :: !Text
     , modelOverride :: !(Maybe Text)
+    , reasoningEffortOverride :: !(Maybe Text)
     } deriving (Eq, Show)
 
 type GrokSubagentSpecs = IORef (Map SubagentId GrokSubagentSpec)
@@ -114,10 +117,8 @@ sanitizeOptional value = value >>= \raw ->
         else Just stripped
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
-taskTool baseCwd ctx specsRef = AppTool
-    { appToolName = "task"
-    , appToolDescription = taskDescription
-    , appToolParameters =
+taskTool baseCwd ctx specsRef =
+    jsonAppTool "task" taskDescription
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -135,11 +136,8 @@ taskTool baseCwd ctx specsRef = AppTool
         , PropertySchema "isolation" PropertyString False $ Just
             "Isolation mode: \"none\" (default) or \"worktree\". Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
-    , appToolHandler = typedTool "task" (runTask baseCwd ctx specsRef)
-    , appToolKind = JsonFunction
-    , appToolReadOnly = False
-    , appToolIsReadOnlyCall = Nothing
-    }
+        AlwaysPrompt
+        (typedTool "task" (runTask baseCwd ctx specsRef))
 
 taskDescription :: Text
 taskDescription =
@@ -200,6 +198,7 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
     let spec = GrokSubagentSpec
             { agentType = args.subagentType
             , modelOverride = args.model
+            , reasoningEffortOverride = Nothing
             }
         worktreePath = (.subagentWorktreePath) <$> worktree
     result <- restore
@@ -383,7 +382,10 @@ recordAgentType :: GrokSubagentSpecs -> SubagentId -> Text -> IO ()
 recordAgentType specsRef agentId agentType = do
     specs <- readIORef specsRef
     let model = maybe Nothing (\spec -> spec.modelOverride) (Map.lookup agentId specs)
-    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model)
+        effort =
+            maybe Nothing (\spec -> spec.reasoningEffortOverride)
+                (Map.lookup agentId specs)
+    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model effort)
 
 lookupAgentType :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
 lookupAgentType specsRef agentId = do
@@ -395,6 +397,11 @@ lookupAgentModel specsRef agentId = do
     specs <- readIORef specsRef
     pure (Map.lookup agentId specs >>= \spec -> spec.modelOverride)
 
+lookupAgentReasoningEffort :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
+lookupAgentReasoningEffort specsRef agentId = do
+    specs <- readIORef specsRef
+    pure (Map.lookup agentId specs >>= \spec -> spec.reasoningEffortOverride)
+
 -- | Restrict the child tool surface by subagent type.
 filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]
 filterGrokToolsForType agentType tools = case agentType of
@@ -402,11 +409,13 @@ filterGrokToolsForType agentType tools = case agentType of
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
     _ -> filter ((/= "task") . (.appToolName)) tools
   where
+    exploreNames :: [Text]
     exploreNames =
         [ "read_file"
         , "list_dir"
         , "grep"
         ]
+    planNames :: [Text]
     planNames =
         [ "read_file"
         , "list_dir"

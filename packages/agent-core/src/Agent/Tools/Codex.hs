@@ -32,9 +32,11 @@ import Agent.Tools.PlanMode
     , isPlanModeActive
     )
 import Agent.Tools.Types
-    ( AppTool(..)
-    , AppToolKind(..)
+    ( AppTool
+    , ApprovalRule(..)
     , ToolEnv(..)
+    , freeformApplyPatchAppTool
+    , jsonAppTool
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Object, Value(..), withObject)
@@ -70,15 +72,9 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly =
+    jsonAppTool name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
 
 --------------------------------------------------------------------------------
 -- shell_command
@@ -165,15 +161,9 @@ instance FromJSON ApplyPatchArgs where
     parseJSON _ = parseFail "apply_patch expects freeform patch text"
 
 applyPatchTool :: ToolEnv -> AppTool
-applyPatchTool env = AppTool
-    { appToolName = "apply_patch"
-    , appToolDescription = applyPatchDescription
-    , appToolParameters = []
-    , appToolHandler = typedTool "apply_patch" (runApplyPatch env)
-    , appToolKind = FreeformApplyPatch
-    , appToolReadOnly = False
-    , appToolIsReadOnlyCall = Nothing
-    }
+applyPatchTool env =
+    freeformApplyPatchAppTool "apply_patch" applyPatchDescription AlwaysPrompt
+        (typedTool "apply_patch" (runApplyPatch env))
 
 applyPatchDescription :: Text
 applyPatchDescription =

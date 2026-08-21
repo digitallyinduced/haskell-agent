@@ -2,7 +2,7 @@ module Agent.OpenAI.WebSocketClientSpec (spec) where
 
 import Test.Hspec
 import Agent.Error
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson

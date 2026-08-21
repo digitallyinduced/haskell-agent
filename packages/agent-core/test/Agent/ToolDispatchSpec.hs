@@ -59,6 +59,12 @@ spec = describe "dispatchToolCall" do
         result `shouldBe` functionResult "call-1" "EX explode"
         readIORef seen `shouldReturn` ["explode"]
 
+    it "does not turn asynchronous cancellation into tool output" do
+        dispatchToolCall testConfig
+            [noArgsTool "cancel" (Exception.throwIO Exception.ThreadKilled)]
+            (functionToolCall "call-1" "cancel" "{}")
+            `shouldThrow` (== Exception.ThreadKilled)
+
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
     { toolDispatchUnknownTool = \name -> "unknown:" <> name

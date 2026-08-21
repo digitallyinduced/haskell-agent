@@ -4,7 +4,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.ToolDispatch
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -176,6 +176,99 @@ spec = do
                 , sequenceNumber = Nothing
                 , eventExtraFields = KeyMap.empty
                 }) `shouldBe` Nothing
+
+    describe "statelessResponsesBackend" do
+        it "replays the local transcript on tool follow-ups" do
+            seen <- newIORef []
+            events <- newIORef []
+            remaining <- newIORef
+                [ testResponse "resp-1"
+                    [functionCallItem "c1" "read_file" "{\"target_file\":\"README.md\"}"]
+                , testResponse "resp-2" [assistantItem "done"]
+                ]
+            transcript <- newIORef []
+            let backend = statelessResponsesBackend
+                    (scriptedStatelessSend seen remaining)
+                    (pure baseParams)
+                    transcript
+
+            first <- backend.submitTurn Nothing [UserMessage "read it"]
+                (modifyIORef' events . (:))
+            first `shouldBe` Right (emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "read_file" "{\"target_file\":\"README.md\"}"]
+                Nothing)
+
+            second <- backend.submitTurn (Just "resp-1")
+                [CompletedTool (functionResult "c1" "file contents")]
+                (const (pure ()))
+            second `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "done"))
+
+            requests <- readIORef seen
+            map inputItems requests `shouldBe`
+                [ turnInputsToItems [UserMessage "read it"]
+                , turnInputsToItems [UserMessage "read it"]
+                    <> [functionCallItem "c1" "read_file"
+                        "{\"target_file\":\"README.md\"}"]
+                    <> turnInputsToItems
+                        [CompletedTool (functionResult "c1" "file contents")]
+                ]
+            readIORef transcript `shouldReturn`
+                ( turnInputsToItems [UserMessage "read it"]
+                    <> [functionCallItem "c1" "read_file"
+                        "{\"target_file\":\"README.md\"}"]
+                    <> turnInputsToItems
+                        [CompletedTool (functionResult "c1" "file contents")]
+                    <> [assistantItem "done"]
+                )
+            reverse <$> readIORef events `shouldReturn` [TextDelta "call"]
+
+        it "leaves the transcript unchanged when the transport fails" do
+            seen <- newIORef []
+            remaining <- newIORef [testResponse "resp-1" [assistantItem "hi"]]
+            transcript <- newIORef []
+            let send request onEvent = do
+                    n <- length <$> readIORef seen
+                    if n == 0
+                        then do
+                            modifyIORef' seen (++ [request])
+                            pure (Left (ConnectionError "boom"))
+                        else scriptedStatelessSend seen remaining request onEvent
+                backend = statelessResponsesBackend send (pure baseParams) transcript
+
+            failed <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
+            failed `shouldBe` Left (ConnectionError "boom")
+
+            recovered <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
+            recovered `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "hi"))
+            map inputItems <$> readIORef seen `shouldReturn`
+                [ turnInputsToItems [UserMessage "hi"]
+                , turnInputsToItems [UserMessage "hi"]
+                ]
+
+        it "re-reads request params without dropping the transcript" do
+            seen <- newIORef []
+            remaining <- newIORef
+                [ testResponse "resp-1" [assistantItem "one"]
+                , testResponse "resp-2" [assistantItem "two"]
+                ]
+            paramsRef <- newIORef (withEffort "low" baseParams)
+            transcript <- newIORef []
+            let backend = statelessResponsesBackend
+                    (scriptedStatelessSend seen remaining)
+                    (readIORef paramsRef)
+                    transcript
+            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            writeIORef paramsRef (withEffort "high" baseParams)
+            _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"]
+                (const (pure ()))
+            requests <- readIORef seen
+            map reasoningEffort requests `shouldBe` [Just "low", Just "high"]
+            map inputItems requests `shouldBe`
+                [ turnInputsToItems [UserMessage "one"]
+                , turnInputsToItems [UserMessage "one"]
+                    <> [assistantItem "one"]
+                    <> turnInputsToItems [UserMessage "two"]
+                ]
 
     describe "openAiBackendWith" do
         it "sends only the new items and threads previous_response_id" do
@@ -379,6 +472,24 @@ spec = do
             readIORef healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 
+        it "reacquires a credential after an in-band usage-limit error" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent =
+                    pure $ Left $ ProviderError UsageLimitReached
+                        "usage limit reached" (Just 120)
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 1
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
@@ -413,6 +524,23 @@ recordingSend seen request previous onEvent = do
     modifyIORef' seen (++ [(request, previous)])
     onEvent (deltaEvent EventOutputTextDelta "ok")
     pure $ Right (testResponse "resp-1" [assistantItem "ok"])
+
+scriptedStatelessSend
+    :: IORef [ResponseCreateParams]
+    -> IORef [Response]
+    -> ResponseCreateParams
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+scriptedStatelessSend seen remaining request onEvent = do
+    modifyIORef' seen (++ [request])
+    next <- atomicModifyIORef' remaining \case
+        [] -> ([], Nothing)
+        response : rest -> (rest, Just response)
+    case next of
+        Nothing -> pure (Left (ConnectionError "scripted backend exhausted"))
+        Just response -> do
+            onEvent (deltaEvent EventOutputTextDelta "call")
+            pure (Right response)
 
 functionResult :: Text -> Text -> ToolCallResult
 functionResult callId output = ToolCallResult

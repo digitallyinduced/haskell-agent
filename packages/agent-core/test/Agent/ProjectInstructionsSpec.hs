@@ -73,6 +73,14 @@ spec = describe "Agent.ProjectInstructions" do
                 loaded <- discoverProjectInstructions options (fromFilePath (dir </> "nested"))
                 map (.instructionContent) loaded.loadedProject `shouldBe` ["abcd"]
 
+        it "counts UTF-8 bytes rather than Unicode code points" do
+            withTempDir \dir -> do
+                createDirectoryIfMissing True (dir </> ".git")
+                writeFile (dir </> "AGENTS.md") "ééa"
+                let options = defaultDiscoverOptions { discoverMaxBytes = 4 }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) loaded.loadedProject `shouldBe` ["éé"]
+
         it "disables discovery when max bytes is zero" do
             withTempDir \dir -> do
                 createDirectoryIfMissing True (dir </> ".git")

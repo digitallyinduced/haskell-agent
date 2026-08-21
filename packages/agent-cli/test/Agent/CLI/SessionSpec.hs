@@ -2,7 +2,7 @@ module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
 import Agent.Loop (TokenUsage(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
@@ -42,10 +42,13 @@ spec = describe "Agent.CLI.Session" do
                 readDevResumePointer home `shouldReturn` Nothing
 
     describe "sessionTitleFromPrompt" do
-        it "collapses whitespace and truncates long prompts" do
+        it "collapses whitespace and keeps the first ten words" do
             sessionTitleFromPrompt "  hello   world  " `shouldBe` "hello world"
-            let long = Text.replicate 100 "a"
-            Text.length (sessionTitleFromPrompt long) `shouldBe` 72
+            sessionTitleFromPrompt "one two three four five six seven eight nine ten eleven"
+                `shouldBe` "one two three four five six seven eight nine ten"
+            sessionTitleFromPrompt "   " `shouldBe` "New session"
+            Text.length (sessionTitleFromPrompt (Text.replicate 200 "x"))
+                `shouldBe` 72
 
     describe "resumeHint" do
         it "prints a copy-pasteable --resume line with a quoted program name" do
@@ -182,11 +185,11 @@ spec = describe "Agent.CLI.Session" do
 
         it "creates a pending session only when ensureSession runs" $
             withTempDir "agent-sessions-" \root -> do
-                slot <- newIORef (Left (testCreate root))
+                PersistenceEnabled slot <- newPendingPersistence (testCreate root)
                 listDirectory root `shouldReturn` []
                 handle <- ensureSession slot
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
-                Right again <- readIORef slot
+                PersistenceActive again <- readIORef slot
                 again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
 
     describe "json codec" do
@@ -210,6 +213,7 @@ testCreate root = SessionCreate
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
+    , createTitleIsManual = False
     }
 
 fixedTime :: UTCTime

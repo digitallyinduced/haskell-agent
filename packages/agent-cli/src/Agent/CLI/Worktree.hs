@@ -101,16 +101,22 @@ addUnique repo root repoName day start attempt
                     Left err
                         | branchTaken err ->
                             addUnique repo root repoName day start (attempt + 1)
-                        | otherwise -> throwE err
+                        | otherwise -> do
+                            lift (cleanupWorktreeCandidate repo path)
+                            throwE err
                     Right _ -> pure path
 
 cleanupWorktreeCandidate :: OsPath -> OsPath -> IO ()
 cleanupWorktreeCandidate repo path = do
-    _ <- git repo ["worktree", "remove", "--force", toFilePath path]
-    _ <- tryAny (removePathForcibly path)
-    _ <- git repo ["worktree", "prune"]
-    _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
-    pure ()
+    exists <- doesPathExist path
+    if not exists
+        then pure ()
+        else do
+            _ <- git repo ["worktree", "remove", "--force", toFilePath path]
+            _ <- tryAny (removePathForcibly path)
+            _ <- git repo ["worktree", "prune"]
+            _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
+            pure ()
 
 gitToplevel :: OsPath -> ExceptT Text IO OsPath
 gitToplevel source = do

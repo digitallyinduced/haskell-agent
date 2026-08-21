@@ -10,8 +10,8 @@ import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
 import Agent.OpenAI.Http (decodeCodexHttpBody)
-import qualified Agent.OpenAI.Responses.Codec as Codec
-import qualified Agent.OpenAI.Responses.Types as Responses
+import qualified Agent.Responses.Codec as Codec
+import qualified Agent.Responses.Types as Responses
 import Agent.OpenAI.ToolDSL
 import Agent.OpenAI.WebSocketClient
 

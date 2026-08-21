@@ -5,8 +5,8 @@ module Agent.OpenRouter.Error
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
-import Agent.OpenAI.Error (classifyHttpFailure, decodeOpenAIError, mkOpenAIError)
-import Agent.OpenAI.Responses.Types (ResponseStreamError(..))
+import Agent.Responses.Error (classifyHttpFailure, decodeOpenAIError, mkOpenAIError)
+import Agent.Responses.Types (ResponseStreamError(..))
 import Control.Applicative ((<|>))
 import Data.Aeson ((.:), (.:?), (.!=), FromJSON(..), withObject)
 import qualified Data.Aeson as Aeson

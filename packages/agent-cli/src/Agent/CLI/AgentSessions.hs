@@ -28,13 +28,16 @@ import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (ToolHandler, typedTool)
-import Agent.Tools.Types (AppTool(..), AppToolKind(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , modifyMVar_
     , newMVar
-    , readMVar
     )
 import Control.Exception.Safe (SomeException, try)
 import Control.Monad (forM_)
@@ -68,9 +71,7 @@ import System.Process
     , StdStream(..)
     , createProcess
     , getProcessExitCode
-    , interruptProcessGroupOf
     , proc
-    , terminateProcess
     , waitForProcess
     )
 
@@ -212,42 +213,36 @@ launchSessionTurn manager background policy handle message =
                                                     <> Text.pack (show code)))
 
 sessionProcessStatus :: SessionProcessManager -> Text -> IO Text
-sessionProcessStatus manager sessionId = do
-    processes <- readMVar manager.managedProcesses
-    case Map.lookup sessionId processes of
-        Nothing -> do
-            locked <- doesDirectoryExist
-                (sessionLockPath manager sessionId)
-            pure (if locked then "running" else "idle")
-        Just process ->
-            getProcessExitCode process.managedHandle >>= \case
-                Nothing -> pure "running"
-                Just ExitSuccess -> do
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
-                    pure "completed"
-                Just (ExitFailure code) ->
-                    removePrivateFile process.managedPromptPath >>
-                    releaseSessionLock process.managedLockPath >>
-                    pure ("failed (" <> Text.pack (show code) <> ")")
+sessionProcessStatus manager sessionId =
+    modifyMVar manager.managedProcesses \processes ->
+        case Map.lookup sessionId processes of
+            Nothing -> do
+                locked <- doesDirectoryExist
+                    (sessionLockPath manager sessionId)
+                pure (processes, if locked then "running" else "idle")
+            Just process ->
+                getProcessExitCode process.managedHandle >>= \case
+                    Nothing -> pure (processes, "running")
+                    Just ExitSuccess ->
+                        pure (Map.delete sessionId processes, "completed")
+                    Just (ExitFailure code) ->
+                        pure
+                            ( Map.delete sessionId processes
+                            , "failed (" <> Text.pack (show code) <> ")"
+                            )
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager =
     modifyMVar_ manager.managedProcesses \processes -> do
+        -- Running sessions intentionally outlive the caller. The child
+        -- wrapper owns prompt and lock cleanup.
         forM_ (Map.elems processes) \process -> do
             getProcessExitCode process.managedHandle >>= \case
                 Just _ -> do
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
-                Nothing -> do
-                    _ <- try @_ @SomeException
-                        (interruptProcessGroupOf process.managedHandle)
-                    _ <- try @_ @SomeException
-                        (terminateProcess process.managedHandle)
                     _ <- try @_ @SomeException
                         (waitForProcess process.managedHandle)
-                    removePrivateFile process.managedPromptPath
-                    releaseSessionLock process.managedLockPath
+                    pure ()
+                Nothing -> pure ()
         pure Map.empty
 
 acquireSessionLock :: SessionHandle -> IO (Either Text FilePath)
@@ -306,15 +301,12 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly handler =
+    jsonAppTool name description parameters approval handler
+  where
+    approval
+        | readOnly = AlwaysReadOnly
+        | otherwise = AlwaysPrompt
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text
@@ -353,6 +345,8 @@ runCreateAgentSession
 runCreateAgentSession env args
     | Text.null (Text.strip args.message) =
         pure (Left "create_agent_session requires a non-empty message")
+    | maybe False ((> 100) . Text.length . Text.strip) args.title =
+        pure (Left "create_agent_session title must be at most 100 characters")
     | otherwise = do
         let title = case Text.strip <$> args.title of
                 Just value | not (Text.null value) -> value
@@ -364,6 +358,8 @@ runCreateAgentSession env args
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
                 , createTitleHint = Just title
+                , createTitleIsManual =
+                    maybe False (not . Text.null . Text.strip) args.title
                 }
         handle <- createSession spec
         env.toolsLaunchTurn handle args.message >>= \case

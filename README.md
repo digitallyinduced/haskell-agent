@@ -7,8 +7,10 @@ A universal coding-agent harness written in Haskell.
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
 - `agent-core` provides provider-neutral credentials, broker failover, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
-- `agent-openai` provides the OpenAI/ChatGPT Responses transports, authentication,
-  streaming, and tool-call types under the `Agent.OpenAI.*` module namespace.
+- `agent-responses` provides the canonical Responses wire model, codecs, error
+  normalization, response merging, and provider-neutral loop adapters.
+- `agent-openai` provides the OpenAI/ChatGPT Responses transports,
+  authentication, and streaming under the `Agent.OpenAI.*` module namespace.
 - `agent-xai` provides Grok request mapping, OAuth login, HTTP SSE transport,
   and stateful sessions under the `Agent.XAI.*` module namespace.
 - `agent-openrouter` provides OpenRouter static API-key auth, HTTP SSE
@@ -24,6 +26,7 @@ After changing a `.cabal` file, regenerate that package's Nix expression:
 
 ```console
 (cd packages/agent-core && cabal2nix . > package.nix)
+(cd packages/agent-responses && cabal2nix . > package.nix)
 (cd packages/agent-openai && cabal2nix . > package.nix)
 (cd packages/agent-xai && cabal2nix . > package.nix)
 (cd packages/agent-openrouter && cabal2nix . > package.nix)

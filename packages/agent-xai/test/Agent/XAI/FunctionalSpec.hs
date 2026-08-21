@@ -16,7 +16,7 @@ import Agent.XAI.Auth (accountIdFromAccessToken)
 import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap

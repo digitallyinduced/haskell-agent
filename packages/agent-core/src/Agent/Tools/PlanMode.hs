@@ -36,8 +36,9 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.Types
-    ( AppTool(..)
-    , AppToolKind(..)
+    ( AppTool
+    , ApprovalRule(..)
+    , jsonAppTool
     )
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
@@ -47,7 +48,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
-import System.OsPath (equalFilePath, takeDirectory, takeFileName, (</>))
+import System.OsPath (equalFilePath, takeDirectory, (</>))
 
 data PlanModeState
     = PlanInactive
@@ -164,7 +165,6 @@ isPlanFileEditTarget :: OsPath -> OsPath -> Bool
 isPlanFileEditTarget planPath target =
     equalFilePath planPath target
         || equalFilePath planFileName target
-        || equalFilePath planFileName (takeFileName target)
 
 --------------------------------------------------------------------------------
 -- Grok-build tools
@@ -177,15 +177,9 @@ jsonTool
     -> Bool
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler = AppTool
-    { appToolName = name
-    , appToolDescription = description
-    , appToolParameters = parameters
-    , appToolHandler = handler
-    , appToolKind = JsonFunction
-    , appToolReadOnly = readOnly
-    , appToolIsReadOnlyCall = Nothing
-    }
+jsonTool name description parameters readOnly =
+    jsonAppTool name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
 
 data EnterPlanArgs = EnterPlanArgs
     { explanation :: Maybe Text

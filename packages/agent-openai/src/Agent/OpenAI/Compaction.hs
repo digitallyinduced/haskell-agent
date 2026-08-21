@@ -20,7 +20,7 @@ module Agent.OpenAI.Compaction
     , newSessionUserText
     ) where
 
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (mapMaybe)

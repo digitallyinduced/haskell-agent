@@ -41,6 +41,7 @@ nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
   agent-core:lib:agent-core \
+  agent-responses:lib:agent-responses \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
   agent-openrouter:lib:agent-openrouter

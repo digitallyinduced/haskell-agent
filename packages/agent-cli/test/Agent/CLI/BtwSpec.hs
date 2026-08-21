@@ -7,8 +7,8 @@ import Agent.Loop
     , TurnInput(..)
     , emptyTurnOutput
     )
-import Agent.OpenAI.LoopBackend (turnInputsToItems)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types
 import Agent.ToolDispatch (functionToolCall)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap

@@ -2,9 +2,11 @@
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , grokCredentialFromAuthJson
+    , grokEmailFromAuthJson
     , loadAuth
     , openAIOAuthClientId
     , openaiAuthStateFromJson
+    , probeLoadedAuth
     , reloadableFileCredentialProvider
     , xaiOAuthClientId
     ) where
@@ -33,7 +35,7 @@ import Agent.Provider
     , seedTokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
-import Agent.XAI.Auth (accountIdFromAccessToken)
+import Agent.XAI.Auth (accountIdFromAccessToken, emailFromToken)
 import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
@@ -85,6 +87,23 @@ loadAuth requested = runExceptT do
                 XAIProvider -> loadXai
                 OpenAIProvider -> loadOpenAi
                 OpenRouterProvider -> loadOpenRouter
+
+-- | Ask the token source whether it has a usable credential now without
+-- making a model request, preserving a successful checkout for later use.
+probeLoadedAuth :: LoadedAuth -> IO (Either ApiError LoadedAuth)
+probeLoadedAuth loaded = do
+    result <- getNextToken loaded.loadedTokenProvider Nothing
+    case result of
+        Left err -> pure (Left err)
+        Right credential
+            | credential.provider /= loaded.loadedProvider ->
+                pure $ Left $ ProviderError AuthenticationError
+                    "credential provider does not match loaded auth"
+                    Nothing
+            | otherwise -> do
+                tokenProvider <-
+                    seedTokenProvider loaded.loadedTokenProvider credential
+                pure $ Right loaded { loadedTokenProvider = tokenProvider }
 
 detectProvider :: Maybe Provider -> ExceptT Text IO Provider
 detectProvider (Just provider) = pure provider
@@ -401,6 +420,26 @@ grokCredentialFromAuthJson raw = do
             , Just token <- [entryToken nested]
             ]
     firstNestedToken _ = Nothing
+
+grokEmailFromAuthJson :: Text -> Maybe Text
+grokEmailFromAuthJson raw = do
+    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
+    entryEmail value <|> firstNestedEmail value
+  where
+    entryEmail (Aeson.Object object) =
+        textField "email" object
+            <|> (textField "id_token" object >>= emailFromToken)
+            <|> (textField "access_token" object >>= emailFromToken)
+            <|> (textField "key" object >>= emailFromToken)
+    entryEmail _ = Nothing
+
+    firstNestedEmail (Aeson.Object object) =
+        listToMaybe
+            [ email
+            | nested <- KeyMap.elems object
+            , Just email <- [entryEmail nested]
+            ]
+    firstNestedEmail _ = Nothing
 
 grokCredential :: Text -> Credential
 grokCredential token = Credential

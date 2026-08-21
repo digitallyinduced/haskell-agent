@@ -5,11 +5,17 @@ module Agent.OpenAI.CompactClient
     , compactConversationAt
     ) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Client (defaultCodexBaseUrl)
 import Agent.OpenAI.Error (classifyHttpFailure)
-import Agent.OpenAI.Responses.Types hiding (Response)
-import Agent.Provider (Credential(..), TokenProvider, runWithTokenProvider)
+import Agent.Responses.Types hiding (Response)
+import Agent.Provider
+    ( Credential(..)
+    , Provider(..)
+    , TokenProvider
+    , runWithTokenProvider
+    )
+import Control.Exception.Safe (tryAny)
 import Control.Monad (when)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -19,6 +25,7 @@ import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import Network.Http.Client
     ( Method(POST)
     , Response
@@ -79,25 +86,36 @@ postCompact
     -> Credential
     -> CompactRequest
     -> IO (Either ApiError [ResponseItem])
-postCompact baseUrl credential request = do
-    let url = Text.dropWhileEnd (== '/') baseUrl <> "/responses/compact"
-        body = Aeson.toJSON request
-    case URI.parseURI (Text.unpack url) of
-        Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
-        Just uri ->
-            withOpenSSL $
-                withConnection (establishConnection (Text.encodeUtf8 url)) $ \conn -> do
-                    let path = Text.encodeUtf8 (Text.pack uri.uriPath)
-                        req = buildRequest1 $ do
-                            http POST path
-                            setContentType "application/json"
-                            setHeader "Authorization"
-                                ("Bearer " <> Text.encodeUtf8 credential.accessToken)
-                            when (not (Text.null (Text.strip credential.accountId))) $
-                                setHeader "chatgpt-account-id"
-                                    (Text.encodeUtf8 credential.accountId)
-                    sendRequest conn req (jsonBody body)
-                    receiveResponse conn compactResponseHandler
+postCompact _ credential _
+    | credential.provider /= OpenAIProvider =
+        pure $ Left $ ProviderError ApiErrorType
+            "Codex compaction requires an OpenAI credential"
+            Nothing
+postCompact baseUrl credential request =
+    tryAny perform >>= \case
+        Left exception -> pure $ Left $ ConnectionError
+            ("Codex compaction request failed: " <> Text.pack (show exception))
+        Right result -> pure result
+  where
+    perform = do
+        let url = Text.dropWhileEnd (== '/') baseUrl <> "/responses/compact"
+            body = Aeson.toJSON request
+        case URI.parseURI (Text.unpack url) of
+            Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
+            Just uri ->
+                withOpenSSL $
+                    withConnection (establishConnection (Text.encodeUtf8 url)) $ \conn -> do
+                        let path = Text.encodeUtf8 (Text.pack uri.uriPath)
+                            req = buildRequest1 $ do
+                                http POST path
+                                setContentType "application/json"
+                                setHeader "Authorization"
+                                    ("Bearer " <> Text.encodeUtf8 credential.accessToken)
+                                when (not (Text.null (Text.strip credential.accountId))) $
+                                    setHeader "chatgpt-account-id"
+                                        (Text.encodeUtf8 credential.accountId)
+                        sendRequest conn req (jsonBody body)
+                        receiveResponse conn compactResponseHandler
 
 compactResponseHandler
     :: Response
@@ -106,7 +124,7 @@ compactResponseHandler
 compactResponseHandler response stream = do
     let status = getStatusCode response
     bytes <- Streams.fold mappend mempty stream
-    let bodyText = Text.decodeUtf8 bytes
+    let bodyText = Text.decodeUtf8With Text.lenientDecode bytes
     if status >= 200 && status < 300
         then pure (decodeCompactBody bodyText)
         else pure $ Left (classifyHttpFailure status bodyText)
