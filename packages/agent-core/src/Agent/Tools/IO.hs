@@ -11,6 +11,7 @@ module Agent.Tools.IO
     , runShellCommand
     , startShellCommand
     , stopShellCommand
+    , terminateProcessGroup
     , runningLiveOutput
     , truncateText
     ) where
@@ -27,10 +28,9 @@ import Agent.Tools.FileSystem
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Monad (void)
 import Control.Concurrent.Async
     ( Async
-    , async
+    , asyncWithUnmask
     , cancel
     , concurrently
     , race
@@ -40,9 +40,9 @@ import Control.Concurrent.MVar
     ( MVar
     , newEmptyMVar
     , readMVar
+    , tryReadMVar
     , tryPutMVar
     )
-import Control.Exception (evaluate)
 import Control.Exception.Safe
     ( SomeException
     , finally
@@ -50,6 +50,8 @@ import Control.Exception.Safe
     , onException
     , try
     )
+import Control.Monad (unless, void)
+import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -58,12 +60,21 @@ import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose)
+import System.Posix.Signals
+    ( nullSignal
+    , sigINT
+    , sigKILL
+    , sigTERM
+    , signalProcessGroup
+    )
+import System.Posix.Types (ProcessGroupID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
     , StdStream(..)
     , createProcess
-    , interruptProcessGroupOf
+    , getPid
+    , getProcessExitCode
     , shell
     , terminateProcess
     , waitForProcess
@@ -79,21 +90,28 @@ data CommandResult = CommandResult
 
 data RunningCommand = RunningCommand
     { runningHandle :: !ProcessHandle
+    , runningGroupId :: !(Maybe ProcessGroupID)
     , runningResult :: !(MVar CommandResult)
-    , runningStdout :: !(IORef BS.ByteString)
-    , runningStderr :: !(IORef BS.ByteString)
-    , runningCap :: !Int
+    , runningStdout :: !(IORef CapturedBytes)
+    , runningStderr :: !(IORef CapturedBytes)
+    , runningStdoutHandle :: !Handle
+    , runningStderrHandle :: !Handle
     , runningSupervisor :: !(Async ())
+    }
+
+data CapturedBytes = CapturedBytes
+    { capturedBytes :: !BS.ByteString
+    , capturedDropped :: !Int
     }
 
 -- | Bytes already drained from a still-running command, decoded and capped.
 runningLiveOutput :: RunningCommand -> IO (Text, Text)
 runningLiveOutput running = do
-    outBytes <- readIORef running.runningStdout
-    errBytes <- readIORef running.runningStderr
+    out <- readIORef running.runningStdout
+    err <- readIORef running.runningStderr
     pure
-        ( truncateText running.runningCap (decodeUtf8With lenientDecode outBytes)
-        , truncateText running.runningCap (decodeUtf8With lenientDecode errBytes)
+        ( renderCapturedBytes out
+        , renderCapturedBytes err
         )
 
 -- | Run a shell command in @workdir@, killing the process group on timeout.
@@ -103,7 +121,7 @@ runShellCommand
     -> String
     -> Int
     -> IO CommandResult
-runShellCommand env workdir command timeoutMs = do
+runShellCommand env workdir command timeoutMs = mask \restore -> do
     let spec = (shell command)
             { cwd = Just (toFilePath workdir)
             , std_in = CreatePipe
@@ -120,17 +138,23 @@ runShellCommand env workdir command timeoutMs = do
             , commandCancelled = False
             }
         Right (Just hin, Just hout, Just herr, processHandle) -> do
-            hClose hin
+            groupId <- getPid processHandle
+            let closePipes =
+                    mapM_ (void . try @_ @SomeException . hClose) [hin, hout, herr]
+                stopCommand = do
+                    terminateProcessGroup groupId processHandle
+                    closePipes
+            hClose hin `onException` stopCommand
+            outRef <- newIORef emptyCapturedBytes
+            errRef <- newIORef emptyCapturedBytes
             let collect = do
                     -- Drain stdout and stderr concurrently so a child that
                     -- fills one pipe cannot deadlock the other.
-                    (outBytes, errBytes) <- concurrently
-                        (strictGetContents hout)
-                        (strictGetContents herr)
+                    (out, err) <- concurrently
+                        (drainHandle env.toolStdoutCap hout outRef)
+                        (drainHandle env.toolStdoutCap herr errRef)
                     code <- waitForProcess processHandle
-                    pure (outBytes, errBytes, code)
-                killGroup = void $ try @_ @SomeException
-                    (interruptProcessGroupOf processHandle)
+                    pure (out, err, code)
                 -- Prefer cancel over timeout when both fire: race cancel
                 -- against (timeout `race` collect).
                 waitStop = do
@@ -138,37 +162,41 @@ runShellCommand env workdir command timeoutMs = do
                     pure $ case timed of
                         Left () -> StopTimeout
                         Right triple -> StopDone triple
-            already <- isCancelled env.toolCancel
-            if already
-                then do
-                    killGroup
-                    pure cancelledResult
-                else do
-                    stopped <- race (waitCancel env.toolCancel) waitStop
-                    case stopped of
-                        Left () -> do
-                            killGroup
-                            pure cancelledResult
-                        Right StopTimeout -> do
-                            killGroup
-                            pure CommandResult
-                                { commandExitCode = Nothing
-                                , commandStdout = ""
-                                , commandStderr = ""
-                                , commandTimedOut = True
-                                , commandCancelled = False
-                                }
-                        Right (StopDone (outBytes, errBytes, code)) ->
-                            pure CommandResult
-                                { commandExitCode = Just (exitCodeInt code)
-                                , commandStdout = truncateText env.toolStdoutCap
-                                    (decodeUtf8With lenientDecode outBytes)
-                                , commandStderr = truncateText env.toolStdoutCap
-                                    (decodeUtf8With lenientDecode errBytes)
-                                , commandTimedOut = False
-                                , commandCancelled = False
-                                }
-        Right _ ->
+            restore (do
+                already <- isCancelled env.toolCancel
+                if already
+                    then do
+                        stopCommand
+                        pure cancelledResult
+                    else do
+                        stopped <- race (waitCancel env.toolCancel) waitStop
+                        case stopped of
+                            Left () -> do
+                                stopCommand
+                                pure cancelledResult
+                            Right StopTimeout -> do
+                                stopCommand
+                                pure CommandResult
+                                    { commandExitCode = Nothing
+                                    , commandStdout = ""
+                                    , commandStderr = ""
+                                    , commandTimedOut = True
+                                    , commandCancelled = False
+                                    }
+                            Right (StopDone (out, err, code)) -> do
+                                closePipes
+                                pure CommandResult
+                                    { commandExitCode = Just (exitCodeInt code)
+                                    , commandStdout = renderCapturedBytes out
+                                    , commandStderr = renderCapturedBytes err
+                                    , commandTimedOut = False
+                                    , commandCancelled = False
+                                    })
+                `onException` stopCommand
+        Right (hin, hout, herr, processHandle) -> do
+            groupId <- getPid processHandle
+            terminateProcessGroup groupId processHandle
+            closeOptionalPipes [hin, hout, herr]
             pure CommandResult
                 { commandExitCode = Just 127
                 , commandStdout = ""
@@ -180,7 +208,7 @@ runShellCommand env workdir command timeoutMs = do
 -- | Outcomes of racing timeout against completion (cancel is the other race arm).
 data ShellStop
     = StopTimeout
-    | StopDone (BS.ByteString, BS.ByteString, ExitCode)
+    | StopDone (CapturedBytes, CapturedBytes, ExitCode)
 
 cancelledResult :: CommandResult
 cancelledResult = CommandResult
@@ -209,89 +237,96 @@ startShellCommand env workdir command = do
     try @_ @SomeException
         (acquireRunningCommand spec env.toolStdoutCap) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
-        Right running ->
-            pure (Right running)
+        Right running -> pure (Right running)
 
 acquireRunningCommand :: CreateProcess -> Int -> IO RunningCommand
-acquireRunningCommand spec outputCap =
-    mask \restore ->
-    restore (createProcess spec) >>= \case
-        (Just hin, Just hout, Just herr, processHandle) -> do
-            let rollback = cleanupProcess processHandle [hin, hout, herr]
-            flip onException rollback do
-                hClose hin
-                resultVar <- newEmptyMVar
-                stdoutRef <- newIORef BS.empty
-                stderrRef <- newIORef BS.empty
-                supervisor <- async $
-                    (do
-                        result <- try @_ @SomeException do
-                            ((outBytes, errBytes), code) <- concurrently
-                                (concurrently
-                                    (drainHandle hout stdoutRef)
-                                    (drainHandle herr stderrRef))
-                                (waitForProcess processHandle)
-                            pure (outBytes, errBytes, code)
-                        void $ tryPutMVar resultVar $ case result of
-                            Left exception -> commandFailure exception
-                            Right (outBytes, errBytes, code) -> CommandResult
+acquireRunningCommand spec outputCap = mask \restore -> do
+    created@(_, _, _, processHandle) <- createProcess spec
+    groupId <- getPid processHandle
+    case created of
+        (Just hin, Just hout, Just herr, _) -> do
+            let closePipes =
+                    mapM_ (void . try @_ @SomeException . hClose) [hin, hout, herr]
+                stopCreated = do
+                    terminateProcessGroup groupId processHandle
+                    closePipes
+            hClose hin `onException` stopCreated
+            resultVar <- newEmptyMVar
+            stdoutRef <- newIORef emptyCapturedBytes
+            stderrRef <- newIORef emptyCapturedBytes
+            supervisor <- asyncWithUnmask \unmask ->
+                (do
+                    result <- try @_ @SomeException $ unmask do
+                        ((out, err), code) <- concurrently
+                            (concurrently
+                                (drainHandle outputCap hout stdoutRef)
+                                (drainHandle outputCap herr stderrRef))
+                            (waitForProcessPolling processHandle)
+                        pure (out, err, code)
+                    commandResult <- case result of
+                        Left exception -> do
+                            terminateProcessGroup groupId processHandle
+                            pure (failedCommandResult exception)
+                        Right (out, err, code) ->
+                            pure CommandResult
                                 { commandExitCode = Just (exitCodeInt code)
-                                , commandStdout = truncateText outputCap
-                                    (decodeUtf8With lenientDecode outBytes)
-                                , commandStderr = truncateText outputCap
-                                    (decodeUtf8With lenientDecode errBytes)
+                                , commandStdout = renderCapturedBytes out
+                                , commandStderr = renderCapturedBytes err
                                 , commandTimedOut = False
                                 , commandCancelled = False
-                                })
-                    `finally` do
-                        void $ tryPutMVar resultVar cancelledResult
-                        mapM_
-                            (\handle ->
-                                void $ try @_ @SomeException (hClose handle))
-                            [hout, herr]
-                pure RunningCommand
+                                }
+                    void $ tryPutMVar resultVar commandResult)
+                `finally` do
+                    void $ tryPutMVar resultVar cancelledResult
+                    mapM_ (void . try @_ @SomeException . hClose) [hout, herr]
+            let running = RunningCommand
                     { runningHandle = processHandle
+                    , runningGroupId = groupId
                     , runningResult = resultVar
                     , runningStdout = stdoutRef
                     , runningStderr = stderrRef
-                    , runningCap = outputCap
+                    , runningStdoutHandle = hout
+                    , runningStderrHandle = herr
                     , runningSupervisor = supervisor
                     }
-        _ -> fail "Failed to capture command output"
-
-cleanupProcess :: ProcessHandle -> [Handle] -> IO ()
-cleanupProcess processHandle handles = do
-    void $ try @_ @SomeException (interruptProcessGroupOf processHandle)
-    void $ try @_ @SomeException (terminateProcess processHandle)
-    mapM_ (\handle -> void $ try @_ @SomeException (hClose handle)) handles
-    void $ try @_ @SomeException (waitForProcess processHandle)
+            restore (pure running) `onException` stopShellCommand running
+        (hin, hout, herr, _) -> do
+            terminateProcessGroup groupId processHandle
+            closeOptionalPipes [hin, hout, herr]
+            fail "Failed to capture command output"
 
 stopShellCommand :: RunningCommand -> IO ()
 stopShellCommand running = do
-    void $ try @_ @SomeException
-        (interruptProcessGroupOf running.runningHandle)
-    stopped <- race
-        (threadDelay 5000000)
-        (readMVar running.runningResult)
-    case stopped of
-        Right _ ->
+    finished <- tryReadMVar running.runningResult
+    case finished of
+        Just _ ->
             void (waitCatch running.runningSupervisor)
-        Left () -> do
-            void $ try @_ @SomeException
-                (terminateProcess running.runningHandle)
-            stoppedAfterTerminate <- race
+        Nothing -> do
+            terminateProcessGroup running.runningGroupId running.runningHandle
+            joined <- race
                 (threadDelay 1000000)
                 (readMVar running.runningResult)
-            case stoppedAfterTerminate of
+            case joined of
                 Right _ ->
                     void (waitCatch running.runningSupervisor)
                 Left () -> do
+                    closeRunningPipes running
                     cancel running.runningSupervisor
                     void (waitCatch running.runningSupervisor)
                     void $ tryPutMVar running.runningResult cancelledResult
+    closeRunningPipes running
 
-commandFailure :: SomeException -> CommandResult
-commandFailure exception = CommandResult
+closeRunningPipes :: RunningCommand -> IO ()
+closeRunningPipes running =
+    mapM_ (void . try @_ @SomeException . hClose)
+        [running.runningStdoutHandle, running.runningStderrHandle]
+
+closeOptionalPipes :: [Maybe Handle] -> IO ()
+closeOptionalPipes =
+    mapM_ (mapM_ (void . try @_ @SomeException . hClose))
+
+failedCommandResult :: SomeException -> CommandResult
+failedCommandResult exception = CommandResult
     { commandExitCode = Just 127
     , commandStdout = ""
     , commandStderr = Text.pack (show exception)
@@ -299,23 +334,56 @@ commandFailure exception = CommandResult
     , commandCancelled = False
     }
 
-strictGetContents :: Handle -> IO BS.ByteString
-strictGetContents handle = do
-    bytes <- BS.hGetContents handle
-    _ <- evaluate (BS.length bytes)
-    pure bytes
-
 -- | Read the handle in chunks so a live snapshot can see output before EOF.
-drainHandle :: Handle -> IORef BS.ByteString -> IO BS.ByteString
-drainHandle handle ref = go
+drainHandle :: Int -> Handle -> IORef CapturedBytes -> IO CapturedBytes
+drainHandle cap handle ref = go
   where
     go = do
         chunk <- BS.hGetSome handle 8192
         if BS.null chunk
             then readIORef ref
             else do
-                atomicModifyIORef' ref \soFar -> (soFar <> chunk, ())
+                atomicModifyIORef' ref \soFar ->
+                    (appendCapturedBytes cap chunk soFar, ())
                 go
+
+emptyCapturedBytes :: CapturedBytes
+emptyCapturedBytes = CapturedBytes
+    { capturedBytes = BS.empty
+    , capturedDropped = 0
+    }
+
+appendCapturedBytes :: Int -> BS.ByteString -> CapturedBytes -> CapturedBytes
+appendCapturedBytes cap chunk captured
+    | BS.null chunk = captured
+    | cap <= 0 =
+        captured { capturedBytes = captured.capturedBytes <> chunk }
+    | otherwise =
+        let remaining = max 0 (cap - BS.length captured.capturedBytes)
+            kept = BS.take remaining chunk
+        in CapturedBytes
+            { capturedBytes = captured.capturedBytes <> kept
+            , capturedDropped =
+                captured.capturedDropped + BS.length chunk - BS.length kept
+            }
+
+renderCapturedBytes :: CapturedBytes -> Text
+renderCapturedBytes captured =
+    decodeUtf8With lenientDecode captured.capturedBytes
+        <> if captured.capturedDropped <= 0
+            then ""
+            else
+                "\n...[truncated "
+                    <> Text.pack (show captured.capturedDropped)
+                    <> " bytes]"
+
+waitForProcessPolling :: ProcessHandle -> IO ExitCode
+waitForProcessPolling processHandle =
+    getProcessExitCode processHandle >>= \case
+        Just code -> pure code
+        Nothing -> do
+            threadDelay 10000
+            waitForProcessPolling processHandle
 
 exitCodeInt :: ExitCode -> Int
 exitCodeInt = \case
@@ -331,3 +399,62 @@ truncateText cap text
             <> "\n...[truncated "
             <> Text.pack (show (Text.length text - cap))
             <> " chars]"
+
+terminateProcessGroup
+    :: Maybe ProcessGroupID
+    -> ProcessHandle
+    -> IO ()
+terminateProcessGroup groupId processHandle = do
+    alive <- processGroupAlive groupId processHandle
+    whenAlive alive do
+        signalGroup sigINT
+        interrupted <- waitForProcessGroupExit groupId processHandle 250
+        unless interrupted do
+            signalGroup sigTERM
+            void $ try @_ @SomeException (terminateProcess processHandle)
+            terminated <- waitForProcessGroupExit groupId processHandle 750
+            unless terminated do
+                signalGroup sigKILL
+                void $ try @_ @SomeException (terminateProcess processHandle)
+                void $ waitForProcessGroupExit groupId processHandle 1000
+  where
+    whenAlive True action = action
+    whenAlive False _ = pure ()
+
+    signalGroup signal =
+        case groupId of
+            Just pid ->
+                void $ try @_ @SomeException (signalProcessGroup signal pid)
+            Nothing ->
+                void $ try @_ @SomeException (terminateProcess processHandle)
+
+waitForProcessGroupExit
+    :: Maybe ProcessGroupID
+    -> ProcessHandle
+    -> Int
+    -> IO Bool
+waitForProcessGroupExit groupId processHandle timeoutMs =
+    go (max 0 timeoutMs)
+  where
+    go remaining = do
+        alive <- processGroupAlive groupId processHandle
+        if not alive
+            then pure True
+            else if remaining <= 0
+                then pure False
+                else do
+                    let delayMs = min 10 remaining
+                    threadDelay (delayMs * 1000)
+                    go (remaining - delayMs)
+
+processGroupAlive
+    :: Maybe ProcessGroupID
+    -> ProcessHandle
+    -> IO Bool
+processGroupAlive groupId processHandle = do
+    processExit <- getProcessExitCode processHandle
+    case groupId of
+        Nothing -> pure (case processExit of Nothing -> True; Just _ -> False)
+        Just pid ->
+            isRight <$> try @_ @SomeException
+                (signalProcessGroup nullSignal pid)
