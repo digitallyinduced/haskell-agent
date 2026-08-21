@@ -198,7 +198,9 @@ enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional reason this task needs a planning phase before implementation."
     ]
-    False
+    -- The tool performs its own explicit user confirmation through
+    -- planConfirmEnter, so it must not also trigger generic tool approval.
+    True
     (typedTool "enter_plan_mode" (runEnterPlanMode env))
 
 enterPlanDescription :: Text
