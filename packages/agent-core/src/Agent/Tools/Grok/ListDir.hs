@@ -12,7 +12,7 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory.OsPath (doesDirectoryExist)
+import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
 import System.OsPath (takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
@@ -85,8 +85,12 @@ toNode cwd parent (name, isDir) = do
         else if not isDir
             then pure [FileNode name]
             else do
-                children <- collectDir cwd full
-                pure [summarizeDir name children]
+                isLink <- pathIsSymbolicLink full
+                if isLink
+                    then pure [FileNode name]
+                    else do
+                        children <- collectDir cwd full
+                        pure [summarizeDir name children]
 
 capNodes :: Int -> [DirNode] -> ([DirNode], Bool)
 capNodes budget nodes =

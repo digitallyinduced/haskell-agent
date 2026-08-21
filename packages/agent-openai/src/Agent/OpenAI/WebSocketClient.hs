@@ -176,9 +176,7 @@ type StreamEventCallback = ResponseStreamEvent -> IO ()
 -- e.g. for compatibility with another streaming event model.
 type RawStreamEventCallback = Text -> Aeson.Value -> IO ()
 
--- | Optional controls for a WebSocket Responses request. Existing callers use
--- 'defaultCodexWsOptions'; long-running agents can opt into server-side
--- compaction without changing the shared 'ResponseCreateParams' type.
+-- | Optional controls for a WebSocket Responses request.
 data CodexWsOptions = CodexWsOptions
     { compactThreshold :: !(Maybe Int)
     } deriving (Eq, Show)
@@ -284,11 +282,11 @@ sendWsRequestWithEventsAndOptions options cc request previousResponseId onEvent 
     sendOverWs session = do
         let wsPayload = buildWsPayloadWithOptions options request previousResponseId
             encoded = Aeson.encode wsPayload
-        WebSocket.withWebSocketRequest session do
-            sendRes <- WebSocket.sendWebSocketText session encoded
+        WebSocket.withWebSocketRequest session \wsRequest -> do
+            sendRes <- WebSocket.sendWebSocketText wsRequest encoded
             case sendRes of
                 Left apiError -> pure (Left apiError)
-                Right () -> receiveWsResponse session onEvent
+                Right () -> receiveWsResponse wsRequest onEvent
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").
@@ -318,7 +316,7 @@ buildWsPayloadWithOptions options request previousResponseId =
 -- | Receive typed WebSocket events until the response is complete.
 -- Accumulates output items from 'ResponseOutputItemDoneEvent' values and
 -- returns the response carried by 'ResponseCompletedEvent'.
-receiveWsResponse :: WebSocket.WebSocketSession -> StreamEventCallback -> IO (Either ApiError Response)
+receiveWsResponse :: WebSocket.WebSocketRequest -> StreamEventCallback -> IO (Either ApiError Response)
 receiveWsResponse cc onEvent = do
     itemsRef <- newIORef ([] :: [Aeson.Value])
     framesRef <- newIORef (0 :: Int)
@@ -337,7 +335,7 @@ receiveWsResponse cc onEvent = do
                     Left err -> do
                         let msgPreview = Text.decodeUtf8With Text.lenientDecode (LBS.toStrict msgBytes)
                         logStreamStats "json_decode_error" itemsRef framesRef bytesRef
-                        WebSocket.invalidateWebSocketSession cc
+                        WebSocket.invalidateWebSocketRequest cc
                             "received a malformed response frame"
                         pure $ Left (JsonDecodeError (Text.pack err) (Text.take 500 msgPreview))
                     Right event -> do
@@ -345,10 +343,12 @@ receiveWsResponse cc onEvent = do
                         case event of
                             ResponseErrorEvent { streamError } -> do
                                 logStreamStats "error_event" itemsRef framesRef bytesRef
+                                WebSocket.completeWebSocketRequest cc
                                 pure $ Left (parseWsErrorEvent streamError)
 
                             ResponseNestedErrorEvent { streamError } -> do
                                 logStreamStats "error_event" itemsRef framesRef bytesRef
+                                WebSocket.completeWebSocketRequest cc
                                 pure $ Left (parseWsErrorEvent streamError)
 
                             ResponseOutputItemDoneEvent { item } -> do
@@ -358,11 +358,19 @@ receiveWsResponse cc onEvent = do
                             ResponseCompletedEvent { response } -> do
                                 items <- reverse <$> readIORef itemsRef
                                 logStreamStats "completed" itemsRef framesRef bytesRef
+                                WebSocket.completeWebSocketRequest cc
+                                parseCompletedResponse items (Aeson.toJSON response)
+
+                            ResponseIncompleteEvent { response } -> do
+                                items <- reverse <$> readIORef itemsRef
+                                logStreamStats "incomplete" itemsRef framesRef bytesRef
+                                WebSocket.completeWebSocketRequest cc
                                 parseCompletedResponse items (Aeson.toJSON response)
 
                             ResponseFailedEvent { response } -> do
                                 logStreamStats "response_failed" itemsRef framesRef bytesRef
-                                pure $ Left (ConnectionError (failedResponseMessage response))
+                                WebSocket.completeWebSocketRequest cc
+                                pure $ Left (failedResponseError response)
 
                             -- Ignore other event variants (created, added,
                             -- content deltas, and future event types).
@@ -393,6 +401,15 @@ receiveWsResponse cc onEvent = do
             Nothing -> case response.incompleteDetails of
                 Just details -> "response.failed: " <> details.reason
                 Nothing -> "response.failed (no details)"
+
+    failedResponseError response = case response.error of
+        Just responseError ->
+            mkOpenAIError
+                (errorTypeFromText responseError.code)
+                responseError.message
+                (Just responseError.code)
+                Nothing
+        Nothing -> ConnectionError (failedResponseMessage response)
 
 -- | Parse a server @type: error@ event into a structured 'ApiError'.
 --

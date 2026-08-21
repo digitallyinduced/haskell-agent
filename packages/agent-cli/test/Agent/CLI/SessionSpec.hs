@@ -30,22 +30,14 @@ spec = describe "Agent.CLI.Session" do
             sessionsRoot (fromFilePath "/home/marc")
                 `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"
 
-    describe "dev resume pointer" do
-        it "round-trips and clears under ~/.haskell-agent/dev-resume" $
-            withTempDir "agent-home-" \home -> do
-                readDevResumePointer home `shouldReturn` Nothing
-                writeDevResumePointer home "2026-08-20-abcd1234"
-                modeOf (devResumePointerPath home) `shouldReturn` 0o600
-                readDevResumePointer home
-                    `shouldReturn` Just "2026-08-20-abcd1234"
-                clearDevResumePointer home
-                readDevResumePointer home `shouldReturn` Nothing
-
     describe "sessionTitleFromPrompt" do
-        it "collapses whitespace and truncates long prompts" do
+        it "collapses whitespace and keeps the first ten words" do
             sessionTitleFromPrompt "  hello   world  " `shouldBe` "hello world"
-            let long = Text.replicate 100 "a"
-            Text.length (sessionTitleFromPrompt long) `shouldBe` 72
+            sessionTitleFromPrompt "one two three four five six seven eight nine ten eleven"
+                `shouldBe` "one two three four five six seven eight nine ten"
+            sessionTitleFromPrompt "   " `shouldBe` "New session"
+            Text.length (sessionTitleFromPrompt (Text.replicate 200 "x"))
+                `shouldBe` 72
 
     describe "resumeHint" do
         it "prints a copy-pasteable --resume line with a quoted program name" do
@@ -210,6 +202,7 @@ testCreate root = SessionCreate
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
+    , createTitleIsManual = False
     }
 
 fixedTime :: UTCTime

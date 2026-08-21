@@ -78,6 +78,14 @@ spec = do
             now <- getCurrentTime
             needsRefresh state now `shouldBe` True
 
+        it "does not refresh static bearer credentials" $ do
+            let state = (mkFreshAuth "acc")
+                    { accessToken = "not-a-jwt"
+                    , refreshToken = ""
+                    }
+            now <- getCurrentTime
+            needsRefresh state now `shouldBe` False
+
     describe "newPool + getAccessToken" $ do
         it "dispenses fresh tokens without calling the refresh callback" $ do
             callCounter <- newIORef (0 :: Int)
@@ -126,6 +134,14 @@ spec = do
             -- Every pick for the next 60s must land on acc-2.
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 4 :: Int]
             ids `shouldSatisfy` all (== "acc-2")
+
+        it "does not shorten an existing longer cooldown" $ do
+            pool <- newPool [mkFreshAuth "only-acc"] neverRefresh
+            reportRateLimit pool "only-acc" (Just 3600)
+            [before] <- snapshotAccounts pool
+            reportRateLimit pool "only-acc" (Just 60)
+            [after] <- snapshotAccounts pool
+            after.snapshotCooldownUntil `shouldBe` before.snapshotCooldownUntil
 
         it "returns CredentialsExhausted when every account is cooling down" $ do
             pool <- newPool [mkFreshAuth "only-acc"] neverRefresh

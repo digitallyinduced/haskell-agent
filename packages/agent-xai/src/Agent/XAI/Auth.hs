@@ -26,6 +26,7 @@ module Agent.XAI.Auth
     , completeDeviceAuthorization
     , refreshAccessToken
     , accountIdFromAccessToken
+    , emailFromToken
     ) where
 
 import Agent.Http.Url (trimTrailingSlash)
@@ -248,10 +249,18 @@ accountIdFromAccessToken accessToken = do
     orElse Nothing b = b
     orElse _ b = b
 
+emailFromToken :: Text -> Maybe Text
+emailFromToken token = do
+    payload <- decodeJwtPayload token
+    email <- payload.email
+    let trimmed = Text.strip email
+    if Text.null trimmed then Nothing else Just trimmed
+
 data JwtClaims = JwtClaims
     { subject :: !(Maybe Text)
     , principalIdSnake :: !(Maybe Text)
     , principalIdCamel :: !(Maybe Text)
+    , email :: !(Maybe Text)
     }
 
 instance Aeson.FromJSON JwtClaims where
@@ -259,6 +268,7 @@ instance Aeson.FromJSON JwtClaims where
         <$> object Aeson..:? "sub"
         <*> object Aeson..:? "principal_id"
         <*> object Aeson..:? "principalId"
+        <*> object Aeson..:? "email"
 
 decodeJwtPayload :: Text -> Maybe JwtClaims
 decodeJwtPayload token = do

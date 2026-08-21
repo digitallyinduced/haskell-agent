@@ -51,6 +51,35 @@ spec =
                     `shouldReturn` Right ()
                 loadManagedCredentials `shouldReturn` Right []
 
+        it "updates one secret without replacing sibling accounts" $
+            withTempHome \_ -> do
+                let sibling = account
+                        { managedId = "openrouter-sibling"
+                        , managedAccountId = "sibling"
+                        }
+                    siblingSecret = ManagedSecret
+                        { secretManagedId = sibling.managedId
+                        , secretPayload = "sibling-secret"
+                        }
+                upsertManagedCredential account secret `shouldReturn` Right ()
+                upsertManagedCredential sibling siblingSecret
+                    `shouldReturn` Right ()
+                updateManagedCredentialSecret account.managedId "rotated-secret"
+                    `shouldReturn` Right ()
+                loaded <- loadManagedCredentials
+                loaded `shouldBe` Right
+                    [ (sibling, siblingSecret)
+                    , (account, secret { secretPayload = "rotated-secret" })
+                    ]
+
+        it "rejects mismatched metadata and secret ids" $
+            withTempHome \_ ->
+                upsertManagedCredential
+                    account
+                    secret { secretManagedId = "different-id" }
+                    `shouldReturn` Left
+                        "managed credential metadata and secret ids do not match"
+
 account :: ManagedCredential
 account = ManagedCredential
     { managedId = "openrouter-test"

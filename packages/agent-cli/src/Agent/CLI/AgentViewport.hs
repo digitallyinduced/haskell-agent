@@ -4,15 +4,19 @@ module Agent.CLI.AgentViewport
     , AgentTarget(..)
     , AgentViewportEnv(..)
     , AgentViewportState(..)
+    , agentEntryTreeLabel
     , applyAgentViewportKey
     , formatAgentStatus
     , initialAgentViewportState
     , pickAgentViewport
+    , refreshAgentViewportState
     , renderAgentTree
     , renderAgentViewportPanelFor
     , renderAgentViewportFrame
     , renderAgentViewportFrameFor
     , responseItemLines
+    , selectAgentTarget
+    , selectedAgentEntry
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
@@ -71,10 +75,28 @@ initialAgentViewportState selected entries =
   where
     ordered = sortOn (.agentPath) entries
 
-selectedEntry :: AgentViewportState -> Maybe AgentEntry
-selectedEntry state = case state.viewportAll of
+selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
+selectedAgentEntry state = case state.viewportAll of
     [] -> Nothing
     entries -> Just (entries !! clamp (length entries) state.viewportIndex)
+
+refreshAgentViewportState
+    :: [AgentEntry]
+    -> AgentViewportState
+    -> AgentViewportState
+refreshAgentViewportState entries state =
+    initialAgentViewportState selected entries
+  where
+    selected =
+        maybe AgentRoot (.agentTarget) (selectedAgentEntry state)
+
+selectAgentTarget :: AgentTarget -> AgentViewportState -> AgentViewportState
+selectAgentTarget target state =
+    state
+        { viewportIndex =
+            maybe state.viewportIndex id
+                (findIndex ((== target) . (.agentTarget)) state.viewportAll)
+        }
 
 applyAgentViewportKey
     :: PickerKey
@@ -82,7 +104,7 @@ applyAgentViewportKey
     -> Either (Maybe AgentTarget) AgentViewportState
 applyAgentViewportKey key state = case key of
     PickerKeyCancel -> Left Nothing
-    PickerKeyConfirm -> Left ((.agentTarget) <$> selectedEntry state)
+    PickerKeyConfirm -> Left ((.agentTarget) <$> selectedAgentEntry state)
     PickerKeyUp -> Right (move (-1) state)
     PickerKeyDown -> Right (move 1 state)
     _ -> Right state
@@ -118,13 +140,9 @@ renderAgentTree color selected entries
     renderEntry (index, entry) =
         let isSelected = entry.agentTarget == effectiveSelected
             marker = if isSelected then "› " else "  "
-            branch = treePrefix ordered index entry.agentPath
             line =
                 marker
-                    <> branch
-                    <> pathName entry.agentPath
-                    <> "  "
-                    <> entry.agentStatus
+                    <> agentEntryTreeLabel ordered index entry
         in if isSelected then roleSuccess color line else line
 
 renderAgentViewportFrame :: Bool -> AgentViewportState -> Text
@@ -163,7 +181,7 @@ renderAgentViewportPanelFor color terminalCols selected entries
   where
     state = initialAgentViewportState selected entries
     selectedPath =
-        maybe "/root" (.agentPath) (selectedEntry state)
+        maybe "/root" (.agentPath) (selectedAgentEntry state)
 
 renderAgentViewportFor
     :: Bool
@@ -183,7 +201,7 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
     n = length entries
     idx = clamp n state.viewportIndex
     shown = entryWindow bodyRows idx entries
-    selected = selectedEntry state
+    selected = selectedAgentEntry state
     header =
         rolePrompt color "agents"
             <> roleMuted color
@@ -201,10 +219,10 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         map
             (\(absoluteIndex, entry) ->
                 let prefix = if absoluteIndex == idx then "› " else "  "
-                    branch = treePrefix entries absoluteIndex entry.agentPath
                     text = fitCell leftWidth
-                        (prefix <> branch <> pathName entry.agentPath
-                            <> "  " <> entry.agentStatus)
+                        (prefix
+                            <> agentEntryTreeLabel
+                                entries absoluteIndex entry)
                 in if absoluteIndex == idx
                     then roleSuccess color text
                     else text)
@@ -298,6 +316,13 @@ findByTarget target = go
     go (entry : rest)
         | entry.agentTarget == target = Just entry
         | otherwise = go rest
+
+agentEntryTreeLabel :: [AgentEntry] -> Int -> AgentEntry -> Text
+agentEntryTreeLabel entries index entry =
+    treePrefix entries index entry.agentPath
+        <> pathName entry.agentPath
+        <> "  "
+        <> entry.agentStatus
 
 pathName :: Text -> Text
 pathName path =

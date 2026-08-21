@@ -146,23 +146,6 @@ OPENAI_OAUTH_CLIENT_ID=... nix run .#agent-openai-login -- --output /root/.codex
 Open the printed URL, enter the one-time code, and finish signing in. The
 credentials file is written atomically with mode `0600`.
 
-Services using a centralized broker can avoid handling refresh tokens entirely:
-
-```haskell
-provider <- Agent.Broker.newBrokerTokenProvider Agent.Broker.BrokerOptions
-    { baseUrl = "https://codex-auth.example.com"
-    , serviceToken = tokenFromSecretStore
-    }
-```
-
-The broker provider asks the broker for its currently preferred account on
-every acquisition instead of copying every broker account into another local
-round-robin pool. When the broker returns a `lease_id`, the provider echoes it
-with failure feedback so delayed authentication failures cannot invalidate a
-newer credential generation. A broker exhaustion response with `retry_at` is
-surfaced as `CredentialsExhausted`, preserving the earliest useful retry time
-across processes.
-
 ## Development
 
 ```

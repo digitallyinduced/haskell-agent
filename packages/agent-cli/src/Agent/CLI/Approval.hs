@@ -1,6 +1,7 @@
 -- | Parent and child tool-approval policy for interactive CLI sessions.
 module Agent.CLI.Approval
     ( approveToolDecision
+    , approveToolDecisionWith
     , childApprove
     , toggleAlwaysApprove
     ) where
@@ -14,9 +15,7 @@ import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
     ( glyphOk
-    , glyphSession
     , glyphWarn
-    , roleMuted
     , roleSuccess
     , roleWarn
     )
@@ -57,6 +56,25 @@ approveToolDecision
     -> ToolCall
     -> IO (Either Text Bool)
 approveToolDecision policyRef allowedToolsRef tools planMode call = do
+    approveToolDecisionWith
+        (\requested -> do
+            color <- resolveColor stderr
+            promptPermission color requested)
+        policyRef
+        allowedToolsRef
+        tools
+        planMode
+        call
+
+approveToolDecisionWith
+    :: (ToolCall -> IO (Maybe PermissionChoice))
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -94,7 +112,7 @@ approveToolDecision policyRef allowedToolsRef tools planMode call = do
                                         | readOnly -> pure (Right True)
                                         | otherwise -> do
                                             color <- resolveColor stderr
-                                            promptPermission color call >>= \case
+                                            requestPermission call >>= \case
                                                 Nothing -> pure (Right False)
                                                 Just PermissionAllowOnce ->
                                                     pure (Right True)
@@ -130,17 +148,16 @@ isPlanFileWrite active planPath call
             && isPlanFileEditTarget planPath (fromText target)
     | otherwise = False
 
-toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO ()
+toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do
-    color <- resolveColor stderr
     next <- atomicModifyIORef' policyRef \policy ->
         if policy == ApproveAll
             then (PromptMutating, PromptMutating)
             else (ApproveAll, ApproveAll)
     saveProjectAutoApprove projectRoot (next == ApproveAll)
-    putTextLn stderr (case next of
-        ApproveAll -> roleSuccess color (glyphOk <> "auto-approve on (saved for project)")
-        _ -> roleMuted color (glyphSession <> "auto-approve off (saved for project)"))
+    pure (case next of
+        ApproveAll -> "auto-approve on (saved for project)"
+        _ -> "auto-approve off (saved for project)")
 
 childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
 childApprove policy tools call = case policy of

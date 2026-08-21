@@ -8,6 +8,7 @@ import Agent.CLI.Input
     , decodeBracketedPastePayload
     , displayEditorText
     , formatPasteChip
+    , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , parseChoiceKey
     , replHistoryPath
@@ -113,6 +114,18 @@ spec = do
             terminalTextWidth truncated `shouldBe` 5
 
     describe "clipboard image paste key" do
-        it "recognizes Ctrl+V without treating ordinary v as paste" do
+        it "recognizes legacy Ctrl+V without treating ordinary v as paste" do
             isClipboardPasteKey '\SYN' `shouldBe` True
             isClipboardPasteKey 'v' `shouldBe` False
+
+        it "recognizes Kitty keyboard Ctrl+V and Cmd+V press events" do
+            isClipboardPasteCsiBody "118;5u" `shouldBe` True
+            isClipboardPasteCsiBody "118;9u" `shouldBe` True
+            isClipboardPasteCsiBody "118;9:1u" `shouldBe` True
+            isClipboardPasteCsiBody "118:86:86;9u" `shouldBe` True
+
+        it "rejects unmodified v, other modified keys, and key releases" do
+            isClipboardPasteCsiBody "118u" `shouldBe` False
+            isClipboardPasteCsiBody "99;9u" `shouldBe` False
+            isClipboardPasteCsiBody "118;9:3u" `shouldBe` False
+            isClipboardPasteCsiBody "not-a-key" `shouldBe` False

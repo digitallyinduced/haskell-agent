@@ -4,12 +4,13 @@ module Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImage
     , readClipboardImages
+    , nonEmptyClipboardImages
     , loadImagesFromPastedText
     , formatImageSize
     ) where
 
 import Agent.Loop (ImageAttachment(..))
-import Control.Exception (SomeException, try)
+import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -74,6 +75,16 @@ readClipboardImage =
         Left err -> pure (Left err)
         Right [] -> pure (Left "no image found on the clipboard")
         Right (img:_) -> pure (Right img)
+
+-- | Keep a successful, non-empty clipboard image read. This is used when a
+-- terminal reports a bracketed paste: image-bearing clipboard contents should
+-- become attachments, while ordinary text pastes should stay in the editor.
+nonEmptyClipboardImages
+    :: Either Text [ImageAttachment]
+    -> Maybe [ImageAttachment]
+nonEmptyClipboardImages = \case
+    Right images@(_:_) -> Just images
+    _ -> Nothing
 
 formatImageSize :: Int -> Text
 formatImageSize n
@@ -179,35 +190,38 @@ readMacClipboardImage = do
 
 readMacClipboardPaths :: IO [FilePath]
 readMacClipboardPaths = do
-    (code, out, _) <- readProcessWithExitCode "osascript"
-        [ "-e"
-        , "try\n\
-          \  set theFiles to the clipboard as list\n\
-          \  set paths to {}\n\
-          \  repeat with f in theFiles\n\
-          \    try\n\
-          \      set end of paths to POSIX path of f\n\
-          \    end try\n\
-          \  end repeat\n\
-          \  set AppleScript's text item delimiters to linefeed\n\
-          \  return paths as text\n\
-          \on error\n\
-          \  try\n\
-          \    return POSIX path of (the clipboard as «class furl»)\n\
-          \  on error\n\
-          \    return \"\"\n\
-          \  end try\n\
-          \end try"
-        ]
-        ""
-    pure $ case code of
-        ExitSuccess -> filter (not . null) (lines out)
-        ExitFailure _ -> []
+    result <- tryAny $
+        readProcessWithExitCode "osascript"
+            [ "-e"
+            , "try\n\
+              \  set theFiles to the clipboard as list\n\
+              \  set paths to {}\n\
+              \  repeat with f in theFiles\n\
+              \    try\n\
+              \      set end of paths to POSIX path of f\n\
+              \    end try\n\
+              \  end repeat\n\
+              \  set AppleScript's text item delimiters to linefeed\n\
+              \  return paths as text\n\
+              \on error\n\
+              \  try\n\
+              \    return POSIX path of (the clipboard as «class furl»)\n\
+              \  on error\n\
+              \    return \"\"\n\
+              \  end try\n\
+              \end try"
+            ]
+            ""
+    pure $ case result of
+        Right (ExitSuccess, out, _) ->
+            filter (not . null) (lines out)
+        Right (ExitFailure _, _, _) -> []
+        Left _ -> []
 
 readMacClipboardClass :: String -> IO (Either Text ByteString)
 readMacClipboardClass typeClass = do
     tmpDir <- getTemporaryDirectory
-    result <- try @SomeException do
+    result <- tryAny do
         (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
         hClose handle
         removeFile path
@@ -233,10 +247,10 @@ readMacClipboardClass typeClass = do
         case code of
             ExitSuccess -> do
                 bytes <- BS.readFile path
-                _ <- try @SomeException (removeFile path)
+                _ <- tryAny (removeFile path)
                 pure (Right bytes)
             ExitFailure _ -> do
-                _ <- try @SomeException (removeFile path)
+                _ <- tryAny (removeFile path)
                 pure (Left (clipboardErrorMessage typeClass err))
     case result of
         Left ex -> pure (Left (Text.pack (show ex)))
@@ -288,7 +302,7 @@ isImageExtension ext =
 
 readImageFile :: FilePath -> IO (Either Text ImageAttachment)
 readImageFile path = do
-    result <- try @SomeException (BS.readFile path)
+    result <- tryAny (BS.readFile path)
     pure $ case result of
         Left ex -> Left (Text.pack (show ex))
         Right bytes
@@ -310,7 +324,7 @@ mimeForPath path = case map toLower (takeExtension path) of
 
 runTextCmd :: FilePath -> [String] -> IO (Either Text Text)
 runTextCmd cmd args = do
-    result <- try @SomeException (readProcessWithExitCode cmd args "")
+    result <- tryAny (readProcessWithExitCode cmd args "")
     pure $ case result of
         Left ex -> Left (Text.pack (show ex))
         Right (ExitSuccess, out, _) -> Right (Text.pack out)
@@ -320,7 +334,7 @@ runTextCmd cmd args = do
 runBytesCmd :: FilePath -> [String] -> IO (Either Text ByteString)
 runBytesCmd cmd args = do
     tmpDir <- getTemporaryDirectory
-    result <- try @SomeException do
+    result <- tryAny do
         (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
         hClose handle
         removeFile path
@@ -336,12 +350,12 @@ runBytesCmd cmd args = do
         case code of
             ExitSuccess -> do
                 bytes <- BS.readFile path
-                _ <- try @SomeException (removeFile path)
+                _ <- tryAny (removeFile path)
                 if BS.null bytes
                     then pure (Left "no image found on the clipboard")
                     else pure (Right bytes)
             ExitFailure _ -> do
-                _ <- try @SomeException (removeFile path)
+                _ <- tryAny (removeFile path)
                 pure (Left (Text.strip (Text.pack err)))
     case result of
         Left ex -> pure (Left (Text.pack (show ex)))

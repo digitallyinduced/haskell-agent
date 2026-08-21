@@ -2,6 +2,15 @@
 -- request-changes / cancel when a plan is presented.
 module Agent.CLI.Plan
     ( cliPlanHooks
+    , PlanEnterChoice(..)
+    , PlanEnterState(..)
+    , PlanExitState(..)
+    , applyPlanEnterKey
+    , applyPlanExitKey
+    , initialPlanEnterState
+    , initialPlanExitState
+    , renderPlanEnterFrame
+    , renderPlanExitFrame
     , extractProposedPlan
     , stripProposedPlan
     , renderPlanMarkdown
@@ -12,7 +21,6 @@ module Agent.CLI.Plan
 import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Input
     ( ReplLine(..)
-    , readApprovalLine
     , readChoiceSelection
     , readReplLine
     )
@@ -22,8 +30,10 @@ import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
     )
+import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style
     ( agentBackground
+    , glyphWarn
     , paintBackgroundLines
     , roleMuted
     , rolePrompt
@@ -40,6 +50,7 @@ import Agent.Tools.PlanMode
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.IORef (IORef)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -61,6 +72,21 @@ cliPlanHooks interrupt escPaused resolveColor = PlanModeHooks
         withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
     }
 
+data PlanEnterChoice = PlanEnter | PlanStayNormal
+    deriving (Eq, Show)
+
+data PlanEnterState = PlanEnterState Text Int
+    deriving (Eq, Show)
+
+data PlanExitState = PlanExitState Int
+    deriving (Eq, Show)
+
+initialPlanEnterState :: Text -> PlanEnterState
+initialPlanEnterState reason = PlanEnterState reason 0
+
+initialPlanExitState :: PlanExitState
+initialPlanExitState = PlanExitState 0
+
 confirmEnter :: IO Bool -> Text -> IO Bool
 confirmEnter resolveColor reason = do
     color <- resolveColor
@@ -68,13 +94,44 @@ confirmEnter resolveColor reason = do
     if not isTty
         then pure False
         else do
-            putTextLn stderr (roleMuted color reason)
             notifyAttention stderr InputRequested
-            let question = roleWarn color "Enter plan mode? [y/N] "
-            readApprovalLine question >>= \case
-                Nothing -> pure False
-                Just raw ->
-                    pure $ Text.toLower (Text.strip raw) `elem` ["y", "yes"]
+            result <-
+                runOverlay
+                    (renderPlanEnterFrame color)
+                    applyPlanEnterKey
+                    (initialPlanEnterState reason)
+            pure (fromMaybe PlanStayNormal result == PlanEnter)
+
+applyPlanEnterKey
+    :: PickerKey
+    -> PlanEnterState
+    -> Either PlanEnterChoice PlanEnterState
+applyPlanEnterKey key state@(PlanEnterState reason index) = case key of
+    PickerKeyCancel -> Left PlanStayNormal
+    PickerKeyConfirm -> Left (enterChoiceFromIndex index)
+    PickerKeyUp -> Right (PlanEnterState reason (movePlanIndex 2 (-1) index))
+    PickerKeyDown -> Right (PlanEnterState reason (movePlanIndex 2 1 index))
+    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
+        "a" -> Left PlanEnter
+        "y" -> Left PlanEnter
+        "n" -> Left PlanStayNormal
+        _ -> Right state
+    PickerKeyBackspace -> Right state
+
+renderPlanEnterFrame :: Bool -> PlanEnterState -> Text
+renderPlanEnterFrame color (PlanEnterState reason index) =
+    Text.intercalate "\n"
+        [ roleWarn color (glyphWarn <> "Enter plan mode?")
+        , roleMuted color reason
+        , renderPlanRow color (index == 0) "Enter plan mode"
+        , renderPlanRow color (index == 1) "Stay in normal mode"
+        , roleMuted color
+            "↑↓/jk or scroll · click/enter · a/y enter · n/q/esc stay"
+        ]
+
+enterChoiceFromIndex :: Int -> PlanEnterChoice
+enterChoiceFromIndex 0 = PlanEnter
+enterChoiceFromIndex _ = PlanStayNormal
 
 decideExit :: InterruptState -> IO Bool -> Text -> IO PlanDecision
 decideExit interrupt resolveColor planBody = do
@@ -93,24 +150,66 @@ decideExit interrupt resolveColor planBody = do
 
 promptDecision :: InterruptState -> Bool -> IO PlanDecision
 promptDecision interrupt color = do
-    let question =
-            roleWarn color
-                "Plan: [a]pprove / [s] request changes / [q] cancel? "
-    readApprovalLine question >>= \case
-        Nothing -> pure PlanCancel
-        Just raw -> case parsePlanDecisionAnswer raw of
-            Just PlanApprove -> do
-                putTextLn stderr (roleSuccess color "plan approved")
-                pure PlanApprove
-            Just PlanCancel -> do
-                putTextLn stderr (roleMuted color "plan cancelled")
-                pure PlanCancel
-            Just (PlanRequestChanges _) -> do
-                notes <- readChangeNotes interrupt color
-                pure (PlanRequestChanges notes)
-            Nothing -> do
-                putTextLn stderr (roleMuted color "enter a, s, or q")
-                promptDecision interrupt color
+    result <-
+        runOverlay
+            (renderPlanExitFrame color)
+            applyPlanExitKey
+            initialPlanExitState
+    case fromMaybe PlanCancel result of
+        PlanApprove -> do
+            putTextLn stderr (roleSuccess color "plan approved")
+            pure PlanApprove
+        PlanCancel -> do
+            putTextLn stderr (roleMuted color "plan cancelled")
+            pure PlanCancel
+        PlanRequestChanges _ -> do
+            notes <- readChangeNotes interrupt color
+            pure (PlanRequestChanges notes)
+
+applyPlanExitKey
+    :: PickerKey
+    -> PlanExitState
+    -> Either PlanDecision PlanExitState
+applyPlanExitKey key state@(PlanExitState index) = case key of
+    PickerKeyCancel -> Left PlanCancel
+    PickerKeyConfirm -> Left (exitChoiceFromIndex index)
+    PickerKeyUp -> Right (PlanExitState (movePlanIndex 3 (-1) index))
+    PickerKeyDown -> Right (PlanExitState (movePlanIndex 3 1 index))
+    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
+        "a" -> Left PlanApprove
+        "y" -> Left PlanApprove
+        "s" -> Left (PlanRequestChanges "")
+        "c" -> Left (PlanRequestChanges "")
+        "r" -> Left (PlanRequestChanges "")
+        "n" -> Left PlanCancel
+        _ -> Right state
+    PickerKeyBackspace -> Right state
+
+renderPlanExitFrame :: Bool -> PlanExitState -> Text
+renderPlanExitFrame color (PlanExitState index) =
+    Text.intercalate "\n"
+        [ roleWarn color (glyphWarn <> "Ready to implement this plan?")
+        , renderPlanRow color (index == 0) "Approve and implement"
+        , renderPlanRow color (index == 1) "Request changes"
+        , renderPlanRow color (index == 2) "Cancel plan"
+        , roleMuted color
+            "↑↓/jk or scroll · click/enter · a approve · s changes · q/esc cancel"
+        ]
+
+exitChoiceFromIndex :: Int -> PlanDecision
+exitChoiceFromIndex = \case
+    0 -> PlanApprove
+    1 -> PlanRequestChanges ""
+    _ -> PlanCancel
+
+movePlanIndex :: Int -> Int -> Int -> Int
+movePlanIndex count delta index = (index + delta) `mod` count
+
+renderPlanRow :: Bool -> Bool -> Text -> Text
+renderPlanRow color selected label =
+    let cursor = if selected then roleWarn color "› " else "  "
+        body = if selected then roleSuccess color label else roleMuted color label
+    in cursor <> body
 
 readChangeNotes :: InterruptState -> Bool -> IO Text
 readChangeNotes interrupt color = do
@@ -125,12 +224,16 @@ readChangeNotes interrupt color = do
         ReplQuitInterrupt -> throwIO UserInterrupt
         ReplPasted text ->
             if Text.null (Text.strip text) then pure "(no notes)" else pure (Text.strip text)
-        ReplClipboardPaste text ->
+        ReplClipboardPaste text _ ->
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
+            readChangeNotes interrupt color
+        ReplChooseModel _ ->
+            readChangeNotes interrupt color
+        ReplChooseEffort _ ->
             readChangeNotes interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
@@ -159,11 +262,15 @@ askQuestion interrupt resolveColor question options = do
                             if Text.null (Text.strip text)
                                 then pure Nothing
                                 else pure (Just (Text.strip text))
-                        ReplClipboardPaste text ->
+                        ReplClipboardPaste text _ ->
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
                         ReplCycleMode _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplChooseModel _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplChooseEffort _ ->
                             askQuestion interrupt resolveColor question []
                         ReplText text
                             | Text.null (Text.strip text) -> pure Nothing

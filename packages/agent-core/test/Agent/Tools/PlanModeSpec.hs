@@ -43,6 +43,8 @@ spec = describe "Agent.Tools.PlanMode" do
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
             (fromFilePath "plan.md") `shouldBe` True
         isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
+            (fromFilePath "/tmp/other/plan.md") `shouldBe` False
+        isPlanFileEditTarget (fromFilePath "/tmp/sess/plan.md")
             (fromFilePath "/tmp/sess/other.hs") `shouldBe` False
 
 withTempPlan :: (PlanModeEnv -> IO a) -> IO a

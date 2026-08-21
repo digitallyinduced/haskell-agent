@@ -2,11 +2,13 @@
 
 module Agent.Transport.WebSocket
     ( WebSocketSession
+    , WebSocketRequest
     , WebSocketSessionOptions(..)
     , defaultWebSocketSessionOptions
     , withWebSocketSession
     , withWebSocketRequest
-    , invalidateWebSocketSession
+    , completeWebSocketRequest
+    , invalidateWebSocketRequest
     , sendWebSocketText
     , receiveWebSocketData
     , transientWsRetryDelayMicros
@@ -20,14 +22,14 @@ import Agent.Error (ApiError(..))
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
-import Control.Exception.Safe (onException)
-import Control.Monad (unless)
+import qualified Control.Exception.Safe as Safe
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
+import Data.Word (Word64)
 import GHC.IO.Exception (IOErrorType(ResourceVanished))
 import qualified Network.WebSockets as WS
 import System.IO.Error (ioeGetErrorType)
@@ -36,10 +38,22 @@ import System.IO.Error (ioeGetErrorType)
 -- owned by a background pump for the duration of 'withWebSocketSession'.
 data WebSocketSession = WebSocketSession
     { sessionOut :: !(TQueue OutCommand)
-    , sessionIn :: !(TBQueue (Either ApiError LBS.ByteString))
-    , sessionClosed :: !(TVar Bool)
-    , sessionPoisoned :: !(TVar (Maybe ApiError))
+    , sessionIn :: !(TBQueue LBS.ByteString)
+    , sessionState :: !(TVar SessionState)
     }
+
+-- | Opaque ownership token for one request/response exchange.
+data WebSocketRequest = WebSocketRequest
+    { requestSession :: !WebSocketSession
+    , requestGeneration :: !Word64
+    }
+
+data SessionState
+    = SessionIdle !Word64
+    | SessionActive !Word64
+    | SessionFinished !Word64
+    | SessionClosed !(Maybe Word64) !ApiError
+    | SessionPoisoned !ApiError
 
 -- | Transport-level settings for a reusable WebSocket session.
 data WebSocketSessionOptions = WebSocketSessionOptions
@@ -56,7 +70,7 @@ defaultWebSocketSessionOptions = WebSocketSessionOptions
     }
 
 data OutCommand
-    = SendText !LBS.ByteString !(TMVar (Either ApiError ()))
+    = SendText !Word64 !LBS.ByteString !(TMVar (Either ApiError ()))
     | SendControl !WS.Message
     | CloseSession !LBS.ByteString
 
@@ -74,103 +88,250 @@ withWebSocketSession options connection action =
     withClientPings do
         outbound <- newTQueueIO
         inbound <- newTBQueueIO (fromIntegral (max 1 options.inboundFrameCapacity))
-        closed <- newTVarIO False
-        poisoned <- newTVarIO Nothing
+        state <- newTVarIO (SessionIdle 0)
         let session = WebSocketSession
                 { sessionOut = outbound
                 , sessionIn = inbound
-                , sessionClosed = closed
-                , sessionPoisoned = poisoned
+                , sessionState = state
                 }
-        withAsync (readerLoop connection inbound outbound closed poisoned) \_ ->
-            withAsync (writerLoop connection outbound closed) \_ ->
+        withAsync (readerLoop connection session) \_ ->
+            withAsync (writerLoop connection session) \_ ->
                 action session
   where
     withClientPings inner = case options.clientPingIntervalSeconds of
         Just seconds | seconds > 0 -> WS.withPingThread connection seconds (pure ()) inner
         _ -> inner
 
--- | Poison the reusable connection if a response consumer is interrupted.
--- Once interrupted, its remaining frames cannot be assigned safely to a
--- later request.
-withWebSocketRequest :: WebSocketSession -> IO value -> IO value
-withWebSocketRequest session action =
-    action `onException`
-        invalidateWebSocketSession session "response consumer interrupted"
+-- | Serialize one request/response exchange on a reusable session.
+--
+-- Only 'completeWebSocketRequest' permits reuse. If the action throws,
+-- including through asynchronous cancellation, or returns without marking a
+-- terminal frame, the session is atomically poisoned. A later request
+-- therefore reconnects instead of observing abandoned frames.
+withWebSocketRequest
+    :: WebSocketSession
+    -> (WebSocketRequest -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+withWebSocketRequest session action = Safe.mask \restore -> do
+    acquired <- atomically (acquireRequest session)
+    case acquired of
+        Left apiError -> pure (Left apiError)
+        Right request -> do
+            result <- restore (action request)
+                `Safe.onException`
+                    invalidateWebSocketRequest request "response consumer interrupted"
+            atomically (finishRequest request)
+            pure result
 
--- | Mark a response boundary as lost and asynchronously close the socket.
-invalidateWebSocketSession :: WebSocketSession -> Text -> IO ()
-invalidateWebSocketSession session reason = atomically do
-    current <- readTVar session.sessionPoisoned
-    case current of
-        Just _ -> pure ()
-        Nothing -> do
-            let apiError = ConnectionError
-                    ("WebSocket session invalidated: " <> reason)
-            writeTVar session.sessionPoisoned (Just apiError)
-            writeTVar session.sessionClosed True
-            writeTQueue session.sessionOut
-                (CloseSession (LBS.fromStrict (Text.encodeUtf8 reason)))
-
--- | Send one text frame through the session's serialized writer.
-sendWebSocketText :: WebSocketSession -> LBS.ByteString -> IO (Either ApiError ())
-sendWebSocketText session bytes = do
+-- | Send one text frame through the request's serialized writer.
+sendWebSocketText :: WebSocketRequest -> LBS.ByteString -> IO (Either ApiError ())
+sendWebSocketText request bytes = do
     reply <- newEmptyTMVarIO
-    queued <- atomically do
-        poisoned <- readTVar session.sessionPoisoned
-        closed <- readTVar session.sessionClosed
-        case poisoned of
-            Just apiError -> pure (Left apiError)
-            Nothing
-                | closed -> pure (Left connectionClosedError)
-                | otherwise -> do
-                    writeTQueue session.sessionOut (SendText bytes reply)
-                    pure (Right ())
+    queued <- atomically (queueRequestText request bytes reply)
     case queued of
         Left apiError -> pure (Left apiError)
         Right () -> atomically $
             takeTMVar reply
             `orElse`
-            poisonedSession session
-            `orElse`
-            (do
-                closed <- readTVar session.sessionClosed
-                check closed
-                pure (Left connectionClosedError))
+            requestFailure request
 
 -- | Receive the next application data frame. Control frames are handled by
 -- the session pump and are never exposed to callers.
-receiveWebSocketData :: WebSocketSession -> IO (Either ApiError LBS.ByteString)
-receiveWebSocketData session = atomically do
-    poisoned <- readTVar session.sessionPoisoned
-    case poisoned of
-        Just apiError -> pure (Left apiError)
-        Nothing ->
-            readTBQueue session.sessionIn
-            `orElse`
-            (do
-                closed <- readTVar session.sessionClosed
-                check closed
-                pure (Left connectionClosedError))
+receiveWebSocketData :: WebSocketRequest -> IO (Either ApiError LBS.ByteString)
+receiveWebSocketData request = atomically do
+    let session = request.requestSession
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration ->
+                Right <$> readTBQueue session.sessionIn
+        SessionClosed owner apiError
+            | owner == Just request.requestGeneration -> do
+                frame <- tryReadTBQueue session.sessionIn
+                pure (maybe (Left apiError) Right frame)
+        SessionClosed _ apiError -> pure (Left apiError)
+        SessionPoisoned apiError -> pure (Left apiError)
+        _ -> pure (Left inactiveRequestError)
 
-poisonedSession :: WebSocketSession -> STM (Either ApiError value)
-poisonedSession session = do
-    poisoned <- readTVar session.sessionPoisoned
-    case poisoned of
-        Just apiError -> pure (Left apiError)
-        Nothing -> retry
+queueInboundFrame :: WebSocketSession -> LBS.ByteString -> STM ()
+queueInboundFrame session bytes = do
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive _ -> writeTBQueue session.sessionIn bytes
+        SessionIdle _ -> do
+            let apiError = invalidatedSessionError
+                    "received a response frame without an active request"
+            writeTVar session.sessionState (SessionPoisoned apiError)
+            writeTQueue session.sessionOut
+                (CloseSession "unexpected response frame")
+        SessionFinished _ -> do
+            let apiError = invalidatedSessionError
+                    "received a response frame after request completion"
+            writeTVar session.sessionState (SessionPoisoned apiError)
+            writeTQueue session.sessionOut
+                (CloseSession "response frame after completion")
+        SessionClosed _ _ -> pure ()
+        SessionPoisoned _ -> pure ()
 
-connectionClosedError :: ApiError
-connectionClosedError = ConnectionError "WebSocket connection closed"
+closeSession :: WebSocketSession -> ApiError -> STM ()
+closeSession session apiError = do
+    state <- readTVar session.sessionState
+    case state of
+        SessionIdle _ ->
+            writeTVar session.sessionState
+                (SessionClosed Nothing apiError)
+        SessionActive generation ->
+            writeTVar session.sessionState
+                (SessionClosed (Just generation) apiError)
+        SessionFinished generation ->
+            writeTVar session.sessionState
+                (SessionClosed (Just generation) apiError)
+        SessionClosed _ _ -> pure ()
+        SessionPoisoned _ -> pure ()
+
+requestGenerationActive :: WebSocketSession -> Word64 -> STM Bool
+requestGenerationActive session generation = do
+    state <- readTVar session.sessionState
+    pure $ case state of
+        SessionActive activeGeneration ->
+            activeGeneration == generation
+        _ -> False
+
+queueControl :: WebSocketSession -> WS.Message -> STM ()
+queueControl session message = do
+    state <- readTVar session.sessionState
+    case state of
+        SessionIdle _ -> writeTQueue session.sessionOut (SendControl message)
+        SessionActive _ -> writeTQueue session.sessionOut (SendControl message)
+        SessionFinished _ -> writeTQueue session.sessionOut (SendControl message)
+        SessionClosed _ _ -> pure ()
+        SessionPoisoned _ -> pure ()
+
+finishRequest :: WebSocketRequest -> STM ()
+finishRequest request = do
+    let session = request.requestSession
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration -> do
+                let apiError = invalidatedSessionError
+                        "request returned before response completion"
+                writeTVar session.sessionState
+                    (SessionPoisoned apiError)
+                writeTQueue session.sessionOut
+                    (CloseSession "response not completed")
+        SessionFinished generation
+            | generation == request.requestGeneration -> do
+                empty <- isEmptyTBQueue session.sessionIn
+                if empty
+                    then writeTVar session.sessionState
+                        (SessionIdle (generation + 1))
+                    else do
+                        let apiError = invalidatedSessionError
+                                "response frames remained after request completion"
+                        writeTVar session.sessionState
+                            (SessionPoisoned apiError)
+                        writeTQueue session.sessionOut
+                            (CloseSession "response boundary lost")
+        _ -> pure ()
+
+-- | Mark the protocol terminal frame as consumed. A request scope that
+-- returns normally without this transition is poisoned rather than reused.
+completeWebSocketRequest :: WebSocketRequest -> IO ()
+completeWebSocketRequest request = atomically do
+    let session = request.requestSession
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration ->
+                writeTVar session.sessionState
+                    (SessionFinished generation)
+        _ -> pure ()
+
+-- | Poison an exchange whose response boundary cannot be recovered, such as
+-- after a malformed frame. This is idempotent and never affects a newer
+-- generation if a stale request token escapes its scope.
+invalidateWebSocketRequest :: WebSocketRequest -> Text -> IO ()
+invalidateWebSocketRequest request reason = atomically do
+    let session = request.requestSession
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration -> do
+                let apiError = invalidatedSessionError reason
+                writeTVar session.sessionState (SessionPoisoned apiError)
+                writeTQueue session.sessionOut
+                    (CloseSession (LBS.fromStrict (Text.encodeUtf8 reason)))
+        SessionFinished generation
+            | generation == request.requestGeneration -> do
+                let apiError = invalidatedSessionError reason
+                writeTVar session.sessionState (SessionPoisoned apiError)
+                writeTQueue session.sessionOut
+                    (CloseSession (LBS.fromStrict (Text.encodeUtf8 reason)))
+        _ -> pure ()
+
+queueRequestText
+    :: WebSocketRequest
+    -> LBS.ByteString
+    -> TMVar (Either ApiError ())
+    -> STM (Either ApiError ())
+queueRequestText request bytes reply = do
+    let session = request.requestSession
+    state <- readTVar session.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration -> do
+                writeTQueue session.sessionOut
+                    (SendText generation bytes reply)
+                pure (Right ())
+        SessionClosed _ apiError -> pure (Left apiError)
+        SessionPoisoned apiError -> pure (Left apiError)
+        _ -> pure (Left inactiveRequestError)
+
+requestFailure :: WebSocketRequest -> STM (Either ApiError ())
+requestFailure request = do
+    state <- readTVar request.requestSession.sessionState
+    case state of
+        SessionActive generation
+            | generation == request.requestGeneration -> retry
+        SessionClosed _ apiError -> pure (Left apiError)
+        SessionPoisoned apiError -> pure (Left apiError)
+        _ -> pure (Left inactiveRequestError)
+
+inactiveRequestError :: ApiError
+inactiveRequestError = ConnectionError "WebSocket request is no longer active"
+
+invalidatedSessionError :: Text -> ApiError
+invalidatedSessionError reason =
+    ConnectionError ("WebSocket session invalidated: " <> reason)
+
+acquireRequest :: WebSocketSession -> STM (Either ApiError WebSocketRequest)
+acquireRequest session = do
+    state <- readTVar session.sessionState
+    case state of
+        SessionIdle generation -> do
+            empty <- isEmptyTBQueue session.sessionIn
+            if empty
+                then do
+                    writeTVar session.sessionState (SessionActive generation)
+                    pure (Right (WebSocketRequest session generation))
+                else do
+                    let apiError = invalidatedSessionError
+                            "unclaimed response frames were queued"
+                    writeTVar session.sessionState (SessionPoisoned apiError)
+                    writeTQueue session.sessionOut
+                        (CloseSession "unclaimed response frames")
+                    pure (Left apiError)
+        SessionActive _ -> retry
+        SessionFinished _ -> retry
+        SessionClosed _ apiError -> pure (Left apiError)
+        SessionPoisoned apiError -> pure (Left apiError)
 
 readerLoop
     :: WS.Connection
-    -> TBQueue (Either ApiError LBS.ByteString)
-    -> TQueue OutCommand
-    -> TVar Bool
-    -> TVar (Maybe ApiError)
+    -> WebSocketSession
     -> IO ()
-readerLoop connection inbound outbound closed poisoned = loop
+readerLoop connection session = loop
   where
     loop = do
         result <- Exception.try @Exception.SomeException (WS.receive connection)
@@ -183,14 +344,11 @@ readerLoop connection inbound outbound closed poisoned = loop
                 let bytes = case message of
                         WS.Text value _ -> value
                         WS.Binary value -> value
-                stopped <- atomically do
-                    readTVar poisoned >>= \case
-                        Just _ -> pure True
-                        Nothing -> writeTBQueue inbound (Right bytes) >> pure False
-                unless stopped loop
+                atomically (queueInboundFrame session bytes)
+                loop
             Right (WS.ControlMessage (WS.Ping payload)) -> do
-                atomically (writeTQueue outbound
-                    (SendControl (WS.ControlMessage (WS.Pong payload))))
+                atomically (queueControl session
+                    (WS.ControlMessage (WS.Pong payload)))
                 loop
             Right (WS.ControlMessage (WS.Pong _)) -> loop
             Right (WS.ControlMessage (WS.Close code reason)) ->
@@ -198,24 +356,17 @@ readerLoop connection inbound outbound closed poisoned = loop
                     ("WebSocket closed by server (" <> showText code <> "): "
                         <> Text.decodeUtf8With Text.lenientDecode (LBS.toStrict reason))
 
-    terminate reason = atomically do
-        writeTVar closed True
-        readTVar poisoned >>= \case
-            Just _ -> pure ()
-            Nothing -> do
-                full <- isFullTBQueue inbound
-                unless full $
-                    writeTBQueue inbound (Left (ConnectionError reason))
+    terminate reason =
+        atomically (closeSession session (ConnectionError reason))
 
 writerLoop
     :: WS.Connection
-    -> TQueue OutCommand
-    -> TVar Bool
+    -> WebSocketSession
     -> IO ()
-writerLoop connection outbound closed = loop
+writerLoop connection session = loop
   where
     loop = do
-        command <- atomically (readTQueue outbound)
+        command <- atomically (readTQueue session.sessionOut)
         case command of
             CloseSession reason -> do
                 result <- Exception.try @Exception.SomeException
@@ -228,22 +379,31 @@ writerLoop connection outbound closed = loop
                 result <- Exception.try @Exception.SomeException (WS.send connection message)
                 case result of
                     Left exception | isAsyncException exception -> Exception.throwIO exception
-                    Left _ -> atomically (writeTVar closed True)
+                    Left exception -> atomically (closeSession session
+                        (ConnectionError
+                            ("WebSocket send error: " <> showText exception)))
                     Right () -> loop
-            SendText bytes reply -> do
-                result <- Exception.try @Exception.SomeException
-                    (WS.sendTextData connection bytes)
-                case result of
-                    Left exception | isAsyncException exception -> Exception.throwIO exception
-                    Left exception -> do
-                        let apiError = ConnectionError
-                                ("WebSocket send error: " <> showText exception)
-                        atomically do
-                            putTMVar reply (Left apiError)
-                            writeTVar closed True
-                    Right () -> do
-                        atomically (putTMVar reply (Right ()))
+            SendText generation bytes reply -> do
+                allowed <- atomically (requestGenerationActive session generation)
+                if not allowed
+                    then do
+                        atomically (putTMVar reply (Left inactiveRequestError))
                         loop
+                    else do
+                        result <- Exception.try @Exception.SomeException
+                            (WS.sendTextData connection bytes)
+                        case result of
+                            Left exception | isAsyncException exception ->
+                                Exception.throwIO exception
+                            Left exception -> do
+                                let apiError = ConnectionError
+                                        ("WebSocket send error: " <> showText exception)
+                                atomically do
+                                    putTMVar reply (Left apiError)
+                                    closeSession session apiError
+                            Right () -> do
+                                atomically (putTMVar reply (Right ()))
+                                loop
 
 isAsyncException :: Exception.SomeException -> Bool
 isAsyncException exception =

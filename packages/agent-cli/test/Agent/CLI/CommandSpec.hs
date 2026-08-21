@@ -60,6 +60,15 @@ spec = do
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
+        it "renames sessions or restores automatic titles" do
+            parseReplLine "/rename Fix auth races"
+                `shouldBe` ReplRename "Fix auth races"
+            parseReplLine "/title   keep  spaces"
+                `shouldBe` ReplRename "keep  spaces"
+            parseReplLine "/rename --auto" `shouldBe` ReplRenameAuto
+            parseReplLine "/rename"
+                `shouldBe` ReplCommandError "usage: /rename <TITLE>|--auto"
+
         it "reloads auth from disk/env" do
             parseReplLine "/reload-auth" `shouldBe` ReplReloadAuth
             parseReplLine "  /Reload-Auth  " `shouldBe` ReplReloadAuth
@@ -196,6 +205,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "session"
+                    , "rename"
                     , "login"
                     , "resume"
                     , "compact"
@@ -213,6 +223,7 @@ spec = do
                     , "copy-session"
                     , "terminal"
                     , "agents"
+                    , "skills"
                     , "always-approve"
                     ]
 
@@ -224,6 +235,8 @@ spec = do
                 `shouldBe` Just "login"
             fmap (.slashName) (lookupSlashCommand "/a")
                 `shouldBe` Just "agents"
+            fmap (.slashName) (lookupSlashCommand "/title")
+                `shouldBe` Just "rename"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -245,6 +258,8 @@ spec = do
                     "grok-4.6" `elem` xs
                         && "grok-4.5" `elem` xs
                         && "grok-4.5-mini" `elem` xs)
+            slashCompletionCandidates "emaner/" "-"
+                `shouldBe` ["--auto"]
 
         it "does not complete ordinary prompts" do
             slashCompletionCandidates "" "help" `shouldBe` []
@@ -290,6 +305,36 @@ spec = do
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
+
+    describe "runtime skill commands" do
+        let skills =
+                [ SkillCommand
+                    { skillCommandName = "deploy"
+                    , skillCommandSummary = "Deploy the service"
+                    , skillCommandArgumentHint = Just "<environment>"
+                    , skillCommandSource = "repo · agents"
+                    }
+                ]
+
+        it "parses a skill invocation and preserves arguments" do
+            parseReplLineWithSkills skills "/deploy production now"
+                `shouldBe` ReplInvokeSkill "deploy" "production now"
+
+        it "parses the skills listing and reload commands" do
+            parseReplLine "/skills" `shouldBe` ReplSkills False
+            parseReplLine "/skills reload" `shouldBe` ReplSkills True
+            parseReplLine "/skills nope"
+                `shouldBe` ReplCommandError "usage: /skills [reload]"
+
+        it "adds skills to completion, the live menu, and help" do
+            slashCompletionCandidatesWithSkills skills "" "/de"
+                `shouldBe` ["/deploy"]
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithSkills skills "/dep" 4)
+                `shouldBe` Just ["/deploy"]
+            let help = formatSlashHelpWithSkills False skills (Just "deploy")
+            Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
+            Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

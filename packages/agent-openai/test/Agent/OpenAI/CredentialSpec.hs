@@ -3,10 +3,6 @@ module Agent.OpenAI.CredentialSpec (spec) where
 import Agent.OpenAI.Auth (AuthState(..), newPool)
 import qualified Agent.OpenAI.Auth as Auth
 import Agent.OpenAI.Credential
-import Agent.Broker
-    ( newBrokerTokenProviderWith
-    , newBrokerTokenProviderWithClock
-    )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider
 import qualified Data.Aeson as Aeson
@@ -185,6 +181,10 @@ spec = do
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
             readIORef refreshCalls `shouldReturn` 1
 
+    describe "pooled static bearer credentials" do
+        it "report rejection as an authentication error" staticPoolAuthenticationTest
+        it "preserves another account's cooldown" staticPoolCooldownTest
+
     describe "staticBearerProvider" do
         it "returns the same bearer without an account id" do
             result <- getNextToken (staticBearerProvider "router-key") Nothing
@@ -222,74 +222,48 @@ spec = do
                 other -> expectationFailure
                     ("expected AuthenticationError, got " <> show other)
 
-    describe "broker TokenProvider" do
-        it "passes structured failure feedback and exclusions while returning a replacement" do
-            fetchCalls <- newIORef ([] :: [(Maybe FailedCredential, [Text])])
-            let available = [credentialFor "acc-a", credentialFor "acc-b"]
-                fetch reportedFailure excluded = do
-                    modifyIORef' fetchCalls (<> [(reportedFailure, excluded)])
-                    pure $ Right $ firstAvailable excluded available
-            provider <- newBrokerTokenProviderWith fetch
+staticPoolAuthenticationTest :: IO ()
+staticPoolAuthenticationTest = do
+    state <- freshAuth "acc-static"
+    pool <- newPool
+        [ state
+            { accessToken = "static-token"
+            , refreshToken = ""
+            }
+        ]
+        unexpectedRefresh
+    provider <- poolTokenProvider pool
+    initial <- expectCredential =<< getNextToken provider Nothing
+    rejected <- getNextToken provider
+        (failed initial AccountAuthenticationRejected)
+    case rejected of
+        Left (ProviderError AuthenticationError _ _) -> pure ()
+        other -> expectationFailure
+            ("expected AuthenticationError, got " <> show other)
+  where
+    unexpectedRefresh _ =
+        expectationFailure "static token must not refresh"
+            >> pure (Left (ConnectionError "unexpected refresh"))
 
-            first <- expectCredential =<< getNextToken provider Nothing
-            let reportedFailure = failed first (AccountRateLimited (Just 60))
-            second <- expectCredential =<< getNextToken provider
-                reportedFailure
-
-            first.accountId `shouldBe` "acc-a"
-            second.accountId `shouldBe` "acc-b"
-            readIORef fetchCalls `shouldReturn`
-                [ (Nothing, [])
-                , (reportedFailure, ["acc-a"])
-                ]
-
-        it "retains broker cooldowns across independent acquisitions" do
-            let available = [credentialFor "acc-a", credentialFor "acc-b"]
-                fetch _failed excluded = pure $ Right $ firstAvailable excluded available
-            provider <- newBrokerTokenProviderWith fetch
-            first <- expectCredential =<< getNextToken provider Nothing
-            _ <- expectCredential =<< getNextToken provider
-                (failed first (AccountRateLimited (Just 60)))
-
-            next <- expectCredential =<< getNextToken provider Nothing
-
-            next.accountId `shouldBe` "acc-b"
-
-        it "returns CredentialsExhausted when every broker credential is cooling down" do
-            let available = [credentialFor "acc-a", credentialFor "acc-b"]
-                fetch _failed excluded = pure $ Right $ firstAvailable excluded available
-            provider <- newBrokerTokenProviderWith fetch
-            first <- expectCredential =<< getNextToken provider Nothing
-            second <- expectCredential =<< getNextToken provider
-                (failed first (AccountRateLimited (Just 60)))
-
-            exhausted <- getNextToken provider
-                (failed second (AccountRateLimited (Just 60)))
-
-            case exhausted of
-                Left CredentialsExhausted{} -> pure ()
-                other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
-
-        it "re-probes broker recovery without losing the upstream reset time" do
-            initialNow <- getCurrentTime
-            nowRef <- newIORef initialNow
-            let available = [credentialFor "acc-a"]
-                fetch _failed excluded = pure $ Right $ firstAvailable excluded available
-                upstreamRetrySeconds = 7 * 24 * 60 * 60
-                upstreamRetryAt = addUTCTime (fromIntegral upstreamRetrySeconds) initialNow
-            provider <- newBrokerTokenProviderWithClock (readIORef nowRef) fetch
-            first <- expectCredential =<< getNextToken provider Nothing
-
-            exhausted <- getNextToken provider
-                (failed first (AccountRateLimited (Just upstreamRetrySeconds)))
-            case exhausted of
-                Left CredentialsExhausted { retryAt } -> retryAt `shouldBe` upstreamRetryAt
-                other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
-
-            writeIORef nowRef (addUTCTime 61 initialNow)
-            recovered <- expectCredential =<< getNextToken provider Nothing
-
-            recovered.accountId `shouldBe` "acc-a"
+staticPoolCooldownTest :: IO ()
+staticPoolCooldownTest = do
+    staticState <- freshAuth "acc-static"
+    oauthState <- freshAuth "acc-oauth"
+    pool <- newPool
+        [ staticState { accessToken = "static-token", refreshToken = "" }
+        , oauthState
+        ]
+        (pure . Right)
+    Auth.reportRateLimit pool "acc-oauth" (Just 90)
+    provider <- poolTokenProvider pool
+    initial <- expectCredential =<< getNextToken provider Nothing
+    initial.accountId `shouldBe` "acc-static"
+    rejected <- getNextToken provider
+        (failed initial AccountAuthenticationRejected)
+    case rejected of
+        Left CredentialsExhausted{} -> pure ()
+        other -> expectationFailure
+            ("expected CredentialsExhausted, got " <> show other)
 
 localProvider
     :: [Text]
@@ -340,14 +314,6 @@ credentialFor accountId = Credential
     , leaseId = Just ("lease-" <> accountId)
     , provider = OpenAIProvider
     }
-
-firstAvailable :: [Text] -> [Credential] -> Maybe Credential
-firstAvailable excluded = go
-  where
-    go [] = Nothing
-    go (credential : rest)
-        | credential.accountId `elem` excluded = go rest
-        | otherwise = Just credential
 
 showText :: Show a => a -> Text
 showText = Text.pack . show

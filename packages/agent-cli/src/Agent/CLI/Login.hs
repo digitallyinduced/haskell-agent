@@ -19,6 +19,7 @@ import Agent.CLI.Auth
     ( GrokAuthState(..)
     , grokAuthStateToJson
     , grokCredentialFromAuthJson
+    , grokEmailFromAuthJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
@@ -288,7 +289,6 @@ discoverLoginAccounts = do
     grokFile <- discoverGrokFile
         (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
     openRouter <- discoverOpenRouter
-    broker <- discoverBroker
     managed <- loadManagedCredentials
     let managedAccounts = case managed of
             Left _ -> []
@@ -296,8 +296,7 @@ discoverLoginAccounts = do
     pure $ nubBy sameAccount $
         managedAccounts
             <> catMaybes
-                [ broker
-                , openaiEnv
+                [ openaiEnv
                 , openaiFile
                 , grokEnv
                 , grokFile
@@ -317,8 +316,7 @@ managedLoginAccount now (metadata, secret) =
         { loginManagedId = Just metadata.managedId
         , loginProvider = metadata.managedProvider
         , loginAccountId = metadata.managedAccountId
-        , loginLabel = fromMaybe metadata.managedLabel
-            (openAIAccountEmail =<< openAIAuth)
+        , loginLabel = fromMaybe metadata.managedLabel managedAccountEmail
         , loginBilling = case metadata.managedBilling of
             ManagedSubscription -> SubscriptionBilling Nothing
             ManagedApiCredits -> ApiCreditsBilling
@@ -330,6 +328,15 @@ managedLoginAccount now (metadata, secret) =
         , loginEnabled = metadata.managedEnabled
         }
   where
+    managedAccountEmail = case metadata.managedProvider of
+        OpenAIProvider -> openAIAccountEmail =<< openAIAuth
+        XAIProvider -> case metadata.managedAuthKind of
+            ManagedGrokAuthJson ->
+                grokEmailFromAuthJson secret.secretPayload
+            ManagedBearerToken ->
+                XAIAuth.emailFromToken secret.secretPayload
+            ManagedOpenAIAuthJson -> Nothing
+        OpenRouterProvider -> Nothing
     openAIAuth = case metadata.managedAuthKind of
         ManagedOpenAIAuthJson ->
             openaiAuthStateFromJson now
@@ -510,6 +517,10 @@ connectXAI color = do
                                 fromMaybe "grok"
                                     (XAIAuth.accountIdFromAccessToken
                                         tokens.accessToken)
+                            label = fromMaybe "Grok" $
+                                (tokens.idToken >>= XAIAuth.emailFromToken)
+                                    <|> XAIAuth.emailFromToken
+                                        tokens.accessToken
                             authJson = grokAuthStateToJson GrokAuthState
                                 { grokAccessToken = tokens.accessToken
                                 , grokRefreshToken = tokens.refreshToken
@@ -523,7 +534,7 @@ connectXAI color = do
                         storeConnectedCredential color
                             XAIProvider
                             accountId
-                            "Grok"
+                            label
                             ManagedSubscription
                             ManagedGrokAuthJson
                             (Text.decodeUtf8
@@ -693,29 +704,6 @@ discoverOpenRouter = do
             , loginEnabled = True
             }
 
-discoverBroker :: IO (Maybe LoginAccount)
-discoverBroker = do
-    url <- lookupNonEmpty "AGENT_BROKER_URL"
-    token <- lookupNonEmpty "AGENT_BROKER_TOKEN"
-    pure case (url, token) of
-        (Just brokerUrl, Just _) ->
-            Just LoginAccount
-                { loginManagedId = Nothing
-                , loginProvider = OpenAIProvider
-                , loginAccountId = "broker"
-                , loginLabel = "Credential broker"
-                , loginBilling = SubscriptionBilling Nothing
-                , loginSource = brokerUrl
-                , loginUsage =
-                    UsageUnavailable
-                        "account listing is not exposed by the broker client yet"
-                , loginAccessToken = ""
-                , loginAuthKind = ManagedBearerToken
-                , loginSecretPayload = ""
-                , loginEnabled = True
-                }
-        _ -> Nothing
-
 subscriptionAccount
     :: Provider
     -> Text
@@ -745,7 +733,9 @@ grokAccount token source authKind payload =
     subscriptionAccount
         XAIProvider
         (fromMaybe "grok" (XAIAuth.accountIdFromAccessToken token))
-        "Grok"
+        (fromMaybe "Grok"
+            (grokEmailFromAuthJson payload
+                <|> XAIAuth.emailFromToken token))
         source
         token
         authKind

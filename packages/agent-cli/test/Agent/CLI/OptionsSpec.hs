@@ -106,6 +106,26 @@ spec = do
                     , optAgentsMd = True
                     })
 
+        it "parses fullscreen and minimal rendering modes" do
+            parseArgs ["--fullscreen"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optScreenMode = ScreenFullscreen })
+            parseArgs ["--fullscreen", "--minimal"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optScreenMode = ScreenMinimal })
+
+        it "parses --skills and --no-skills" do
+            parseArgs ["--no-skills", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optSkills = False
+                    })
+            parseArgs ["--no-skills", "--skills", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optSkills = True
+                    })
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False False
@@ -113,6 +133,10 @@ spec = do
 
         it "denies mutating tools without a TTY when --no-yolo is set" do
             resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
+                `shouldBe` DenyMutating
+
+        it "does not auto-approve a piped interactive REPL" do
+            resolveApprovalPolicy defaultCliOptions False False
                 `shouldBe` DenyMutating
 
         it "prompts on a TTY unless --yolo is set" do

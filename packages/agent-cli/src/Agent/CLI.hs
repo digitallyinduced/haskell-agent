@@ -6,9 +6,11 @@ module Agent.CLI
     , cycleReplInteraction
     , devArgs
     , devMain
+    , devMainResume
     , formatReplStatusLine
     , formatTokenUsage
     , run
+    , withRestoredCurrentDirectory
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
@@ -22,6 +24,12 @@ import Agent.CLI.AgentViewport
     , renderAgentViewportPanelFor
     , responseItemLines
     )
+import Agent.CLI.SessionTitle
+    ( invalidateSessionTitles
+    , requestSessionTitle
+    , waitForSessionTitleResults
+    , withSessionTitleManager
+    )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
     , acquireSessionLock
@@ -34,7 +42,7 @@ import Agent.CLI.AgentSessions
     )
 import Agent.CLI.Approval
     ( approveToolDecision
-    , childApprove
+    , approveToolDecisionWith
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -53,6 +61,7 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , autoCompactOpenAiBackend
     , runProviderCompact
     )
 import Agent.CLI.ImagePreview
@@ -61,7 +70,11 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Input (ReplLine(..), formatPasteChip, readReplLineWithInitial)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , formatPasteChip
+    , readReplLineWithSkills
+    )
 import Agent.CLI.ReplMode
     ( ReplMode(..)
     , replModeFromState
@@ -70,12 +83,17 @@ import Agent.CLI.Interrupt
     ( InterruptState
     , isWrappedUserInterrupt
     , newInterruptState
+    , noteFullscreenCtrlC
     , withCtrlCHandler
     , withTurnCancel
     )
 import Agent.CLI.Login (runLoginManager)
 import Agent.CLI.ModelPicker (pickModel)
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models
+    ( ModelOption(..)
+    , PickerState(..)
+    , initialPickerState
+    )
 import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
@@ -85,7 +103,8 @@ import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume (pickResumeSession)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
-    ( osc9ProgressRemove
+    ( osc9ProgressIndeterminate
+    , osc9ProgressRemove
     , wrapOscForTmux
     )
 import Agent.CLI.Project
@@ -94,6 +113,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( automaticCooldownRetryDelay
     , fallbackCandidates
@@ -115,16 +135,30 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Skills
+    ( formatSkillsListing
+    , installSkillCatalog
+    , loadSkillsCatalog
+    , reservedSlashNames
+    , skillInvocationCommand
+    )
 import Agent.CLI.Status
     ( applyReplMode
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
     )
-import Agent.CLI.SubagentStore
-    ( SubagentDiskMeta(..)
-    , loadSubagentState
-    , saveSubagentState
+import Agent.CLI.Subagents.Runtime
+    ( SubagentRuntime(..)
+    , SubagentSession(..)
+    , SubagentStoreRoot
+    , flushAllSubagentSnapshots
+    , freshOpenAiBackend
+    , persistSubagentSnapshotWithStatus
+    , prepareCollaborationSpawn
+    , restoreAgentFromDisk
+    , runCodexSubagent
+    , runHttpSubagent
     )
 import Agent.CLI.Style
     ( beginBackground
@@ -153,8 +187,27 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (schemasFromAppTools)
-import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.TUI.App
+    ( FullscreenRuntime
+    , emitUiEvent
+    , newFullscreenRuntime
+    , readFullscreenLine
+    , requestFullscreenPermission
+    , requestFullscreenChoice
+    , requestFullscreenChoiceWithBody
+    , requestFullscreenText
+    , runFullscreen
+    , withFullscreenSuspended
+    )
+import Agent.CLI.UI.Model
+    ( PromptState(..)
+    , UiEvent(..)
+    , UiState
+    , initialUiState
+    , reduceUi
+    )
+import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
@@ -166,10 +219,9 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (resetCancel, waitCancel)
+import Agent.Cancel (requestCancel, resetCancel, waitCancel)
 import Agent.Loop
 import Agent.Error (ApiError(..))
-import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
@@ -178,20 +230,29 @@ import Agent.ProjectInstructions
     , globalAgentsHomeDir
     , loadedInstructionFiles
     )
+import Agent.Skills
+    ( Skill(..)
+    , SkillCatalog(..)
+    , SkillInvocation(..)
+    , SkillWarning(..)
+    , formatSkillActivation
+    , resolveSkillInvocation
+    , resolveSkillMentions
+    )
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
+    , hasCompactionCheckpoint
     , isTranscriptResetTurn
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.LoopBackend (openAiBackend, openAiBackendReconnecting)
+import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
 import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
-    , withCodexWsRetrying
     , withCodexWsWithProvider
     )
 import Agent.Provider
@@ -204,11 +265,8 @@ import Agent.Provider
     , providerSlug
     )
 import Agent.Subagents
-    ( RunSubagent
-    , RootTurnId
+    ( RootTurnId
     , SubagentId(..)
-    , SubagentRegistry
-    , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , abortRootTurn
     , beginRootTurn
@@ -216,51 +274,31 @@ import Agent.Subagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
-    , getPreviousResponseId
-    , getStatus
-    , getSubagentCwd
-    , getSubagentIdentity
-    , getTaskPath
+    , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
-    , restoreSubagent
-    , restoreSubagentAt
-    , restoreSubagentAtWithCwd
-    , restoreSubagentWithCwd
-    , setPreviousResponseId
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools
-    ( CodingTools(..)
-    , codingToolsFor
-    , codingToolsForWithTypes
-    , filterChildGrokTools
+import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.Tools.MultiAgents
+    ( MultiAgentContext(..)
+    , SubagentWorktree(..)
     )
-import Agent.Tools.Grok.Task
-    ( GrokSubagentSpec(..)
-    , GrokSubagentSpecs
-    , defaultSubagentType
-    , lookupAgentModel
-    , lookupAgentType
-    , recordAgentSpec
-    )
-import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot, taskPathText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.PlanMode
-    ( PlanModeEnv(..)
-    , PlanModeHooks
+    ( PlanDecision(..)
+    , PlanModeEnv(..)
+    , PlanModeHooks(..)
     , PlanModeState(..)
     , activatePlanMode
     , deactivatePlanMode
     , planFilePath
     )
 import Agent.Tools.Types
-    ( AppTool(..)
+    ( AppTool
     , ToolEnv(..)
-    , ToolRegistry
     , defaultToolEnv
-    , mkToolRegistry
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
@@ -278,12 +316,12 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (when)
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.List (elemIndex, findIndex)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -302,36 +340,41 @@ import System.Directory.OsPath
     , setCurrentDirectory
     )
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.OsPath ((</>), takeDirectory)
+import System.OsPath ((</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.Exit (die, exitFailure)
+import System.Exit (ExitCode(..), die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
 -- | How the GHCi-driven agent REPL finished.
 data DevResult
     = DevQuit
-    | DevReload
+    | DevReload Text
     deriving (Eq, Show)
 
 data RunResult
     = RunQuit
-    | RunReload
+    | RunReload Text
     | RunSwitchProvider ProviderTransition
     | RunProviderStartFailed ApiError
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
 
--- | GHCi @:cmd@ helper: on 'DevReload', reload modules and re-enter 'devMain'.
+-- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
+-- session. Keeping the id in the generated GHCi command avoids a shared
+-- cross-process resume pointer when several development REPLs are open.
 afterDev :: DevResult -> IO String
 afterDev = \case
     DevQuit -> pure ""
-    DevReload -> pure $ unlines
+    DevReload sessionId -> pure $ unlines
         [ ":reload"
         , ":module +Agent.CLI"
-        , ":cmd afterDev =<< devMain"
+        , ":cmd afterDev =<< devMainResume (Just "
+            <> show (Text.unpack sessionId)
+            <> ")"
         ]
 
 -- | Arguments used by the development @repl@ launcher.
@@ -351,14 +394,16 @@ devArgs resumeId underWorktree = case resumeId of
         ]
             <> ["--worktree" | not underWorktree]
 
--- | Start the agent from GHCi (@repl@). Resumes the session written by @:reload@.
--- On first open (no resume pointer), selects OpenAI/gpt-5.6-sol with yolo
--- enabled and passes @--worktree@ unless the cwd is already under
--- @~/.haskell-agent/worktrees@.
+-- | Start a fresh agent from GHCi (@repl@).
 devMain :: IO DevResult
-devMain = do
+devMain = devMainResume Nothing
+
+-- | Start or resume the GHCi-driven agent. 'afterDev' embeds the session id in
+-- the next @:cmd@ invocation, so concurrent REPLs cannot consume each other's
+-- reload state.
+devMainResume :: Maybe Text -> IO DevResult
+devMainResume resumeId = do
     home <- getHomeDirectory
-    resumeId <- readDevResumePointer home
     underWorktree <- case resumeId of
         Just _ -> pure True
         Nothing -> do
@@ -367,9 +412,7 @@ devMain = do
             pure (isUnderWorktreeRoot root cwd)
     let args = devArgs resumeId underWorktree
     case parseArgs args of
-        Left err -> do
-            clearDevResumePointer home
-            die err
+        Left err -> die err
         Right ShowHelp -> putStr usage >> pure DevQuit
         Right ShowVersion -> putStrLn "agent-cli 0.1.0.0" >> pure DevQuit
         Right Login -> do
@@ -381,8 +424,8 @@ devMain = do
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
-                DevQuit -> clearDevResumePointer home >> pure DevQuit
-                DevReload -> pure DevReload
+                DevQuit -> pure DevQuit
+                DevReload sessionId -> pure (DevReload sessionId)
 
 run :: IO ()
 run = do
@@ -400,16 +443,15 @@ run = do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
-                DevReload -> do
-                    home <- getHomeDirectory
-                    clearDevResumePointer home
+                DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options = go options Nothing
+runAgentWithRestarts options =
+    withRestoredCurrentDirectory (go options Nothing)
   where
     go current transition =
         runAgent current transition >>= \case
@@ -440,7 +482,15 @@ runAgentWithRestarts options = go options Nothing
                                     pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
-            RunReload -> pure DevReload
+            RunReload sessionId -> pure (DevReload sessionId)
+
+-- | Restore the process cwd after an action succeeds or throws. Cabal gives
+-- GHCi relative source paths, so returning from an agent session in its cwd
+-- would make the following @:reload@ lose local modules.
+withRestoredCurrentDirectory :: IO a -> IO a
+withRestoredCurrentDirectory action = do
+    originalCwd <- getCurrentDirectory
+    action `finally` setCurrentDirectory originalCwd
 
 runListSessions :: IO ()
 runListSessions = do
@@ -548,7 +598,10 @@ runAgent options transition = do
         putTextLn stderr (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
-    let planHooks = cliPlanHooks interrupt escPaused (resolveColor stderr)
+    uiRuntimeRef <- newIORef Nothing
+    let basePlanHooks =
+            cliPlanHooks interrupt escPaused (resolveColor stderr)
+        planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         provider = loaded.loadedProvider
         model = fromMaybe
             (case transitionTarget of
@@ -568,6 +621,7 @@ runAgent options transition = do
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
+    subagentForkSource <- newIORef (Nothing :: Maybe (IORef [ResponseItem]))
     pendingNotices <- newIORef ([] :: [TurnInput])
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
@@ -596,6 +650,10 @@ runAgent options transition = do
                                 Left err -> pure (Left err)
                                 Right () -> pure (Right ())
                         }
+            , multiPrepareSpawn = Just
+                (prepareCollaborationSpawn
+                    subagentSessions subagentStoreRoot agentTypesRef
+                    subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
     coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
@@ -607,20 +665,25 @@ runAgent options transition = do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
                     Just session ->
-                        persistSubagentSnapshot subagentStoreRoot ctx.multiRegistry
-                            agentTypesRef agentId session.subSessionTranscript
+                        persistSubagentSnapshotWithStatus
+                            subagentStoreRoot ctx.multiRegistry agentTypesRef
+                            agentId status session.subSessionTranscript
                     Nothing -> pure ()
         Nothing -> pure ()
     let claimCurrentSession handle
             | managedAgentSession = pure ()
-            | otherwise =
+            | otherwise = do
+                let desired =
+                        toFilePath
+                            (handle.sessionDir </> fromFilePath ".agent-running")
                 readIORef activeSessionLock >>= \case
-                    Just _ -> pure ()
-                    Nothing ->
+                    Just current | current == desired -> pure ()
+                    previous ->
                         acquireSessionLock handle >>= \case
                             Left err -> throwIO (userError (Text.unpack err))
-                            Right lockPath ->
+                            Right lockPath -> do
                                 writeIORef activeSessionLock (Just lockPath)
+                                mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root
             , toolsProvider = provider
@@ -644,9 +707,10 @@ runAgent options transition = do
         closeAll = do
             case multiCtx of
                 Just ctx -> do
-                    closeSubagentRegistry ctx.multiRegistry
+                    interruptActiveSubagents ctx.multiRegistry
                     flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
                         subagentSessions agentTypesRef
+                    closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
@@ -657,17 +721,36 @@ runAgent options transition = do
             params = requestParams model instructions
                 (schemasFromAppTools provider tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
+            initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
                 Just _ -> Nothing
                 Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
+        let subagentRuntime = SubagentRuntime
+                { subagentOptions = options
+                , subagentPolicy = policy
+                , subagentPlanHooks = planHooks
+                , subagentParams = paramsRef
+                , subagentRegistry = registry
+                , subagentSessions = subagentSessions
+                , subagentStoreRoot = subagentStoreRoot
+                , subagentTypes = agentTypesRef
+                }
         transcriptRef <- newIORef initialItems
+        contextTokensRef <- newIORef Nothing
+        writeIORef subagentForkSource (Just transcriptRef)
         prompt <- loadPrompt options
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
         setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
-        agentsContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        startupContext <- loadAgentsContext options provider home cwd initialItems initialPrevious
+        -- Fullscreen sessions load skills after Brick has taken over the
+        -- terminal, so filesystem discovery cannot delay the first frame.
+        -- Minimal and one-shot sessions still initialize them synchronously
+        -- before their first prompt/turn below.
+        skillsRef <- newIORef (SkillCatalog [] [])
+        skillInvocationsRef <- newIORef []
 
         persist <- preparePersistence options root provider model cwd effort prompt resumed
         writeIORef persistSlotRef persist
@@ -696,18 +779,8 @@ runAgent options transition = do
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
                                             runCodexSubagent
-                                                options
-                                                policy
-                                                planHooks
-                                                paramsRef
-                                                wsLock
+                                                subagentRuntime
                                                 loaded.loadedTokenProvider
-                                                wsHealthy
-                                                conn
-                                                ctx.multiRegistry
-                                                subagentSessions
-                                                subagentStoreRoot
-                                                agentTypesRef
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let lockedBackend =
@@ -718,6 +791,7 @@ runAgent options transition = do
                                             conn
                                             (readIORef paramsRef)
                                             transcriptRef
+                                            contextTokensRef
                                     noticingBackend =
                                         withPendingInputs pendingNotices lockedBackend
                                     btwBackend privateParams privateTranscript =
@@ -727,8 +801,8 @@ runAgent options transition = do
                                             privateTranscript
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
-                                runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                                runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -744,18 +818,11 @@ runAgent options transition = do
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
-                                        options
-                                        policy
-                                        planHooks
-                                        paramsRef
+                                        subagentRuntime
                                         XAIProvider
                                         (\childParamsRef childTranscript ->
                                             xaiBackend xaiOptions loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
-                                        ctx.multiRegistry
-                                        subagentSessions
-                                        agentTypesRef
-                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -766,8 +833,8 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -775,18 +842,11 @@ runAgent options transition = do
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
-                                        options
-                                        policy
-                                        planHooks
-                                        paramsRef
+                                        subagentRuntime
                                         OpenRouterProvider
                                         (\childParamsRef childTranscript ->
                                             openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
-                                        ctx.multiRegistry
-                                        subagentSessions
-                                        agentTypesRef
-                                        subagentStoreRoot
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -797,8 +857,8 @@ runAgent options transition = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool agentsContext escPaused interrupt
+                        runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
 preparePersistence
@@ -838,6 +898,7 @@ preparePersistence options root provider model cwd effort prompt resumed =
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
+                    , createTitleIsManual = False
                     }
             | otherwise -> pure PersistenceDisabled
 
@@ -890,10 +951,6 @@ printResumeHint progName = \case
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
-requireToolRegistry :: [AppTool] -> IO ToolRegistry
-requireToolRegistry tools =
-    either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
-
 isJustCwd :: CliOptions -> Bool
 isJustCwd options = case options.optCwd of
     Just _ -> True
@@ -907,11 +964,13 @@ runSession
     -> [AppTool]
     -> ToolEnv
     -> PlanModeEnv
+    -> IORef (Maybe FullscreenRuntime)
     -> Maybe Text
     -> Maybe PendingTurn
     -> [Provider]
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
+    -> [SessionTurn]
     -> Maybe Text
     -> Persistence
     -> OsPath
@@ -920,6 +979,8 @@ runSession
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
     -> IORef (Maybe Text)
+    -> IORef SkillCatalog
+    -> IORef [SkillInvocation]
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
@@ -932,7 +993,8 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode prompt pendingTurn unavailableProviders paramsRef transcriptRef initialPrevious persist projectRoot home cwd tokenProvider openAiPool agentsContext escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
+  withSessionTitleManager btwBackend paramsRef \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -945,12 +1007,14 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
     reasoningBuffer <- newIORef ""
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
+    toolCallsRef <- newIORef Map.empty
     allowedToolsRef <- newIORef Set.empty
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     ioLock <- newMVar ()
     previous <- newIORef initialPrevious
+    titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     let loadAgentEntries = do
             rootItems <- readIORef transcriptRef
@@ -968,10 +1032,17 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
           where
             materializeChild (path, agentId, status) = do
                 sessions <- readIORef subagentSessions
-                transcript <- case Map.lookup agentId sessions of
+                stored <- case Map.lookup agentId sessions of
                     Nothing -> pure ["(" <> formatAgentStatus status <> ")"]
                     Just session ->
                         responseItemLines <$> readIORef session.subSessionTranscript
+                let transcript = stored <> case status of
+                        Completed (Just result)
+                            | not (Text.null (Text.strip result)) ->
+                                ["assistant: " <> Text.strip result]
+                        Errored message ->
+                            ["error: " <> Text.strip message]
+                        _ -> []
                 pure AgentEntry
                     { agentTarget = AgentChild agentId
                     , agentPath = taskPathText path
@@ -994,13 +1065,55 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext options provider home cwd [] Nothing
+            freshSkills <- loadSkillsCatalog options home projectRoot cwd True
+            installSkillCatalog
+                reservedSlashNames True freshAgents
+                skillsRef skillInvocationsRef freshSkills
             fresh <- readIORef freshAgents
-            writeIORef agentsContext fresh
+            writeIORef startupContext fresh
+        refreshSkills queueContext = do
+            refreshed <- loadSkillsCatalog
+                options home projectRoot cwd queueContext
+            installSkillCatalog
+                reservedSlashNames queueContext startupContext
+                skillsRef skillInvocationsRef refreshed
     policyRef <- newIORef policy
     stderrTty <- hIsTerminalDevice stderr
+    stdinTty <- hIsTerminalDevice stdin
+    stdoutTty <- hIsTerminalDevice stdout
     terminal <- detectTerminalCapabilities stdout
     reportTerminalCwd terminal stdout (toFilePath cwd)
     useColor <- resolveColor stdout
+    branch <- detectGitBranch cwd
+    let fullscreenEnabled =
+            stdinTty
+                && stdoutTty
+                && not (isOneShot options)
+                && options.optScreenMode /= ScreenMinimal
+        initialFullscreenState =
+            reduceUi
+                (UiSetNotice (Just "Starting…"))
+                (reduceUi
+                    (UiSetRepository
+                        branch
+                        (toText (takeFileName (takeDirectory cwd))
+                            <> "/"
+                            <> toText (takeFileName cwd)))
+                    (hydrateUiHistory initialTurns))
+    fullscreen <- if fullscreenEnabled
+        then Just <$> newFullscreenRuntime
+            (requestCancel toolEnv.toolCancel)
+            (noteFullscreenCtrlC interrupt)
+            (copyTerminalClipboard terminal stdout)
+            (\active ->
+                when terminal.terminalNativeProgress $
+                    setNativeProgress stderr active)
+            ((,) <$> readIORef selectedAgent <*> loadAgentEntries)
+            (writeIORef selectedAgent)
+            useColor
+            initialFullscreenState
+        else pure Nothing
+    writeIORef uiRuntimeRef fullscreen
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
             sessionDir <- readIORef planMode.planSessionDir
@@ -1024,23 +1137,47 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , renderModelRef = modelRef
             , renderActivityRef = activityRef
             , renderStartedAt = startedAtRef
+            , renderToolCalls = toolCallsRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
             , renderNativeProgress =
                 stderrTty && terminal.terminalNativeProgress
             }
+        emitLoop event = case fullscreen of
+            Nothing -> renderEvent render event
+            Just runtime -> do
+                case event of
+                    TurnStarted -> do
+                        now <- getCurrentTime
+                        writeIORef startedAtRef (Just now)
+                        writeIORef activityRef "Thinking…"
+                    TextDelta _ -> writeIORef printed True
+                    ToolStarted _ ->
+                        writeIORef activityRef "Running tool…"
+                    _ -> pure ()
+                emitUiEvent runtime (UiLoop event)
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
-            , loopOnEvent = renderEvent render
+            , loopOnEvent = emitLoop
             , loopApprove = \call ->
                 withMVar ioLock \_ ->
-                    withStdinPaused escPaused $
-                        approveToolDecision
-                            policyRef allowedToolsRef toolRegistry planMode call
+                    case fullscreen of
+                        Nothing ->
+                            withStdinPaused escPaused $
+                                approveToolDecision
+                                    policyRef allowedToolsRef toolRegistry planMode call
+                        Just runtime ->
+                            approveToolDecisionWith
+                                (requestFullscreenPermission runtime)
+                                policyRef
+                                allowedToolsRef
+                                toolRegistry
+                                planMode
+                                call
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -1072,13 +1209,18 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
             , sessionPersist = persist
+            , sessionTitleManager = titleManager
+            , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
             , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionAgentsContext = agentsContext
+            , sessionStartupContext = startupContext
+            , sessionSkills = skillsRef
+            , sessionSkillInvocations = skillInvocationsRef
+            , sessionRefreshSkills = refreshSkills
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
@@ -1087,6 +1229,7 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionUsage = usageRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
+            , sessionFullscreen = fullscreen
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -1094,15 +1237,46 @@ runSession options provider policy tools toolEnv planMode prompt pendingTurn una
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    case pendingTurn of
-        Just pending ->
-            runPendingTurn env pending
-        Nothing -> case prompt of
-            Just text -> do
-                result <- runOneTurn env text [UserMessage text]
-                finishTurn env True result
-            Nothing ->
-                repl env
+    let formatSkillWarning warning =
+            "skill ignored: "
+                <> toText warning.skillWarningPath
+                <> ": "
+                <> warning.skillWarningMessage
+        initializeSkills = do
+            skills <- loadSkillsCatalog
+                options home projectRoot cwd (isNothing fullscreen)
+            installSkillCatalog
+                reservedSlashNames
+                (null initialTurns && not (isJust initialPrevious))
+                startupContext skillsRef skillInvocationsRef skills
+            case fullscreen of
+                Nothing -> pure ()
+                Just runtime -> do
+                    mapM_
+                        (emitUiEvent runtime . UiSystemMessage . formatSkillWarning)
+                        skills.catalogWarnings
+                    emitUiEvent runtime (UiSetNotice Nothing)
+        sessionAction = do
+            initializeSkills
+            case pendingTurn of
+                Just pending ->
+                    runPendingTurn env pending
+                Nothing -> case prompt of
+                    Just text -> do
+                        inputs <- preparePromptSkillInputs env text [UserMessage text]
+                            >>= either (die . Text.unpack) pure
+                        result <- runOneTurn env text inputs
+                        finishTurn env True result
+                    Nothing ->
+                        repl env
+    result <-
+        (case fullscreen of
+            Nothing -> sessionAction
+            Just runtime -> runFullscreen runtime sessionAction)
+            `finally` writeIORef uiRuntimeRef Nothing
+    _ <- waitForSessionTitleResults 5000000 titleManager
+    applyPendingSessionTitles env
+    pure result
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
 runPendingTurn = runPendingTurnWithCooldownRetry True
@@ -1114,6 +1288,10 @@ runPendingTurnWithCooldownRetry
     -> IO RunResult
 runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    case env.sessionFullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime (UiUserSubmitted pending.pendingPromptText)
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
@@ -1134,7 +1312,9 @@ finishTurnWithCooldownRetry
 finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         writeIORef env.sessionUnavailableProviders []
-        putTrailingNewline env.sessionPrinted
+        case env.sessionFullscreen of
+            Nothing -> putTrailingNewline env.sessionPrinted
+            Just _ -> pure ()
         if exitAfter
             then pure RunQuit
             else do
@@ -1144,7 +1324,9 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         if exitAfter
             then exitFailure
             else do
-                putTrailingNewline env.sessionPrinted
+                case env.sessionFullscreen of
+                    Nothing -> putTrailingNewline env.sessionPrinted
+                    Just _ -> pure ()
                 notifyAttention stderr InputRequested
                 repl env
     TurnProviderUnavailable apiError pending ->
@@ -1171,30 +1353,53 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    color <- resolveColor stderr
-    putTextLn stderr $ roleWarn color $
-        glyphWarn
-            <> "provider credentials temporarily unavailable; retrying this turn in "
-            <> formatDuration delay
-            <> " (Esc to cancel)"
+    let waitMessage =
+            "provider credentials temporarily unavailable; retrying this turn in "
+                <> formatDuration delay
+                <> " (Esc to cancel)"
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiSetNotice (Just waitMessage))
+        Nothing -> do
+            color <- resolveColor stderr
+            putTextLn stderr $
+                roleWarn color (glyphWarn <> waitMessage)
     let cancel = env.sessionLoop.loopCancel
         -- Give the provider reset boundary a small margin so the automatic
         -- retry does not race a rounded server timestamp.
         waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
+        waitForCancel =
+            isJust <$> timeout waitMicros (waitCancel cancel)
+        waitAction = case env.sessionFullscreen of
+            Just _ -> waitForCancel
+            Nothing ->
+                withEscCancel cancel env.sessionEscPaused waitForCancel
     resetCancel cancel
     cancelled <-
-        ( withTurnCancel env.sessionInterrupt cancel $
-            withEscCancel cancel env.sessionEscPaused $
-                isJust <$> timeout waitMicros (waitCancel cancel)
-        ) `finally` resetCancel cancel
+        (withTurnCancel env.sessionInterrupt cancel waitAction)
+            `finally` resetCancel cancel
     if cancelled
         then do
-            putTextLn stderr (roleMuted color "automatic retry cancelled")
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "automatic retry cancelled"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color "automatic retry cancelled")
             if pending.pendingExitAfter
                 then pure RunQuit
                 else replWithDraft env pending.pendingPromptText
         else do
-            putTextLn stderr (roleMuted color (glyphOk <> "retrying turn"))
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just "retrying turn"))
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr
+                        (roleMuted color (glyphOk <> "retrying turn"))
             runPendingTurnWithCooldownRetry False env pending
 
 reportProviderUnavailable :: ApiError -> IO ()
@@ -1232,6 +1437,9 @@ replWithDraft env@SessionEnv
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionOpenAiPool = openAiPool
+    , sessionSkills = skillsRef
+    , sessionSkillInvocations = skillInvocationsRef
+    , sessionRefreshSkills = refreshSkills
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -1240,11 +1448,15 @@ replWithDraft env@SessionEnv
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
+    , sessionFullscreen = fullscreen
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
-    when terminal.terminalSemanticPrompts $
-        emitTerminalSequence terminal stdout osc133PromptStart
+    refreshSkills False
+    skillInvocations <- readIORef skillInvocationsRef
+    let skillCommands =
+            map skillInvocationCommand
+                (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -1253,54 +1465,69 @@ replWithDraft env@SessionEnv
     policy <- readIORef policyRef
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
-    termCols <- fmap snd <$> getTerminalSize
-    case agentViewport of
-        Nothing -> pure ()
-        Just viewport -> do
-            entries <- viewport.viewportEntries
-            selected <- readIORef viewport.viewportSelected
-            let panel =
-                    renderAgentViewportPanelFor
-                        stdoutColor
-                        (fromMaybe 100 termCols)
-                        selected
-                        entries
-            when (not (Text.null panel)) (Text.putStrLn panel)
-    -- Status sits on the line above λ; the inline editor owns the prompt and
-    -- any live completion rows below it.
-    -- Token totals sit on the right of that line when the TTY width is known.
     usage <- readIORef usageRef
-    withSynchronizedOutput terminal stdout do
-        Text.putStrLn $ formatReplStatusLine stdoutColor termCols
-            (currentModel params)
-            (currentEffort params)
-            idleMode
-            usage
-        hFlush stdout
-    -- Solarized user wash under the prompt; the inline editor redraws it.
-    -- Ctrl+U keeps the familiar kill-to-start behavior.
-    let modeTag
-            | planActive = roleWarn stdoutColor "[plan] "
-            | planPending = roleMuted stdoutColor "[plan…] "
-            | idleMode == ReplModeAlwaysApprove =
-                roleSuccess stdoutColor "[yolo] "
-            | otherwise = ""
-        chromePrompt =
-            beginBackground stdoutColor userBackground
-                <> modeTag
-                <> if null pendingAttachments
-                    then ""
-                    else roleMuted stdoutColor
-                        ("[📎 " <> Text.pack (show (length pendingAttachments)) <> "] ")
-                <> rolePrompt stdoutColor "λ "
-                <> if stdoutColor
-                    then Text.pack clearFromCursorToLineEndCode
-                    else mempty
-    mline <- readReplLineWithInitial interrupt chromePrompt draft
-    when terminal.terminalSemanticPrompts $
-        emitTerminalSequence terminal stdout osc133PromptEnd
-    Text.putStr (endBackground stdoutColor)
-    hFlush stdout
+    mline <- case fullscreen of
+        Just runtime ->
+            readFullscreenLine runtime skillCommands
+                PromptState
+                    { promptModel = currentModel params
+                    , promptEffort = currentEffort params
+                    , promptMode = idleMode
+                    , promptUsage = usage
+                    , promptAttachments = length pendingAttachments
+                    }
+                draft
+        Nothing -> withMVar render.renderLock \_ -> do
+            -- The inline editor redraws its ANSI frame with several writes.
+            -- Keep the renderer out for the complete prompt lifetime so a
+            -- late tool event cannot be spliced into the composer row.
+            when terminal.terminalSemanticPrompts $
+                emitTerminalSequence terminal stdout osc133PromptStart
+            termCols <- fmap snd <$> getTerminalSize
+            case agentViewport of
+                Nothing -> pure ()
+                Just viewport -> do
+                    entries <- viewport.viewportEntries
+                    selected <- readIORef viewport.viewportSelected
+                    let panel =
+                            renderAgentViewportPanelFor
+                                stdoutColor
+                                (fromMaybe 100 termCols)
+                                selected
+                                entries
+                    when (not (Text.null panel)) (Text.putStrLn panel)
+            -- Status sits on the line above λ in minimal mode.
+            withSynchronizedOutput terminal stdout do
+                Text.putStrLn $ formatReplStatusLine stdoutColor termCols
+                    (currentModel params)
+                    (currentEffort params)
+                    idleMode
+                    usage
+                hFlush stdout
+            let modeTag
+                    | planActive = roleWarn stdoutColor "[plan] "
+                    | planPending = roleMuted stdoutColor "[plan…] "
+                    | idleMode == ReplModeAlwaysApprove =
+                        roleSuccess stdoutColor "[yolo] "
+                    | otherwise = ""
+                chromePrompt =
+                    beginBackground stdoutColor userBackground
+                        <> modeTag
+                        <> if null pendingAttachments
+                            then ""
+                            else roleMuted stdoutColor
+                                ("[📎 " <> Text.pack (show (length pendingAttachments)) <> "] ")
+                        <> rolePrompt stdoutColor "λ "
+                        <> if stdoutColor
+                            then Text.pack clearFromCursorToLineEndCode
+                            else mempty
+            result <- readReplLineWithSkills
+                skillCommands interrupt chromePrompt draft
+            when terminal.terminalSemanticPrompts $
+                emitTerminalSequence terminal stdout osc133PromptEnd
+            Text.putStr (endBackground stdoutColor)
+            hFlush stdout
+            pure result
     case mline of
         ReplEof -> do
             putStrLn ""
@@ -1312,31 +1539,64 @@ replWithDraft env@SessionEnv
         ReplCycleMode keptDraft -> do
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
-            -- The editor advanced a line; walk back over the previous status
-            -- + prompt so the next chrome replaces them.
-            putStr "\ESC[2A\r\ESC[J"
-            hFlush stdout
+            case fullscreen of
+                Just _ -> pure ()
+                Nothing -> do
+                    -- Minimal editor advanced a line; replace its old chrome.
+                    putStr "\ESC[2A\r\ESC[J"
+                    hFlush stdout
             continueWith keptDraft
-        ReplClipboardPaste keptDraft -> do
-            errColor <- resolveColor stderr
-            queueClipboardImages
-                attachmentsRef previewIdRef stdoutColor errColor
+        ReplClipboardPaste keptDraft clipboardPasteImages -> do
+            case clipboardPasteImages of
+                Just images@(_:_) -> do
+                    message <- queueAttachedImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        images
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted stdoutColor
+                                (glyphOk <> message))
+                _ ->
+                    queueClipboardImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        >>= \case
+                            Left err ->
+                                displayError err do
+                                    errColor <- resolveColor stderr
+                                    Text.hPutStrLn stderr (roleError errColor err)
+                            Right message ->
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted stdoutColor
+                                            (glyphOk <> message))
             continueWith keptDraft
+        ReplChooseModel keptDraft ->
+            chooseModel (continueWith keptDraft)
+        ReplChooseEffort keptDraft ->
+            chooseEffort (continueWith keptDraft)
         ReplPasted pasted ->
-            submitLine continue stdoutColor True pasted
+            submitLine skillCommands skillInvocations
+                continue stdoutColor True pasted
         ReplText line ->
-            submitLine continue stdoutColor False line
+            submitLine skillCommands skillInvocations
+                continue stdoutColor False line
   where
-    submitLine continue color pasted line =
+    submitLine skillCommands skillInvocations continue color pasted line =
         let stripped = Text.strip line
         in if Text.null stripped
             then continue
             else do
                 when pasted do
                     let chip = formatPasteChip stripped
-                    when (chip /= stripped) do
+                    when (chip /= stripped && isNothing fullscreen) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLine line of
+                case parseReplLineWithSkills skillCommands line of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
@@ -1347,8 +1607,16 @@ replWithDraft env@SessionEnv
                         pastedImages <- loadImagesFromPastedText text
                         case pastedImages of
                             Just images@(_:_) -> do
-                                queueAttachedImages
-                                    attachmentsRef previewIdRef color images
+                                message <- queueAttachedImages
+                                    attachmentsRef
+                                    previewIdRef
+                                    color
+                                    (isNothing fullscreen)
+                                    images
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            (glyphOk <> message))
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
@@ -1362,8 +1630,58 @@ replWithDraft env@SessionEnv
                                                     , userImages = pendingImages
                                                     }
                                                 ]
-                                result <- runOneTurn env text turnInputs
+                                preparePromptSkillInputs env text turnInputs >>= \case
+                                    Left err -> do
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                        continue
+                                    Right skillInputs -> do
+                                        result <- runOneTurn env text skillInputs
+                                        finishTurn env False result
+                    ReplInvokeSkill invocationName arguments ->
+                        case resolveSkillInvocation
+                            skillInvocations invocationName of
+                            Left err -> do
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Right invocation -> do
+                                pendingImages <- atomicModifyIORef'
+                                    attachmentsRef \imgs -> ([], imgs)
+                                let userText =
+                                        if Text.null arguments
+                                            then "Use the "
+                                                <> invocation.invocationSkill.skillName
+                                                <> " skill."
+                                            else arguments
+                                    userInput =
+                                        if null pendingImages
+                                            then UserMessage userText
+                                            else UserMultimodal
+                                                { userText = userText
+                                                , userImages = pendingImages
+                                                }
+                                    skillInputs =
+                                        [ UserMessage
+                                            (formatSkillActivation
+                                                invocation arguments)
+                                        , userInput
+                                        ]
+                                writeIORef printed False
+                                fullscreenEvent (UiUserSubmitted line)
+                                result <- runOneTurn env line skillInputs
                                 finishTurn env False result
+                    ReplSkills reloadFirst -> do
+                        when reloadFirst (refreshSkills True)
+                        current <- readIORef skillsRef
+                        invocations <- readIORef skillInvocationsRef
+                        let listing =
+                                formatSkillsListing color current invocations
+                        displayInfo (formatSkillsListing False current invocations) $
+                            Text.putStrLn listing
+                        continue
                     ReplPaste{pasteImmediate, pasteCaption} -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
@@ -1372,22 +1690,44 @@ replWithDraft env@SessionEnv
                             Left err -> do
                                 -- Fall back to a richer clipboard sniff for better errors.
                                 content <- readClipboard
+                                let
+                                    message = case content of
+                                        ClipboardText _ ->
+                                            "clipboard has text, not an image \
+                                            \(paste text normally into the prompt)"
+                                        ClipboardPaths paths ->
+                                            "clipboard has file path(s), \
+                                            \but no loadable image: "
+                                                <> Text.intercalate
+                                                    ", " (map Text.pack paths)
+                                        ClipboardEmpty ->
+                                            err
+                                        ClipboardImage image ->
+                                            -- Shouldn't happen if readClipboardImages failed, but be safe.
+                                            "attached "
+                                                <> image.imageMime
                                 case content of
-                                    ClipboardText _ ->
-                                        Text.hPutStrLn stderr (roleError errColor
-                                            "clipboard has text, not an image (paste text normally into the prompt)")
-                                    ClipboardPaths paths ->
-                                        Text.hPutStrLn stderr (roleError errColor
-                                            ("clipboard has file path(s), but no loadable image: "
-                                                <> Text.intercalate ", " (map Text.pack paths)))
-                                    ClipboardEmpty ->
-                                        Text.hPutStrLn stderr (roleError errColor err)
-                                    ClipboardImage image ->
-                                        -- Shouldn't happen if readClipboardImages failed, but be safe.
-                                        modifyIORef' attachmentsRef (<> [image])
+                                    ClipboardImage image -> do
+                                        attachMessage <- queueAttachedImages
+                                            attachmentsRef
+                                            previewIdRef
+                                            color
+                                            (isNothing fullscreen)
+                                            [image]
+                                        displayInfo attachMessage $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> attachMessage))
+                                    _ ->
+                                        displayError message $
+                                            Text.hPutStrLn stderr
+                                                (roleError errColor message)
                                 continue
                             Right [] -> do
-                                Text.hPutStrLn stderr (roleError errColor "no image found on the clipboard")
+                                displayError "no image found on the clipboard" $
+                                    Text.hPutStrLn stderr
+                                        (roleError errColor
+                                            "no image found on the clipboard")
                                 continue
                             Right images -> do
                                 let sizes =
@@ -1401,10 +1741,15 @@ replWithDraft env@SessionEnv
                                                 if Text.null pasteCaption
                                                     then "See attached image."
                                                     else pasteCaption
-                                        putImagePreview previewIdRef color images
-                                        Text.putStrLn
-                                            (roleMuted color (glyphOk <> "pasted " <> sizes))
+                                        when (isNothing fullscreen) $
+                                            putImagePreview previewIdRef color images
+                                        displayInfo ("pasted " <> sizes) $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> "pasted " <> sizes))
                                         writeIORef printed False
+                                        fullscreenEvent
+                                            (UiUserSubmitted promptText)
                                         let turnInputs =
                                                 [ UserMultimodal
                                                     { userText = promptText
@@ -1414,26 +1759,43 @@ replWithDraft env@SessionEnv
                                         result <- runOneTurn env promptText turnInputs
                                         finishTurn env False result
                                     else do
-                                        queueAttachedImages
-                                            attachmentsRef previewIdRef color images
+                                        message <- queueAttachedImages
+                                            attachmentsRef
+                                            previewIdRef
+                                            color
+                                            (isNothing fullscreen)
+                                            images
+                                        displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphOk <> message))
                                         continue
                     ReplShowAttachments -> do
                         pending <- readIORef attachmentsRef
                         color <- resolveColor stdout
-                        if null pending
-                            then Text.putStrLn (roleMuted color (glyphSession <> "attachments: (none)"))
-                            else Text.putStrLn $ roleMuted color $
-                                glyphSession
-                                    <> "attachments: "
-                                    <> Text.intercalate ", "
-                                        [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                                        | img <- pending
-                                        ]
+                        let message =
+                                if null pending
+                                    then "attachments: (none)"
+                                    else "attachments: "
+                                        <> Text.intercalate ", "
+                                            [ img.imageMime
+                                                <> " ("
+                                                <> formatImageSize
+                                                    (BS.length img.imageBytes)
+                                                <> ")"
+                                            | img <- pending
+                                            ]
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
                         continue
                     ReplClearAttachments -> do
                         writeIORef attachmentsRef []
                         color <- resolveColor stdout
-                        Text.putStrLn (roleMuted color (glyphOk <> "attachments cleared"))
+                        displayInfo "attachments cleared" $
+                            Text.putStrLn
+                                (roleMuted color
+                                    (glyphOk <> "attachments cleared"))
                         continue
                     ReplAgents -> do
                         case agentViewport of
@@ -1442,7 +1804,8 @@ replWithDraft env@SessionEnv
                                 entries <- viewport.viewportEntries
                                 selected <- readIORef viewport.viewportSelected
                                 color <- resolveColor stderr
-                                pickAgentViewport color selected entries >>= \case
+                                pickAgentChoice
+                                    fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
                                     Just target ->
                                         writeIORef viewport.viewportSelected target
@@ -1450,114 +1813,101 @@ replWithDraft env@SessionEnv
 
                     ReplCopyLast -> do
                         answer <- readIORef lastAssistantRef
-                        maybe (copyMissing "no assistant response to copy")
-                            (copyValue terminal "last response") answer
+                        copyCommand
+                            "last response"
+                            "no assistant response to copy"
+                            answer
                         continue
                     ReplCopyCode index -> do
                         answer <- readIORef lastAssistantRef
-                        case answer >>= fencedCodeBlock index of
-                            Nothing -> copyMissing
-                                ("code block " <> Text.pack (show index) <> " was not found")
-                            Just block -> copyValue terminal
-                                ("code block " <> Text.pack (show index)) block
+                        let label =
+                                "code block " <> Text.pack (show index)
+                        copyCommand
+                            label
+                            (label <> " was not found")
+                            (answer >>= fencedCodeBlock index)
                         continue
                     ReplCopyDiff -> do
                         answer <- readIORef lastAssistantRef
-                        case answer >>= lastDiffBlock of
-                            Nothing -> copyMissing "no diff block was found"
-                            Just block -> copyValue terminal "diff block" block
+                        copyCommand
+                            "diff block"
+                            "no diff block was found"
+                            (answer >>= lastDiffBlock)
                         continue
                     ReplCopyPath -> do
-                        copyValue terminal "worktree path" (toText cwd)
+                        copyCommand
+                            "worktree path"
+                            "worktree path is unavailable"
+                            (Just (toText cwd))
                         continue
                     ReplCopySession -> do
                         sessionId <- currentSessionId persist
-                        maybe
-                            (copyMissing "this session has no persisted id yet")
-                            (copyValue terminal "session id")
+                        copyCommand
+                            "session id"
+                            "this session has no persisted id yet"
                             sessionId
                         continue
                     ReplShowTerminal -> do
-                        Text.putStrLn
-                            (roleMuted color
-                                (formatTerminalCapabilities terminal))
+                        let message = formatTerminalCapabilities terminal
+                        displayInfo message $
+                            Text.putStrLn (roleMuted color message)
                         continue
                     ReplShowEffort -> do
                         color <- resolveColor stdout
                         params <- readIORef paramsRef
-                        Text.putStrLn (roleMuted color (glyphSession <> "effort: " <> currentEffort params))
+                        let message = "effort: " <> currentEffort params
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
                         continue
                     ReplSetEffort level -> do
-                        color <- resolveColor stdout
-                        modifyIORef' paramsRef (setReasoningEffort level)
-                        Text.putStrLn (roleMuted color (glyphOk <> "effort set to " <> level))
-                        case persist of
-                            PersistenceDisabled -> pure ()
-                            PersistenceEnabled slotRef -> do
-                                slot <- readIORef slotRef
-                                case slot of
-                                    PersistencePending pending ->
-                                        writeIORef slotRef
-                                            (PersistencePending pending { createEffort = level })
-                                    PersistenceActive handle -> do
-                                        let meta = handle.sessionMeta { metaEffort = level }
-                                        writeSessionMeta handle.sessionMetaPath meta
-                                        writeIORef slotRef
-                                            (PersistenceActive handle { sessionMeta = meta })
+                        setEffort level
                         continue
                     ReplShowModel -> do
-                        color <- resolveColor stderr
-                        params <- readIORef paramsRef
-                        let current = currentModel params
-                        pickModel color provider current >>= \case
-                            Nothing -> continue
-                            Just choice
-                                | choice.modelProvider == provider
-                                , choice.modelId == current -> do
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            (glyphSession
-                                                <> "model: "
-                                                <> providerSlug provider
-                                                <> "/"
-                                                <> choice.modelId))
-                                    continue
-                                | choice.modelProvider == provider -> do
-                                    applyModelChange
-                                        provider choice.modelId paramsRef render previous persist
-                                    continue
-                                | otherwise ->
-                                    requestModelProviderSwitch choice persist >>= \case
-                                        Left err -> do
-                                            Text.hPutStrLn stderr (roleError color err)
-                                            continue
-                                        Right result -> pure result
+                        chooseModel continue
                     ReplSetModel name -> do
-                        applyModelChange
+                        color <- resolveColor stdout
+                        message <- applyModelChange
                             provider name paramsRef render previous persist
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplToggleAlwaysApprove -> do
-                        toggleAlwaysApprove policyRef projectRoot
+                        message <- toggleAlwaysApprove policyRef projectRoot
+                        color <- resolveColor stderr
+                        displayInfo message $
+                            putTextLn stderr (roleMuted color message)
                         continue
                     ReplCompact focus -> do
                         color <- resolveColor stderr
                         result <- runProviderCompact provider tokenProvider paramsRef transcriptRef focus
                         case result of
                             Left err -> do
-                                Text.hPutStrLn stderr (roleError color err)
+                                displayError err $
+                                    Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
                                 writeIORef transcriptRef outcome.compactHistory
                                 writeIORef previous Nothing
-                                Text.hPutStrLn stderr $ roleMuted color $
-                                    glyphSession
-                                        <> "compacted "
-                                        <> Text.pack (show outcome.compactBeforeTokens)
-                                        <> " → "
-                                        <> Text.pack (show outcome.compactAfterTokens)
-                                        <> " tokens ("
-                                        <> Text.pack (show (length outcome.compactHistory))
-                                        <> " items)"
+                                fullscreenEvent UiConversationCleared
+                                fullscreenEvent
+                                    (UiSystemMessage outcome.compactSummary)
+                                let message =
+                                        "compacted "
+                                            <> Text.pack
+                                                (show outcome.compactBeforeTokens)
+                                            <> " → "
+                                            <> Text.pack
+                                                (show outcome.compactAfterTokens)
+                                            <> " tokens ("
+                                            <> Text.pack
+                                                (show (length outcome.compactHistory))
+                                            <> " items)"
+                                displayInfo message $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> message))
                                 case persist of
                                     PersistenceDisabled -> pure ()
                                     PersistenceEnabled slotRef -> do
@@ -1573,12 +1923,13 @@ replWithDraft env@SessionEnv
                                                 , turnUsage = Nothing
                                                 }
                                         handle' <- appendTurn handle turn
-                                        writeIORef slotRef (PersistenceActive handle')
-                                        writeSessionMeta handle'.sessionMetaPath $
-                                            handle'.sessionMeta
+                                        let meta = handle'.sessionMeta
                                                 { metaLastResponseId = Nothing
                                                 , metaUpdatedAt = now
                                                 }
+                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        writeIORef slotRef
+                                            (PersistenceActive handle'{sessionMeta = meta})
                                 continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
@@ -1587,42 +1938,54 @@ replWithDraft env@SessionEnv
                             Nothing -> continue
                     ReplBtw question -> do
                         color <- resolveColor stdout
-                        putTextLn stdout
-                            (roleMuted color (glyphSession <> "btw · asking…"))
-                        result <- runBtwWithCancel
-                            (\cancel action ->
-                                withTurnCancel interrupt cancel $
-                                    withEscCancel cancel escPaused action)
-                            btwBackend
-                            paramsRef
-                            transcriptRef
-                            question
+                        fullscreenEvent
+                            (UiSetNotice (Just "btw · asking…"))
+                        result <-
+                            runBtwWithCancel
+                                (\cancel action ->
+                                    withTurnCancel interrupt cancel $
+                                        case fullscreen of
+                                            Nothing ->
+                                                withEscCancel
+                                                    cancel escPaused action
+                                            Just _ -> action)
+                                btwBackend
+                                paramsRef
+                                transcriptRef
+                                question
                         case result of
                             Left err -> do
                                 errorColor <- resolveColor stderr
-                                putTextLn stderr
-                                    (roleError errorColor (formatBtwError err))
+                                let message = formatBtwError err
+                                displayError message $
+                                    putTextLn stderr
+                                        (roleError errorColor message)
                             Right answer ->
-                                putTextLn stdout (renderAssistantText color answer)
+                                case fullscreen of
+                                    Just runtime ->
+                                        emitUiEvent runtime
+                                            (UiAssistantHistory answer)
+                                    Nothing ->
+                                        putTextLn stdout
+                                            (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
-                        handleResume maybeId persist >>= \case
+                        handleResume fullscreen maybeId persist >>= \case
                             Nothing -> continue
                             Just result -> pure result
                     ReplClear -> do
                         sessionReset
+                        fullscreenEvent UiConversationCleared
                         color <- resolveColor stderr
-                        case persist of
+                        message <- case persist of
                             PersistenceDisabled ->
-                                Text.hPutStrLn stderr
-                                    (roleMuted color (glyphOk <> "conversation cleared"))
+                                pure "conversation cleared"
                             PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
                                 slot <- readIORef slotRef
                                 case slot of
                                     PersistencePending _ ->
-                                        Text.hPutStrLn stderr
-                                            (roleMuted color (glyphOk <> "conversation cleared"))
+                                        pure "conversation cleared"
                                     PersistenceActive handle -> do
                                         let turn = SessionTurn
                                                 { turnAt = now
@@ -1645,21 +2008,25 @@ replWithDraft env@SessionEnv
                                         writeSessionMeta handle'.sessionMetaPath meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
-                                        Text.hPutStrLn stderr
-                                            (roleMuted color
-                                                (glyphOk
-                                                    <> "conversation cleared (session "
-                                                    <> meta.metaId
-                                                    <> ")"))
+                                        pure
+                                            ("conversation cleared (session "
+                                                <> meta.metaId
+                                                <> ")")
+                        displayInfo message $
+                            Text.hPutStrLn stderr
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplNew -> do
                         sessionReset
+                        fullscreenEvent UiConversationCleared
                         color <- resolveColor stderr
                         case persist of
                             PersistenceDisabled -> do
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        (glyphOk <> "started a fresh conversation"))
+                                displayInfo "started a fresh conversation" $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphOk
+                                                <> "started a fresh conversation"))
                                 continue
                             PersistenceEnabled slotRef -> do
                                 now <- getCurrentTime
@@ -1673,6 +2040,7 @@ replWithDraft env@SessionEnv
                                                 { createModel = model
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
+                                                , createTitleIsManual = False
                                                 }
                                         PersistenceActive handle ->
                                             SessionCreate
@@ -1684,6 +2052,7 @@ replWithDraft env@SessionEnv
                                                     handle.sessionMeta.metaCwd
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
+                                                , createTitleIsManual = False
                                                 }
                                 handle <- createSession create
                                 let turn = SessionTurn
@@ -1702,8 +2071,10 @@ replWithDraft env@SessionEnv
                                         , metaUpdatedAt = now
                                         }
                                 writeSessionMeta handle'.sessionMetaPath meta
+                                env.sessionOnPersisted handle'
                                 writeIORef slotRef
                                     (PersistenceActive handle'{sessionMeta = meta})
+                                writeIORef env.sessionTitleTurnCount 0
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
@@ -1711,48 +2082,403 @@ replWithDraft env@SessionEnv
                                 setCliWindowTitle tty stdout
                                     (cliWindowTitle meta.metaCwd
                                         (Just meta.metaTitle))
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        (glyphOk <> "new session: " <> meta.metaId))
+                                let message = "new session: " <> meta.metaId
+                                displayInfo message $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphOk <> message))
                                 continue
                     ReplShowSession -> do
                         color <- resolveColor stdout
                         case persist of
                             PersistenceDisabled ->
-                                Text.putStrLn (roleMuted color "session: (not persisted)")
+                                displayInfo "session: (not persisted)" $
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            "session: (not persisted)")
                             PersistenceEnabled slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
                                     PersistencePending _ ->
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                "session: (pending until first turn)")
+                                        displayInfo
+                                            "session: (pending until first turn)" $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    "session: (pending until first turn)")
                                     PersistenceActive handle ->
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+                                        let message =
+                                                "session: "
+                                                    <> handle.sessionMeta.metaId
+                                        in displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    (glyphSession <> message))
+                        continue
+                    ReplRename title -> do
+                        color <- resolveColor stderr
+                        case persist of
+                            PersistenceDisabled ->
+                                displayError
+                                    "cannot rename a session that is not persisted" $
+                                    putTextLn stderr
+                                        (roleError color
+                                            "cannot rename a session that is not persisted")
+                            PersistenceEnabled slotRef ->
+                                readIORef slotRef >>= \case
+                                    PersistencePending pending -> do
+                                        writeIORef slotRef (PersistencePending pending
+                                            { createTitleHint = Just title
+                                            , createTitleIsManual = True
+                                            })
+                                        let message = "session title: " <> title
+                                        displayInfo message $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk <> message))
+                                    PersistenceActive handle -> do
+                                        invalidateSessionTitles
+                                            env.sessionTitleManager
+                                            handle.sessionMeta.metaId
+                                        updated <- setManualSessionTitle title handle
+                                        writeIORef slotRef (PersistenceActive updated)
+                                        tty <- hIsTerminalDevice stdout
+                                        setCliWindowTitle tty stdout
+                                            (cliWindowTitle updated.sessionMeta.metaCwd
+                                                (Just updated.sessionMeta.metaTitle))
+                                        let message =
+                                                "session title: "
+                                                    <> updated.sessionMeta.metaTitle
+                                        displayInfo message $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk <> message))
+                        continue
+                    ReplRenameAuto -> do
+                        color <- resolveColor stderr
+                        case persist of
+                            PersistenceDisabled ->
+                                displayError
+                                    "cannot rename a session that is not persisted" $
+                                    putTextLn stderr
+                                        (roleError color
+                                            "cannot rename a session that is not persisted")
+                            PersistenceEnabled slotRef ->
+                                readIORef slotRef >>= \case
+                                    PersistencePending pending -> do
+                                        writeIORef slotRef (PersistencePending pending
+                                            { createTitleHint = Nothing
+                                            , createTitleIsManual = False
+                                            })
+                                        displayInfo
+                                            "automatic session titles enabled" $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk
+                                                        <> "automatic session titles enabled"))
+                                    PersistenceActive handle -> do
+                                        invalidateSessionTitles
+                                            env.sessionTitleManager
+                                            handle.sessionMeta.metaId
+                                        updated <- resetSessionTitleToAuto handle
+                                        writeIORef slotRef (PersistenceActive updated)
+                                        loadSession
+                                            (takeDirectory updated.sessionDir)
+                                            updated.sessionMeta.metaId
+                                            >>= \case
+                                                Left _ -> pure ()
+                                                Right (_, turns) -> do
+                                                    let source =
+                                                            sessionConversationText turns
+                                                    requestSessionTitle
+                                                        env.sessionTitleManager
+                                                        updated.sessionMeta.metaId
+                                                        1
+                                                        source
+                                        displayInfo
+                                            "automatic session titles enabled" $
+                                            putTextLn stderr
+                                                (roleMuted color
+                                                    (glyphOk
+                                                        <> "automatic session titles enabled"))
                         continue
                     ReplLogin -> do
                         color <- resolveColor stderr
-                        runLoginManager color
+                        legacy (runLoginManager color)
                         continue
                     ReplUsage -> do
-                        showAccountUsage provider tokenProvider openAiPool
+                        case fullscreen of
+                            Nothing ->
+                                showAccountUsage
+                                    provider tokenProvider openAiPool
+                            Just runtime ->
+                                accountUsageText
+                                    False provider tokenProvider openAiPool
+                                    >>= emitUiEvent runtime . UiSystemMessage
                         continue
                     ReplReloadAuth -> do
-                        reloadAuth provider tokenProvider
+                        reloadResult <- reloadAuth provider tokenProvider
+                        color <- resolveColor stderr
+                        case reloadResult of
+                            Left err ->
+                                displayError err $
+                                    putTextLn stderr (roleError color err)
+                            Right message ->
+                                displayInfo message $
+                                    putTextLn stderr (roleMuted color message)
                         continue
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
-                        Text.putStrLn (formatSlashHelp color maybeName)
+                        displayInfo
+                            (formatSlashHelpWithSkills
+                                False skillCommands maybeName) $
+                            Text.putStrLn
+                                (formatSlashHelpWithSkills
+                                    color skillCommands maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
-                        Text.hPutStrLn stderr (roleError color err)
+                        displayError err $
+                            Text.hPutStrLn stderr (roleError color err)
                         continue
     continue = continueWith ""
     continueWith keptDraft =
         replWithDraft env keptDraft
+    legacy action = case fullscreen of
+        Nothing -> action
+        Just runtime -> withFullscreenSuspended runtime action
+    fullscreenEvent event = case fullscreen of
+        Nothing -> pure ()
+        Just runtime -> emitUiEvent runtime event
+    displayInfo message minimalAction = case fullscreen of
+        Nothing -> minimalAction
+        Just runtime -> emitUiEvent runtime (UiSystemMessage message)
+    displayError message minimalAction = case fullscreen of
+        Nothing -> minimalAction
+        Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    setEffort level = do
+        color <- resolveColor stdout
+        modifyIORef' paramsRef (setReasoningEffort level)
+        displayInfo ("effort set to " <> level) $
+            Text.putStrLn
+                (roleMuted color
+                    (glyphOk <> "effort set to " <> level))
+        case persist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef -> do
+                slot <- readIORef slotRef
+                case slot of
+                    PersistencePending pending ->
+                        writeIORef slotRef
+                            (PersistencePending pending { createEffort = level })
+                    PersistenceActive handle -> do
+                        let meta = handle.sessionMeta { metaEffort = level }
+                        writeSessionMeta handle.sessionMetaPath meta
+                        writeIORef slotRef
+                            (PersistenceActive handle { sessionMeta = meta })
+    chooseEffort next = do
+        params <- readIORef paramsRef
+        effortChoice fullscreen (currentEffort params) >>= \case
+            Nothing -> next
+            Just level -> setEffort level >> next
+    chooseModel next = do
+        color <- resolveColor stderr
+        params <- readIORef paramsRef
+        let current = currentModel params
+        modelChoice fullscreen color provider current >>= \case
+            Nothing -> next
+            Just choice
+                | choice.modelProvider == provider
+                , choice.modelId == current -> do
+                    let message =
+                            "model: "
+                                <> providerSlug provider
+                                <> "/"
+                                <> choice.modelId
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted color
+                                (glyphSession <> message))
+                    next
+                | choice.modelProvider == provider -> do
+                    message <- applyModelChange
+                        provider choice.modelId paramsRef render previous persist
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted color
+                                (glyphOk <> message))
+                    next
+                | otherwise ->
+                    requestModelProviderSwitch choice persist >>= \case
+                        Left err -> do
+                            displayError err $
+                                Text.hPutStrLn stderr
+                                    (roleError color err)
+                            next
+                        Right result -> pure result
+    copyCommand label missing payload = case payload of
+        Nothing ->
+            displayError missing do
+                color <- resolveColor stderr
+                Text.hPutStrLn stderr (roleError color missing)
+        Just value -> do
+            copied <- copyTerminalClipboard terminal stdout value
+            if copied
+                then
+                    let message = "copied " <> label
+                    in displayInfo message do
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr
+                            (roleSuccess color (glyphOk <> message))
+                else
+                    displayError "terminal clipboard is unavailable" do
+                        color <- resolveColor stderr
+                        Text.hPutStrLn stderr
+                            (roleError color
+                                "terminal clipboard is unavailable")
+
+modelChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> Provider
+    -> Text
+    -> IO (Maybe ModelOption)
+modelChoice fullscreen color provider current = case fullscreen of
+    Nothing -> pickModel color provider current
+    Just runtime -> do
+        let picker = initialPickerState provider current
+            options = picker.pickerAll
+            rows =
+                [ ( providerSlug option.modelProvider
+                        <> " · "
+                        <> option.modelId
+                  , fromMaybe "" option.modelLabel
+                  )
+                | option <- options
+                ]
+        requestFullscreenChoice
+            runtime
+            "Model"
+            picker.pickerIndex
+            rows
+            >>= \case
+                Just index
+                    | index >= 0
+                    , index < length options ->
+                        pure (Just (options !! index))
+                _ -> pure Nothing
+
+effortChoice
+    :: Maybe FullscreenRuntime
+    -> Text
+    -> IO (Maybe Text)
+effortChoice fullscreen current = case fullscreen of
+    Nothing -> pure Nothing
+    Just runtime -> do
+        let efforts = reasoningEfforts
+            initial = fromMaybe 0 (elemIndex current efforts)
+        requestFullscreenChoice
+            runtime
+            "Reasoning effort"
+            initial
+            [(effort, "") | effort <- efforts]
+            >>= \case
+                Just index
+                    | index >= 0
+                    , index < length efforts ->
+                        pure (Just (efforts !! index))
+                _ -> pure Nothing
+
+fullscreenAwarePlanHooks
+    :: IORef (Maybe FullscreenRuntime)
+    -> PlanModeHooks
+    -> PlanModeHooks
+fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
+    { planConfirmEnter = \reason ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planConfirmEnter reason)
+            \runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Enter plan mode?"
+                    reason
+                    0
+                    [ ("Enter plan mode", "Explore and design before implementing")
+                    , ("Stay in normal mode", "Continue without entering plan mode")
+                    ]
+                    >>= pure . (== Just 0)
+    , planDecideExit = \planBody ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planDecideExit planBody)
+            \runtime ->
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Ready to implement this plan?"
+                    planBody
+                    0
+                    [ ("Approve and implement", "Leave plan mode and start implementation")
+                    , ("Request changes", "Send feedback and keep planning")
+                    , ("Cancel plan", "Leave plan mode without implementing")
+                    ]
+                    >>= \case
+                        Just 0 -> pure PlanApprove
+                        Just 1 ->
+                            requestFullscreenText
+                                runtime
+                                "Request changes"
+                                "What should be changed in the plan?"
+                                ""
+                                >>= pure
+                                    . PlanRequestChanges
+                                    . normalizePlanNotes
+                        _ -> pure PlanCancel
+    , planAskQuestion = \question options ->
+        withCurrentFullscreen runtimeRef
+            (hooks.planAskQuestion question options)
+            \runtime -> case options of
+                [] ->
+                    requestFullscreenText
+                        runtime
+                        "Planning question"
+                        question
+                        ""
+                        >>= pure . nonBlank
+                choices ->
+                    requestFullscreenChoiceWithBody
+                        runtime
+                        "Planning question"
+                        question
+                        0
+                        [(choice, "") | choice <- choices]
+                        >>= pure . (>>= (`atMay` choices))
+    }
+
+withCurrentFullscreen
+    :: IORef (Maybe FullscreenRuntime)
+    -> IO a
+    -> (FullscreenRuntime -> IO a)
+    -> IO a
+withCurrentFullscreen runtimeRef fallback fullscreenAction = do
+    runtime <- readIORef runtimeRef
+    case runtime of
+        Nothing -> fallback
+        Just active -> fullscreenAction active
+
+normalizePlanNotes :: Maybe Text -> Text
+normalizePlanNotes =
+    fromMaybe "(no notes)" . nonBlank
+
+nonBlank :: Maybe Text -> Maybe Text
+nonBlank =
+    (>>= \text ->
+        let stripped = Text.strip text
+        in if Text.null stripped then Nothing else Just stripped)
+
+atMay :: Int -> [a] -> Maybe a
+atMay index values
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing
 
 showAccountUsage
     :: Provider
@@ -1761,6 +2487,16 @@ showAccountUsage
     -> IO ()
 showAccountUsage provider tokenProvider openAiPool = do
     color <- resolveColor stdout
+    accountUsageText color provider tokenProvider openAiPool
+        >>= Text.putStrLn
+
+accountUsageText
+    :: Bool
+    -> Provider
+    -> Maybe TokenProvider
+    -> Maybe OpenAI.Pool
+    -> IO Text
+accountUsageText color provider tokenProvider openAiPool = do
     now <- getCurrentTime
     case provider of
         OpenAIProvider ->
@@ -1768,19 +2504,19 @@ showAccountUsage provider tokenProvider openAiPool = do
                 Just pool -> do
                     snapshots <- OpenAI.snapshotAccounts pool
                     lines_ <- mapM fetchSnapshot snapshots
-                    Text.putStrLn (formatUsageReport color now lines_)
+                    pure (formatUsageReport color now lines_)
                 Nothing ->
                     case tokenProvider of
                         Just provider_ ->
                             getNextToken provider_ Nothing >>= \case
                                 Left err ->
-                                    Text.putStrLn
-                                        (roleError color
-                                            ("usage: " <> Text.pack (show err)))
+                                    pure $
+                                        roleError color
+                                            ("usage: " <> Text.pack (show err))
                                 Right credential -> do
                                     result <- fetchUsage
                                         credential.accessToken credential.accountId
-                                    Text.putStrLn $
+                                    pure $
                                         formatUsageReport color now
                                             [ AccountUsageLine
                                                 { usageAccountId = credential.accountId
@@ -1789,10 +2525,11 @@ showAccountUsage provider tokenProvider openAiPool = do
                                                 }
                                             ]
                         Nothing ->
-                            Text.putStrLn
-                                (roleMuted color "usage: no OpenAI credentials loaded")
+                            pure $
+                                roleMuted color
+                                    "usage: no OpenAI credentials loaded"
         _ ->
-            Text.putStrLn $
+            pure $
                 roleMuted color
                     "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
 
@@ -1806,19 +2543,6 @@ fetchSnapshot snapshot = do
         , usageCooldownUntil = snapshot.snapshotCooldownUntil
         , usageResult = result
         }
-copyMissing :: Text -> IO ()
-copyMissing message = do
-    color <- resolveColor stderr
-    Text.hPutStrLn stderr (roleError color message)
-
-copyValue :: TerminalCapabilities -> Text -> Text -> IO ()
-copyValue terminal label payload = do
-    copied <- copyTerminalClipboard terminal stdout payload
-    color <- resolveColor stderr
-    Text.hPutStrLn stderr $
-        if copied
-            then roleSuccess color (glyphOk <> "copied " <> label)
-            else roleError color "terminal clipboard is unavailable"
 applyModelChange
     :: Provider
     -> Text
@@ -1826,9 +2550,8 @@ applyModelChange
     -> RenderConfig
     -> IORef (Maybe Text)
     -> Persistence
-    -> IO ()
+    -> IO Text
 applyModelChange provider name paramsRef render previous persist = do
-    color <- resolveColor stdout
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
     clearedChain <- case provider of
@@ -1836,13 +2559,6 @@ applyModelChange provider name paramsRef render previous persist = do
             atomicModifyIORef' previous \prev ->
                 (Nothing, isJust prev)
         _ -> pure False
-    if clearedChain
-        then Text.putStrLn
-            (roleMuted color
-                (glyphOk <> "model set to " <> name
-                    <> " (conversation continued locally)"))
-        else Text.putStrLn
-            (roleMuted color (glyphOk <> "model set to " <> name))
     case persist of
         PersistenceDisabled -> pure ()
         PersistenceEnabled slotRef -> do
@@ -1856,6 +2572,12 @@ applyModelChange provider name paramsRef render previous persist = do
                     writeSessionMeta handle.sessionMetaPath meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
+    pure $
+        "model set to "
+            <> name
+            <> if clearedChain
+                then " (conversation continued locally)"
+                else ""
 
 requestModelProviderSwitch
     :: ModelOption
@@ -2064,11 +2786,10 @@ markUnavailable provider unavailable
     | provider `elem` unavailable = unavailable
     | otherwise = unavailable <> [provider]
 
-reloadAuth :: Provider -> Maybe TokenProvider -> IO ()
+reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
 reloadAuth provider = \case
-    Nothing -> do
-        color <- resolveColor stderr
-        putTextLn stderr $ roleMuted color $
+    Nothing ->
+        pure $ Right $
             "reload-auth: OpenAI WebSocket auth is fixed for this process; "
                 <> "restart after refreshing ~/.codex/auth.json "
                 <> "(OAuth pools already rotate on handshake failure)"
@@ -2084,13 +2805,11 @@ reloadAuth provider = \case
                 }
             , failure = AccountAuthenticationRejected
             }) >>= \case
-            Left err -> do
-                color <- resolveColor stderr
-                putTextLn stderr $ roleError color $
+            Left err ->
+                pure $ Left $
                     "reload-auth failed: " <> Text.pack (show err)
-            Right credential -> do
-                color <- resolveColor stdout
-                Text.putStrLn $ roleSuccess color $
+            Right credential ->
+                pure $ Right $
                     "auth reloaded ("
                         <> providerSlug provider
                         <> " account "
@@ -2102,7 +2821,6 @@ requestReload
     :: Persistence
     -> IO RunResult
 requestReload persist = do
-    home <- getHomeDirectory
     color <- resolveColor stderr
     case persist of
         PersistenceDisabled -> do
@@ -2111,38 +2829,49 @@ requestReload persist = do
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
-            writeDevResumePointer home handle.sessionMeta.metaId
             putTextLn stderr
                 (roleMuted color
                     (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
-            pure RunReload
+            pure (RunReload handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
-enterPlanFromSlash env@SessionEnv{sessionPlanMode = planMode, sessionPersist = persist, sessionPrinted = printed} maybeDescription = do
+enterPlanFromSlash env@SessionEnv
+    { sessionPlanMode = planMode
+    , sessionPersist = persist
+    , sessionPrinted = printed
+    , sessionFullscreen = fullscreen
+    } maybeDescription = do
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
+    let report message minimal = case fullscreen of
+            Nothing -> putTextLn stderr (roleMuted color minimal)
+            Just runtime -> emitUiEvent runtime (UiSystemMessage message)
     case persist of
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession <> "session: " <> handle.sessionMeta.metaId))
+            report
+                ("session: " <> handle.sessionMeta.metaId)
+                (glyphSession <> "session: " <> handle.sessionMeta.metaId)
         PersistenceDisabled -> pure ()
     case maybeDescription of
         Nothing -> do
             writeIORef planMode.planStateRef PlanPending
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession
-                        <> "plan mode armed; send a prompt to activate (or /plan <description>)"))
+            let message =
+                    "plan mode armed; send a prompt to activate \
+                    \(or /plan <description>)"
+            report message (glyphSession <> message)
             pure Nothing
         Just description -> do
             activatePlanMode planMode
             path <- planFilePath planMode
-            putTextLn stderr
-                (roleMuted color (glyphSession <> "plan mode on (" <> toText path <> ")"))
+            let message = "plan mode on (" <> toText path <> ")"
+            report message (glyphSession <> message)
             writeIORef printed False
+            case fullscreen of
+                Nothing -> pure ()
+                Just runtime ->
+                    emitUiEvent runtime (UiUserSubmitted description)
             let planEnv = env { sessionStoreRoot = discardStore }
                 inputs = [UserMessage description]
             result <- runOneTurn planEnv description inputs
@@ -2191,25 +2920,48 @@ loadAgentsContext options provider home cwd initialItems initialPrevious
                             <> if length files == 1 then " file" else " files"))
                 newIORef (Just text)
 
+preparePromptSkillInputs
+    :: SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> IO (Either Text [TurnInput])
+preparePromptSkillInputs env prompt inputs = do
+    invocations <- readIORef env.sessionSkillInvocations
+    pure do
+        selected <- resolveSkillMentions invocations prompt
+        let activations =
+                [ UserMessage (formatSkillActivation invocation prompt)
+                | invocation <- selected
+                ]
+        pure (activations <> inputs)
+
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.
 clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle = do
+clearNativeProgress handle =
+    setNativeProgress handle False
+
+setNativeProgress :: Handle -> Bool -> IO ()
+setNativeProgress handle active = do
     tty <- hIsTerminalDevice handle
     when tty do
         inTmux <- isJust <$> lookupEnv "TMUX"
-        Text.hPutStr handle (wrapOscForTmux inTmux osc9ProgressRemove)
+        let sequence_
+                | active = osc9ProgressIndeterminate
+                | otherwise = osc9ProgressRemove
+        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
--- | Queue clipboard / Finder-paste images and draw an in-terminal thumbnail
--- (Kitty graphics or iTerm2 OSC 1337, matching Grok Build).
+-- | Queue clipboard / Finder-paste images and optionally draw an in-terminal
+-- thumbnail. The caller reports the returned message through the active UI.
 queueAttachedImages
     :: IORef [ImageAttachment]
     -> IORef Int
     -> Bool
+    -> Bool
     -> [ImageAttachment]
-    -> IO ()
-queueAttachedImages attachmentsRef previewIdRef color images = do
+    -> IO Text
+queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
     modifyIORef' attachmentsRef (<> images)
     pending <- readIORef attachmentsRef
     let sizes =
@@ -2217,47 +2969,49 @@ queueAttachedImages attachmentsRef previewIdRef color images = do
                 [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
                 | img <- images
                 ]
-    putImagePreview previewIdRef color images
-    Text.putStrLn
-        (roleMuted color
-            (glyphOk
-                <> "attached "
-                <> sizes
-                <> " — send with next message ("
-                <> Text.pack (show (length pending))
-                <> " queued)"))
+    when showPreview (putImagePreview previewIdRef color images)
+    pure $
+        "attached "
+            <> sizes
+            <> " — send with next message ("
+            <> Text.pack (show (length pending))
+            <> " queued)"
 
 queueClipboardImages
     :: IORef [ImageAttachment]
     -> IORef Int
     -> Bool
     -> Bool
-    -> IO ()
-queueClipboardImages attachmentsRef previewIdRef color errColor = do
+    -> IO (Either Text Text)
+queueClipboardImages
+    attachmentsRef
+    previewIdRef
+    color
+    showPreview = do
     imagesResult <- readClipboardImages
     case imagesResult of
         Right images@(_:_) ->
-            queueAttachedImages attachmentsRef previewIdRef color images
+            Right <$> queueAttachedImages
+                attachmentsRef previewIdRef color showPreview images
         Right [] ->
-            Text.hPutStrLn stderr
-                (roleError errColor "no image found on the clipboard")
+            pure (Left "no image found on the clipboard")
         Left err -> reportClipboardImageError err
   where
     reportClipboardImageError err =
         readClipboard >>= \case
             ClipboardText _ ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        "clipboard has text, not an image (paste text normally into the prompt)")
+                pure $ Left
+                    "clipboard has text, not an image \
+                    \(paste text normally into the prompt)"
             ClipboardPaths paths ->
-                Text.hPutStrLn stderr
-                    (roleError errColor
-                        ("clipboard has file path(s), but no loadable image: "
-                            <> Text.intercalate ", " (map Text.pack paths)))
+                pure $ Left
+                    ("clipboard has file path(s), but no loadable image: "
+                        <> Text.intercalate ", " (map Text.pack paths))
             ClipboardEmpty ->
-                Text.hPutStrLn stderr (roleError errColor err)
+                pure (Left err)
             ClipboardImage image ->
-                queueAttachedImages attachmentsRef previewIdRef color [image]
+                Right <$> queueAttachedImages
+                    attachmentsRef previewIdRef color showPreview [image]
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do
@@ -2288,10 +3042,11 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     _ -> pure Nothing
 
 handleResume
-    :: Maybe Text
+    :: Maybe FullscreenRuntime
+    -> Maybe Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleResume maybeId persist = do
+handleResume fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let root = sessionsRoot home
@@ -2313,9 +3068,59 @@ handleResume maybeId persist = do
         Just sessionId -> resume sessionId
         Nothing -> do
             sessions <- listSessions root
-            pickResumeSession color root sessions >>= \case
+            pickResumeChoice fullscreen color root sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
+
+pickResumeChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> OsPath
+    -> [SessionMeta]
+    -> IO (Maybe Text)
+pickResumeChoice fullscreen color root sessions = case fullscreen of
+    Nothing -> pickResumeSession color root sessions
+    Just runtime ->
+        requestFullscreenChoice
+            runtime
+            "Resume session"
+            0
+            [ ( meta.metaTitle
+              , providerSlug meta.metaProvider
+                    <> "/"
+                    <> meta.metaModel
+                    <> " · "
+                    <> toText meta.metaCwd
+              )
+            | meta <- sessions
+            ]
+            >>= pure . (>>= (`atMay` map (.metaId) sessions))
+
+pickAgentChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> AgentTarget
+    -> [AgentEntry]
+    -> IO (Maybe AgentTarget)
+pickAgentChoice fullscreen color selected entries = case fullscreen of
+    Nothing -> pickAgentViewport color selected entries
+    Just runtime ->
+        requestFullscreenChoice
+            runtime
+            "Agents"
+            (fromMaybe 0
+                (findIndex ((== selected) . (.agentTarget)) entries))
+            [ ( entry.agentPath
+              , entry.agentStatus
+                    <> case entry.agentTranscript of
+                        first : _
+                            | not (Text.null (Text.strip first)) ->
+                                " · " <> Text.take 80 (Text.strip first)
+                        _ -> ""
+              )
+            | entry <- entries
+            ]
+            >>= pure . (>>= (`atMay` map (.agentTarget) entries))
 
 currentSessionId
     :: Persistence
@@ -2328,141 +3133,8 @@ currentSessionId = \case
             PersistencePending _ -> Nothing
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
-data SubagentSession = SubagentSession
-    { subSessionTranscript :: !(IORef [ResponseItem])
-    }
-
--- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
-type SubagentStoreRoot = IORef (Maybe OsPath)
-
--- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
-syncStoreRootFromPlan :: SubagentStoreRoot -> PlanModeEnv -> IO ()
-syncStoreRootFromPlan storeRootRef planMode = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Just _ -> pure ()
-        Nothing -> do
-            sessionDir <- readIORef planMode.planSessionDir
-            case sessionDir of
-                Just dir -> writeIORef storeRootRef (Just dir)
-                Nothing -> pure ()
-
-persistSubagentSnapshot
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IORef [ResponseItem]
-    -> IO ()
-persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Nothing -> pure ()
-        Just sessionDir -> do
-            items <- readIORef transcriptRef
-            previous <- getPreviousResponseId registry agentId
-            agentType <- lookupAgentType typesRef agentId
-            agentModel <- lookupAgentModel typesRef agentId
-            agentCwd <- getSubagentCwd registry agentId
-            identity <- getSubagentIdentity registry agentId
-            _ <- saveSubagentState
-                sessionDir agentId items previous agentType agentModel agentCwd identity
-            pure ()
-
-flushAllSubagentSnapshots
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> IO ()
-flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
-    sessions <- readIORef sessionsRef
-    mapM_
-        (\(agentId, session) ->
-            persistSubagentSnapshot storeRootRef registry typesRef agentId
-                session.subSessionTranscript)
-        (Map.toList sessions)
-
--- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
--- 'resume_agent' / 'resume_from' can continue the prior transcript.
-restoreAgentFromDisk
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IO (Either Text ())
-restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
-    status <- getStatus registry agentId
-    case status of
-        NotFound -> restore
-        Closed -> restore
-        _ -> pure (Right ())
-  where
-    restore = do
-        mroot <- readIORef storeRootRef
-        case mroot of
-            Nothing ->
-                pure (Left "no session directory; cannot restore subagent from disk")
-            Just sessionDir ->
-                loadSubagentState sessionDir agentId >>= \case
-                    Left err -> pure (Left err)
-                    Right Nothing ->
-                        -- Same-process close with no disk yet: still reopen.
-                        reopenInMemory Nothing Nothing
-                    Right (Just (items, meta)) -> do
-                        result <- reopenPersisted meta
-                        case result of
-                            Left err -> pure (Left err)
-                            Right () -> do
-                                case meta.diskAgentType of
-                                    Just agentType ->
-                                        recordAgentSpec typesRef agentId GrokSubagentSpec
-                                            { agentType
-                                            , modelOverride = meta.diskAgentModel
-                                            }
-                                    Nothing -> pure ()
-                                transcript <- newIORef items
-                                let session =
-                                        SubagentSession
-                                            { subSessionTranscript = transcript
-                                            }
-                                atomicModifyIORef' sessionsRef \m ->
-                                    (Map.insert agentId session m, ())
-                                pure (Right ())
-    reopenPersisted meta =
-        case meta.diskTaskPath of
-            Nothing ->
-                reopenInMemory meta.diskPreviousResponseId meta.diskCwd
-            Just pathText ->
-                case parseTaskPath pathText of
-                    Left err -> pure (Left err)
-                    Right taskPath -> do
-                        let restoreAt =
-                                case meta.diskCwd of
-                                    Just childCwd ->
-                                        restoreSubagentAtWithCwd
-                                            registry childCwd
-                                    Nothing ->
-                                        restoreSubagentAt registry
-                        restoreAt
-                            agentId meta.diskParentId taskPath
-                            (fromMaybe 1 meta.diskDepth)
-                            Nothing meta.diskPreviousResponseId
-                            >>= pure . fmap (const ())
-    reopenInMemory previous requestedCwd = do
-        restored <- case requestedCwd of
-            Just childCwd ->
-                restoreSubagentWithCwd
-                    registry childCwd agentId Nothing 1 Nothing previous
-            Nothing ->
-                restoreSubagent registry agentId Nothing 1 Nothing previous
-        pure $ case restored of
-            Left err -> Left err
-            Right _ -> Right ()
-
--- | Serialize OpenAI WebSocket turns: parent and children share one connection,
--- and 'receiveWsResponse' is not multiplexed.
+-- | Serialize turns on the root OpenAI WebSocket connection because
+-- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
     :: MVar ()
     -> TokenProvider
@@ -2470,231 +3142,16 @@ lockedOpenAiBackend
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript =
+lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
+        contextTokens =
     let Backend submit =
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
-    in Backend \previous inputs onEvent ->
-        withMVar wsLock \_ -> submit previous inputs onEvent
-
--- | Use a disposable WebSocket for side questions so cancellation cannot
--- leave abandoned response frames queued on the main conversation connection.
-freshOpenAiBackend
-    :: TokenProvider
-    -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
-freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEvent ->
-    withCodexWsRetrying provider \conn _credential ->
-        let Backend submit = openAiBackend conn getParams transcript
-        in submit previous inputs onEvent
--- | Child Codex agent: per-agent transcript (retained across send_input), same
--- WS (locked), nested multi-agent tools.
-runCodexSubagent
-    :: CliOptions
-    -> ApprovalPolicy
-    -> PlanModeHooks
-    -> IORef ResponseCreateParams
-    -> MVar ()
-    -> TokenProvider
-    -> IORef Bool
-    -> CodexConn
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> RunSubagent
-runCodexSubagent options policy planHooks paramsRef wsLock tokenProvider connectionHealthy conn registry sessionsRef storeRootRef typesRef sendToRoot =
-    \env previous prompt onEvent -> do
-        parentParams <- readIORef paramsRef
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
-        -- Inherit soft-cancel from the registry-owned child flag.
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = registry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiSendToRoot = sendToRoot
-                }
-        -- Child tools create their own PlanModeEnv; sync store root from parent
-        -- params is handled by noteSessionDir on the parent path. If the parent
-        -- already has a session dir in storeRootRef, we persist; otherwise skip.
-        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
-        coding <- codingToolsFor OpenAIProvider childToolEnv (Just planHooks) (Just childCtx)
-        syncStoreRootFromPlan storeRootRef coding.codingPlanMode
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let model = fromMaybe (defaultModelFor OpenAIProvider) parentParams.model
-                effort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
-                    Nothing -> defaultEffortFor OpenAIProvider
-                baseInstructions =
-                    fromMaybe
-                        (systemPrompt OpenAIProvider env.subCwd today True)
-                        parentParams.instructions
-                instructions =
-                    baseInstructions
-                        <> "\n\nYou are a Codex subagent. Complete the assigned task and "
-                        <> "report results clearly. Your agent id is "
-                        <> env.subId.unSubagentId
-                        <> "."
-                tools = coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools OpenAIProvider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            let backend =
-                    lockedOpenAiBackend wsLock tokenProvider connectionHealthy conn
-                        (readIORef childParamsRef)
-                        session.subSessionTranscript
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = options.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            result <- runLoopInputs config previous [AgentMessage prompt]
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ -> pure ()
-            persistSubagentSnapshot storeRootRef registry typesRef env.subId
-                session.subSessionTranscript
-            pure result
-
--- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
-runHttpSubagent
-    :: CliOptions
-    -> ApprovalPolicy
-    -> PlanModeHooks
-    -> IORef ResponseCreateParams
-    -> Provider
-    -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> SubagentStoreRoot
-    -> RunSubagent
-runHttpSubagent options policy planHooks paramsRef provider mkBackend registry sessionsRef typesRef storeRootRef =
-    \env previous prompt onEvent -> do
-        parentParams <- readIORef paramsRef
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = registry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiSendToRoot = Nothing
-                }
-        session <- lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef env.subId
-        agentType <- fromMaybe defaultSubagentType <$> lookupAgentType typesRef env.subId
-        childModel <- lookupAgentModel typesRef env.subId
-        coding <- codingToolsFor provider childToolEnv (Just planHooks) (Just childCtx)
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let model = fromMaybe
-                    (fromMaybe (defaultModelFor provider) parentParams.model)
-                    childModel
-                effort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
-                    Nothing -> defaultEffortFor provider
-                baseInstructions = systemPrompt provider env.subCwd today True
-                instructions =
-                    baseInstructions
-                        <> "\n\n"
-                        <> grokSubagentSuffix agentType env.subId
-                tools = filterChildGrokTools agentType coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools provider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            let backend = mkBackend childParamsRef session.subSessionTranscript
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = options.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove = \call -> childApprove policy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            -- XAI/OpenRouter ignore previous_response_id and replay local
-            -- transcripts; still pass previous for API symmetry.
-            result <- runLoop config previous (interAgentMessagePayload prompt)
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId registry env.subId loopResult.finalResponseId
-                Left _ -> pure ()
-            persistSubagentSnapshot storeRootRef registry typesRef env.subId
-                session.subSessionTranscript
-            pure result
-
-grokSubagentSuffix :: Text -> SubagentId -> Text
-grokSubagentSuffix agentType agentId =
-    "You are a Grok Build subagent — a focused worker delegated a specific task.\n\
-    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
-    \Report blocked or unverified work explicitly.\n\n\
-    \Subagent type: "
-        <> agentType
-        <> "\nAgent id: "
-        <> agentId.unSubagentId
-        <> case agentType of
-            "explore" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \You have no file editing or command execution tools. Search broadly, narrow down, \
-                \and return absolute file paths and relevant findings."
-            "plan" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete implementation files. Explore the codebase, \
-                \consider trade-offs, and produce a concrete implementation strategy. End with \
-                \a Critical Files for Implementation section listing 3-5 files."
-            _ ->
-                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
-                \Never create documentation files unless explicitly requested."
-
-lookupOrCreateSubagentSession
-    :: IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> IO SubagentSession
-lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
-    sessions <- readIORef sessionsRef
-    case Map.lookup agentId sessions of
-        Just session -> pure session
-        Nothing -> do
-            mroot <- readIORef storeRootRef
-            loaded <- case mroot of
-                Just sessionDir -> loadSubagentState sessionDir agentId
-                Nothing -> pure (Right Nothing)
-            let (items, meta) = case loaded of
-                    Right (Just (xs, m)) -> (xs, Just m)
-                    _ -> ([], Nothing)
-            transcript <- newIORef items
-            case meta >>= (.diskAgentType) of
-                Just agentType ->
-                    recordAgentSpec typesRef agentId GrokSubagentSpec
-                        { agentType
-                        , modelOverride = meta >>= (.diskAgentModel)
-                        }
-                Nothing -> pure ()
-            let session = SubagentSession { subSessionTranscript = transcript }
-            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
-            pure session
+        serialized = Backend \previous inputs onEvent ->
+            withMVar wsLock \_ -> submit previous inputs onEvent
+    in autoCompactOpenAiBackend provider
+        getParams transcript contextTokens serialized
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
@@ -2709,6 +3166,23 @@ resetLiveConversation previous transcriptRef attachmentsRef planMode = do
     writeIORef attachmentsRef []
     deactivatePlanMode planMode
 
+detectGitBranch :: OsPath -> IO Text
+detectGitBranch cwd = do
+    result <-
+        (try $
+            readProcessWithExitCode
+                "git"
+                ["-C", toFilePath cwd, "rev-parse", "--abbrev-ref", "HEAD"]
+                "")
+            :: IO (Either SomeException (ExitCode, String, String))
+    pure $ case result of
+        Right (ExitSuccess, output, _) ->
+            let branch = Text.strip (Text.pack output)
+            in if Text.null branch
+                then toText (takeFileName cwd)
+                else branch
+        _ -> toText (takeFileName cwd)
+
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
 foldSessionItems = go []
@@ -2719,31 +3193,36 @@ foldSessionItems = go []
             -- /clear and /new store an empty snapshot; /compact stores the
             -- rebuilt history. Either way, turnItems replaces prior history.
             go turn.turnItems rest
+        | hasCompactionCheckpoint turn.turnItems =
+            go turn.turnItems rest
         | otherwise = go (acc <> turn.turnItems) rest
 
--- | Codex requires @store = false@. Continuation still uses
--- @previous_response_id@, with the local transcript available for recovery.
-requestParams
-    :: Text
-    -> Text
-    -> [ResponseTool]
-    -> Text
-    -> ResponseCreateParams
-requestParams modelName instructionText toolSchemas effort =
-    case defaultResponseCreateParams of
-        ResponseCreateParams{..} ->
-            ResponseCreateParams
-                { model = Just modelName
-                , instructions = Just instructionText
-                , tools = Just toolSchemas
-                , reasoning = Just ReasoningConfig
-                    { context = Nothing
-                    , effort = Just effort
-                    , generateSummary = Nothing
-                    , reasoningMode = Nothing
-                    , summary = Nothing
-                    , extraFields = KeyMap.empty
-                    }
-                , store = Just False
-                , ..
-                }
+hydrateUiHistory :: [SessionTurn] -> UiState
+hydrateUiHistory = foldl addTurn initialUiState
+  where
+    addTurn state turn
+        | isTranscriptResetTurn turn.turnUserText =
+            addResetTurn state turn
+        | otherwise =
+            addRegularTurn state turn
+
+    addResetTurn state turn =
+        let cleared = reduceUi UiConversationCleared state
+        in case turn.turnAssistantText of
+            Nothing -> cleared
+            Just text -> reduceUi (UiSystemMessage text) cleared
+
+    addRegularTurn state turn =
+        let withUser =
+                if Text.null (Text.strip turn.turnUserText)
+                    then state
+                    else reduceUi
+                        (UiUserSubmitted turn.turnUserText)
+                        state
+            withAssistant = case turn.turnAssistantText of
+                Nothing -> withUser
+                Just text ->
+                    reduceUi (UiAssistantHistory text) withUser
+        in case turn.turnError of
+            Nothing -> withAssistant
+            Just err -> reduceUi (UiErrorMessage err) withAssistant

@@ -20,11 +20,14 @@ module Agent.Subagents.Registry
     , spawnSubagentWithCwdPreparedForTurn
     , spawnSubagentAt
     , spawnSubagentAtForTurn
+    , spawnSubagentAtPreparedForTurn
     , spawnSubagentAtWithCwdPrepared
     , restoreSubagent
     , restoreSubagentAt
+    , restoreSubagentAtStatus
     , restoreSubagentWithCwd
     , restoreSubagentAtWithCwd
+    , restoreSubagentAtWithCwdStatus
     , waitSubagents
     , waitSubagentsFrom
     , waitAnyLive
@@ -118,7 +121,7 @@ data SubagentRecord = SubagentRecord
     , recordMailbox :: !(TQueue SubagentWork)
     , recordAsync :: !(TVar (Maybe (ResourceKey, Async ())))
     , recordRootTurnId :: !(TVar (Maybe RootTurnId))
-      -- | Whether this agent currently occupies a concurrency slot.
+      -- | Whether this agent currently occupies an active-worker slot.
     , recordSlotHeld :: !(TVar Bool)
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
@@ -332,8 +335,22 @@ spawnSubagentAtForTurn
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
 spawnSubagentAtForTurn registry rootTurnId =
+    spawnSubagentAtPreparedForTurn registry rootTurnId (\_ -> pure ())
+
+spawnSubagentAtPreparedForTurn
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> (SubagentId -> IO ())
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> InterAgentMessageContent
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtPreparedForTurn registry rootTurnId beforeStart =
     spawnSubagentAtWithCwdPreparedForTurn
-        registry rootTurnId registry.registryCwd (\_ -> pure ())
+        registry rootTurnId registry.registryCwd beforeStart
 
 spawnSubagentAtWithCwdPrepared
     :: SubagentRegistry
@@ -426,7 +443,7 @@ spawnSubagentAtWithIdPreparedForTurn
                                                         "Concurrent subagent limit reached: "
                                                             <> Text.pack
                                                                 (show registry.registryConfig.maxConcurrent)
-                                                            <> " agents are already open. Close finished agents before spawning more."
+                                                            <> " agents are already active."
                                                     else do
                                                         let record = SubagentRecord
                                                                 { recordId = agentId
@@ -579,7 +596,7 @@ runWorker registry record firstWork = do
                             notifyComplete
                                 registry record.recordId work.workRootTurnId status
                         pure ()
-                    atomically (finishOrContinue record status) >>= \case
+                    atomically (finishOrContinue registry record status) >>= \case
                         Nothing -> pure ()
                         Just nextWork -> do
                             resetCancel record.recordCancel
@@ -739,10 +756,11 @@ nextWorkerStep registry record = do
                     pure (WorkerMessage work)
 
 finishOrContinue
-    :: SubagentRecord
+    :: SubagentRegistry
+    -> SubagentRecord
     -> SubagentStatus
     -> STM (Maybe SubagentWork)
-finishOrContinue record status = do
+finishOrContinue registry record status = do
     current <- readTVar record.recordStatus
     if current == Closed || current == Interrupted
         then pure Nothing
@@ -751,6 +769,7 @@ finishOrContinue record status = do
             if empty
                 then do
                     writeTVar record.recordStatus status
+                    releaseSlotSTM registry record
                     pure Nothing
                 else do
                     work <- readTQueue record.recordMailbox
@@ -786,7 +805,10 @@ notifyComplete registry agentId rootTurnId status
     | otherwise = pure ()
 
 releaseSlot :: SubagentRegistry -> SubagentRecord -> IO ()
-releaseSlot registry record = atomically do
+releaseSlot registry record = atomically (releaseSlotSTM registry record)
+
+releaseSlotSTM :: SubagentRegistry -> SubagentRecord -> STM ()
+releaseSlotSTM registry record = do
     held <- readTVar record.recordSlotHeld
     whenSTM held do
         writeTVar record.recordSlotHeld False
@@ -812,7 +834,7 @@ acquireSlot registry record = do
                         then pure $ Left $
                             "Concurrent subagent limit reached: "
                                 <> Text.pack (show registry.registryConfig.maxConcurrent)
-                                <> " agents are already open."
+                                <> " agents are already active."
                         else do
                             modifyTVar' registry.registryLiveCount (+ 1)
                             writeTVar record.recordSlotHeld True
@@ -1113,6 +1135,19 @@ restoreSubagentAt
 restoreSubagentAt registry =
     restoreSubagentAtWithCwd registry registry.registryCwd
 
+restoreSubagentAtStatus
+    :: SubagentRegistry
+    -> SubagentId
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> SubagentStatus
+    -> IO (Either Text SubagentId)
+restoreSubagentAtStatus registry =
+    restoreSubagentAtWithCwdStatus registry registry.registryCwd
+
 restoreSubagentWithCwd
     :: SubagentRegistry
     -> OsPath
@@ -1125,7 +1160,8 @@ restoreSubagentWithCwd
 restoreSubagentWithCwd
         registry childCwd agentId parentId depth nickname previous =
     restoreSubagentResolvedWithCwd
-        registry childCwd agentId parentId nickname previous \agents ->
+        registry childCwd agentId parentId nickname previous
+        (Completed Nothing) \agents ->
             resolveParentSTM agents parentId taskPathRoot (max 0 (depth - 1))
                 >>= \case
                     Left err -> pure (Left err)
@@ -1147,8 +1183,25 @@ restoreSubagentAtWithCwd
     -> IO (Either Text SubagentId)
 restoreSubagentAtWithCwd
         registry childCwd agentId parentId taskPath depth nickname previous =
+    restoreSubagentAtWithCwdStatus
+        registry childCwd agentId parentId taskPath depth nickname previous
+        (Completed Nothing)
+
+restoreSubagentAtWithCwdStatus
+    :: SubagentRegistry
+    -> OsPath
+    -> SubagentId
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Maybe Text
+    -> Maybe Text
+    -> SubagentStatus
+    -> IO (Either Text SubagentId)
+restoreSubagentAtWithCwdStatus
+        registry childCwd agentId parentId taskPath depth nickname previous restoredStatus =
     restoreSubagentResolvedWithCwd
-        registry childCwd agentId parentId nickname previous
+        registry childCwd agentId parentId nickname previous restoredStatus
         (\_ -> pure (Right (taskPath, depth)))
 
 restoreSubagentResolvedWithCwd
@@ -1158,10 +1211,12 @@ restoreSubagentResolvedWithCwd
     -> Maybe SubagentId
     -> Maybe Text
     -> Maybe Text
+    -> SubagentStatus
     -> (Map SubagentId SubagentRecord -> STM (Either Text (TaskPath, Int)))
     -> IO (Either Text SubagentId)
 restoreSubagentResolvedWithCwd
-        registry childCwd agentId parentId nickname previous resolveIdentity = do
+        registry childCwd agentId parentId nickname previous
+        restoredStatus resolveIdentity = do
     result <-
         withMVar registry.registryLifecycle \_ -> do
             closed <- atomically $ readTVar registry.registryClosed
@@ -1179,6 +1234,12 @@ restoreSubagentResolvedWithCwd
             restoreSubagentIndex restored
             pure (Right restored)
   where
+    normalizedStatus = case restoredStatus of
+        Pending -> Interrupted
+        Running -> Interrupted
+        NotFound -> Interrupted
+        status -> status
+
     restoreExisting record = do
         status <- atomically $ readTVar record.recordStatus
         case status of
@@ -1190,7 +1251,7 @@ restoreSubagentResolvedWithCwd
                 releaseSlot registry record
                 resetCancel record.recordCancel
                 atomically do
-                    writeTVar record.recordStatus (Completed Nothing)
+                    writeTVar record.recordStatus normalizedStatus
                     writeTVar record.recordPreviousResponseId previous
                     writeTVar record.recordRootTurnId Nothing
                     modifyTVar' registry.registryPaths
@@ -1200,7 +1261,7 @@ restoreSubagentResolvedWithCwd
     restoreMissing = do
         cancelFlag <- newCancelFlag
         mailbox <- newTQueueIO
-        statusVar <- newTVarIO (Completed Nothing)
+        statusVar <- newTVarIO normalizedStatus
         asyncVar <- newTVarIO Nothing
         rootTurnVar <- newTVarIO Nothing
         slotHeld <- newTVarIO False

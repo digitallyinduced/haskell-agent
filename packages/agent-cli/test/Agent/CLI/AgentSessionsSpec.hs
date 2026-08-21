@@ -52,6 +52,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             [(handle, message)] <- readIORef launched
             message `shouldBe` "investigate this"
             handle.sessionMeta.metaTitle `shouldBe` "worker"
+            handle.sessionMeta.metaTitleIsManual `shouldBe` True
             handle.sessionMeta.metaModel `shouldBe` "model-2"
             handle.sessionMeta.metaEffort `shouldBe` "high"
             loadSession env.toolsRoot handle.sessionMeta.metaId
@@ -116,6 +117,18 @@ spec = describe "Agent.CLI.AgentSessions" do
                     `shouldReturn` "completed"
                 closeSessionProcessManager manager
 
+    it "does not terminate background sessions when the manager closes" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let marker = toFilePath root FilePath.</> "finished"
+            script <- writeFakeAgentBody root
+                ("#!/bin/sh\nsleep 0.2\nprintf done > " <> shellQuote marker <> "\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                _ <- launchSessionTurn manager True ApproveAll handle "one"
+                closeSessionProcessManager manager
+                waitForFile marker
+
 runTool :: AgentSessionToolsEnv -> Text.Text -> Text.Text -> IO Text.Text
 runTool env name arguments = do
     result <- dispatchToolCall defaultLoopDispatch
@@ -152,6 +165,7 @@ testCreate root = SessionCreate
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"
+    , createTitleIsManual = False
     }
 
 testCreateAt :: OsPath -> OsPath -> SessionCreate
@@ -159,11 +173,31 @@ testCreateAt root cwd = (testCreate root) { createCwd = cwd }
 
 writeFakeAgent :: OsPath -> IO FilePath
 writeFakeAgent root = do
+    writeFakeAgentBody root "#!/bin/sh\nsleep 0.2\nexit 0\n"
+
+writeFakeAgentBody :: OsPath -> String -> IO FilePath
+writeFakeAgentBody root body = do
     let path = toFilePath root FilePath.</> "fake-agent-cli"
-    writeFile path "#!/bin/sh\nsleep 0.2\nexit 0\n"
+    writeFile path body
     permissions <- Directory.getPermissions path
     Directory.setPermissions path permissions { Directory.executable = True }
     pure path
+
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (50 :: Int)
+  where
+    go 0 = expectationFailure ("timed out waiting for " <> path)
+    go attempts = do
+        exists <- Directory.doesFileExist path
+        if exists
+            then pure ()
+            else threadDelay 20000 >> go (attempts - 1)
+
+shellQuote :: FilePath -> String
+shellQuote path = "'" <> concatMap escape path <> "'"
+  where
+    escape '\'' = "'\\''"
+    escape char = [char]
 
 withExecutableOverride :: FilePath -> IO a -> IO a
 withExecutableOverride executable action =
