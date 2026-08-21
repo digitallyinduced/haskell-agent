@@ -25,7 +25,8 @@ import Agent.CLI.AgentViewport
     , responseItemLines
     )
 import Agent.CLI.SessionTitle
-    ( invalidateSessionTitles
+    ( SessionTitleResult(..)
+    , invalidateSessionTitles
     , requestSessionTitle
     , waitForSessionTitleResults
     , withSessionTitleManager
@@ -198,6 +199,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
 import Agent.CLI.UI.Model
@@ -993,8 +995,22 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend =
-  withSessionTitleManager btwBackend paramsRef \titleManager -> do
+runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+  ioLock <- newMVar ()
+  let showGeneratedTitle SessionTitleResult{..} =
+        case persist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef ->
+                readIORef slotRef >>= \case
+                    PersistenceActive handle
+                        | handle.sessionMeta.metaId == resultSessionId
+                        , not handle.sessionMeta.metaTitleIsManual ->
+                            withMVar ioLock \_ -> do
+                                activeFullscreen <- readIORef uiRuntimeRef
+                                setActiveWindowTitle activeFullscreen
+                                    handle.sessionMeta.metaCwd resultTitle
+                    _ -> pure ()
+  withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -1012,7 +1028,6 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
-    ioLock <- newMVar ()
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
@@ -1277,6 +1292,15 @@ runSession options provider policy tools toolEnv planMode uiRuntimeRef prompt pe
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
+
+setActiveWindowTitle :: Maybe FullscreenRuntime -> OsPath -> Text -> IO ()
+setActiveWindowTitle fullscreen cwd title =
+    case fullscreen of
+        Just runtime ->
+            setFullscreenWindowTitle runtime (cliWindowTitle cwd (Just title))
+        Nothing -> do
+            tty <- hIsTerminalDevice stdout
+            setCliWindowTitle tty stdout (cliWindowTitle cwd (Just title))
 
 runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
 runPendingTurn = runPendingTurnWithCooldownRetry True
@@ -2078,10 +2102,8 @@ replWithDraft env@SessionEnv
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
-                                tty <- hIsTerminalDevice stdout
-                                setCliWindowTitle tty stdout
-                                    (cliWindowTitle meta.metaCwd
-                                        (Just meta.metaTitle))
+                                setActiveWindowTitle fullscreen
+                                    meta.metaCwd meta.metaTitle
                                 let message = "new session: " <> meta.metaId
                                 displayInfo message $
                                     Text.hPutStrLn stderr
@@ -2141,10 +2163,9 @@ replWithDraft env@SessionEnv
                                             handle.sessionMeta.metaId
                                         updated <- setManualSessionTitle title handle
                                         writeIORef slotRef (PersistenceActive updated)
-                                        tty <- hIsTerminalDevice stdout
-                                        setCliWindowTitle tty stdout
-                                            (cliWindowTitle updated.sessionMeta.metaCwd
-                                                (Just updated.sessionMeta.metaTitle))
+                                        setActiveWindowTitle fullscreen
+                                            updated.sessionMeta.metaCwd
+                                            updated.sessionMeta.metaTitle
                                         let message =
                                                 "session title: "
                                                     <> updated.sessionMeta.metaTitle

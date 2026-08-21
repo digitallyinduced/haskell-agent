@@ -9,6 +9,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenWindowTitle
     , withFullscreenSuspended
     ) where
 
@@ -71,6 +72,7 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
 import Data.Foldable (toList)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find, intersperse, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -123,6 +125,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
+    , runtimeSetWindowTitle :: !(IORef (Text -> IO ()))
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
@@ -190,6 +193,7 @@ newFullscreenRuntime
     <*> pure nativeProgress
     <*> pure agentSnapshot
     <*> pure agentSelect
+    <*> newIORef (\_ -> pure ())
     <*> pure color
     <*> pure initial
 
@@ -257,6 +261,11 @@ requestFullscreenText runtime title body initial = do
         (AppAskText title body initial reply)
     atomically (readTMVar reply)
 
+setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
+setFullscreenWindowTitle runtime title = do
+    setter <- readIORef runtime.runtimeSetWindowTitle
+    setter title
+
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
     reply <- newEmptyTMVarIO
@@ -282,6 +291,8 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
+            writeIORef runtime.runtimeSetWindowTitle
+                (V.setOutputWindowTitle output . Text.unpack)
             pure vty
     initialVty <- buildVty
     let
@@ -319,7 +330,10 @@ runFullscreen runtime workerAction = do
                             (Just runtime.runtimeEvents)
                             fullscreenApp
                             initialState)
-                        `finally` runtime.runtimeNativeProgress False
+                        `finally` do
+                            runtime.runtimeNativeProgress False
+                            writeIORef runtime.runtimeSetWindowTitle
+                                (\_ -> pure ())
                     atomically $
                         writeTQueue runtime.runtimeInput ReplEof
                     wait worker

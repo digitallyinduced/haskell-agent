@@ -15,6 +15,7 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.TUI.App
     ( emitUiEvent
+    , setFullscreenWindowTitle
     )
 import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
 import Agent.CLI.Render
@@ -70,6 +71,7 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
+import Agent.OsPath (OsPath)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -352,10 +354,8 @@ runOneTurn env@SessionEnv
                         )
                         (requestConversationTitle env countedHandle titleTurns)
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        tty <- hIsTerminalDevice stdout
-                        setCliWindowTitle tty stdout
-                            (cliWindowTitle countedMeta.metaCwd
-                                (Just countedMeta.metaTitle))
+                        setTurnWindowTitle env countedMeta.metaCwd
+                            countedMeta.metaTitle
                     applyPendingSessionTitles env
             case followUp of
                 Nothing -> pure TurnSucceeded
@@ -400,10 +400,17 @@ applyPendingSessionTitles env =
                                 resultTitle
                                 handle
                             writeIORef slotRef (PersistenceActive updated)
-                            tty <- hIsTerminalDevice stdout
-                            setCliWindowTitle tty stdout
-                                (cliWindowTitle updated.sessionMeta.metaCwd
-                                    (Just updated.sessionMeta.metaTitle))
+                            setTurnWindowTitle env updated.sessionMeta.metaCwd
+                                updated.sessionMeta.metaTitle
+
+setTurnWindowTitle :: SessionEnv -> OsPath -> Text -> IO ()
+setTurnWindowTitle env cwd title =
+    case env.sessionFullscreen of
+        Just runtime ->
+            setFullscreenWindowTitle runtime (cliWindowTitle cwd (Just title))
+        Nothing -> do
+            tty <- hIsTerminalDevice stdout
+            setCliWindowTitle tty stdout (cliWindowTitle cwd (Just title))
 
 finishTerminal
     :: Bool
