@@ -51,7 +51,6 @@ import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
     , roleMuted
-    , setCliWindowTitle
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -95,7 +94,7 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import System.IO (hIsTerminalDevice, stderr, stdout)
+import System.IO (stderr, stdout)
 import qualified System.OsPath
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
@@ -115,6 +114,7 @@ runOneTurn env@SessionEnv
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
+    , sessionSetWindowTitle = setWindowTitle
     , sessionBeginSubagentTurn = beginSubagentTurn
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
@@ -352,8 +352,7 @@ runOneTurn env@SessionEnv
                         )
                         (requestConversationTitle env countedHandle titleTurns)
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        tty <- hIsTerminalDevice stdout
-                        setCliWindowTitle tty stdout
+                        setWindowTitle
                             (cliWindowTitle countedMeta.metaCwd
                                 (Just countedMeta.metaTitle))
                     applyPendingSessionTitles env
@@ -400,8 +399,7 @@ applyPendingSessionTitles env =
                                 resultTitle
                                 handle
                             writeIORef slotRef (PersistenceActive updated)
-                            tty <- hIsTerminalDevice stdout
-                            setCliWindowTitle tty stdout
+                            env.sessionSetWindowTitle
                                 (cliWindowTitle updated.sessionMeta.metaCwd
                                     (Just updated.sessionMeta.metaTitle))
 

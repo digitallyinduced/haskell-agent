@@ -264,6 +264,8 @@ usage = unlines
     , "reasoning effort. /model (alias /m) opens the model picker; /model NAME"
     , "sets it. /help [NAME] lists slash commands. Tab completes / commands."
     , "Shift+Tab cycles idle mode: ask (normal) → plan → always-approve → ask."
+    , "In fullscreen mode the composer stays editable during a turn; Enter queues"
+    , "the draft as the next input, and queued inputs run in submission order."
     , "/compact [FOCUS] summarizes history (OpenAI remote compact;"
     , "xAI/OpenRouter local summary) to free context."
     , "/plan [description] enters plan mode (read-only except plan.md);"

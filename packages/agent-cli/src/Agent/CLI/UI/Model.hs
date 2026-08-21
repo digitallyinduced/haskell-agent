@@ -103,6 +103,7 @@ data UiState = UiState
     , uiNextBlockId :: !Int
     , uiDraft :: !Text
     , uiCursor :: !Int
+    , uiQueuedInputs :: !(Seq Text)
     , uiFocus :: !Focus
     , uiSelectedBlock :: !(Maybe BlockId)
     , uiFollow :: !Bool
@@ -124,6 +125,9 @@ data UiState = UiState
 data UiEvent
     = UiLoop !LoopEvent
     | UiUserSubmitted !Text
+    | UiDraftSubmitted
+    | UiInputQueued !Text
+    | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
     | UiSetAwaitingInput !Bool
@@ -152,6 +156,7 @@ initialUiState = UiState
     , uiNextBlockId = 1
     , uiDraft = ""
     , uiCursor = 0
+    , uiQueuedInputs = Seq.empty
     , uiFocus = FocusComposer
     , uiSelectedBlock = Nothing
     , uiFollow = True
@@ -181,12 +186,30 @@ reduceUi event state = case event of
     UiUserSubmitted text ->
         appendBlock BlockUser "You" text "" BlockComplete Nothing
             state
-                { uiDraft = ""
-                , uiCursor = 0
-                , uiAwaitingInput = False
+                { uiAwaitingInput = False
                 , uiFollow = True
                 , uiNotice = Nothing
                 }
+    UiDraftSubmitted ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
+    UiInputQueued text ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiQueuedInputs = state.uiQueuedInputs Seq.|> text
+            , uiNotice = Nothing
+            }
+    UiQueuedInputStarted ->
+        state
+            { uiQueuedInputs = Seq.drop 1 state.uiQueuedInputs
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
     UiSetDraft text cursor ->
         state
             { uiDraft = text
@@ -304,7 +327,9 @@ reduceLoop event state = case event of
         in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)
             state
-                { uiActivity = summarizeToolCall call
+                { uiRunning = True
+                , uiAwaitingInput = False
+                , uiActivity = summarizeToolCall call
                 , uiToolCalls = Map.insert call.callId call state.uiToolCalls
                 }
     ToolFinished result ->
@@ -314,11 +339,14 @@ reduceLoop event state = case event of
                     result
                         { output = formatToolOutput call result.output }
         in completeTool displayed state
-            { uiActivity = "Thinking…"
+            { uiRunning = True
+            , uiAwaitingInput = False
+            , uiActivity = "Thinking…"
             , uiToolCalls = Map.delete result.callId state.uiToolCalls
             }
     TurnFinished output ->
         let finalized = finalizeStreams state
+            continuing = not (null output.toolCalls)
             withFallback = case output.assistantText of
                 Just text
                     | not (Text.null (Text.strip text))
@@ -330,8 +358,11 @@ reduceLoop event state = case event of
                             BlockComplete Nothing finalized
                 _ -> finalized
         in withFallback
-            { uiRunning = False
-            , uiActivity = "Ready"
+            { uiRunning = continuing
+            , uiActivity =
+                if continuing
+                    then "Running tools…"
+                    else "Ready"
             }
 
 appendOrExtend

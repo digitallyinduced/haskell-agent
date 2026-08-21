@@ -190,21 +190,26 @@ import Agent.CLI.Terminal
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime
+    ( FullscreenInputBuffer
+    , FullscreenRuntime
     , emitUiEvent
+    , hasQueuedFullscreenInput
+    , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , queuedFullscreenInputDisplays
     , readFullscreenLine
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
 import Agent.CLI.UI.Model
     ( PromptState(..)
     , UiEvent(..)
-    , UiState
+    , UiState(..)
     , initialUiState
     , reduceUi
     )
@@ -476,13 +481,14 @@ run = do
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options =
-    withRestoredCurrentDirectory (go options Nothing)
+runAgentWithRestarts options = do
+    fullscreenInputs <- newFullscreenInputBuffer
+    withRestoredCurrentDirectory (go fullscreenInputs options Nothing)
   where
-    go current transition =
-        runAgent current transition >>= \case
+    go fullscreenInputs current transition =
+        runAgent fullscreenInputs current transition >>= \case
             RunResumeSession sessionId ->
-                go
+                go fullscreenInputs
                     current
                         { optProvider = Nothing
                         , optModel = Nothing
@@ -495,14 +501,18 @@ runAgentWithRestarts options =
                         }
                     Nothing
             RunSwitchProvider next ->
-                go (applyProviderTransition current next) (Just next)
+                go fullscreenInputs
+                    (applyProviderTransition current next)
+                    (Just next)
             RunProviderStartFailed apiError ->
                 case transition of
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
                             continueAutomaticFallback failed apiError >>= \case
                                 Just next ->
-                                    go (applyProviderTransition current next) (Just next)
+                                    go fullscreenInputs
+                                        (applyProviderTransition current next)
+                                        (Just next)
                                 Nothing -> do
                                     reportProviderUnavailable apiError
                                     pure DevQuit
@@ -631,8 +641,12 @@ setStartupRepository fullscreen branch cwd =
                         <> "/"
                         <> toText (takeFileName cwd))
 
-runAgent :: CliOptions -> Maybe ProviderTransition -> IO RunResult
-runAgent options transition = do
+runAgent
+    :: FullscreenInputBuffer
+    -> CliOptions
+    -> Maybe ProviderTransition
+    -> IO RunResult
+runAgent fullscreenInputs options transition = do
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     home <- getHomeDirectory
@@ -676,6 +690,7 @@ runAgent options transition = do
     useColor <- resolveColor stdout
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
+    queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
     let initialTurns = maybe [] snd resumed
         fullscreenEnabled =
             stdinTty
@@ -683,7 +698,7 @@ runAgent options transition = do
                 && not (isOneShot options)
                 && options.optScreenMode /= ScreenMinimal
         initialFullscreenState =
-            reduceUi
+            (reduceUi
                 (UiSetNotice (Just "Loading project…"))
                 (reduceUi
                     (UiSetRepository
@@ -691,12 +706,15 @@ runAgent options transition = do
                         (toText (takeFileName (takeDirectory cwd))
                             <> "/"
                             <> toText (takeFileName cwd)))
-                    (hydrateUiHistory initialTurns))
+                    (hydrateUiHistory initialTurns)))
+                        { uiQueuedInputs = queuedInputDisplays }
     fullscreen <- if fullscreenEnabled
         then Just <$> newFullscreenRuntime
+            fullscreenInputs
             (requestCancel toolEnv.toolCancel)
             (noteFullscreenCtrlC interrupt)
             (copyTerminalClipboard terminal stdout)
+            (setCliWindowTitle stdoutTty stdout)
             (\active ->
                 when terminal.terminalNativeProgress $
                     setNativeProgress stderr active)
@@ -751,6 +769,10 @@ runAgentInitialized options transition home root resumed cwd startup = do
         fullscreen = startup.startupFullscreen
         isTty = startup.startupStdinTty
         stdoutTty = startup.startupStdoutTty
+        setWindowTitle title =
+            case fullscreen of
+                Just runtime -> setFullscreenWindowTitle runtime title
+                Nothing -> setCliWindowTitle stdoutTty stdout title
     projectRoot <- resolveProjectRoot cwd
     projectSettings <- loadProjectSettings projectRoot
     branch <- detectGitBranch cwd
@@ -928,7 +950,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
-        setCliWindowTitle stdoutTty stdout (cliWindowTitle cwd titleHint)
+        setWindowTitle (cliWindowTitle cwd titleHint)
         markStartupStage startup "Loading instructions…"
         startupContext <-
             loadAgentsContext
@@ -1197,6 +1219,11 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
         terminal = startup.startupTerminal
         useColor = startup.startupUseColor
         stderrTty = startup.startupStderrTty
+        stdoutTty = startup.startupStdoutTty
+        setWindowTitle title =
+            case fullscreen of
+                Just runtime -> setFullscreenWindowTitle runtime title
+                Nothing -> setCliWindowTitle stdoutTty stdout title
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -1399,6 +1426,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
+            , sessionSetWindowTitle = setWindowTitle
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -1483,9 +1511,7 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
             Just _ -> pure ()
         if exitAfter
             then pure RunQuit
-            else do
-                notifyAttention stderr InputRequested
-                repl env
+            else continueAfterTurn env
     TurnFailed ->
         if exitAfter
             then exitFailure
@@ -1493,8 +1519,7 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                 case env.sessionFullscreen of
                     Nothing -> putTrailingNewline env.sessionPrinted
                     Just _ -> pure ()
-                notifyAttention stderr InputRequested
-                repl env
+                continueAfterTurn env
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
         in requestAutomaticProviderFallback env apiError pending' >>= \case
@@ -1512,6 +1537,15 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                             else do
                                 notifyAttention stderr InputRequested
                                 replWithDraft env pending.pendingPromptText
+
+continueAfterTurn :: SessionEnv -> IO RunResult
+continueAfterTurn env = do
+    queued <- case env.sessionFullscreen of
+        Nothing -> pure False
+        Just runtime -> hasQueuedFullscreenInput runtime
+    when (not queued) $
+        notifyAttention stderr InputRequested
+    repl env
 
 waitAndRetryPendingTurn
     :: SessionEnv
@@ -1615,6 +1649,7 @@ replWithDraft env@SessionEnv
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
+    , sessionSetWindowTitle = setWindowTitle
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
@@ -1803,6 +1838,7 @@ replWithDraft env@SessionEnv
                                                 (roleError color err)
                                         continue
                                     Right skillInputs -> do
+                                        fullscreenEvent (UiUserSubmitted text)
                                         result <- runOneTurn env text skillInputs
                                         finishTurn env False result
                     ReplInvokeSkill invocationName arguments ->
@@ -2244,8 +2280,7 @@ replWithDraft env@SessionEnv
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
-                                tty <- hIsTerminalDevice stdout
-                                setCliWindowTitle tty stdout
+                                setWindowTitle
                                     (cliWindowTitle meta.metaCwd
                                         (Just meta.metaTitle))
                                 let message = "new session: " <> meta.metaId
@@ -2307,8 +2342,7 @@ replWithDraft env@SessionEnv
                                             handle.sessionMeta.metaId
                                         updated <- setManualSessionTitle title handle
                                         writeIORef slotRef (PersistenceActive updated)
-                                        tty <- hIsTerminalDevice stdout
-                                        setCliWindowTitle tty stdout
+                                        setWindowTitle
                                             (cliWindowTitle updated.sessionMeta.metaCwd
                                                 (Just updated.sessionMeta.metaTitle))
                                         let message =
