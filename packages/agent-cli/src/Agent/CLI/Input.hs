@@ -194,11 +194,15 @@ choiceMoveIndex len idx key
 -- 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
-    readReplLineWithInitial interrupt prompt ""
+    readReplLineConfigured False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
-readReplLineWithInitial interrupt prompt initial = do
+readReplLineWithInitial =
+    readReplLineConfigured True
+
+readReplLineConfigured :: Bool -> InterruptState -> Text -> Text -> IO ReplLine
+readReplLineConfigured slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -206,11 +210,11 @@ readReplLineWithInitial interrupt prompt initial = do
             let path = replHistoryPath home
             ensureHistoryParent path
             classifyLine <$>
-                readInlineEditor interrupt path prompt initial
+                readInlineEditor slashEnabled interrupt path prompt initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            fmap (maybe ReplEof (classifySubmitted . Text.strip)) readAnswerOnly
+            fmap (maybe ReplEof classifySubmitted) readRawLine
   where
     classifyLine = \case
         ReplText text -> classifySubmitted text
@@ -227,6 +231,7 @@ data EditorState = EditorState
     , editorHistoryDraft :: !Text
     , editorKillBuffer :: !Text
     , editorPasted :: !Bool
+    , editorSlashEnabled :: !Bool
     , editorSlashDismissed :: !Bool
     }
 
@@ -338,12 +343,13 @@ data EditorKey
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: InterruptState
+    :: Bool
+    -> InterruptState
     -> FilePath
     -> Text
     -> Text
     -> IO ReplLine
-readInlineEditor interrupt historyPath prompt initial = do
+readInlineEditor slashEnabled interrupt historyPath prompt initial = do
     withBracketedPaste $
         withEditorRawStdin $
             bracket
@@ -360,6 +366,7 @@ readInlineEditor interrupt historyPath prompt initial = do
                             , editorHistoryDraft = initial
                             , editorKillBuffer = ""
                             , editorPasted = False
+                            , editorSlashEnabled = slashEnabled
                             , editorSlashDismissed = False
                             }
                     redrawEditor prompt state
@@ -390,16 +397,8 @@ readInlineEditor interrupt historyPath prompt initial = do
                     ContinuePrompt -> do
                         finishEditorLine prompt state
                         Text.putStrLn "^C"
-                        let cleared = state
-                                { editorText = ""
-                                , editorCursor = 0
-                                , editorSelected = 0
-                                , editorHistoryIndex = Nothing
-                                , editorHistoryDraft = ""
-                                , editorSlashDismissed = False
-                                }
-                        redrawEditor prompt cleared
-                        editorLoop history entries cleared
+                        redrawEditor prompt state
+                        editorLoop history entries state
                     QuitProcess -> do
                         finishEditorLine prompt state
                         pure ReplQuitInterrupt
@@ -487,6 +486,7 @@ menuHasRows = maybe False (not . null . (.slashMenuSuggestions))
 
 currentMenu :: EditorState -> Maybe SlashMenu
 currentMenu state
+    | not state.editorSlashEnabled = Nothing
     | state.editorSlashDismissed = Nothing
     | otherwise = slashMenuFor state.editorText state.editorCursor
 
@@ -1113,11 +1113,16 @@ withBracketedPaste action = do
         hFlush stdout
 
 readAnswerOnly :: IO (Maybe Text)
-readAnswerOnly = do
+readAnswerOnly = fmap (fmap Text.strip) readRawLine
+
+-- | Read one line without changing whitespace. Prompt payloads can contain
+-- indentation or trailing blank data; approval answers normalize separately.
+readRawLine :: IO (Maybe Text)
+readRawLine = do
     done <- isEOF
     if done
         then pure Nothing
-        else Just . Text.strip <$> Text.getLine
+        else Just <$> Text.getLine
 
 ensureHistoryParent :: FilePath -> IO ()
 ensureHistoryParent path = do
