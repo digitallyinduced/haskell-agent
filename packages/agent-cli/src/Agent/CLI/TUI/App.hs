@@ -6,22 +6,30 @@ module Agent.CLI.TUI.App
     , readFullscreenLine
     , requestFullscreenPermission
     , requestFullscreenChoice
+    , requestFullscreenChoiceWithBody
+    , requestFullscreenText
     , runFullscreen
     , withFullscreenSuspended
     ) where
 
-import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , appendReplHistory
+    , readReplHistory
+    , terminalTextWidth
+    )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
     ( ReplAction(..)
+    , SkillCommand
     , SlashMenu(..)
     , SlashSuggestion(..)
-    , parseReplLine
-    , slashMenuFor
+    , parseReplLineWithSkills
+    , slashMenuForWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.ReplMode (replModeLabel)
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
 import qualified Agent.CLI.TUI.Theme as Theme
 import Agent.CLI.TUI.Markdown (markdownWidget)
@@ -64,9 +72,11 @@ import qualified Graphics.Vty.CrossPlatform as Vty
 
 data Name
     = ConversationViewport
+    | OverlayViewport
     | ComposerCursor
     | ComposerModel
     | ComposerEffort
+    | OverlayCursor
     deriving (Eq, Ord, Show)
 
 data AppEvent
@@ -74,10 +84,17 @@ data AppEvent
     | AppAskPermission !Text !(TMVar (Maybe PermissionChoice))
     | AppAskChoice
         !Text
+        !Text
         !Int
         ![(Text, Text)]
         !(TMVar (Maybe Int))
+    | AppAskText
+        !Text
+        !Text
+        !Text
+        !(TMVar (Maybe Text))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
+    | AppSetSkillCommands ![SkillCommand]
     | AppStop
 
 data FullscreenRuntime = FullscreenRuntime
@@ -87,6 +104,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeNativeProgress :: !(Bool -> IO ())
+    , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }
 
@@ -97,14 +115,29 @@ data AppState = AppState
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
     , appChoiceReply :: !(Maybe (TMVar (Maybe Int)))
+    , appTextPrompt :: !(Maybe TextOverlay)
+    , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
+    , appHistory :: ![Text]
+    , appHistoryIndex :: !(Maybe Int)
+    , appHistoryDraft :: !Text
+    , appKillBuffer :: !Text
+    , appSkillCommands :: ![SkillCommand]
     }
 
 data ChoiceOverlay = ChoiceOverlay
     { choiceTitle :: !Text
+    , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
+    }
+
+data TextOverlay = TextOverlay
+    { textTitle :: !Text
+    , textBody :: !Text
+    , textDraft :: !Text
+    , textCursor :: !Int
     }
 
 newFullscreenRuntime
@@ -112,6 +145,7 @@ newFullscreenRuntime
     -> IO CtrlCDecision
     -> (Text -> IO Bool)
     -> (Bool -> IO ())
+    -> Bool
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntime
@@ -119,6 +153,7 @@ newFullscreenRuntime
     ctrlCAction
     copyAction
     nativeProgress
+    color
     initial = FullscreenRuntime
     <$> newBChan 512
     <*> newTQueueIO
@@ -126,6 +161,7 @@ newFullscreenRuntime
     <*> pure ctrlCAction
     <*> pure copyAction
     <*> pure nativeProgress
+    <*> pure color
     <*> pure initial
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
@@ -133,10 +169,12 @@ emitUiEvent runtime = writeBChan runtime.runtimeEvents . AppUi
 
 readFullscreenLine
     :: FullscreenRuntime
+    -> [SkillCommand]
     -> PromptState
     -> Text
     -> IO ReplLine
-readFullscreenLine runtime prompt initial = do
+readFullscreenLine runtime skills prompt initial = do
+    writeBChan runtime.runtimeEvents (AppSetSkillCommands skills)
     emitUiEvent runtime (UiSetPrompt prompt)
     emitUiEvent runtime (UiSetDraft initial (Text.length initial))
     emitUiEvent runtime (UiSetAwaitingInput True)
@@ -159,9 +197,31 @@ requestFullscreenChoice
     -> [(Text, Text)]
     -> IO (Maybe Int)
 requestFullscreenChoice runtime title initial rows = do
+    requestFullscreenChoiceWithBody runtime title "" initial rows
+
+requestFullscreenChoiceWithBody
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> Int
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
     writeBChan runtime.runtimeEvents
-        (AppAskChoice title initial rows reply)
+        (AppAskChoice title body initial rows reply)
+    atomically (readTMVar reply)
+
+requestFullscreenText
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> Text
+    -> IO (Maybe Text)
+requestFullscreenText runtime title body initial = do
+    reply <- newEmptyTMVarIO
+    writeBChan runtime.runtimeEvents
+        (AppAskText title body initial reply)
     atomically (readTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
@@ -172,6 +232,7 @@ withFullscreenSuspended runtime action = do
 
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
+    history <- readReplHistory
     let vtyConfig =
             V.defaultConfig
                 { V.configPreferredColorMode = Just V.FullColor
@@ -189,8 +250,15 @@ runFullscreen runtime workerAction = do
             , appSlashIndex = 0
             , appChoice = Nothing
             , appChoiceReply = Nothing
+            , appTextPrompt = Nothing
+            , appTextReply = Nothing
             , appSlashDismissed = False
             , appPasted = False
+            , appHistory = history
+            , appHistoryIndex = Nothing
+            , appHistoryDraft = ""
+            , appKillBuffer = ""
+            , appSkillCommands = []
             }
     withAsync workerAction \worker ->
         withAsync ticker \_ticker ->
@@ -220,6 +288,10 @@ handleChoiceKey = \case
     V.EvKey V.KDown [] -> moveChoice 1
     V.EvKey V.KBackTab [] -> moveChoice (-1)
     V.EvKey (V.KChar '\t') [] -> moveChoice 1
+    V.EvKey V.KPageUp [] ->
+        vScrollPage (viewportScroll OverlayViewport) Up
+    V.EvKey V.KPageDown [] ->
+        vScrollPage (viewportScroll OverlayViewport) Down
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
@@ -247,7 +319,8 @@ handleStatusClick choice = do
     state <- get
     let ui = state.appUi
         overlayOpen =
-            maybe False (const True) state.appChoice
+            maybe False (const True) state.appTextPrompt
+                || maybe False (const True) state.appChoice
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput && not overlayOpen
         then do
@@ -288,27 +361,117 @@ resolveChoice confirmed = do
             , appChoiceReply = Nothing
             }
 
+handleTextPromptKey :: V.Event -> EventM Name AppState ()
+handleTextPromptKey = \case
+    V.EvKey V.KEsc [] -> resolveTextPrompt False
+    V.EvKey V.KEnter [] -> resolveTextPrompt True
+    V.EvKey V.KEnter [V.MShift] -> insert "\n"
+    V.EvKey V.KPageUp [] ->
+        vScrollPage (viewportScroll OverlayViewport) Up
+    V.EvKey V.KPageDown [] ->
+        vScrollPage (viewportScroll OverlayViewport) Down
+    V.EvKey V.KBS [] -> edit \draft cursor ->
+        if cursor <= 0
+            then (draft, cursor)
+            else
+                ( Text.take (cursor - 1) draft <> Text.drop cursor draft
+                , cursor - 1
+                )
+    V.EvKey V.KDel [] -> edit \draft cursor ->
+        if cursor >= Text.length draft
+            then (draft, cursor)
+            else
+                ( Text.take cursor draft <> Text.drop (cursor + 1) draft
+                , cursor
+                )
+    V.EvKey V.KLeft [] -> move (-1)
+    V.EvKey V.KRight [] -> move 1
+    V.EvKey V.KHome [] -> edit \draft cursor ->
+        (draft, lineStartCursor draft cursor)
+    V.EvKey V.KEnd [] -> edit \draft cursor ->
+        (draft, lineEndCursor draft cursor)
+    V.EvKey (V.KChar 'w') modifiers
+        | V.MCtrl `elem` modifiers ->
+            edit deleteWordBefore
+    V.EvKey (V.KChar 'u') modifiers
+        | V.MCtrl `elem` modifiers ->
+            edit deleteToLineStart
+    V.EvKey (V.KChar 'k') modifiers
+        | V.MCtrl `elem` modifiers ->
+            edit deleteToLineEnd
+    V.EvKey (V.KChar character) [] ->
+        insert (Text.singleton character)
+    V.EvPaste bytes ->
+        insert (decodePaste bytes)
+    _ -> pure ()
+  where
+    edit change =
+        modify' \state ->
+            state
+                { appTextPrompt =
+                    (\prompt ->
+                        let (draft, cursor) =
+                                change prompt.textDraft prompt.textCursor
+                        in prompt
+                            { textDraft = draft
+                            , textCursor =
+                                max 0 (min (Text.length draft) cursor)
+                            })
+                        <$> state.appTextPrompt
+                }
+    insert inserted =
+        edit \draft cursor ->
+            ( Text.take cursor draft <> inserted <> Text.drop cursor draft
+            , cursor + Text.length inserted
+            )
+    move delta =
+        edit \draft cursor -> (draft, cursor + delta)
+
+resolveTextPrompt :: Bool -> EventM Name AppState ()
+resolveTextPrompt confirmed = do
+    state <- get
+    case state.appTextReply of
+        Nothing -> pure ()
+        Just reply ->
+            liftIO $ atomically $
+                putTMVar reply $
+                    if confirmed
+                        then (.textDraft) <$> state.appTextPrompt
+                        else Nothing
+    modify' \current ->
+        current
+            { appTextPrompt = Nothing
+            , appTextReply = Nothing
+            }
+
 fullscreenApp :: App AppState AppEvent Name
 fullscreenApp = App
     { appDraw = drawApp
     , appChooseCursor = showFirstCursor
     , appHandleEvent = handleEvent
     , appStartEvent = vScrollToEnd (viewportScroll ConversationViewport)
-    , appAttrMap = const Theme.solarizedDark
+    , appAttrMap = \state ->
+        if state.appRuntime.runtimeColor
+            then Theme.solarizedDark
+            else Theme.monochrome
     }
 
 drawApp :: AppState -> [Widget Name]
 drawApp state =
-    case (state.appChoice, state.appUi.uiPermission) of
-        (Just choice, _) ->
+    case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+        (Just prompt, _, _) ->
+            [ drawTextPrompt prompt
+            , drawMain state
+            ]
+        (Nothing, Just choice, _) ->
             [ drawChoice choice
             , drawMain state
             ]
-        (Nothing, Just permission) ->
+        (Nothing, Nothing, Just permission) ->
             [ drawPermission permission
             , drawMain state
             ]
-        (Nothing, Nothing) -> [drawMain state]
+        (Nothing, Nothing, Nothing) -> [drawMain state]
 
 drawMain :: AppState -> Widget Name
 drawMain state =
@@ -342,6 +505,11 @@ drawHeader state =
     right =
         (if state.uiRunning then spinnerFrame state.uiFrame <> " " else "")
             <> state.uiActivity
+            <> if state.uiRunning
+                then " · "
+                    <> formatElapsed
+                        (fromIntegral state.uiElapsedTenths / 10)
+                else ""
             <> if Text.null usage then "" else " │ " <> usage
 
 spinnerFrame :: Int -> Text
@@ -563,10 +731,12 @@ drawFooter state =
         padLeftRight 2 $
             txt footer
   where
-    footer = case (state.appChoice, state.appUi.uiFocus) of
-        (Just _, _) ->
+    footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
+        (Just _, _, _) ->
+            "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+        (Nothing, Just _, _) ->
             "↑↓ select  │  Enter choose  │  Esc cancel"
-        (Nothing, focus) ->
+        (Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
@@ -617,16 +787,61 @@ drawChoice choice =
                         borderWithLabel
                             (txt (" " <> choice.choiceTitle <> " ")) $
                             padAll 1 $
-                                vBox $
-                                    zipWith
-                                        (choiceRow choice.choiceIndex)
-                                        [start ..]
-                                        rows
+                                vBox
+                                    [ if Text.null (Text.strip choice.choiceBody)
+                                        then emptyWidget
+                                        else padBottom (Pad 1) $
+                                            vLimitPercent 65 $
+                                                viewport OverlayViewport Vertical $
+                                                    markdownWidget choice.choiceBody
+                                    , vBox $
+                                        zipWith
+                                            (choiceRow choice.choiceIndex)
+                                            [start ..]
+                                            rows
+                                    ]
   where
     count = length choice.choiceRows
     start =
         max 0 (min choice.choiceIndex (max 0 (count - 14)))
     rows = take 14 (drop start choice.choiceRows)
+
+drawTextPrompt :: TextOverlay -> Widget Name
+drawTextPrompt prompt =
+    centerLayer $
+        hLimitPercent 82 $
+            vLimitPercent 78 $
+                withAttr Theme.borderActiveAttr $
+                    withBorderStyle unicodeRounded $
+                        borderWithLabel
+                            (txt (" " <> prompt.textTitle <> " ")) $
+                            padAll 1 $
+                                vBox
+                                    [ if Text.null (Text.strip prompt.textBody)
+                                        then emptyWidget
+                                        else padBottom (Pad 1) $
+                                            vLimitPercent 60 $
+                                                viewport OverlayViewport Vertical $
+                                                    markdownWidget prompt.textBody
+                                    , withAttr Theme.borderAttr $
+                                        withBorderStyle unicodeRounded $
+                                            borderWithLabel (txt " Answer ") $
+                                                padLeftRight 1 $
+                                                    hBox
+                                                        [ renderTextDraft prompt
+                                                        , vLimit 1 (fill ' ')
+                                                        ]
+                                    ]
+
+renderTextDraft :: TextOverlay -> Widget Name
+renderTextDraft prompt =
+    let content =
+            if Text.null prompt.textDraft
+                then withAttr Theme.mutedAttr (txt " ")
+                else txt prompt.textDraft
+        (row, column) =
+            draftCursorLocation prompt.textDraft prompt.textCursor
+    in showCursor OverlayCursor (Location (column, row)) content
 
 choiceRow :: Int -> Int -> (Text, Text) -> Widget Name
 choiceRow selected index (label, detail) =
@@ -645,6 +860,12 @@ handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = case event of
     AppEvent AppStop ->
         halt
+    AppEvent (AppSetSkillCommands skills) ->
+        modify' \state -> state
+            { appSkillCommands = skills
+            , appSlashIndex = 0
+            , appSlashDismissed = False
+            }
     AppEvent (AppUi uiEvent) -> do
         modify' \state -> state
             { appUi = reduceUi uiEvent state.appUi
@@ -654,6 +875,12 @@ handleEvent event = case event of
             , appPasted = case uiEvent of
                 UiSetDraft _ _ -> False
                 _ -> state.appPasted
+            , appHistoryIndex = case uiEvent of
+                UiSetDraft _ _ -> Nothing
+                _ -> state.appHistoryIndex
+            , appHistoryDraft = case uiEvent of
+                UiSetDraft text _ -> text
+                _ -> state.appHistoryDraft
             }
         state <- get
         case nativeProgressSignal uiEvent state.appUi of
@@ -668,17 +895,31 @@ handleEvent event = case event of
                 { appUi = reduceUi (UiPermissionShown summary) state.appUi
                 , appPermissionReply = Just reply
                 }
-    AppEvent (AppAskChoice title initial rows reply) ->
+    AppEvent (AppAskChoice title body initial rows reply) -> do
         modify' \state ->
             state
                 { appChoice = Just ChoiceOverlay
                     { choiceTitle = title
+                    , choiceBody = body
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
                     }
                 , appChoiceReply = Just reply
                 }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppAskText title body initial reply) -> do
+        modify' \state ->
+            state
+                { appTextPrompt = Just TextOverlay
+                    { textTitle = title
+                    , textBody = body
+                    , textDraft = initial
+                    , textCursor = Text.length initial
+                    }
+                , appTextReply = Just reply
+                }
+        vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppSuspend action reply) -> do
         state <- get
         suspendAndResume do
@@ -691,16 +932,20 @@ handleEvent event = case event of
         handleStatusClick ReplChooseEffort
     VtyEvent vtyEvent -> do
         state <- get
-        case (state.appChoice, state.appUi.uiPermission) of
-            (Just _, _) -> handleChoiceKey vtyEvent
-            (Nothing, Just _) -> handlePermissionKey vtyEvent
-            (Nothing, Nothing) -> handleNormalKey vtyEvent
+        case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+            (Just _, _, _) -> handleTextPromptKey vtyEvent
+            (Nothing, Just _, _) -> handleChoiceKey vtyEvent
+            (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
+            (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
     _ -> pure ()
 
 eventFollows :: UiEvent -> Bool
 eventFollows = \case
     UiLoop _ -> True
     UiUserSubmitted _ -> True
+    UiAssistantHistory _ -> True
+    UiSystemMessage _ -> True
+    UiErrorMessage _ -> True
     UiConversationCleared -> True
     _ -> False
 
@@ -885,10 +1130,14 @@ handleComposerKey event = do
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash (-1) (length menu.slashMenuSuggestions)
+        V.EvKey V.KUp [] ->
+            moveHistory 1
         V.EvKey V.KDown []
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash 1 (length menu.slashMenuSuggestions)
+        V.EvKey V.KDown [] ->
+            moveHistory (-1)
         V.EvKey (V.KChar '\t') [] ->
             case slashMenu of
                 Just menu -> acceptSlash menu
@@ -918,6 +1167,12 @@ handleComposerKey event = do
         V.EvKey (V.KChar 'k') modifiers
             | V.MCtrl `elem` modifiers ->
                 deleteLineEnd
+        V.EvKey (V.KChar 'y') modifiers
+            | V.MCtrl `elem` modifiers ->
+                insertKillBuffer
+        V.EvKey (V.KChar 'l') modifiers
+            | V.MCtrl `elem` modifiers ->
+                invalidateCache
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
                 setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
@@ -980,6 +1235,7 @@ handleComposerKey event = do
         if Text.null (Text.strip draft)
             then pure ()
             else do
+                liftIO (appendReplHistory draft)
                 liftIO $ atomically $
                     writeTQueue state.appRuntime.runtimeInput $
                         if state.appPasted
@@ -987,7 +1243,7 @@ handleComposerKey event = do
                             else ReplText draft
                 modify' \current ->
                     current
-                        { appUi = if isLocalCommand draft
+                        { appUi = if isLocalCommand state.appSkillCommands draft
                             then reduceUi
                                 (UiSetDraft "" 0)
                                 (reduceUi
@@ -997,6 +1253,9 @@ handleComposerKey event = do
                                 (UiUserSubmitted draft)
                                 current.appUi
                         , appPasted = False
+                        , appHistory = draft : current.appHistory
+                        , appHistoryIndex = Nothing
+                        , appHistoryDraft = ""
                         }
                 vScrollToEnd (viewportScroll ConversationViewport)
 
@@ -1039,21 +1298,38 @@ handleComposerKey event = do
 
     deletePreviousWord = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteWordBefore state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killed =
+                Text.take (oldCursor - cursor) (Text.drop cursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
 
     deleteLineEnd = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteToLineEnd state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killedLength = Text.length old - Text.length next
+            killed = Text.take killedLength (Text.drop oldCursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
 
     deleteCurrentLine = do
         state <- get
-        let (next, cursor) =
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
                 deleteToLineStart state.appUi.uiDraft state.appUi.uiCursor
-        modifyUiResetSlash (UiSetDraft next cursor)
+            killed =
+                Text.take (oldCursor - cursor) (Text.drop cursor old)
+        modifyUiWithKill killed (UiSetDraft next cursor)
+
+    insertKillBuffer = do
+        state <- get
+        when (not (Text.null state.appKillBuffer)) $
+            insertText state.appKillBuffer
 
     moveCursor delta = do
         state <- get
@@ -1079,7 +1355,61 @@ handleComposerKey event = do
                 { appUi = reduceUi uiEvent state.appUi
                 , appSlashIndex = 0
                 , appSlashDismissed = False
+                , appHistoryIndex = Nothing
+                , appHistoryDraft =
+                    case uiEvent of
+                        UiSetDraft text _ -> text
+                        _ -> state.appHistoryDraft
                 }
+
+    modifyUiWithKill killed uiEvent =
+        modify' \state ->
+            state
+                { appUi = reduceUi uiEvent state.appUi
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                , appKillBuffer = killed
+                , appHistoryIndex = Nothing
+                , appHistoryDraft =
+                    case uiEvent of
+                        UiSetDraft text _ -> text
+                        _ -> state.appHistoryDraft
+                }
+
+    moveHistory delta = do
+        state <- get
+        let entries = state.appHistory
+            current = maybe (-1) id state.appHistoryIndex
+            next = current + delta
+        if null entries
+            then pure ()
+            else if next < 0
+                then modify' \currentState ->
+                    currentState
+                        { appUi =
+                            reduceUi
+                                (UiSetDraft
+                                    currentState.appHistoryDraft
+                                    (Text.length currentState.appHistoryDraft))
+                                currentState.appUi
+                        , appHistoryIndex = Nothing
+                        }
+                else when (next < length entries) do
+                    let text = entries !! next
+                        draft = case state.appHistoryIndex of
+                            Nothing -> state.appUi.uiDraft
+                            Just _ -> state.appHistoryDraft
+                    modify' \currentState ->
+                        currentState
+                            { appUi =
+                                reduceUi
+                                    (UiSetDraft text (Text.length text))
+                                    currentState.appUi
+                            , appHistoryIndex = Just next
+                            , appHistoryDraft = draft
+                            , appSlashIndex = 0
+                            , appSlashDismissed = False
+                            }
 
     moveSlash delta count =
         modify' \current ->
@@ -1168,7 +1498,10 @@ currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
     | state.appSlashDismissed = Nothing
     | otherwise =
-        slashMenuFor state.appUi.uiDraft state.appUi.uiCursor
+        slashMenuForWithSkills
+            state.appSkillCommands
+            state.appUi.uiDraft
+            state.appUi.uiCursor
 
 selectedSlashSuggestion
     :: AppState
@@ -1192,8 +1525,8 @@ slashReplacement draft menu suggestion =
         after = Text.drop menu.slashMenuReplaceEnd draft
     in before <> suggestion.slashSuggestionReplacement <> after
 
-isLocalCommand :: Text -> Bool
-isLocalCommand draft = case parseReplLine draft of
+isLocalCommand :: [SkillCommand] -> Text -> Bool
+isLocalCommand skills draft = case parseReplLineWithSkills skills draft of
     ReplPrompt _ -> False
     _ -> True
 

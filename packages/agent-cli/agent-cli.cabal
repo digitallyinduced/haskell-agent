@@ -72,6 +72,7 @@ library
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Subagents.Runtime
@@ -165,6 +166,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionTitleSpec
+                    , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.UIModelSpec

@@ -1,7 +1,9 @@
 module Agent.CLI.ReplStatusSpec (spec) where
 
 import Agent.CLI
-    ( applyReplMode
+    ( DevResult(..)
+    , afterDev
+    , applyReplMode
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
@@ -48,6 +50,15 @@ spec = do
                     [ "--yolo"
                     , "--resume", "2026-08-20-abcd1234"
                     ]
+
+        it "carries reload state in the GHCi continuation" do
+            afterDev (DevReload "2026-08-20-abcd1234")
+                `shouldReturn`
+                    unlines
+                        [ ":reload"
+                        , ":module +Agent.CLI"
+                        , ":cmd afterDev =<< devMainResume (Just \"2026-08-20-abcd1234\")"
+                        ]
 
     describe "formatReplStatusLine" do
         it "shows model, effort, and interaction mode" do
