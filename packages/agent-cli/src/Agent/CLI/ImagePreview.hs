@@ -83,6 +83,10 @@ detectImagePreviewProtocol handle = do
 -- format code (24/32 are raw RGB/RGBA). We always send 100 and let the
 -- terminal sniff, matching Grok Build's overlay path for PNG screenshots.
 --
+-- Use the combined @a=T@ action rather than uploading with @a=t@ and creating
+-- a separate @a=p@ placement. Besides saving a round trip, this keeps PNG
+-- alpha on the terminal's normal transmit-and-display path (notably Ghostty).
+--
 -- Only @r@ is specified for the placement. Per the Kitty graphics protocol,
 -- omitting @c@ makes the terminal derive the width from the source image and
 -- cell dimensions, preserving the original aspect ratio. Supplying both
@@ -96,6 +100,7 @@ kittyImageSequence imageId _columns rows mime bytes =
         total = length chunks
         transmit n chunk =
             let more = if n + 1 < total then 1 else 0 :: Int
+                action = if n == 0 then "T" else "t"
                 extras
                     | n == 0 =
                         ",f="
@@ -104,7 +109,9 @@ kittyImageSequence imageId _columns rows mime bytes =
                             <> Text.pack (show rows)
                             <> ",C=1"
                     | otherwise = ""
-            in "\ESC_Ga=t,q=2,i="
+            in "\ESC_Ga="
+                <> action
+                <> ",q=2,i="
                 <> Text.pack (show imageId)
                 <> extras
                 <> ",m="
@@ -112,13 +119,7 @@ kittyImageSequence imageId _columns rows mime bytes =
                 <> ";"
                 <> TextEncoding.decodeLatin1 chunk
                 <> "\ESC\\"
-        display =
-            "\ESC_Ga=p,i="
-                <> Text.pack (show imageId)
-                <> ",r="
-                <> Text.pack (show rows)
-                <> ",C=1,q=2\ESC\\"
-    in Text.concat (zipWith transmit [0 ..] chunks) <> display
+    in Text.concat (zipWith transmit [0 ..] chunks)
 
 kittyFormat :: Text -> Int
 kittyFormat _ = 100
