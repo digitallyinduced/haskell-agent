@@ -11,6 +11,7 @@ module Agent.TUI.Theme
     , controlLinkActiveAttr
     , controlLinkAttr
     , controlLinkHoverAttr
+    , dimAttr
     , emphasisAttr
     , headingAttr
     , inlineCodeAttr
@@ -33,7 +34,7 @@ import qualified Graphics.Vty as V
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
-headingAttr, codeAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
+headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
@@ -50,6 +51,7 @@ borderAttr = attrName "border"
 borderActiveAttr = attrName "border-active"
 headingAttr = attrName "markdown-heading"
 codeAttr = attrName "markdown-code"
+dimAttr = attrName "dim"
 emphasisAttr = attrName "markdown-emphasis"
 inlineCodeAttr = attrName "markdown-inline-code"
 linkAttr = attrName "markdown-link"
@@ -111,6 +113,9 @@ solarizedDark =
         , (codeAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
             `V.withBackColor` rgb 7 54 66)
+        , (dimAttr, V.defAttr
+            `V.withForeColor` rgb 88 110 117
+            `V.withBackColor` rgb 0 43 54)
         , (emphasisAttr, V.defAttr
             `V.withForeColor` rgb 147 161 161
             `V.withBackColor` rgb 0 43 54
@@ -157,6 +162,7 @@ monochrome =
         , (borderActiveAttr, V.defAttr `V.withStyle` V.bold)
         , (headingAttr, V.defAttr `V.withStyle` V.bold)
         , (codeAttr, V.defAttr)
+        , (dimAttr, V.defAttr)
         , (emphasisAttr, V.defAttr `V.withStyle` V.italic)
         , (inlineCodeAttr, V.defAttr `V.withStyle` V.reverseVideo)
         , (linkAttr, V.defAttr `V.withStyle` V.underline)

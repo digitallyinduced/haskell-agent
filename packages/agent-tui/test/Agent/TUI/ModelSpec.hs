@@ -69,7 +69,9 @@ spec = describe "fullscreen UI reducer" do
         state.uiPrompt.promptEffort `shouldBe` "high"
         state.uiRunning `shouldBe` False
         state.uiActivity `shouldBe` "Restarting…"
-        state.uiNotice `shouldBe` Just "Restarting current turn…"
+        state.uiNotice
+            `shouldBe` Just
+                (progressNotice "Restarting current turn…")
 
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
@@ -178,6 +180,38 @@ spec = describe "fullscreen UI reducer" do
         idle.uiFrame `shouldBe` 0
         running.uiElapsedTenths `shouldBe` 3
         after.uiElapsedTenths `shouldBe` 3
+
+    it "briefly settles on Finished before returning to Ready" do
+        let finished =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] Nothing))
+                    ]
+            awaiting = reduceUi (UiSetAwaitingInput True) finished
+            settled = iterate (reduceUi UiTick) awaiting !! 10
+        finished.uiActivity `shouldBe` "Finished"
+        finished.uiCompletionTicks `shouldBe` 10
+        awaiting.uiActivity `shouldBe` "Finished"
+        settled.uiActivity `shouldBe` "Ready"
+        settled.uiCompletionTicks `shouldBe` 0
+
+    it "expires transient notices but keeps progress notices visible" do
+        let transient =
+                reduceUi
+                    (UiSetNotice
+                        (Just (successNotice "Copied selected block.")))
+                    initialUiState
+            expired = iterate (reduceUi UiTick) transient !! 30
+            progress =
+                reduceUi
+                    (UiSetNotice (Just (progressNotice "Cancelling…")))
+                    initialUiState
+            stillProgress = iterate (reduceUi UiTick) progress !! 40
+        expired.uiNotice `shouldBe` Nothing
+        stillProgress.uiNotice
+            `shouldBe` Just (progressNotice "Cancelling…")
 
     it "shows a search-replace diff while the tool is running" do
         let call =
@@ -298,6 +332,24 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
             `shouldBe` ["first follow-up", "second follow-up"]
 
+    it "promotes a send-now draft ahead of existing queued inputs" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiInputQueued "later"
+                    , UiSetDraft "send now" 8
+                    , UiInputPromoted "send now"
+                    ]
+        Foldable.toList state.uiQueuedInputs
+            `shouldBe` ["send now", "later"]
+        state.uiDraft `shouldBe` ""
+        state.uiCursor `shouldBe` 0
+        state.uiNotice
+            `shouldBe`
+                Just
+                    (progressNotice
+                        "Cancelling the current turn; sending this prompt next…")
+
     it "clears only the draft that was submitted immediately" do
         let state =
                 apply
@@ -343,7 +395,8 @@ spec = describe "fullscreen UI reducer" do
         requestingTool.uiActivity `shouldBe` "Running tools…"
         afterTool.uiRunning `shouldBe` True
         finished.uiRunning `shouldBe` False
-        finished.uiActivity `shouldBe` "Ready"
+        finished.uiActivity `shouldBe` "Finished"
+        finished.uiCompletionTicks `shouldBe` 10
 
     it "deletes the previous word for command/option-backspace" do
         deleteWordBefore "hello brave world" 17

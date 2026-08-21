@@ -192,3 +192,4 @@ test-suite agent-cli-test
                     , text
                     , time
                     , unix
+                    , vty >= 6.4 && < 7

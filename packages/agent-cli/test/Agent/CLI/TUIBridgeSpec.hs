@@ -14,6 +14,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Control.Monad (replicateM_)
 import System.Timeout (timeout)
+import qualified Graphics.Vty as V
 import Test.Hspec
 
 spec :: Spec
@@ -111,6 +112,14 @@ spec = describe "fullscreen TUI bridge" do
             `shouldBe` ("old", Just 1, "draft")
         historyMove (-1) ["new", "old"] (Just 0) "new" "draft"
             `shouldBe` ("draft", Nothing, "draft")
+
+    it "recognizes send-now keys without stealing ordinary Enter or Tab" do
+        isSendNowKey (V.EvKey V.KEnter [V.MCtrl]) `shouldBe` True
+        isSendNowKey (V.EvKey (V.KChar 'o') [V.MCtrl]) `shouldBe` True
+        isSendNowKey (V.EvKey V.KEnter [V.MShift, V.MCtrl])
+            `shouldBe` False
+        isSendNowKey (V.EvKey V.KEnter []) `shouldBe` False
+        isSendNowKey (V.EvKey (V.KChar '\t') []) `shouldBe` False
 
     it "falls back to root when the selected agent disappears" do
         let child = AgentChild (SubagentId "child")

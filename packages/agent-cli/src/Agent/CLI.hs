@@ -212,6 +212,10 @@ import Agent.TUI.Model
     ( PromptState(..)
     , UiEvent(..)
     , UiState(..)
+    , infoNotice
+    , progressNotice
+    , successNotice
+    , warningNotice
     , initialUiState
     , reduceUi
     )
@@ -579,7 +583,8 @@ setStartupNotice fullscreen message =
     case fullscreen of
         Nothing -> pure ()
         Just runtime ->
-            emitUiEvent runtime (UiSetNotice (Just message))
+            emitUiEvent runtime
+                (UiSetNotice (Just (progressNotice message)))
 
 recordStartupTiming
     :: UTCTime
@@ -703,7 +708,8 @@ runAgent fullscreenInputs options transition = do
                 && options.optScreenMode /= ScreenMinimal
         initialFullscreenState =
             (reduceUi
-                (UiSetNotice (Just "Loading project…"))
+                (UiSetNotice
+                    (Just (progressNotice "Loading project…")))
                 (reduceUi
                     (UiSetRepository
                         ""
@@ -1624,7 +1630,8 @@ waitAndRetryPendingTurn env delay pending = do
                 <> " (Esc to cancel)"
     case env.sessionFullscreen of
         Just runtime ->
-            emitUiEvent runtime (UiSetNotice (Just waitMessage))
+            emitUiEvent runtime
+                (UiSetNotice (Just (warningNotice waitMessage)))
         Nothing -> do
             color <- resolveColor stderr
             putTextLn stderr $
@@ -1648,7 +1655,10 @@ waitAndRetryPendingTurn env delay pending = do
             case env.sessionFullscreen of
                 Just runtime ->
                     emitUiEvent runtime
-                        (UiSetNotice (Just "automatic retry cancelled"))
+                        (UiSetNotice
+                            (Just
+                                (infoNotice
+                                    "automatic retry cancelled")))
                 Nothing -> do
                     color <- resolveColor stderr
                     putTextLn stderr
@@ -1660,7 +1670,8 @@ waitAndRetryPendingTurn env delay pending = do
             case env.sessionFullscreen of
                 Just runtime ->
                     emitUiEvent runtime
-                        (UiSetNotice (Just "retrying turn"))
+                        (UiSetNotice
+                            (Just (successNotice "retrying turn")))
                 Nothing -> do
                     color <- resolveColor stderr
                     putTextLn stderr
@@ -2227,7 +2238,10 @@ replWithDraft env@SessionEnv
                     ReplBtw question -> do
                         color <- resolveColor stdout
                         fullscreenEvent
-                            (UiSetNotice (Just "btw · asking…"))
+                            (UiSetNotice
+                                (Just
+                                    (progressNotice
+                                        "btw · asking…")))
                         result <-
                             runBtwWithCancel
                                 (\cancel action ->

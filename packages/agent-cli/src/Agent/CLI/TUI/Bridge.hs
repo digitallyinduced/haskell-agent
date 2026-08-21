@@ -2,6 +2,7 @@
 module Agent.CLI.TUI.Bridge
     ( eventFollows
     , historyMove
+    , isSendNowKey
     , mergeUiEvents
     , nativeProgressSignal
     , normalizeAgentSelection
@@ -11,6 +12,7 @@ import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..))
 import Data.Text (Text)
+import qualified Graphics.Vty as V
 
 eventFollows :: UiEvent -> Bool
 eventFollows = \case
@@ -70,6 +72,15 @@ historyMove delta entries currentIndex currentText savedDraft
   where
     current = maybe (-1) id currentIndex
     next = current + delta
+
+-- | Interruptive submission while a turn is active. Modified Enter is the
+-- primary chord; Ctrl-O is a terminal-safe fallback for environments that
+-- cannot distinguish Ctrl-Enter from Enter.
+isSendNowKey :: V.Event -> Bool
+isSendNowKey = \case
+    V.EvKey V.KEnter [V.MCtrl] -> True
+    V.EvKey (V.KChar 'o') [V.MCtrl] -> True
+    _ -> False
 
 normalizeAgentSelection
     :: AgentTarget
