@@ -127,6 +127,7 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
+    , providerTransitionDraft
     , setPendingExitAfter
     )
 import Agent.CLI.Render
@@ -792,6 +793,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
     markStartupStage startup "Loading credentials…"
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
+        transitionDraft = providerTransitionDraft transition
         unavailableProviders =
             maybe [] (.transitionUnavailableProviders) transition
         requestedProvider = case transitionTarget of
@@ -1026,7 +1028,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             privateTranscript
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
-                                runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                                runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                                     initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
                             >>= \case
@@ -1060,7 +1062,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -1084,7 +1086,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     (readIORef privateParams) privateTranscript
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
 
@@ -1199,6 +1201,7 @@ runSession
     -> StartupRuntime
     -> Maybe Text
     -> Maybe PendingTurn
+    -> Text
     -> [Provider]
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
@@ -1225,7 +1228,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
@@ -1526,7 +1529,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                         result <- runOneTurn env text inputs
                         finishTurn env True result
                     Nothing ->
-                        repl env
+                        replWithDraft env initialDraft
     result <- sessionAction
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
@@ -1875,7 +1878,7 @@ replWithDraft env@SessionEnv
                                             (glyphOk <> message))
             continueWith keptDraft
         ReplChooseModel keptDraft ->
-            chooseModel (continueWith keptDraft)
+            chooseModel keptDraft (continueWith keptDraft)
         ReplChooseEffort keptDraft ->
             chooseEffort (continueWith keptDraft)
         ReplPasted pasted ->
@@ -2163,7 +2166,7 @@ replWithDraft env@SessionEnv
                         setEffort level
                         continue
                     ReplShowModel -> do
-                        chooseModel continue
+                        chooseModel "" continue
                     ReplSetModel name -> do
                         color <- resolveColor stdout
                         message <- applyModelChange
@@ -2567,7 +2570,7 @@ replWithDraft env@SessionEnv
         effortChoice fullscreen (currentEffort params) >>= \case
             Nothing -> next
             Just level -> setEffort level >> next
-    chooseModel next = do
+    chooseModel keptDraft next = do
         color <- resolveColor stderr
         params <- readIORef paramsRef
         let current = currentModel params
@@ -2595,7 +2598,7 @@ replWithDraft env@SessionEnv
                                 (glyphOk <> message))
                     next
                 | otherwise ->
-                    requestModelProviderSwitch choice persist >>= \case
+                    requestModelProviderSwitch choice keptDraft persist >>= \case
                         Left err -> do
                             displayError err $
                                 Text.hPutStrLn stderr
@@ -2868,11 +2871,12 @@ applyModelChange provider name paramsRef render previous persist = do
 
 requestModelProviderSwitch
     :: ModelOption
+    -> Text
     -> Persistence
     -> IO (Either Text RunResult)
-requestModelProviderSwitch choice persist =
+requestModelProviderSwitch choice draft persist =
     prepareProviderTransition
-        ManualTransition [] Nothing choice persist >>= \case
+        ManualTransition [] Nothing draft choice persist >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
@@ -2955,6 +2959,7 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
                         { transitionTarget = choice
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
+                        , transitionDraft = ""
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
                         }
@@ -2963,10 +2968,11 @@ prepareProviderTransition
     :: TransitionCause
     -> [Provider]
     -> Maybe PendingTurn
+    -> Text
     -> ModelOption
     -> Persistence
     -> IO (Either Text ProviderTransition)
-prepareProviderTransition cause unavailable pending choice persist =
+prepareProviderTransition cause unavailable pending draft choice persist =
     validateProviderTarget choice >>= \case
         Left err -> pure (Left err)
         Right () -> do
@@ -2975,6 +2981,7 @@ prepareProviderTransition cause unavailable pending choice persist =
                 { transitionTarget = choice
                 , transitionSessionId = sessionId
                 , transitionPendingTurn = pending
+                , transitionDraft = draft
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
                 }
