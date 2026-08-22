@@ -88,38 +88,41 @@ spec = do
                 getCurrentDirectory `shouldReturn` original
 
     describe "formatReplStatusLine" do
-        it "shows model, effort, and interaction mode" do
-            formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal emptyTokenUsage
-                `shouldBe` "  grok-4.6 · high · ask"
-            formatReplStatusLine False Nothing "gpt-5.1-codex" "medium" ReplModeAlwaysApprove emptyTokenUsage
+        it "shows model, effort, interaction mode, and active account" do
+            formatReplStatusLine False Nothing "grok-4.6" "high"
+                ReplModeNormal "person@example.com" emptyTokenUsage
+                `shouldBe` "  grok-4.6 · high · ask · person@example.com"
+            formatReplStatusLine False Nothing "gpt-5.1-codex" "medium"
+                ReplModeAlwaysApprove "" emptyTokenUsage
                 `shouldBe` "  gpt-5.1-codex · medium · yolo"
-            formatReplStatusLine False Nothing "gpt-5.1" "low" ReplModePlan emptyTokenUsage
+            formatReplStatusLine False Nothing "gpt-5.1" "low"
+                ReplModePlan "" emptyTokenUsage
                 `shouldBe` "  gpt-5.1 · low · plan"
 
         it "appends session usage when no width is known" do
-            formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal
+            formatReplStatusLine False Nothing "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 `shouldBe` "  grok-4.6 · high · ask  1.2k in · 340 out"
 
         it "right-aligns session usage when the TTY is wide enough" do
-            formatReplStatusLine False (Just 48) "grok-4.6" "high" ReplModeNormal
+            formatReplStatusLine False (Just 48) "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 `shouldBe` "  grok-4.6 · high · ask        1.2k in · 340 out"
 
         it "drops usage rather than wrapping when only the state fits" do
-            formatReplStatusLine False (Just 24) "grok-4.6" "high" ReplModeNormal
+            formatReplStatusLine False (Just 24) "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 `shouldBe` "  grok-4.6 · high · ask"
 
         it "truncates the state when a narrow pane cannot fit it" do
-            formatReplStatusLine False (Just 20) "grok-4.6" "high" ReplModeNormal
+            formatReplStatusLine False (Just 20) "grok-4.6" "high" ReplModeNormal ""
                 TokenUsage { inputTokens = 1200, outputTokens = 340, cachedTokens = 0 }
                 `shouldBe` "  grok-4.6 · high ·…"
 
         it "measures and truncates wide model names in terminal columns" do
             let line =
                     formatReplStatusLine False (Just 16) "模型模型" "high"
-                        ReplModeNormal emptyTokenUsage
+                        ReplModeNormal "" emptyTokenUsage
             terminalTextWidth line `shouldBe` 16
             line `shouldBe` "  模型模型 · hi…"
 

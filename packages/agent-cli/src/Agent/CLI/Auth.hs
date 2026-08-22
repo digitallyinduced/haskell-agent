@@ -2,6 +2,7 @@
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , GrokAuthState(..)
+    , credentialAccountLabel
     , grokCredentialFromAuthJson
     , grokAuthStateFromJson
     , grokAuthStateToJson
@@ -108,9 +109,47 @@ xaiOAuthClientId =
 data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
+    , loadedAccountLabel :: !(Credential -> IO Text)
     -- | Live OpenAI OAuth pool, when authentication uses one.
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
+
+-- | Human-readable identity for the credential most recently selected by a
+-- provider. Prefer an email claim, then fall back to a compact account id.
+credentialAccountLabel :: Credential -> Text
+credentialAccountLabel credential = case credential.provider of
+    OpenAIProvider ->
+        fromMaybe (fallback "ChatGPT") $
+            OpenAI.deriveEmail credential.accessToken
+    XAIProvider ->
+        fromMaybe (fallback "Grok") $
+            XAIAuth.emailFromToken credential.accessToken
+    OpenRouterProvider ->
+        fallback "OpenRouter"
+  where
+    accountId = Text.strip credential.accountId
+    fallback providerName
+        | Text.null accountId = providerName
+        | Text.length accountId <= 12 = accountId
+        | otherwise = Text.take 8 accountId <> "…"
+
+credentialAccountLabelWith :: Text -> Credential -> Text
+credentialAccountLabelWith preferred credential =
+    fromMaybe (credentialAccountLabel credential) $
+        credentialEmail credential <|> nonEmptyText preferred
+
+credentialEmail :: Credential -> Maybe Text
+credentialEmail credential = case credential.provider of
+    OpenAIProvider -> OpenAI.deriveEmail credential.accessToken
+    XAIProvider -> XAIAuth.emailFromToken credential.accessToken
+    OpenRouterProvider -> Nothing
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value
+    | Text.null trimmed = Nothing
+    | otherwise = Just trimmed
+  where
+    trimmed = Text.strip value
 
 data GrokAuthState = GrokAuthState
     { grokAccessToken :: !Text, grokRefreshToken :: !(Maybe Text)
@@ -188,6 +227,8 @@ loadXai = do
                 pure LoadedAuth
                     { loadedProvider = XAIProvider
                     , loadedTokenProvider = provider
+                    , loadedAccountLabel =
+                        pure . credentialAccountLabelWith metadata.managedLabel
                     , loadedOpenAiPool = Nothing
                     }
         Just (metadata, secret) ->
@@ -200,6 +241,8 @@ loadXai = do
                         , leaseId = Nothing
                         , provider = XAIProvider
                         }
+                , loadedAccountLabel =
+                    pure . credentialAccountLabelWith metadata.managedLabel
                 , loadedOpenAiPool = Nothing
                 }
         Nothing -> do
@@ -212,28 +255,45 @@ loadXai = do
                     pure LoadedAuth
                         { loadedProvider = XAIProvider
                         , loadedTokenProvider = provider
+                        , loadedAccountLabel = pure . credentialAccountLabel
                         , loadedOpenAiPool = Nothing
                         }
 
-loadOpenRouterKey :: IO (Maybe Text)
-loadOpenRouterKey = do
+loadOpenRouterCredential :: IO (Maybe (Credential, Text))
+loadOpenRouterCredential = do
     managed <- loadManagedCredential OpenRouterProvider
     case managed of
-        Just (_, secret) -> pure (Just secret.secretPayload)
-        Nothing -> lookupNonEmpty "OPENROUTER_API_KEY"
+        Just (metadata, secret) ->
+            pure $ Just
+                ( (credentialFromApiKey secret.secretPayload)
+                    { accountId = metadata.managedAccountId }
+                , metadata.managedLabel
+                )
+        Nothing ->
+            fmap (\key -> (credentialFromApiKey key, "")) <$>
+                lookupNonEmpty "OPENROUTER_API_KEY"
 
 loadOpenRouter :: ExceptT Text IO LoadedAuth
 loadOpenRouter = do
-    key <- lift loadOpenRouterKey
-    case key of
+    loadedCredential <- lift loadOpenRouterCredential
+    case loadedCredential of
         Nothing -> throwE noAuthHint
-        Just apiKey -> do
-            let initial = credentialFromApiKey apiKey
-            provider <- lift $ reloadableFileCredentialProvider OpenRouterProvider initial
-                (fmap (fmap credentialFromApiKey) loadOpenRouterKey)
+        Just (initial, initialLabel) -> do
+            provider <- lift $ reloadableFileCredentialProvider
+                OpenRouterProvider initial
+                (fmap (fmap fst) loadOpenRouterCredential)
             pure LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
+                , loadedAccountLabel = \credential -> do
+                    current <- loadOpenRouterCredential
+                    let label = case current of
+                            Just (currentCredential, currentLabel)
+                                | currentCredential.accountId
+                                    == credential.accountId ->
+                                        currentLabel
+                            _ -> initialLabel
+                    pure (credentialAccountLabelWith label credential)
                 , loadedOpenAiPool = Nothing
                 }
 
@@ -259,6 +319,16 @@ loadOpenAi = do
     pure LoadedAuth
         { loadedProvider = OpenAIProvider
         , loadedTokenProvider = tokenProvider
+        , loadedAccountLabel = \credential -> do
+            currentAccounts <- readIORef accountSources
+            pure $ maybe
+                (credentialAccountLabel credential)
+                (.openAiLabel)
+                (find
+                    ((== credential.accountId)
+                        . (.accountId)
+                        . (.openAiState))
+                    currentAccounts)
         , loadedOpenAiPool = Just pool
         }
 
@@ -294,15 +364,21 @@ loadOpenAiAccounts = do
             partitionEithers (map (managedOpenAiAccount now) enabledManaged)
         managedAccountIds =
             map ((.accountId) . (.openAiState)) managedAccounts
-        envJsonAccount =
-            OpenAiAccount
-                <$> (fromEnvJson >>= openaiAuthStateFromJson now
-                    . LBS.fromStrict . TextEncoding.encodeUtf8)
-                <*> pure OpenAiEnvironmentOAuth
-        fileAccount =
-            OpenAiAccount
-                <$> (fileBytes >>= openaiAuthStateFromJson now)
-                <*> pure (OpenAiAuthFile filePath)
+        envJsonAccount = do
+            state <- fromEnvJson >>= openaiAuthStateFromJson now
+                . LBS.fromStrict . TextEncoding.encodeUtf8
+            pure OpenAiAccount
+                { openAiState = state
+                , openAiSource = OpenAiEnvironmentOAuth
+                , openAiLabel = openAiStateLabel "ChatGPT" state
+                }
+        fileAccount = do
+            state <- fileBytes >>= openaiAuthStateFromJson now
+            pure OpenAiAccount
+                { openAiState = state
+                , openAiSource = OpenAiAuthFile filePath
+                , openAiLabel = openAiStateLabel "ChatGPT" state
+                }
         externalAccounts =
             filter
                 (\account ->
@@ -342,6 +418,7 @@ data OpenAiCredentialSource
 data OpenAiAccount = OpenAiAccount
     { openAiState :: !OpenAI.AuthState
     , openAiSource :: !OpenAiCredentialSource
+    , openAiLabel :: !Text
     }
 
 managedOpenAiAccount
@@ -369,12 +446,22 @@ managedOpenAiAccount now (metadata, secret) =
                             { openAiState = state
                             , openAiSource =
                                 OpenAiManagedOAuth metadata.managedId
+                            , openAiLabel =
+                                openAiStateLabel metadata.managedLabel state
                             }
         _ ->
             Right OpenAiAccount
                 { openAiState = staticOpenAiState
                     now metadata.managedAccountId secret.secretPayload
                 , openAiSource = OpenAiManagedBearer
+                , openAiLabel = fromMaybe
+                    (credentialAccountLabel Credential
+                        { accessToken = secret.secretPayload
+                        , accountId = metadata.managedAccountId
+                        , leaseId = Nothing
+                        , provider = OpenAIProvider
+                        })
+                    (nonEmptyText metadata.managedLabel)
                 }
 
 openAiStaticAccount :: UTCTime -> Text -> IO OpenAiAccount
@@ -383,7 +470,29 @@ openAiStaticAccount now token = do
     pure OpenAiAccount
         { openAiState = staticOpenAiState now accountId token
         , openAiSource = OpenAiEnvironmentBearer
+        , openAiLabel =
+            credentialAccountLabel Credential
+                { accessToken = token
+                , accountId
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
         }
+
+openAiStateLabel :: Text -> OpenAI.AuthState -> Text
+openAiStateLabel preferred state =
+    fromMaybe fallback $
+        (state.idToken >>= OpenAI.deriveEmail)
+            <|> OpenAI.deriveEmail state.accessToken
+            <|> nonEmptyText preferred
+  where
+    fallback =
+        credentialAccountLabel Credential
+            { accessToken = state.accessToken
+            , accountId = state.accountId
+            , leaseId = Nothing
+            , provider = OpenAIProvider
+            }
 
 staticOpenAiState :: UTCTime -> Text -> Text -> OpenAI.AuthState
 staticOpenAiState now accountId accessToken =
