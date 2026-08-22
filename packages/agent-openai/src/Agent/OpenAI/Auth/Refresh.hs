@@ -13,6 +13,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Simple
     ( getResponseBody
@@ -49,7 +50,7 @@ refreshAccessTokenHTTP oauthClientId state = do
                 then pure $ Left $ ProviderError AuthenticationError
                     ("Codex token refresh failed with HTTP "
                         <> Text.pack (show status) <> ": "
-                        <> Text.decodeUtf8
+                        <> Text.decodeUtf8With Text.lenientDecode
                             (LBS.toStrict (LBS.take 500 (getResponseBody response))))
                     Nothing
                 else case Aeson.eitherDecode (getResponseBody response) of

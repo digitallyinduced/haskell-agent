@@ -14,7 +14,7 @@ import Control.Concurrent
     , takeMVar
     , writeChan
     )
-import Control.Exception (SomeException, finally, throwIO, toException)
+import Control.Exception (Exception, SomeException, finally, throwIO, toException)
 import qualified Control.Exception.Safe as Safe
 import Control.Retry
     ( RetryPolicyM
@@ -28,11 +28,17 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import qualified Network.Connection as Connection
 import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
 import System.Timeout (timeout)
 import Test.Hspec
+
+data UnexpectedConnectFailure = UnexpectedConnectFailure
+    deriving (Show)
+
+instance Exception UnexpectedConnectFailure
 
 spec :: Spec
 spec = describe "Agent.Transport.WebSocket" do
@@ -52,6 +58,24 @@ spec = describe "Agent.Transport.WebSocket" do
                 "certificate validation failed"
         transientWsConnectFailureLabel (toException exception :: SomeException)
             `shouldBe` Nothing
+
+    it "classifies typed TLS disconnects and connection wrappers as transient" do
+        transientWsConnectFailureLabel
+            (toException (TLS.HandshakeFailed TLS.Error_EOF) :: SomeException)
+            `shouldBe` Just "TLS handshake failed: unexpected EOF"
+        transientWsConnectFailureLabel
+            (toException (TLS.HandshakeFailed TLS.Error_TCP_Terminate) :: SomeException)
+            `shouldBe` Just "TLS handshake failed: TCP connection terminated"
+        transientWsConnectFailureLabel
+            (toException (Connection.HostNotResolved "chatgpt.com") :: SomeException)
+            `shouldBe` Just
+                "WebSocket host could not be resolved: chatgpt.com"
+        transientWsConnectFailureLabel
+            (toException
+                (Connection.HostCannotConnect "chatgpt.com" [])
+                :: SomeException)
+            `shouldBe` Just
+                "WebSocket host could not be reached: chatgpt.com"
 
     it "backs off transient handshake retries exponentially with a cap" do
         retryPolicyDelays 7 transientWsConnectRetryPolicy
@@ -90,9 +114,9 @@ spec = describe "Agent.Transport.WebSocket" do
                 attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
                 if attempt == 1
                     then throwIO exception
-                    else connected >> pure ("connected" :: String)
+                    else connected >> pure (Right ("connected" :: String))
 
-        result `shouldBe` "connected"
+        result `shouldBe` Right "connected"
         readIORef attempts `shouldReturn` 2
 
     it "does not retry after the connection callback has started" do
@@ -109,22 +133,51 @@ spec = describe "Agent.Transport.WebSocket" do
             Left exception ->
                 transientWsConnectFailureLabel exception
                     `shouldBe` Just "WebSocket handshake returned HTTP 503"
-            Right () -> expectationFailure "expected the callback exception to escape"
+            Right (_ :: Either ApiError ()) ->
+                expectationFailure "expected the callback exception to escape"
         readIORef attempts `shouldReturn` 1
 
-    it "does not retry a non-transient handshake rejection" do
+    it "returns a non-transient handshake rejection as data" do
         attempts <- newIORef (0 :: Int)
-        result <- Safe.tryAny $
-            retryTransientWsConnectWithPolicy
-                (constantDelay 0 <> limitRetries 3)
-                \_connected -> do
-                    modifyIORef' attempts (+ 1)
-                    throwIO (transientHandshakeException 401)
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 3)
+            \_connected -> do
+                modifyIORef' attempts (+ 1)
+                throwIO (transientHandshakeException 401)
 
-        case result of
-            Left exception ->
-                wsHandshakeAuthFailureStatus exception `shouldBe` Just 401
-            Right () -> expectationFailure "expected the handshake rejection to escape"
+        result `shouldBe`
+            (Left (HttpError 401 "WebSocket handshake returned HTTP 401")
+                :: Either ApiError ())
+        readIORef attempts `shouldReturn` 1
+
+    it "returns permanent TLS failures as data without retrying" do
+        attempts <- newIORef (0 :: Int)
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 3)
+            \_connected -> do
+                modifyIORef' attempts (+ 1)
+                throwIO
+                    (TLS.HandshakeFailed
+                        (TLS.Error_Certificate "certificate validation failed"))
+
+        result `shouldBe`
+            (Left (ConnectionError
+                "TLS handshake failed: HandshakeFailed (Error_Certificate \"certificate validation failed\")")
+                :: Either ApiError ())
+        readIORef attempts `shouldReturn` 1
+
+    it "contains unknown synchronous failures before the callback" do
+        attempts <- newIORef (0 :: Int)
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 3)
+            \_connected -> do
+                modifyIORef' attempts (+ 1)
+                throwIO UnexpectedConnectFailure
+
+        result `shouldBe`
+            (Left (ConnectionError
+                "WebSocket connection failed: UnexpectedConnectFailure")
+                :: Either ApiError ())
         readIORef attempts `shouldReturn` 1
 
     it "handles server pings while delivering application data" do
