@@ -152,6 +152,9 @@ spec = do
                 (ProviderError ServiceUnavailableError "unavailable" Nothing) `shouldBe` True
             isInlineRetryableProviderResponseError
                 (ConnectionError "socket closed") `shouldBe` False
+            isInlineRetryableProviderResponseError
+                (ProviderError WebSocketConnectionLimitReached
+                    "too many websocket connections" Nothing) `shouldBe` False
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 1970 1 1) 0

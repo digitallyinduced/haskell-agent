@@ -139,6 +139,7 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
 
     isDeadConnectionOrAccount = \case
         ConnectionError {} -> True
+        ProviderError WebSocketConnectionLimitReached _ _ -> True
         err -> isJust (accountFailureFromApiError err)
 
 -- | Prefer a WebSocket backend, then switch this agent session permanently to

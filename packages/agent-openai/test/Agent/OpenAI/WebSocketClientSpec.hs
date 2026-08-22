@@ -52,7 +52,7 @@ spec = do
         result `shouldBe` Right "completed"
         readIORef responses `shouldReturn` []
 
-    it "leaves connection and quota failures to reconnect/failover" do
+    it "leaves connection, connection-limit, and quota failures to callers" do
         attempts <- newIORef (0 :: Int)
         let run err = retryTransientWsResultWithPolicy
                 (constantDelay 0 <> limitRetries 3)
@@ -60,9 +60,13 @@ spec = do
 
         run (ConnectionError "socket closed")
             `shouldReturn` Left (ConnectionError "socket closed")
+        run (ProviderError WebSocketConnectionLimitReached
+                "too many websocket connections" Nothing)
+            `shouldReturn` Left (ProviderError WebSocketConnectionLimitReached
+                "too many websocket connections" Nothing)
         run (ProviderError UsageLimitReached "quota" (Just 3600))
             `shouldReturn` Left (ProviderError UsageLimitReached "quota" (Just 3600))
-        readIORef attempts `shouldReturn` 2
+        readIORef attempts `shouldReturn` 3
 
 contextManagement :: CodexWsOptions -> Maybe Aeson.Value
 contextManagement options =

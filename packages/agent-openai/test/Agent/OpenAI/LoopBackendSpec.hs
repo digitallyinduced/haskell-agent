@@ -472,6 +472,27 @@ spec = do
             readIORef healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 
+        it "reconnects immediately after a websocket connection-limit error" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            let sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure $ Left $ ProviderError WebSocketConnectionLimitReached
+                        "too many websocket connections" Nothing
+                sendFresh _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef healthy `shouldReturn` False
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 1
+
         it "reacquires a credential after an in-band usage-limit error" do
             freshCalls <- newIORef (0 :: Int)
             healthy <- newIORef True
@@ -533,14 +554,21 @@ spec = do
             readIORef fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
-        it "falls back after a websocket connection-limit activity update" do
+        it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
             events <- newIORef []
-            let primary = Backend \_previous _inputs onEvent -> do
-                    onEvent (ActivityUpdated "Codex connection limit reached")
+            primaryTranscript <- newIORef []
+            let sendPrimary _request _previous _onEvent = do
+                    modifyIORef' primaryCalls (+ 1)
                     pure (Left (ProviderError WebSocketConnectionLimitReached
                         "too many websocket connections" Nothing))
+                primary = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    sendPrimary
+                    (pure baseParams)
+                    primaryTranscript
                 fallback = Backend \_previous _inputs _onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
                     pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
@@ -550,8 +578,8 @@ spec = do
             result <- backend.submitTurn Nothing
                 [UserMessage "one"] (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
-            reverse <$> readIORef events `shouldReturn`
-                [ActivityUpdated "Codex connection limit reached"]
+            readIORef events `shouldReturn` []
+            readIORef primaryCalls `shouldReturn` 1
             readIORef fallbackCalls `shouldReturn` 1
 
         it "preserves non-transport provider failures" do
