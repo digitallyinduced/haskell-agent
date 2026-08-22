@@ -100,8 +100,9 @@ data ToolDispatchConfig = ToolDispatchConfig
 --
 -- Nested calls use the same approval, event, registry, and dispatch path as
 -- model-authored calls, but their results remain local to the invoking tool.
-newtype ToolRuntime = ToolRuntime
+data ToolRuntime = ToolRuntime
     { invokeNestedTool :: ToolCall -> IO ToolCallResult
+    , invokeNestedTools :: [ToolCall] -> IO [ToolCallResult]
     }
 
 data ToolHandler

@@ -351,6 +351,7 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                                 (ToolOutputUpdated progressCall.callId output)
                     , toolDispatchRuntime = Just ToolRuntime
                         { invokeNestedTool = runOne config
+                        , invokeNestedTools = runToolCalls config
                         }
                     }
                 config.loopTools

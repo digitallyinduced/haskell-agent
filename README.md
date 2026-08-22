@@ -102,6 +102,24 @@ program. Tool names and argument schemas follow the active provider's
 advertised surface. `callTool` returns the same formatted result as a direct
 call, including metadata such as shell exit-status lines.
 
+Independent nested calls can use the preimported `Concurrently` applicative:
+
+```haskell
+do
+  (readme, agents) <- runConcurrently $ (,)
+    <$> Concurrently
+      (callTool "read_file" (object ["target_file" .= ("README.md" :: Text)]))
+    <*> Concurrently
+      (callTool "read_file" (object ["target_file" .= ("AGENTS.md" :: Text)]))
+  emitText (Text.pack (show (Text.length readme + Text.length agents)))
+  pure ()
+```
+
+The harness still applies each tool's execution policy: read-only tools marked
+parallel-safe overlap, while stateful tools remain serialized. Only use
+`Concurrently` for independent calls because serialized calls submitted this
+way do not have a defined execution order.
+
 The GHCi process is not OS-sandboxed. Arbitrary Haskell IO can bypass
 `callTool`, so every `run_haskell_program` call requires approval and the tool
 is unavailable while Plan Mode is active. Pass `--no-haskell-program` to omit

@@ -70,10 +70,12 @@ spec = do
 
     it "supplies the active nested-tool runtime to context-aware handlers" do
         nestedCalls <- newIORef []
-        let runtime = ToolRuntime
-                { invokeNestedTool = \call -> do
+        let invoke call = do
                     modifyIORef' nestedCalls (<> [call])
                     pure (functionResult call.callId "nested-result")
+            runtime = ToolRuntime
+                { invokeNestedTool = invoke
+                , invokeNestedTools = traverse invoke
                 }
             config = testConfig { toolDispatchRuntime = Just runtime }
         result <- dispatchToolCall config

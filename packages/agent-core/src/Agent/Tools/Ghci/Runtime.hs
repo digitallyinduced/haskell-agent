@@ -78,9 +78,9 @@ import System.Directory
     ( createDirectory
     , getTemporaryDirectory
     , listDirectory
+    , renameFile
     , removeDirectoryRecursive
     , removeFile
-    , renameFile
     )
 import System.FilePath
     ( dropExtension
@@ -238,7 +238,7 @@ evalGhciProgram
     :: GhciSession
     -> Text
     -> Int
-    -> (Text -> Value -> IO Text)
+    -> ([(Text, Value)] -> IO [Text])
     -> IO GhciResult
 evalGhciProgram session expression requestedTimeout invokeTool =
     withGhciLock session do
@@ -739,6 +739,7 @@ installRpcHelpers process rpcDir = do
     mapM_ (sendLine process)
         [ "import Prelude"
         , "import qualified Prelude as AgentGhciPreludeInternal"
+        , "import Control.Concurrent.Async (Concurrently(..), runConcurrently)"
         , "import Data.Aeson (Value, object, (.=))"
         , "import qualified Data.Aeson as AgentGhciAesonInternal"
         , "import qualified Data.ByteString.Lazy as AgentGhciLazyBytesInternal"
@@ -828,46 +829,130 @@ serveRpcRequests
     :: FilePath
     -> Text
     -> IORef Int
-    -> (Text -> Value -> IO Text)
+    -> ([(Text, Value)] -> IO [Text])
     -> IO ()
-serveRpcRequests rpcDir token inFlight invokeTool = forever do
+serveRpcRequests rpcDir token inFlight invokeTools = forever do
     entries <- sort <$> listDirectory rpcDir
-    let requests =
-            [ entry
-            | entry <- entries
-            , takeExtension entry == ".request"
-            ]
+    let requests = requestEntries entries
     if null requests
         then threadDelay 10000
-        else mapM_ serve requests
+        else do
+            -- Concurrently-authored callTool actions publish their request
+            -- files close together. Wait for a short quiet period, claim the
+            -- complete batch, then route it through the loop's normal
+            -- execution-policy scheduler.
+            batch <- collectBatch requests
+            claimed <- claimBatch batch
+            serveBatch claimed
   where
     tokenPrefix = token <> "-"
 
-    serve entry =
-        serveOne entry `catchAny` \exception ->
-            writeResponse entry
-                ("Nested tool bridge failed: " <> Text.pack (show exception))
+    requestEntries entries =
+        [ entry
+        | entry <- entries
+        , takeExtension entry == ".request"
+        ]
 
-    serveOne entry = do
-        let requestPath = rpcDir </> entry
-        bytes <- LBS.readFile requestPath
-        removeFile requestPath
-        output <-
-            if tokenPrefix `Text.isPrefixOf` Text.pack entry
-                then case Aeson.eitherDecode bytes :: Either String RpcRequest of
-                    Left err ->
-                        pure ("Invalid nested tool request: " <> Text.pack err)
-                    Right (RpcRequest name arguments) -> do
-                        atomicModifyIORef' inFlight \count ->
-                            (count + 1, ())
-                        invokeTool name arguments
-                            `finally` atomicModifyIORef' inFlight \count ->
-                                (max 0 (count - 1), ())
-                else pure
-                    "Error: this callTool capability belongs to an earlier \
-                    \run_haskell_program invocation"
-        writeResponse entry output
+    collectBatch initial = go initial (0 :: Int) (0 :: Int)
+      where
+        pollMicros = 2000
+        quietTarget = 2
+        maxPolls = 10
 
+        go previous quiet polls
+            | quiet >= quietTarget || polls >= maxPolls = pure previous
+            | otherwise = do
+                threadDelay pollMicros
+                current <- requestEntries . sort <$> listDirectory rpcDir
+                go current
+                    (if current == previous then quiet + 1 else 0)
+                    (polls + 1)
+
+    claimBatch entries =
+        fmap concat $ traverse claim entries
+      where
+        claim entry =
+            let requestPath = rpcDir </> entry
+                processingEntry = dropExtension entry <> ".processing"
+                processingPath = rpcDir </> processingEntry
+            in (renameFile requestPath processingPath
+                    >> pure [processingEntry])
+                `catchAny` \_ -> pure []
+
+    serveBatch [] = pure ()
+    serveBatch entries = do
+        let claimedCount = length entries
+        atomicModifyIORef' inFlight \count ->
+            (count + claimedCount, ())
+        (do
+            decoded <- traverse readRequest entries
+            let accepted =
+                    [ request
+                    | (_, Right request) <- decoded
+                    ]
+            outputs <-
+                if null accepted
+                    then pure []
+                    else
+                        (normalizeOutputs (length accepted)
+                            <$> invokeTools accepted)
+                            `catchAny` \exception ->
+                                pure (replicate (length accepted)
+                                    ("Nested tool bridge failed: "
+                                        <> Text.pack (show exception)))
+            writeDecoded decoded outputs)
+            `finally` atomicModifyIORef' inFlight \count ->
+                (max 0 (count - claimedCount), ())
+
+    readRequest entry =
+        ((\request -> (entry, request)) <$> readOne entry)
+            `catchAny` \exception ->
+                (removeFile (rpcDir </> entry) `catchAny` \_ -> pure ())
+                    >> pure
+                    ( entry
+                    , Left
+                        ("Nested tool bridge failed: "
+                            <> Text.pack (show exception))
+                    )
+
+    readOne entry = do
+        let processingPath = rpcDir </> entry
+        bytes <- LBS.readFile processingPath
+            `finally`
+                (removeFile processingPath `catchAny` \_ -> pure ())
+        if tokenPrefix `Text.isPrefixOf` Text.pack entry
+            then case Aeson.eitherDecode bytes :: Either String RpcRequest of
+                Left err ->
+                    pure (Left
+                        ("Invalid nested tool request: " <> Text.pack err))
+                Right (RpcRequest name arguments) ->
+                    pure (Right (name, arguments))
+            else pure (Left
+                "Error: this callTool capability belongs to an earlier \
+                \run_haskell_program invocation")
+
+    normalizeOutputs expected outputs
+        | length outputs == expected = outputs
+        | otherwise =
+            take expected
+                (outputs <> repeat
+                    "Nested tool bridge failed: result count mismatch")
+
+    writeDecoded
+        :: [(FilePath, Either Text (Text, Value))]
+        -> [Text]
+        -> IO ()
+    writeDecoded [] _ = pure ()
+    writeDecoded ((entry, Left output) : rest) outputs =
+        writeResponse entry output >> writeDecoded rest outputs
+    writeDecoded ((entry, Right _) : rest) (output : outputs) =
+        writeResponse entry output >> writeDecoded rest outputs
+    writeDecoded ((entry, Right _) : rest) [] =
+        writeResponse entry
+            "Nested tool bridge failed: missing result"
+            >> writeDecoded rest []
+
+    writeResponse :: FilePath -> Text -> IO ()
     writeResponse entry output = do
         let base = dropExtension entry
             responsePath = rpcDir </> (base <> ".response")
@@ -905,7 +990,7 @@ finishProgramRequests rpcDir inFlight started timeoutMs result
                 "Timed out waiting for nested tool calls to finish."
 
 waitForRpcDrain :: FilePath -> IORef Int -> Int -> IO Bool
-waitForRpcDrain rpcDir inFlight = go 0
+waitForRpcDrain rpcDir inFlight = go (0 :: Int)
   where
     go quiet remaining
         | remaining <= 0 = drainedNow
@@ -925,7 +1010,7 @@ waitForRpcDrain rpcDir inFlight = go 0
                 [ entry
                 | entry <- entries
                 , takeExtension entry `elem`
-                    [".request", ".tmp"]
+                    [".request", ".processing", ".tmp"]
                 ]
         pure (active == 0 && null bridgeFiles)
 

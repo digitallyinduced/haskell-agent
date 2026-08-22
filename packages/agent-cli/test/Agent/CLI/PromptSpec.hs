@@ -71,6 +71,8 @@ spec = describe "systemPrompt" do
         grok `shouldSatisfy` Text.isInfixOf "run_haskell_program"
         openai `shouldSatisfy` Text.isInfixOf "run_haskell_program"
         openai `shouldSatisfy` Text.isInfixOf "selected output returns to the model"
+        openai `shouldSatisfy` Text.isInfixOf "runConcurrently"
+        openai `shouldSatisfy` Text.isInfixOf "parallel-safe"
         openai `shouldSatisfy` Text.isInfixOf "not OS-sandboxed"
         grok `shouldSatisfy` Text.isInfixOf "OverloadedStrings"
         openai `shouldSatisfy` Text.isInfixOf "LambdaCase"

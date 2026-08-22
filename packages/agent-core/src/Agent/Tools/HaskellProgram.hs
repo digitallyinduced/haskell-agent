@@ -88,7 +88,9 @@ haskellProgramDescription =
     "Run a Haskell program in a fresh dedicated GHCi process.\n\
     \Use this to orchestrate multiple tool calls, filter large results, and return only a compact answer.\n\
     \Inside the program, call `callTool \"tool_name\" (object [\"key\" .= value]) :: IO Text`.\n\
-    \`Text`, qualified `Text`, qualified `T`, `Value`, `object`, and `(.=)` are already imported.\n\
+    \For independent calls, `Concurrently(..)` and `runConcurrently` are preimported; combine `Concurrently (callTool ...)` actions applicatively to fan out.\n\
+    \Only tools registered as parallel-safe overlap. Stateful tools remain serialized, and concurrently submitted stateful calls have no defined order.\n\
+    \`Text`, qualified `Text`, qualified `T`, `Value`, `object`, and `(.=)` are also imported.\n\
     \Use only tools and argument schemas advertised for the current provider. callTool returns the same formatted Text a direct tool call would return, including status metadata such as shell exit lines.\n\
     \Nested calls use the normal harness approvals and tool dispatch. Their results stay inside GHCi unless you pass selected text to `emitText`.\n\
     \Each outer invocation has isolated Haskell bindings and must be a complete program.\n\
@@ -120,7 +122,7 @@ runHaskellProgram session planMode runtime outerCall args
                     session
                     (discardProgramResult args.source)
                     (normalizeTimeout (fromMaybe 30000 args.timeout))
-                    (invokeProgramTool runtime outerCall)
+                    (invokeProgramTools runtime outerCall)
                 pure (Right (formatProgramResult result))
 
 -- GHCi prints the value returned by a top-level @IO a@ action. Discard that
@@ -135,33 +137,57 @@ discardProgramResult source =
             ]
         <> ") >> pure ()"
 
-invokeProgramTool
+invokeProgramTools
     :: ToolRuntime
     -> ToolCall
-    -> Text
-    -> Value
-    -> IO Text
-invokeProgramTool runtime outerCall requestedName arguments
-    | Text.null toolName = pure "Error: nested tool name must not be empty"
-    | toolName `elem` blockedTools =
-        pure ("Error: " <> toolName <> " cannot be called from Haskell code mode")
-    | otherwise = do
-        unique <- newUnique
-        let callId =
-                outerCall.callId
-                    <> "/haskell/"
-                    <> Text.pack (show (hashUnique unique))
-            nestedCall =
-                functionToolCall callId toolName (encodeArguments arguments)
-        (.output) <$> runtime.invokeNestedTool nestedCall
+    -> [(Text, Value)]
+    -> IO [Text]
+invokeProgramTools runtime outerCall requests = do
+    prepared <- traverse prepare requests
+    let calls = [call | Right call <- prepared]
+    results <-
+        if null calls
+            then pure []
+            else runtime.invokeNestedTools calls
+    pure (restore prepared results)
   where
-    toolName = canonicalToolName requestedName
     blockedTools =
         [ haskellProgramToolName
         , "run_ghci"
         , "enter_plan_mode"
         , "exit_plan_mode"
         ]
+    prepare (requestedName, arguments)
+        | Text.null toolName =
+            pure (Left "Error: nested tool name must not be empty")
+        | toolName `elem` blockedTools =
+            pure (Left
+                ("Error: " <> toolName
+                    <> " cannot be called from Haskell code mode"))
+        | otherwise = do
+            unique <- newUnique
+            let callId =
+                    outerCall.callId
+                        <> "/haskell/"
+                        <> Text.pack (show (hashUnique unique))
+            pure (Right
+                (functionToolCall callId toolName
+                    (encodeArguments arguments)))
+      where
+        toolName = canonicalToolName requestedName
+
+    restore
+        :: [Either Text ToolCall]
+        -> [ToolCallResult]
+        -> [Text]
+    restore [] [] = []
+    restore (Left output : rest) results =
+        output : restore rest results
+    restore (Right _ : rest) (result : results) =
+        result.output : restore rest results
+    restore (Right _ : rest) [] =
+        "Nested tool bridge failed: missing result" : restore rest []
+    restore [] _ = []
 
 encodeArguments :: Value -> Text
 encodeArguments =

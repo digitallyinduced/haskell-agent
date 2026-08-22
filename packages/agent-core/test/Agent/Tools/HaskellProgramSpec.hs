@@ -38,13 +38,22 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( ApprovalRule(..)
     , ToolEnv(..)
+    , ToolExecutionPolicy(..)
     , defaultToolEnv
     , dispatchRegisteredToolCall
     , jsonAppTool
+    , jsonAppToolWithExecution
     , mkToolRegistry
     )
 import Agent.Cancel (newCancelFlag)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    )
 import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
 import Data.IORef
@@ -56,6 +65,7 @@ import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -64,9 +74,9 @@ spec = describe "Agent.Tools.HaskellProgram" do
         withTempProgramGhci \(ghci, _planMode) -> do
             requests <- newIORef []
             result <- evalGhciProgram ghci programSource 10000
-                \name arguments -> do
+                (batchTool \name arguments -> do
                     modifyIORef' requests (<> [(name, arguments)])
-                    pure "TOP_SECRET_INTERMEDIATE_RESULT"
+                    pure "TOP_SECRET_INTERMEDIATE_RESULT")
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "selected output"
             result.ghciOutput
@@ -76,14 +86,12 @@ spec = describe "Agent.Tools.HaskellProgram" do
 
     it "does not expose the result of a final callTool expression" do
         withTempProgramGhci \(ghci, planMode) -> do
-            let runtime = ToolRuntime
-                    { invokeNestedTool = \call ->
+            let runtime = singleToolRuntime \call ->
                         pure ToolCallResult
                             { callId = call.callId
                             , output = "TOP_SECRET_INTERMEDIATE_RESULT"
                             , callKind = call.callKind
                             }
-                    }
                 dispatchConfig = defaultLoopDispatch
                     { toolDispatchRuntime = Just runtime
                     }
@@ -133,16 +141,32 @@ spec = describe "Agent.Tools.HaskellProgram" do
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "OK"
 
+    it "batches applicative Concurrently callTool actions and preserves results" do
+        withTempProgramGhci \(ghci, _planMode) -> do
+            batchSizes <- newIORef []
+            result <- evalGhciProgram ghci concurrentProgramSource 10000
+                \requests -> do
+                    modifyIORef' batchSizes (<> [length requests])
+                    pure
+                        [ "result-" <> name
+                        | (name, _arguments) <- requests
+                        ]
+            result.ghciOk `shouldBe` True
+            result.ghciOutput
+                `shouldSatisfy` Text.isInfixOf
+                    "result-safe-a|result-safe-b"
+            readIORef batchSizes `shouldReturn` [2]
+
     it "waits for an in-flight nested call before reporting success" do
         withTempProgramGhci \(ghci, _planMode) -> do
             started <- newIORef False
             finished <- newIORef False
             result <- evalGhciProgram ghci backgroundProgram 10000
-                \_name _arguments -> do
+                (batchTool \_name _arguments -> do
                     writeIORef started True
                     threadDelay 200000
                     writeIORef finished True
-                    pure "done"
+                    pure "done")
             result.ghciOk `shouldBe` True
             readIORef started `shouldReturn` True
             readIORef finished `shouldReturn` True
@@ -151,9 +175,9 @@ spec = describe "Agent.Tools.HaskellProgram" do
         withTempProgramGhci \(ghci, _planMode) -> do
             invoked <- newIORef False
             result <- evalGhciProgram ghci delayedBackgroundProgram 10000
-                \_name _arguments -> do
+                (batchTool \_name _arguments -> do
                     writeIORef invoked True
-                    pure "unexpected"
+                    pure "unexpected")
             result.ghciOk `shouldBe` True
             threadDelay 400000
             readIORef invoked `shouldReturn` False
@@ -169,9 +193,9 @@ spec = describe "Agent.Tools.HaskellProgram" do
             result <- evalGhciProgram ghci
                 "callTool \"echo\" (object []) >>= emitText"
                 10000
-                \_name _arguments -> do
+                (batchTool \_name _arguments -> do
                     writeIORef invoked True
-                    pure "REAL"
+                    pure "REAL")
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "REAL"
             result.ghciOutput `shouldNotSatisfy` Text.isInfixOf "FORGED"
@@ -244,17 +268,78 @@ spec = describe "Agent.Tools.HaskellProgram" do
                     expectationFailure
                         ("unexpected loop submissions: " <> show other)
 
+    it "runs nested parallel-safe tools concurrently through the active loop" do
+        withTempProgramGhci \(ghci, planMode) -> do
+            firstStarted <- newEmptyMVar
+            secondStarted <- newEmptyMVar
+            release <- newEmptyMVar
+            submissions <- newIORef []
+            turns <- newIORef (0 :: Int)
+            let blocked started output = do
+                    putMVar started ()
+                    readMVar release
+                    pure (Right output)
+                outerCall = functionToolCall
+                    "outer-call"
+                    haskellProgramToolName
+                    (encodeJson (Aeson.object
+                        [ "source" Aeson..= concurrentProgramSource
+                        , "description" Aeson..=
+                            ("fan out independent reads" :: Text)
+                        ]))
+                backend = Backend \previous inputs _onEvent -> do
+                    modifyIORef' submissions (<> [(previous, inputs)])
+                    turn <- atomicModifyIORef' turns \n -> (n + 1, n)
+                    pure $ Right $ case turn of
+                        0 -> emptyTurnOutput "response-1" [outerCall] Nothing
+                        _ -> emptyTurnOutput "response-2" [] (Just "done")
+                parallelTool name started output =
+                    jsonAppToolWithExecution
+                        name
+                        ""
+                        []
+                        AlwaysReadOnly
+                        ParallelSafe
+                        (noArgsTool name (blocked started output))
+                tools =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry
+                            [ haskellProgramTool ghci planMode
+                            , parallelTool "safe-a" firstStarted "A"
+                            , parallelTool "safe-b" secondStarted "B"
+                            ]
+            cancel <- newCancelFlag
+            let config = LoopConfig
+                    { loopBackend = backend
+                    , loopTools = tools
+                    , loopDispatch = defaultLoopDispatch
+                    , loopMaxTurns = 3
+                    , loopOnEvent = \_ -> pure ()
+                    , loopApprove = \_ -> pure (Right True)
+                    , loopCancel = cancel
+                    }
+            withAsync (runLoop config Nothing "go") \running -> do
+                bothStarted <- timeout 10000000 do
+                    takeMVar firstStarted
+                    takeMVar secondStarted
+                bothStarted `shouldBe` Just ()
+                putMVar release ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "response-2"
+                    , finalText = Just "done"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+
     it "refuses unrestricted Haskell execution while Plan Mode is active" do
         withTempProgramGhci \(ghci, planMode) -> do
             activatePlanMode planMode
-            let runtime = ToolRuntime
-                    { invokeNestedTool = \call ->
-                        pure ToolCallResult
-                            { callId = call.callId
-                            , output = "unexpected"
-                            , callKind = call.callKind
-                            }
-                    }
+            let runtime = singleToolRuntime \call ->
+                    pure ToolCallResult
+                        { callId = call.callId
+                        , output = "unexpected"
+                        , callKind = call.callKind
+                        }
                 dispatchConfig = defaultLoopDispatch
                     { toolDispatchRuntime = Just runtime
                     }
@@ -277,15 +362,13 @@ spec = describe "Agent.Tools.HaskellProgram" do
     it "does not allow a running program to transition into Plan Mode" do
         withTempProgramGhci \(ghci, planMode) -> do
             invoked <- newIORef False
-            let runtime = ToolRuntime
-                    { invokeNestedTool = \call -> do
-                        writeIORef invoked True
-                        pure ToolCallResult
-                            { callId = call.callId
-                            , output = "unexpected"
-                            , callKind = call.callKind
-                            }
-                    }
+            let runtime = singleToolRuntime \call -> do
+                    writeIORef invoked True
+                    pure ToolCallResult
+                        { callId = call.callId
+                        , output = "unexpected"
+                        , callKind = call.callKind
+                        }
                 dispatchConfig = defaultLoopDispatch
                     { toolDispatchRuntime = Just runtime
                     }
@@ -320,6 +403,16 @@ programSource = Text.unlines
     , "  pure ()"
     ]
 
+concurrentProgramSource :: Text
+concurrentProgramSource = Text.unlines
+    [ "do"
+    , "  (a, b) <- runConcurrently $ (,)"
+    , "    <$> Concurrently (callTool \"safe-a\" (object []))"
+    , "    <*> Concurrently (callTool \"safe-b\" (object []))"
+    , "  emitText (a <> \"|\" <> b)"
+    , "  pure ()"
+    ]
+
 delayedBackgroundProgram :: Text
 delayedBackgroundProgram = Text.unlines
     [ "do"
@@ -341,9 +434,23 @@ backgroundProgram = Text.unlines
     , "  pure ()"
     ]
 
-unusedTool :: Text -> Aeson.Value -> IO Text
-unusedTool name _arguments =
-    pure ("unexpected nested tool call: " <> name)
+batchTool
+    :: (Text -> Aeson.Value -> IO Text)
+    -> [(Text, Aeson.Value)]
+    -> IO [Text]
+batchTool invoke =
+    traverse \(name, arguments) -> invoke name arguments
+
+unusedTool :: [(Text, Aeson.Value)] -> IO [Text]
+unusedTool =
+    batchTool \name _arguments ->
+        pure ("unexpected nested tool call: " <> name)
+
+singleToolRuntime :: (ToolCall -> IO ToolCallResult) -> ToolRuntime
+singleToolRuntime invoke = ToolRuntime
+    { invokeNestedTool = invoke
+    , invokeNestedTools = traverse invoke
+    }
 
 encodeJson :: Aeson.Value -> Text
 encodeJson =
