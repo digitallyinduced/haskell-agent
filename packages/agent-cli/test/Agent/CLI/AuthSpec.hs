@@ -65,6 +65,8 @@ spec = do
     describe "OpenAI account pools" do
         it "loads every enabled managed account into one pool" $
             withTempHome openAiManagedPoolTest
+        it "discovers an account connected after the session started" $
+            withTempHome openAiManagedPoolDiscoveryTest
         it "combines distinct managed and ~/.codex accounts" $
             withTempHome openAiManagedAndFilePoolTest
         it "deduplicates duplicate accounts with managed precedence" $
@@ -294,6 +296,33 @@ openAiManagedPoolTest _ =
         loaded <- loadAuth (Just OpenAIProvider)
         pool <- expectOpenAiPool loaded
         OpenAI.allAccountIds pool `shouldReturn` ["acc-b", "acc-a"]
+
+openAiManagedPoolDiscoveryTest :: OsPath -> IO ()
+openAiManagedPoolDiscoveryTest _ =
+    withCleanOpenAiEnv do
+        storeOpenAiAccount "managed-a" "acc-a" True "token-a"
+        storeOpenAiAccount "managed-b" "acc-b" True "token-b"
+        loaded <- loadAuth (Just OpenAIProvider)
+        pool <- expectOpenAiPool loaded
+        initialAccountIds <- OpenAI.allAccountIds pool
+        initialAccountIds `shouldMatchList` ["acc-a", "acc-b"]
+        mapM_ (\accountId -> OpenAI.reportRateLimit pool accountId (Just 60))
+            initialAccountIds
+
+        -- A non-JWT OAuth token is treated as requiring refresh. Keep this
+        -- fixture valid far into the future so the checkout tests discovery,
+        -- not the real OAuth endpoint.
+        storeOpenAiAccount "managed-c" "acc-c" True
+            "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
+
+        result <- OpenAI.getAccessToken pool
+        case result of
+            Right (_, accountId) -> accountId `shouldBe` "acc-c"
+            Left err ->
+                expectationFailure
+                    ("expected newly connected account, got " <> show err)
+        OpenAI.allAccountIds pool
+            `shouldReturn` initialAccountIds <> ["acc-c"]
 
 openAiManagedAndFilePoolTest :: OsPath -> IO ()
 openAiManagedAndFilePoolTest home =
