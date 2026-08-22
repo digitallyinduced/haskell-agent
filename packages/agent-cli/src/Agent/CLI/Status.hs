@@ -28,18 +28,21 @@ import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
--- | Idle prompt chrome: model, reasoning effort, interaction mode on the
--- left; session token totals right-aligned when the TTY width is known.
+-- | Idle prompt chrome: model, reasoning effort, interaction mode, and active
+-- account on the left; session token totals right-aligned when possible.
 formatReplStatusLine
     :: Bool
     -> Maybe Int
     -> Text
     -> Text
     -> ReplMode
+    -> Text
     -> TokenUsage
     -> Text
-formatReplStatusLine color width model effort mode usage =
-    let left = "  " <> model <> " · " <> effort <> " · " <> replModeLabel mode
+formatReplStatusLine color width model effort mode account usage =
+    let left =
+            "  " <> Text.intercalate " · " (filter (not . Text.null)
+                [model, effort, replModeLabel mode, account])
         right = formatTokenUsage usage
         padded = case width of
             Just cols | cols > 0 ->

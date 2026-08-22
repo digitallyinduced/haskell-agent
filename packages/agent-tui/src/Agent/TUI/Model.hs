@@ -122,6 +122,7 @@ data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
     , promptMode :: !Text
+    , promptAccount :: !Text
     , promptUsage :: !TokenUsage
     , promptAttachments :: !Int
     }
@@ -199,6 +200,7 @@ initialUiState = UiState
         { promptModel = ""
         , promptEffort = ""
         , promptMode = "ask"
+        , promptAccount = ""
         , promptUsage = emptyTokenUsage
         , promptAttachments = 0
         }

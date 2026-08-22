@@ -346,9 +346,13 @@ drawComposerStatus state =
                 <> [ modeControl
                    | not (Text.null mode)
                    ]
+                <> [ withAttr Theme.mutedAttr (txt account)
+                   | not (Text.null account)
+                   ]
   where
     prompt = state.appUi.uiPrompt
     mode = prompt.promptMode
+    account = prompt.promptAccount
     modelControl =
         clickable ComposerModel $
             forceAttr

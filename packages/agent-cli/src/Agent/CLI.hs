@@ -16,7 +16,11 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
-import Agent.CLI.Auth (LoadedAuth(..), loadAuth, probeLoadedAuth)
+import Agent.CLI.Auth
+    ( LoadedAuth(..)
+    , loadAuth
+    , probeLoadedAuth
+    )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentStep
@@ -302,7 +306,7 @@ import Agent.Provider
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider
+    , TokenProvider(..)
     , getNextToken
     , providerSlug
     )
@@ -879,6 +883,12 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         _ -> pure ()
+    activeAccountRef <- newIORef ""
+    let tokenProvider =
+            trackCredentialAccount
+                activeAccountRef
+                loaded.loadedAccountLabel
+                loaded.loadedTokenProvider
 
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
@@ -1081,7 +1091,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
-                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn credential -> do
+                            (withCodexWsWithProvider tokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
                                 wsHealthy <- newIORef True
                                 case multiCtx of
@@ -1096,7 +1106,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         lockedOpenAiSession
                                             options.optCompactThreshold
                                             wsLock
-                                            loaded.loadedTokenProvider
+                                            tokenProvider
                                             credential
                                             wsHealthy
                                             conn
@@ -1109,7 +1119,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
-                                            loaded.loadedTokenProvider
+                                            tokenProvider
                                             (readIORef privateParams)
                                             privateTranscript
                                     compactRunner focus =
@@ -1122,7 +1132,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                     (Just compactSender)
                                                     recordCompactionUsage
                                                     provider
-                                                    (Just loaded.loadedTokenProvider)
+                                                    (Just tokenProvider)
                                                     paramsRef
                                                     transcriptRef)
                                                 focus
@@ -1130,8 +1140,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     prepareTransitionBackend
                                         projectRoot transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                                    previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend)
+                                    previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1153,16 +1163,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         subagentRuntime
                                         XAIProvider
                                         (\childParamsRef childTranscript ->
-                                            xaiBackend xaiOptions loaded.loadedTokenProvider
+                                            xaiBackend xaiOptions
+                                                loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        xaiBackend xaiOptions loaded.loadedTokenProvider
+                                        xaiBackend xaiOptions tokenProvider
                                             (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
-                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                xaiBackend xaiOptions tokenProvider
                                     (readIORef privateParams) privateTranscript
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
@@ -1170,15 +1181,15 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Nothing
                                         recordCompactionUsage
                                         provider
-                                        (Just loaded.loadedTokenProvider)
+                                        (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1188,16 +1199,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         subagentRuntime
                                         OpenRouterProvider
                                         (\childParamsRef childTranscript ->
-                                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                            openRouterBackend openRouterOptions
+                                                loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                        openRouterBackend openRouterOptions tokenProvider
                                             (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
-                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                openRouterBackend openRouterOptions tokenProvider
                                     (readIORef privateParams) privateTranscript
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
@@ -1205,15 +1217,28 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Nothing
                                         recordCompactionUsage
                                         provider
-                                        (Just loaded.loadedTokenProvider)
+                                        (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
+
+trackCredentialAccount
+    :: IORef Text
+    -> (Credential -> IO Text)
+    -> TokenProvider
+    -> TokenProvider
+trackCredentialAccount accountRef resolveLabel provider =
+    TokenProvider \failed ->
+        getNextToken provider failed >>= \case
+            Left err -> pure (Left err)
+            Right credential -> do
+                resolveLabel credential >>= writeIORef accountRef
+                pure (Right credential)
 
 preparePersistence
     :: Maybe FullscreenRuntime
@@ -1349,12 +1374,13 @@ runSession
     -> IORef [TurnInput]
     -> SubagentStoreRoot
     -> IORef TokenUsage
+    -> IORef Text
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -1660,6 +1686,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionRestartEffort = restartEffortRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
+            , sessionAccount = accountRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
@@ -1917,6 +1944,7 @@ replWithDraft env@SessionEnv
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionAccount = accountRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
@@ -1938,6 +1966,7 @@ replWithDraft env@SessionEnv
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
+    account <- readIORef accountRef
     mline <- case fullscreen of
         Just runtime -> do
             setFullscreenImagePreviews runtime pendingAttachments
@@ -1946,6 +1975,7 @@ replWithDraft env@SessionEnv
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
                     , promptMode = replModeLabel idleMode
+                    , promptAccount = account
                     , promptUsage = usage
                     , promptAttachments = length pendingAttachments
                     }
@@ -1975,6 +2005,7 @@ replWithDraft env@SessionEnv
                     (currentModel params)
                     (currentEffort params)
                     idleMode
+                    account
                     usage
                 hFlush stdout
             let modeTag
