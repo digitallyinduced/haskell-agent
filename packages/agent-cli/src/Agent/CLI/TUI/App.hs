@@ -14,12 +14,14 @@ module Agent.CLI.TUI.App
     , requestFullscreenText
     , runFullscreen
     , fullscreenVtyConfig
+    , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     ) where
 
 import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
+    ( formatImageSize
+    , nonEmptyClipboardImages
     , readClipboardImages
     )
 import Agent.CLI.Artifact (fencedCodeBlock)
@@ -48,13 +50,18 @@ import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Terminal (shiftEnterCsiBodies)
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
+import Agent.CLI.TUI.ImagePreview
+    ( TuiImagePreview(..)
+    , prepareTuiImagePreview
+    , renderTuiImagePreview
+    )
 import Agent.TUI.Markdown
     ( markdownWidget
     , markdownWidgetWithCodeControls
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.TUI.Model
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (ImageAttachment, LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
 import Brick.BChan
@@ -97,7 +104,7 @@ import Data.IORef
     )
 import Data.List (elemIndex, find, findIndex, intersperse, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -147,6 +154,7 @@ data AppEvent
         !(TMVar (Maybe Text))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
+    | AppSetImagePreviews ![ImageAttachment]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppConversationReflow
@@ -207,6 +215,7 @@ data AppState = AppState
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
+    , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appHoveredControl :: !(Maybe Name)
@@ -289,6 +298,13 @@ emitUiEvent runtime event =
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
 setFullscreenWindowTitle runtime =
     enqueueAppEvent runtime . AppSetWindowTitle
+
+setFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+setFullscreenImagePreviews runtime =
+    enqueueAppEvent runtime . AppSetImagePreviews
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -432,6 +448,7 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
             , appHoveredControl = Nothing
@@ -966,12 +983,41 @@ drawMain state =
             [ drawHeader state.appUi
             , drawWorkspace state
             , drawNotice state.appUi
+            , drawImagePreviews state.appImagePreviews
             , drawQueuedInputs state.appUi
             , drawSlashMenu state
             , drawFollowStatus state.appUi
             , drawComposer state
             , drawFooter state
             ]
+
+drawImagePreviews :: [TuiImagePreview] -> Widget Name
+drawImagePreviews previews =
+    case takeLast 3 previews of
+        [] -> emptyWidget
+        shown ->
+            padLeftRight 2 $
+                padBottom (Pad 1) $
+                    hBox $
+                        intersperse (padLeft (Pad 2) emptyWidget)
+                            (map drawPreview shown)
+  where
+    drawPreview preview =
+        vBox
+            [ renderTuiImagePreview preview
+            , withAttr Theme.mutedAttr $
+                txt $
+                    "🖼 "
+                        <> preview.previewMime
+                        <> " · "
+                        <> Text.pack (show preview.previewSourceWidth)
+                        <> "×"
+                        <> Text.pack (show preview.previewSourceHeight)
+                        <> " · "
+                        <> formatImageSize preview.previewBytes
+            ]
+    takeLast count values =
+        drop (max 0 (length values - count)) values
 
 drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =
@@ -1770,6 +1816,14 @@ handleEvent event = case event of
                 { appSkillCommands = skills
                 , appSlashIndex = 0
                 , appSlashDismissed = False
+                }
+    AppEvent (AppSetImagePreviews images) ->
+        modify' \state ->
+            state
+                { appImagePreviews =
+                    mapMaybe
+                        (either (const Nothing) Just . prepareTuiImagePreview)
+                        images
                 }
     AppEvent (AppSetWindowTitle title) -> do
         state <- get

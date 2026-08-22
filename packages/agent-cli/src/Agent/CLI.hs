@@ -206,6 +206,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
@@ -329,7 +330,7 @@ import Control.Exception.Safe
     , throwIO
     , try
     )
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
@@ -1769,7 +1770,8 @@ replWithDraft env@SessionEnv
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
     mline <- case fullscreen of
-        Just runtime ->
+        Just runtime -> do
+            setFullscreenImagePreviews runtime pendingAttachments
             readFullscreenLine runtime skillCommands
                 PromptState
                     { promptModel = currentModel params
@@ -1922,6 +1924,8 @@ replWithDraft env@SessionEnv
                                 continue
                             _ -> do
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
+                                forM_ fullscreen \runtime ->
+                                    setFullscreenImagePreviews runtime []
                                 writeIORef printed False
                                 let turnInputs =
                                         if null pendingImages
@@ -1953,6 +1957,8 @@ replWithDraft env@SessionEnv
                             Right invocation -> do
                                 pendingImages <- atomicModifyIORef'
                                     attachmentsRef \imgs -> ([], imgs)
+                                forM_ fullscreen \runtime ->
+                                    setFullscreenImagePreviews runtime []
                                 let userText =
                                         if Text.null arguments
                                             then "Use the "
@@ -2094,6 +2100,8 @@ replWithDraft env@SessionEnv
                         continue
                     ReplClearAttachments -> do
                         writeIORef attachmentsRef []
+                        forM_ fullscreen \runtime ->
+                            setFullscreenImagePreviews runtime []
                         color <- resolveColor stdout
                         displayInfo "attachments cleared" $
                             Text.putStrLn
