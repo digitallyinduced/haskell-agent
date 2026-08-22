@@ -47,7 +47,7 @@ nativeProgressSignal event state = case event of
     UiSetAwaitingInput True -> Just False
     UiTick
         | state.uiRunning
-        , state.uiFrame == 0 ->
+        , state.uiFrame `mod` 10 == 0 ->
             Just True
     _ -> Nothing
 

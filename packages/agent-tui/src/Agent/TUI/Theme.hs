@@ -15,6 +15,10 @@ module Agent.TUI.Theme
     , emphasisAttr
     , headingAttr
     , inlineCodeAttr
+    , lambdaDimAttr
+    , lambdaGlowAttr
+    , lambdaSparkAttr
+    , lambdaTrailAttr
     , linkAttr
     , mutedAttr
     , selectedAttr
@@ -36,6 +40,7 @@ userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
+lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
 footerAttr = attrName "footer"
@@ -54,6 +59,10 @@ codeAttr = attrName "markdown-code"
 dimAttr = attrName "dim"
 emphasisAttr = attrName "markdown-emphasis"
 inlineCodeAttr = attrName "markdown-inline-code"
+lambdaDimAttr = attrName "lambda-dim"
+lambdaTrailAttr = attrName "lambda-trail"
+lambdaGlowAttr = attrName "lambda-glow"
+lambdaSparkAttr = attrName "lambda-spark"
 linkAttr = attrName "markdown-link"
 strongAttr = attrName "markdown-strong"
 controlLinkAttr = attrName "control-link"
@@ -123,6 +132,20 @@ solarizedDark =
         , (inlineCodeAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
             `V.withBackColor` rgb 7 54 66)
+        , (lambdaDimAttr, V.defAttr
+            `V.withForeColor` rgb 69 94 100
+            `V.withBackColor` rgb 0 43 54)
+        , (lambdaTrailAttr, V.defAttr
+            `V.withForeColor` rgb 38 139 210
+            `V.withBackColor` rgb 0 43 54)
+        , (lambdaGlowAttr, V.defAttr
+            `V.withForeColor` rgb 42 161 152
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.bold)
+        , (lambdaSparkAttr, V.defAttr
+            `V.withForeColor` rgb 211 54 130
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.bold)
         , (linkAttr, V.defAttr
             `V.withForeColor` rgb 38 139 210
             `V.withBackColor` rgb 0 43 54
@@ -165,6 +188,11 @@ monochrome =
         , (dimAttr, V.defAttr)
         , (emphasisAttr, V.defAttr `V.withStyle` V.italic)
         , (inlineCodeAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (lambdaDimAttr, V.defAttr)
+        , (lambdaTrailAttr, V.defAttr `V.withStyle` V.bold)
+        , (lambdaGlowAttr, V.defAttr `V.withStyle` V.bold)
+        , (lambdaSparkAttr, V.defAttr
+            `V.withStyle` (V.bold .|. V.reverseVideo))
         , (linkAttr, V.defAttr `V.withStyle` V.underline)
         , (strongAttr, V.defAttr `V.withStyle` V.bold)
         , (controlLinkAttr, V.defAttr `V.withStyle` V.underline)

@@ -14,6 +14,7 @@ module Agent.TUI.Model
     , errorNotice
     , infoNotice
     , initialUiState
+    , conversationIsEmpty
     , deleteToLineStart
     , deleteToLineEnd
     , deleteWordBefore
@@ -209,6 +210,16 @@ initialUiState = UiState
     , uiToolCalls = Map.empty
     }
 
+-- | Status-only blocks can appear before the first user turn, but the
+-- conversation is still empty from the user's perspective.
+conversationIsEmpty :: UiState -> Bool
+conversationIsEmpty state =
+    all isStartupStatus (toList state.uiBlocks)
+  where
+    isStartupStatus block =
+        block.blockKind == BlockSystem
+            && block.blockTitle == "System"
+
 reduceUi :: UiEvent -> UiState -> UiState
 reduceUi event state = case event of
     UiLoop loopEvent -> reduceLoop loopEvent state
@@ -358,7 +369,7 @@ reduceUi event state = case event of
                             Nothing
                         | otherwise = state.uiNotice
                 in state
-                    { uiFrame = (state.uiFrame + 1) `mod` 10
+                    { uiFrame = nextUiFrame state.uiFrame
                     , uiElapsedTenths =
                         if state.uiRunning
                             then state.uiElapsedTenths + 1
@@ -377,11 +388,16 @@ uiNeedsTick :: UiState -> Bool
 uiNeedsTick state =
     state.uiRunning
         || state.uiCompletionTicks > 0
+        || conversationIsEmpty state
         || maybe False noticeNeedsTick state.uiNotice
   where
     noticeNeedsTick notice =
         notice.noticeTransient
             || notice.noticeKind == NoticeProgress
+
+nextUiFrame :: Int -> Int
+nextUiFrame frame =
+    (frame + 1) `mod` 120
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
