@@ -29,6 +29,7 @@ import Data.Char
     , isSpace
     )
 import qualified Data.List as List
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -244,20 +245,28 @@ isThematicBreak line =
 
 takeTable :: [Text] -> Maybe (Widget n, [Text])
 takeTable (rawHeader : separator : rest)
-    | isTableRow rawHeader
-    , isSeparatorRow separator =
+    | Just headerCells <- splitTableRow rawHeader
+    , Just separatorCells <- splitTableRow separator
+    , length separatorCells == length headerCells
+    , all isSeparatorCell separatorCells =
         let
             (body, after) = span isTableRow rest
-            rows = map splitRow (rawHeader : body)
+            rows = headerCells : mapMaybe splitTableRow body
         in Just (tableWidget rows, after)
 takeTable _ = Nothing
+
+isSeparatorCell :: Text -> Bool
+isSeparatorCell cell =
+    Text.any (== '-') cell
+        && Text.null
+            (Text.filter (`notElem` ['-', ':', ' ']) cell)
 
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
 -- columns share the remaining space and wrap inside it.
 tableWidget :: [[Text]] -> Widget n
 tableWidget [] = emptyWidget
-tableWidget rows =
+tableWidget rows@(headerCells : _) =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         borderAttr <- B.lookupAttrName Theme.mutedAttr
@@ -276,16 +285,22 @@ tableWidget rows =
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
         let availableWidth = max 1 context.availWidth
+            gridMinimumWidth =
+                columnCount + 1 + sum minimumWidths
+            paddedGridMinimumWidth =
+                gridMinimumWidth + 2 * columnCount
+            gridFits = availableWidth >= gridMinimumWidth
             horizontalPadding =
-                if availableWidth >= 4 * columnCount + 1
+                if availableWidth >= paddedGridMinimumWidth
                     then 1
                     else 0
             chromeWidth =
                 columnCount + 1
                     + 2 * horizontalPadding * columnCount
-            contentBudget =
-                max columnCount (availableWidth - chromeWidth)
-            widths = fitColumnWidths contentBudget naturalWidths
+            contentBudget = max 0 (availableWidth - chromeWidth)
+            widths =
+                fitColumnWidths
+                    contentBudget minimumWidths naturalWidths
             top = tableRule borderAttr horizontalPadding '┌' '┬' '┐' widths
             divider =
                 tableRule borderAttr horizontalPadding '├' '┼' '┤' widths
@@ -303,14 +318,17 @@ tableWidget rows =
                                     borderAttr bodyAttr horizontalPadding widths)
                                 body
             image =
-                V.vertCat (top : renderedRows <> [bottom])
+                if gridFits
+                    then V.vertCat (top : renderedRows <> [bottom])
+                    else compactTableImage
+                        availableWidth borderAttr styledRows
             boundedImage
                 | V.imageWidth image > availableWidth =
                     V.cropRight availableWidth image
                 | otherwise = image
         pure B.emptyResult { B.image = boundedImage }
   where
-    columnCount = maximum (0 : map length rows)
+    columnCount = length headerCells
     normalizedRows =
         [ take columnCount (cells <> repeat "")
         | cells <- rows
@@ -324,6 +342,15 @@ tableWidget rows =
                   ])
         | columnIndex <- [0 .. columnCount - 1]
         ]
+    minimumWidths =
+        [ maximum
+            (1
+                : [ cellMinimumWidth cell
+                  | row <- normalizedRows
+                  , cell <- take 1 (drop columnIndex row)
+                  ])
+        | columnIndex <- [0 .. columnCount - 1]
+        ]
 
 cellDisplayWidth :: Text -> Int
 cellDisplayWidth =
@@ -331,18 +358,30 @@ cellDisplayWidth =
         . inlinePlainText
         . parseInline
 
+cellMinimumWidth :: Text -> Int
+cellMinimumWidth =
+    maximum
+        . (1 :)
+        . map terminalCharWidth
+        . Text.unpack
+        . inlinePlainText
+        . parseInline
+
 -- | Fairly distribute a fixed content budget. Each column starts at one cell;
 -- columns that reach their natural width drop out while the longer columns
 -- continue growing.
-fitColumnWidths :: Int -> [Int] -> [Int]
-fitColumnWidths budget naturalWidths
-    | null naturalWidths = []
+fitColumnWidths :: Int -> [Int] -> [Int] -> [Int]
+fitColumnWidths budget minimumWidths naturalWidths
+    | null preferred = []
     | sum preferred <= budget = preferred
     | otherwise =
-        grow (replicate (length preferred) 1)
-            (max 0 (budget - length preferred))
+        grow minimum (max 0 (budget - sum minimum))
   where
-    preferred = map (max 1) naturalWidths
+    minimum = map (max 1) minimumWidths
+    preferred =
+        zipWith max
+            (minimum <> repeat 1)
+            (map (max 1) naturalWidths)
 
     grow widths remaining
         | remaining <= 0 = widths
@@ -359,6 +398,29 @@ fitColumnWidths budget naturalWidths
             (remaining - 1, current + 1)
         | otherwise =
             (remaining, current)
+
+compactTableImage
+    :: Int
+    -> V.Attr
+    -> [[[(V.Attr, Text)]]]
+    -> V.Image
+compactTableImage width borderAttr rows =
+    V.vertCat $
+        concat
+            [ map renderStyledLine $
+                wrapStyledWords width $
+                    List.intercalate
+                        [(borderAttr, " │ ")]
+                        cells
+            | cells <- rows
+            ]
+
+renderStyledLine :: [(V.Attr, Text)] -> V.Image
+renderStyledLine fragments =
+    V.horizCat
+        [ V.text attr (LazyText.fromStrict text)
+        | (attr, text) <- fragments
+        ]
 
 tableRule
     :: V.Attr
@@ -423,7 +485,7 @@ renderTableCell paddingAttr horizontalPadding width fragments =
     V.horizCat
         [ blank horizontalPadding
         , content
-        , blank (max 0 (width - V.imageWidth content))
+        , blank (max 0 (width - fragmentsDisplayWidth fragments))
         , blank horizontalPadding
         ]
   where
@@ -436,27 +498,101 @@ renderTableCell paddingAttr horizontalPadding width fragments =
         | count <= 0 = V.emptyImage
         | otherwise = V.charFill paddingAttr ' ' count 1
 
+fragmentsDisplayWidth :: [(V.Attr, Text)] -> Int
+fragmentsDisplayWidth =
+    sum
+        . map
+            (Text.foldl'
+                (\width character -> width + terminalCharWidth character)
+                0
+                . snd)
+
 isTableRow :: Text -> Bool
-isTableRow line =
-    let stripped = Text.strip line
-    in Text.isPrefixOf "|" stripped && Text.count "|" stripped >= 2
+isTableRow = isJust . splitTableRow
 
-isSeparatorRow :: Text -> Bool
-isSeparatorRow line =
-    isTableRow line && all isSeparatorCell (splitRow line)
+-- | Split a pipe row on actual column delimiters. Escaped pipes and pipes
+-- inside matching backtick spans remain part of their cell.
+splitTableRow :: Text -> Maybe [Text]
+splitTableRow raw =
+    let stripped = Text.strip raw
+        content = fromMaybe stripped (Text.stripPrefix "|" stripped)
+        (cells, delimiterCount) = scan Nothing [] [] 0 False
+            (Text.unpack content)
+    in if delimiterCount >= 1
+        then Just cells
+        else Nothing
   where
-    isSeparatorCell cell =
-        Text.any (== '-') cell
-            && Text.null
-                (Text.filter (`notElem` ['-', ':', ' ']) cell)
+    scan
+        :: Maybe Int
+        -> String
+        -> [Text]
+        -> Int
+        -> Bool
+        -> String
+        -> ([Text], Int)
+    scan _ current cells delimiterCount trailingDelimiter [] =
+        let allCells =
+                reverse
+                    (finishCell current : cells)
+            withoutOuterBorder
+                | trailingDelimiter = dropLast allCells
+                | otherwise = allCells
+        in (withoutOuterBorder, delimiterCount)
+    scan codeRun current cells delimiterCount _ ('\\' : rest) =
+        let (slashes, afterSlashes) = span (== '\\') rest
+            slashCount = 1 + length slashes
+            literalSlashes = replicate
+                (if startsWithPipe afterSlashes
+                    then slashCount `div` 2
+                    else slashCount)
+                '\\'
+            current' = literalSlashes <> current
+        in case afterSlashes of
+            '|' : afterPipe
+                | odd slashCount ->
+                    scan codeRun ('|' : current') cells
+                        delimiterCount False afterPipe
+                | codeRun == Nothing ->
+                    splitCell codeRun current' cells
+                        delimiterCount afterPipe
+            _ ->
+                scan codeRun current' cells
+                    delimiterCount False afterSlashes
+    scan codeRun current cells delimiterCount _ ('`' : rest) =
+        let (ticks, afterTicks) = span (== '`') rest
+            tickCount = 1 + length ticks
+            marker = replicate tickCount '`'
+            nextCodeRun = case codeRun of
+                Just openCount
+                    | tickCount >= openCount -> Nothing
+                Just openCount -> Just openCount
+                Nothing
+                    | hasClosingRun tickCount afterTicks ->
+                        Just tickCount
+                Nothing -> Nothing
+        in scan nextCodeRun (marker <> current) cells
+            delimiterCount False afterTicks
+    scan Nothing current cells delimiterCount _ ('|' : rest) =
+        splitCell Nothing current cells delimiterCount rest
+    scan codeRun current cells delimiterCount _ (character : rest) =
+        scan codeRun (character : current) cells
+            delimiterCount False rest
 
-splitRow :: Text -> [Text]
-splitRow =
-    map Text.strip
-        . Text.splitOn "|"
-        . Text.dropWhileEnd (== '|')
-        . Text.dropWhile (== '|')
-        . Text.strip
+    splitCell codeRun current cells delimiterCount rest =
+        scan codeRun [] (finishCell current : cells)
+            (delimiterCount + 1) True rest
+
+    finishCell = Text.strip . Text.pack . reverse
+
+    startsWithPipe ('|' : _) = True
+    startsWithPipe _ = False
+
+    hasClosingRun count =
+        Text.isInfixOf (Text.replicate count "`") . Text.pack
+
+    dropLast values = case reverse values of
+        _ : rest -> reverse rest
+        [] -> []
 
 asumPrefix :: [Text] -> Text -> Maybe Text
 asumPrefix prefixes text = case prefixes of
