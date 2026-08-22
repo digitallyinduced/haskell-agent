@@ -1,5 +1,6 @@
 { mkDerivation, aeson, agent-core, base, base64-bytestring
-, bytestring, containers, hspec, lib, scientific, text, vector
+, bytestring, containers, hspec, http-client, http-client-tls
+, http-conduit, lib, safe-exceptions, scientific, text, vector
 }:
 mkDerivation {
   pname = "agent-responses";
@@ -7,7 +8,8 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson agent-core base base64-bytestring bytestring containers
-    scientific text vector
+    http-client http-client-tls http-conduit safe-exceptions scientific
+    text vector
   ];
   testHaskellDepends = [ aeson agent-core base bytestring hspec text ];
   description = "Provider-neutral OpenAI Responses protocol types and adapters";
