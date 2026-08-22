@@ -1,7 +1,9 @@
 -- | Parent and child tool-approval policy for interactive CLI sessions.
 module Agent.CLI.Approval
-    ( approveToolDecision
+    ( ApprovalNotice(..)
+    , approveToolDecision
     , approveToolDecisionWith
+    , approveToolDecisionWithReporter
     , childApprove
     , toggleAlwaysApprove
     ) where
@@ -49,6 +51,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (stderr)
 
+data ApprovalNotice
+    = ApprovalWarning !Text
+    | ApprovalSuccess !Text
+    deriving (Eq, Show)
+
 approveToolDecision
     :: IORef ApprovalPolicy
     -> IORef (Set Text)
@@ -75,15 +82,32 @@ approveToolDecisionWith
     -> PlanModeEnv
     -> ToolCall
     -> IO (Either Text Bool)
-approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMode call = do
+approveToolDecisionWith requestPermission =
+    approveToolDecisionWithReporter requestPermission \case
+        ApprovalWarning message -> do
+            color <- resolveColor stderr
+            putTextLn stderr (roleWarn color message)
+        ApprovalSuccess message -> do
+            color <- resolveColor stderr
+            putTextLn stderr (roleSuccess color message)
+
+approveToolDecisionWithReporter
+    :: (ToolCall -> IO (Maybe PermissionChoice))
+    -> (ApprovalNotice -> IO ())
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWithReporter requestPermission report policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
     case shellCommandBlocked call.name call.arguments of
         Just msg -> do
-            color <- resolveColor stderr
-            putTextLn stderr (roleWarn color (glyphWarn <> msg))
+            report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
         Nothing -> do
             -- Plan mode: reject mutating file edits except plan.md (even under yolo).
@@ -92,8 +116,7 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
             if planModeBlocksCall planActive planPath call
                 then do
                     let msg = planModeBlockedEditMessage planPath
-                    color <- resolveColor stderr
-                    putTextLn stderr (roleWarn color msg)
+                    report (ApprovalWarning msg)
                     pure (Left msg)
                 else do
                     readOnly <- case lookupRegisteredTool call.name tools of
@@ -112,7 +135,6 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
                                     PromptMutating
                                         | readOnly -> pure (Right True)
                                         | otherwise -> do
-                                            color <- resolveColor stderr
                                             requestPermission call >>= \case
                                                 Nothing -> pure (Right False)
                                                 Just PermissionAllowOnce ->
@@ -120,12 +142,12 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
                                                 Just PermissionAllowTool -> do
                                                     modifyIORef' allowedToolsRef
                                                         (Set.insert call.name)
-                                                    putTextLn stderr
-                                                        (roleSuccess color
+                                                    report $
+                                                        ApprovalSuccess
                                                             (glyphOk
                                                                 <> "always allow "
                                                                 <> call.name
-                                                                <> " this session"))
+                                                                <> " this session")
                                                     pure (Right True)
                                                 Just PermissionDeny ->
                                                     pure (Right False)
