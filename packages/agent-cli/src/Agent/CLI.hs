@@ -432,6 +432,7 @@ data StartupRuntime = StartupRuntime
     , startupRestartEffort :: !(IORef (Text -> IO ()))
     , startupStartedAt :: !UTCTime
     , startupTimings :: !(IORef [(Text, NominalDiffTime)])
+    , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
     }
 
 newtype StartupFailure = StartupFailure String
@@ -648,7 +649,17 @@ finishStartup startup = do
             emitUiEvent runtime (UiSetNotice Nothing)
     lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
         Just "1" -> do
-            message <- formatStartupTimings <$> readIORef startup.startupTimings
+            timings <- readIORef startup.startupTimings
+            syntaxLoadDuration <-
+                readIORef startup.startupSyntaxLoadDuration
+            let message =
+                    formatStartupTimings timings
+                        <> maybe
+                            ""
+                            (\duration ->
+                                " · syntax highlighting "
+                                    <> formatStartupDuration duration)
+                            syntaxLoadDuration
             case startup.startupFullscreen of
                 Nothing -> putTextLn stderr message
                 Just runtime -> emitUiEvent runtime (UiSystemMessage message)
@@ -709,6 +720,7 @@ runAgent
 runAgent fullscreenInputs options transition = do
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
+    syntaxLoadDurationRef <- newIORef Nothing
     home <- getHomeDirectory
     let root = sessionsRoot home
     resumed <- case options.optResume of
@@ -788,6 +800,7 @@ runAgent fullscreenInputs options transition = do
             (readIORef agentSnapshotRef >>= id)
             (\target -> readIORef agentSelectRef >>= ($ target))
             (recordStartupTiming startedAt startupTimingsRef "first frame")
+            (writeIORef syntaxLoadDurationRef . Just)
             options.optMotionMode
             useColor
             initialFullscreenState
@@ -809,6 +822,7 @@ runAgent fullscreenInputs options transition = do
             , startupRestartEffort = restartEffortActionRef
             , startupStartedAt = startedAt
             , startupTimings = startupTimingsRef
+            , startupSyntaxLoadDuration = syntaxLoadDurationRef
             }
         action =
             runAgentInitialized

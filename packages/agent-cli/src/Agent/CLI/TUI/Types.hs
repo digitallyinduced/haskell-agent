@@ -36,6 +36,7 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import Data.Text (Text)
+import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
 
 data Name
@@ -92,6 +93,7 @@ data AppEvent
     | AppSetImagePreviews ![ImageAttachment]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
+    | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
     | AppConversationReflow
     | AppMotionTick
     | AppStop
@@ -139,7 +141,9 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeImagePreviewIdBase :: !Int
     , runtimeNativeImagePreviews :: !Bool
     , runtimeColor :: !Bool
-    , runtimeSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , runtimeLoadSyntaxHighlighter
+        :: !(IO (Either Text SyntaxHighlighter))
+    , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
     , runtimeInitial :: !UiState
     }
 
@@ -178,6 +182,7 @@ data AppState = AppState
     , appMotionScheduleReset :: !Bool
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
+    , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     }
 
 data AgentHover = AgentHover
