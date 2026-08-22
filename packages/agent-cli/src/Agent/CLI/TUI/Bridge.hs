@@ -6,6 +6,7 @@ module Agent.CLI.TUI.Bridge
     , mergeUiEvents
     , nativeProgressSignal
     , normalizeAgentSelection
+    , reconcileAgentSelection
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
@@ -88,4 +89,13 @@ normalizeAgentSelection
     -> AgentTarget
 normalizeAgentSelection selected entries
     | any ((== selected) . (.agentTarget)) entries = selected
+    | otherwise = AgentRoot
+
+-- | Normalize the current shared selection against an available target set.
+reconcileAgentSelection
+    :: [AgentTarget]
+    -> AgentTarget
+    -> AgentTarget
+reconcileAgentSelection available current
+    | current `elem` available = current
     | otherwise = AgentRoot

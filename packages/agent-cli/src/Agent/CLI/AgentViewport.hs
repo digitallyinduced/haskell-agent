@@ -1,10 +1,15 @@
 -- | Finder-style agent tree and transcript preview.
 module Agent.CLI.AgentViewport
     ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
     , AgentTarget(..)
     , AgentViewportEnv(..)
     , AgentViewportState(..)
+    , agentDisplayName
     , agentEntryTreeLabel
+    , agentStatusGlyph
+    , agentStepsForStatus
     , applyAgentViewportKey
     , formatAgentStatus
     , initialAgentViewportState
@@ -16,16 +21,21 @@ module Agent.CLI.AgentViewport
     , renderAgentViewportFrameFor
     , responseItemLines
     , responseItemPreviewLines
+    , responseItemStepPreviews
     , selectAgentTarget
     , selectedAgentEntry
     ) where
 
+import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
+import Agent.ToolDispatch (customToolCall, functionToolCall)
 import Data.IORef (IORef)
 import Data.List (findIndex, sortOn)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -37,10 +47,25 @@ data AgentTarget
     | AgentChild !SubagentId
     deriving (Eq, Ord, Show)
 
+data AgentStepState
+    = AgentStepRunning
+    | AgentStepCompleted
+    | AgentStepFailed
+    | AgentStepInfo
+    deriving (Eq, Show)
+
+data AgentStep = AgentStep
+    { agentStepState :: !AgentStepState
+    , agentStepTitle :: !Text
+    , agentStepDetail :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
 data AgentEntry = AgentEntry
     { agentTarget :: !AgentTarget
     , agentPath :: !Text
     , agentStatus :: !Text
+    , agentSteps :: ![AgentStep]
     , agentTranscript :: ![Text]
     }
     deriving (Eq, Show)
@@ -54,6 +79,19 @@ formatAgentStatus status = case status of
     Interrupted -> "interrupted"
     Closed -> "closed"
     NotFound -> "missing"
+
+agentStatusGlyph :: Text -> Text
+agentStatusGlyph status = case Text.toLower status of
+    "active" -> "●"
+    "running" -> "●"
+    "ready" -> "○"
+    "pending" -> "○"
+    "done" -> "✓"
+    "error" -> "✕"
+    "interrupted" -> "■"
+    "closed" -> "×"
+    "missing" -> "?"
+    _ -> "·"
 
 data AgentViewportEnv = AgentViewportEnv
     { viewportSelected :: !(IORef AgentTarget)
@@ -294,6 +332,200 @@ responseItemPreviewLines count items
                 selected = drop (max 0 (rowCount - needed)) rows
             in (max 0 (needed - rowCount), selected <> kept)
 
+-- | Return the latest meaningful agent actions, newest first. Tool outputs are
+-- folded into their originating calls so the preview shows one semantic step
+-- instead of adjacent @tool: name@ / @tool: completed@ rows.
+responseItemStepPreviews :: Int -> [ResponseItem] -> [AgentStep]
+responseItemStepPreviews count items
+    | count <= 0 = []
+    | otherwise = go count Map.empty (reverse items)
+  where
+    go _ _ [] = []
+    go remaining completed (item : rest)
+        | remaining <= 0 = []
+        | otherwise = case item of
+            FunctionCallOutputItem output ->
+                go remaining
+                    (rememberNewestOutput output.callId
+                        (outputStepState output.status)
+                        completed)
+                    rest
+            CustomToolCallOutputItem output ->
+                go remaining
+                    (rememberNewestOutput output.callId
+                        (outputStepState output.status)
+                        completed)
+                    rest
+            FunctionCallItem call ->
+                let state =
+                        Map.findWithDefault
+                            (callStepState call.status)
+                            call.callId
+                            completed
+                    step =
+                        AgentStep
+                            { agentStepState = state
+                            , agentStepTitle =
+                                summarizeToolCall
+                                    (functionToolCall
+                                        call.callId
+                                        call.name
+                                        call.arguments)
+                            , agentStepDetail = stepStateDetail state
+                            }
+                in step
+                    : go (remaining - 1)
+                        (Map.delete call.callId completed)
+                        rest
+            CustomToolCallItem call ->
+                let state =
+                        Map.findWithDefault
+                            (callStepState call.status)
+                            call.callId
+                            completed
+                    step =
+                        AgentStep
+                            { agentStepState = state
+                            , agentStepTitle =
+                                summarizeToolCall
+                                    (customToolCall
+                                        call.callId
+                                        call.name
+                                        call.input)
+                            , agentStepDetail = stepStateDetail state
+                            }
+                in step
+                    : go (remaining - 1)
+                        (Map.delete call.callId completed)
+                        rest
+            MessageItem message
+                | message.role == RoleAssistant ->
+                    case textStep
+                        (messageStepState message.status)
+                        (responseMessageText message.content) of
+                        Nothing -> go remaining completed rest
+                        Just step ->
+                            step : go (remaining - 1) completed rest
+            _ -> go remaining completed rest
+
+    -- We traverse newest-to-oldest. Keep the first output state seen for a
+    -- call so an older partial update cannot overwrite its final status.
+    rememberNewestOutput callId state =
+        Map.insertWith (\_ newest -> newest) callId state
+
+callStepState :: Maybe ItemStatus -> AgentStepState
+callStepState = \case
+    Just ItemIncomplete -> AgentStepFailed
+    Just (ItemStatusUnknown status)
+        | Text.toLower status `elem` ["failed", "error", "cancelled"] ->
+            AgentStepFailed
+    -- A completed call item means the model finished emitting the call, not
+    -- that the tool finished executing. The matching output item settles it.
+    _ -> AgentStepRunning
+
+outputStepState :: Maybe ItemStatus -> AgentStepState
+outputStepState = \case
+    Just ItemCompleted -> AgentStepCompleted
+    Just ItemIncomplete -> AgentStepFailed
+    Just (ItemStatusUnknown status)
+        | Text.toLower status `elem` ["failed", "error", "cancelled"] ->
+            AgentStepFailed
+    _ -> AgentStepInfo
+
+stepStateDetail :: AgentStepState -> Maybe Text
+stepStateDetail = \case
+    AgentStepInfo -> Just "finished"
+    _ -> Nothing
+
+messageStepState :: Maybe ItemStatus -> AgentStepState
+messageStepState = \case
+    Just ItemInProgress -> AgentStepRunning
+    Just ItemIncomplete -> AgentStepFailed
+    Just (ItemStatusUnknown status)
+        | Text.toLower status `elem` ["failed", "error", "cancelled"] ->
+            AgentStepFailed
+    _ -> AgentStepCompleted
+
+agentStepsForStatus
+    :: Int
+    -> SubagentStatus
+    -> [ResponseItem]
+    -> [AgentStep]
+agentStepsForStatus count status items
+    | count <= 0 = []
+    | otherwise = take count $ case status of
+        Pending ->
+            AgentStep AgentStepRunning "Waiting to start" Nothing : settled
+        Running
+            | any ((== AgentStepRunning) . (.agentStepState)) recent ->
+                recent
+            | otherwise ->
+                AgentStep AgentStepRunning "Working…" Nothing : recent
+        Completed result ->
+            maybe
+                (fallback
+                    (AgentStep AgentStepCompleted "Finished" Nothing)
+                    settled)
+                (\raw ->
+                    maybe settled (`prependDistinct` settled)
+                        (textStep AgentStepCompleted raw))
+                (nonEmptyText =<< result)
+        Errored message ->
+            AgentStep
+                { agentStepState = AgentStepFailed
+                , agentStepTitle = "Agent failed"
+                , agentStepDetail = nonEmptyText message
+                }
+                : settled
+        Interrupted ->
+            AgentStep AgentStepFailed "Agent interrupted" Nothing : settled
+        Closed ->
+            fallback
+                (AgentStep AgentStepCompleted "Agent closed" Nothing)
+                settled
+        NotFound ->
+            AgentStep AgentStepFailed "Agent unavailable" Nothing : settled
+  where
+    recent = responseItemStepPreviews count items
+    settled = map settleStep recent
+
+    settleStep step
+        | step.agentStepState == AgentStepRunning =
+            step { agentStepState = AgentStepCompleted }
+        | otherwise = step
+
+    fallback step [] = [step]
+    fallback _ steps = steps
+
+prependDistinct :: AgentStep -> [AgentStep] -> [AgentStep]
+prependDistinct step steps =
+    case steps of
+        current : _
+            | normalizedStepTitle current == normalizedStepTitle step -> steps
+        _ -> step : steps
+
+normalizedStepTitle :: AgentStep -> Text
+normalizedStepTitle =
+    Text.toCaseFold . Text.unwords . Text.words . (.agentStepTitle)
+
+textStep :: AgentStepState -> Text -> Maybe AgentStep
+textStep state raw = do
+    title <- listToMaybe lines_
+    pure AgentStep
+        { agentStepState = state
+        , agentStepTitle = title
+        , agentStepDetail = listToMaybe (drop 1 lines_)
+        }
+  where
+    lines_ =
+        filter (not . Text.null) $
+            map (Text.unwords . Text.words) (Text.lines (Text.strip raw))
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText raw =
+    let compact = Text.unwords (Text.words raw)
+    in if Text.null compact then Nothing else Just compact
+
 responseItemFirstLine :: [ResponseItem] -> Maybe Text
 responseItemFirstLine = go
   where
@@ -382,12 +614,14 @@ findByTarget target = go
 agentEntryTreeLabel :: [AgentEntry] -> Int -> AgentEntry -> Text
 agentEntryTreeLabel entries index entry =
     treePrefix entries index entry.agentPath
-        <> pathName entry.agentPath
+        <> agentDisplayName entry.agentPath
         <> "  "
+        <> agentStatusGlyph entry.agentStatus
+        <> " "
         <> entry.agentStatus
 
-pathName :: Text -> Text
-pathName path =
+agentDisplayName :: Text -> Text
+agentDisplayName path =
     case reverse (filter (not . Text.null) (Text.splitOn "/" path)) of
         name : _ -> name
         [] -> "root"
