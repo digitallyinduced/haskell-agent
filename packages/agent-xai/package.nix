@@ -1,6 +1,6 @@
-{ mkDerivation, aeson, agent-core, agent-responses, base
+{ mkDerivation, aeson, agent-core, agent-responses, async, base
 , base64-bytestring, bytestring, case-insensitive, hspec
-, http-client, http-conduit, http-types, lib, retry, safe-exceptions
+, http-client, http-client-tls, http-conduit, http-types, lib, retry, safe-exceptions
 , scientific, text, time, wai, warp
 }:
 mkDerivation {
@@ -9,11 +9,11 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson agent-core agent-responses base base64-bytestring bytestring
-    http-client http-conduit retry safe-exceptions scientific text time
+    http-client http-client-tls http-conduit retry safe-exceptions scientific text time
   ];
   testHaskellDepends = [
-    aeson agent-core agent-responses base base64-bytestring bytestring
-    case-insensitive hspec http-types retry text wai warp
+    aeson agent-core agent-responses async base base64-bytestring bytestring
+    case-insensitive hspec http-types retry safe-exceptions text wai warp
   ];
   description = "Haskell client for the xAI Grok subscription transport";
   license = lib.licenses.bsd3;

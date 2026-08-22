@@ -8,6 +8,7 @@ module Agent.CLI.AgentViewport
     , AgentViewportState(..)
     , agentDisplayName
     , agentEntryTreeLabel
+    , agentEntryTreeLabelWithGlyph
     , agentStatusGlyph
     , agentStepsForStatus
     , applyAgentViewportKey
@@ -627,10 +628,23 @@ findByTarget target = go
 
 agentEntryTreeLabel :: [AgentEntry] -> Int -> AgentEntry -> Text
 agentEntryTreeLabel entries index entry =
+    agentEntryTreeLabelWithGlyph
+        (agentStatusGlyph entry.agentStatus)
+        entries
+        index
+        entry
+
+agentEntryTreeLabelWithGlyph
+    :: Text
+    -> [AgentEntry]
+    -> Int
+    -> AgentEntry
+    -> Text
+agentEntryTreeLabelWithGlyph glyph entries index entry =
     treePrefix entries index entry.agentPath
         <> agentDisplayName entry.agentPath
         <> "  "
-        <> agentStatusGlyph entry.agentStatus
+        <> glyph
         <> " "
         <> entry.agentStatus
 

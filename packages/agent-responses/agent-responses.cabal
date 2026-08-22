@@ -33,13 +33,20 @@ common common-opts
                       , FlexibleContexts
                       , TupleSections
                       , PackageImports
-    ghc-options:      -Wall -Wno-unused-do-bind -Wno-name-shadowing -Wno-missing-signatures
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
 
 library
     import:           common-opts
     exposed-modules:  Agent.Responses.Types
                     , Agent.Responses.Codec
                     , Agent.Responses.Error
+                    , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
                     , Agent.Responses.LoopBackend
     hs-source-dirs:   src
@@ -60,9 +67,11 @@ test-suite agent-responses-test
     main-is:          Spec.hs
     other-modules:    Agent.Responses.LoopBackendSpec
                     , Agent.Responses.ResponseMergeSpec
+                    , Agent.Responses.SSESpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-responses
                     , aeson >= 2.0
+                    , bytestring
                     , hspec
                     , text

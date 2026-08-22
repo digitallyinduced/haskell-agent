@@ -138,6 +138,24 @@ spec = describe "Agent.Tools.MultiAgents" do
         result.output `shouldSatisfy` Text.isInfixOf "positive integer"
         closeSubagentRegistry registry
 
+    it "rejects overflowing fork turns instead of wrapping them" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let call = ToolCall
+                { callId = "spawn-overflow"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"fork_turns\":\"18446744073709551617\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
+        result.output `shouldSatisfy` Text.isInfixOf "positive integer"
+        closeSubagentRegistry registry
+
     it "wait_agent excludes the calling child" do
         parentGate <- newTVarIO False
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

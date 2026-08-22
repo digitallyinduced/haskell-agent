@@ -116,6 +116,8 @@ spec = describe "Agent.CLI.SubagentStore" do
         forkSubagentTranscript (Just "none") items `shouldBe` []
         forkSubagentTranscript (Just "1") items
             `shouldBe` drop 2 items
+        forkSubagentTranscript (Just "18446744073709551617") items
+            `shouldBe` items
 
 messageItem :: ResponseRole -> Text -> ResponseItem
 messageItem role text = MessageItem ResponseMessage

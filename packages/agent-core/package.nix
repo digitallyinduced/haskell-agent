@@ -1,7 +1,7 @@
 { mkDerivation, aeson, async, base, bytestring, containers
 , crypton-connection, directory, filepath, hspec, lib, process
-, resourcet, retry, safe-exceptions, stm, text, time, tls
-, transformers, unix, vector, websockets, yaml
+, resourcet, retry, safe-exceptions, scientific, stm, text, time
+, tls, transformers, unix, vector, websockets, yaml
 }:
 mkDerivation {
   pname = "agent-core";
@@ -9,8 +9,8 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson async base bytestring containers crypton-connection directory
-    filepath process resourcet retry safe-exceptions stm text time tls
-    transformers unix vector websockets yaml
+    filepath process resourcet retry safe-exceptions scientific stm
+    text time tls transformers unix vector websockets yaml
   ];
   testHaskellDepends = [
     aeson async base bytestring containers crypton-connection directory

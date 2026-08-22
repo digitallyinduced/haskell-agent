@@ -18,6 +18,7 @@ module Agent.CLI.Options
 
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Provider (Provider(..), parseProvider)
+import Agent.TUI.Motion (MotionMode(..))
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -81,6 +82,7 @@ data CliOptions = CliOptions
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
     , optScreenMode :: !ScreenMode
+    , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -101,6 +103,7 @@ defaultCliOptions = CliOptions
     , optAgentsMd = True
     , optSkills = True
     , optScreenMode = ScreenAuto
+    , optMotionMode = MotionFull
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
@@ -199,6 +202,9 @@ parseOptions options = \case
         parseOptions options { optScreenMode = ScreenFullscreen } rest
     "--minimal" : rest ->
         parseOptions options { optScreenMode = ScreenMinimal } rest
+    "--motion" : value : rest -> do
+        motion <- parseMotionMode value
+        parseOptions options { optMotionMode = motion } rest
     flag : _
         | flag == "openai-base-url" ->
             Left "openai-base-url was removed; run agent-cli --help"
@@ -221,6 +227,13 @@ parseInt :: String -> String -> Either String Int
 parseInt flag value = case reads value of
     [(n, "")] | n >= 1 -> Right n
     _ -> Left (flag <> " expects a positive integer, got " <> value)
+
+parseMotionMode :: String -> Either String MotionMode
+parseMotionMode raw = case Text.toLower (Text.pack raw) of
+    "full" -> Right MotionFull
+    "reduced" -> Right MotionReduced
+    "off" -> Right MotionOff
+    _ -> Left ("--motion expects full, reduced, or off (got " <> raw <> ")")
 
 reasoningEfforts :: [Text]
 reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
@@ -257,6 +270,7 @@ usage = unlines
     , "      --no-skills         Disable skill discovery and invocation"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
+    , "      --motion MODE       Animation policy: full, reduced, or off"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"

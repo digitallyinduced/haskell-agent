@@ -41,6 +41,9 @@ module Agent.TUI.Theme
     , thinkingAttr
     , toolAttr
     , userAttr
+    , waitingDimAttr
+    , waitingMidAttr
+    , completionFlashAttr
     , monochrome
     , solarizedDark
     ) where
@@ -60,6 +63,7 @@ syntaxNormalAttr, syntaxKeywordAttr, syntaxTypeAttr, syntaxFunctionAttr :: AttrN
 syntaxVariableAttr, syntaxStringAttr, syntaxNumberAttr, syntaxCommentAttr :: AttrName
 syntaxOperatorAttr, syntaxAnnotationAttr, syntaxPreprocessorAttr :: AttrName
 syntaxWarningAttr, syntaxErrorAttr :: AttrName
+waitingDimAttr, waitingMidAttr, completionFlashAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
 footerAttr = attrName "footer"
@@ -116,6 +120,9 @@ syntaxClassAttr = \case
     SyntaxPreprocessor -> syntaxPreprocessorAttr
     SyntaxWarning -> syntaxWarningAttr
     SyntaxError -> syntaxErrorAttr
+waitingDimAttr = attrName "waiting-dim"
+waitingMidAttr = attrName "waiting-mid"
+completionFlashAttr = attrName "completion-flash"
 
 solarizedDark :: AttrMap
 solarizedDark =
@@ -144,6 +151,12 @@ solarizedDark =
         , (thinkingAttr, V.defAttr
             `V.withForeColor` rgb 181 137 0
             `V.withBackColor` rgb 0 43 54)
+        , (waitingDimAttr, V.defAttr
+            `V.withForeColor` rgb 101 83 0
+            `V.withBackColor` rgb 0 43 54)
+        , (waitingMidAttr, V.defAttr
+            `V.withForeColor` rgb 150 112 0
+            `V.withBackColor` rgb 0 43 54)
         , (toolAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
             `V.withBackColor` rgb 0 43 54)
@@ -154,6 +167,10 @@ solarizedDark =
         , (successAttr, V.defAttr
             `V.withForeColor` rgb 133 153 0
             `V.withBackColor` rgb 0 43 54)
+        , (completionFlashAttr, V.defAttr
+            `V.withForeColor` rgb 181 196 0
+            `V.withBackColor` rgb 0 43 54
+            `V.withStyle` V.bold)
         , (selectedAttr, V.defAttr
             `V.withForeColor` rgb 147 161 161
             `V.withBackColor` rgb 7 54 66)
@@ -241,9 +258,12 @@ monochrome =
         , (userAttr, V.defAttr `V.withStyle` V.bold)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, V.defAttr)
+        , (waitingDimAttr, V.defAttr)
+        , (waitingMidAttr, V.defAttr)
         , (toolAttr, V.defAttr)
         , (errorAttr, V.defAttr `V.withStyle` V.bold)
         , (successAttr, V.defAttr)
+        , (completionFlashAttr, V.defAttr `V.withStyle` V.bold)
         , (selectedAttr, V.defAttr `V.withStyle` V.reverseVideo)
         , (borderAttr, V.defAttr)
         , (borderActiveAttr, V.defAttr `V.withStyle` V.bold)

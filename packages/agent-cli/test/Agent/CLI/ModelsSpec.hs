@@ -27,12 +27,11 @@ spec = do
             let ids = map (.modelId) (modelsForProvider OpenAIProvider)
             ids `shouldBe` ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
 
-        it "lists Thinking Machines models for OpenRouter" do
+        it "lists Ox Alpha instead of Thinking Machines models for OpenRouter" do
             let ids = map (.modelId) (modelsForProvider OpenRouterProvider)
-            ids `shouldContain`
-                [ "thinkingmachines/inkling:free"
-                , "thinkingmachines/inkling-small:free"
-                ]
+            ids `shouldContain` ["stealth/ox-alpha"]
+            ids `shouldSatisfy`
+                all (not . Text.isPrefixOf "thinkingmachines/")
 
         it "lists several options per provider" do
             length (modelsForProvider XAIProvider) `shouldSatisfy` (>= 2)

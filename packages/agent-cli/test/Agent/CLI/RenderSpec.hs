@@ -1,6 +1,7 @@
 module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
+import Agent.CLI.Style (motionGlyphSet)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
@@ -9,6 +10,7 @@ import Agent.ToolDispatch
     , customToolCall
     , functionToolCall
     )
+import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
@@ -409,6 +411,28 @@ spec = do
                 body `shouldSatisfy` containsOsc9 3
                 body `shouldSatisfy` containsOsc9 0
 
+        it "keeps reduced and off thinking static without native animation" do
+            mapM_
+                (\mode ->
+                    withRenderConfigNativeMode
+                        True
+                        False
+                        True
+                        mode
+                        \config handle path -> do
+                            renderEvent config TurnStarted
+                            hClose handle
+                            body <- Text.readFile path
+                            body `shouldSatisfy`
+                                Text.isInfixOf
+                                    (foregroundIndicator
+                                        motionGlyphSet
+                                        mode
+                                        0
+                                        <> " Thinking…")
+                            body `shouldSatisfy` (not . containsOsc9 3))
+                [MotionReduced, MotionOff]
+
     describe "formatThinkingBlock" do
         it "headers a live preview and a finished duration" do
             formatThinkingBlock False True 1.2 "secret plan"
@@ -452,7 +476,21 @@ withRenderConfigNative
     -> Bool
     -> (RenderConfig -> Handle -> FilePath -> IO ())
     -> IO ()
-withRenderConfigNative showThinking color native action = do
+withRenderConfigNative showThinking color native =
+    withRenderConfigNativeMode
+        showThinking
+        color
+        native
+        MotionFull
+
+withRenderConfigNativeMode
+    :: Bool
+    -> Bool
+    -> Bool
+    -> MotionMode
+    -> (RenderConfig -> Handle -> FilePath -> IO ())
+    -> IO ()
+withRenderConfigNativeMode showThinking color native motionMode action = do
     printed <- newIORef False
     thinking <- newIORef False
     spinner <- newIORef Nothing
@@ -487,6 +525,7 @@ withRenderConfigNative showThinking color native action = do
                 , renderStartedAt = startedAt
                 , renderToolCalls = toolCalls
                 , renderNativeProgress = native
+                , renderMotionMode = motionMode
                 }
         action config handle path
         clearThinking config

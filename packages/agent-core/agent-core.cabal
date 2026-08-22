@@ -27,7 +27,13 @@ common common-opts
                       , TypeApplications
                       , ScopedTypeVariables
                       , PackageImports
-    ghc-options:      -Wall -Wno-unused-do-bind -Wno-name-shadowing -Wno-missing-signatures
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
 
 library
     import:           common-opts
@@ -92,6 +98,7 @@ library
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
                     , safe-exceptions
+                    , scientific
                     , stm
                     , text
                     , time
