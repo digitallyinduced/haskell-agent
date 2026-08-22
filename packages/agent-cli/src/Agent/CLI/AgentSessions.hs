@@ -52,10 +52,14 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as TextIO
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Text.Read (readMaybe)
 import System.Directory
     ( createDirectory
     , doesDirectoryExist
+    , doesFileExist
     , findExecutable
+    , getModificationTime
     , removeDirectory
     , removeFile
     )
@@ -66,6 +70,7 @@ import qualified System.FilePath as FilePath
 import System.IO (IOMode(AppendMode), hClose, openTempFile, withFile)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
+import System.Posix.Signals (nullSignal, signalProcess)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -157,10 +162,13 @@ launchSessionTurn manager background policy handle message =
                                 ]
                                     <> approvalArgs
                             cleanupScript =
-                                "lock=$1; prompt=$2; shift 2; "
-                                    <> "cleanup() { rm -f \"$prompt\"; rmdir \"$lock\" >/dev/null 2>&1 || true; }; "
-                                    <> "trap cleanup EXIT HUP INT TERM; "
-                                    <> "\"$@\""
+                                "lock=$1; prompt=$2; shift 2; owner=\"$lock/pid\"; "
+                                    <> "cleanup() { rm -f \"$prompt\" \"$owner\"; rmdir \"$lock\" >/dev/null 2>&1 || true; }; "
+                                    <> "trap cleanup EXIT; "
+                                    <> "\"$@\" & child=$!; "
+                                    <> "printf '%s\\n' \"$child\" > \"$owner\"; "
+                                    <> "trap 'kill \"$child\" >/dev/null 2>&1 || true' HUP INT TERM; "
+                                    <> "wait \"$child\""
                             args =
                                 [ "-c", cleanupScript
                                 , "agent-session-runner"
@@ -204,7 +212,6 @@ launchSessionTurn manager background policy handle message =
                                 | otherwise -> do
                                     exitCode <- waitForProcess process
                                     removePrivateFile promptPath
-                                    releaseSessionLock lockPath
                                     pure (processes, case exitCode of
                                         ExitSuccess ->
                                             Right ("completed session " <> sessionId)
@@ -218,7 +225,7 @@ sessionProcessStatus manager sessionId =
     modifyMVar manager.managedProcesses \processes ->
         case Map.lookup sessionId processes of
             Nothing -> do
-                locked <- doesDirectoryExist
+                locked <- sessionLockIsActive
                     (sessionLockPath manager sessionId)
                 pure (processes, if locked then "running" else "idle")
             Just process ->
@@ -249,15 +256,65 @@ closeSessionProcessManager manager =
 acquireSessionLock :: SessionHandle -> IO (Either Text FilePath)
 acquireSessionLock handle = do
     let lockPath = unsafeToFilePath handle.sessionDir FilePath.</> ".agent-running"
-    try @_ @SomeException (createDirectory lockPath) >>= \case
-        Right () -> pure (Right lockPath)
-        Left _ -> pure $ Left
+    acquire lockPath >>= \case
+        True -> pure (Right lockPath)
+        False -> pure $ Left
             ("session " <> handle.sessionMeta.metaId <> " is already running")
+  where
+    acquire lockPath =
+        try @_ @SomeException (createDirectory lockPath) >>= \case
+            Right () -> pure True
+            Left _ ->
+                sessionLockIsActive lockPath >>= \case
+                    True -> pure False
+                    False ->
+                        try @_ @SomeException (createDirectory lockPath) >>= \case
+                            Right () -> pure True
+                            Left _ -> pure False
 
 releaseSessionLock :: FilePath -> IO ()
 releaseSessionLock lockPath = do
+    removePrivateFile (sessionLockOwnerPath lockPath)
     _ <- try @_ @SomeException (removeDirectory lockPath)
     pure ()
+
+-- | Check whether a cross-process session lock still has a live owner.
+-- New locks record the child agent PID. Empty legacy locks are kept briefly
+-- to avoid racing a newly-created lock before its owner file is written, then
+-- reclaimed so a hard-killed launcher cannot block a session forever.
+sessionLockIsActive :: FilePath -> IO Bool
+sessionLockIsActive lockPath =
+    doesDirectoryExist lockPath >>= \case
+        False -> pure False
+        True -> do
+            let ownerPath = sessionLockOwnerPath lockPath
+            doesFileExist ownerPath >>= \case
+                True ->
+                    try @_ @SomeException (readFile ownerPath) >>= \case
+                        Right contents
+                            | Just pid <- readMaybe contents ->
+                                processIsAlive pid >>= \case
+                                    True -> pure True
+                                    False ->
+                                        releaseSessionLock lockPath >> pure False
+                        _ -> legacyLockIsFresh lockPath
+                False -> legacyLockIsFresh lockPath
+  where
+    legacyLockIsFresh path = do
+        now <- getCurrentTime
+        modified <- getModificationTime path
+        if diffUTCTime now modified < 5
+            then pure True
+            else releaseSessionLock path >> pure False
+
+processIsAlive :: Int -> IO Bool
+processIsAlive pid =
+    try @_ @SomeException (signalProcess nullSignal (fromIntegral pid)) >>= \case
+        Right () -> pure True
+        Left _ -> pure False
+
+sessionLockOwnerPath :: FilePath -> FilePath
+sessionLockOwnerPath lockPath = lockPath FilePath.</> "pid"
 
 removePrivateFile :: FilePath -> IO ()
 removePrivateFile path = do

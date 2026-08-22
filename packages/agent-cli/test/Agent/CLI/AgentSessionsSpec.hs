@@ -21,7 +21,12 @@ import Control.Exception.Safe (bracket)
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
+import Data.Time.Clock
+    ( UTCTime(..)
+    , addUTCTime
+    , getCurrentTime
+    , secondsToDiffTime
+    )
 import qualified System.Directory as Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import qualified System.FilePath as FilePath
@@ -120,6 +125,28 @@ spec = describe "Agent.CLI.AgentSessions" do
                     handle.sessionMeta.metaId
                     "completed"
                 closeSessionProcessManager manager
+
+    it "reclaims a stale session lock left by a crashed process" $
+        withTempDir "agent-session-runtime-" \root -> do
+            handle <- createSession (testCreateAt root root)
+            let lockPath =
+                    toFilePath handle.sessionDir FilePath.</> ".agent-running"
+                ownerPath = lockPath FilePath.</> "pid"
+            Directory.createDirectory lockPath
+            writeFile ownerPath "999999999\n"
+            acquireSessionLock handle `shouldReturn` Right lockPath
+            releaseSessionLock lockPath
+
+    it "reclaims an old empty legacy session lock" $
+        withTempDir "agent-session-runtime-" \root -> do
+            handle <- createSession (testCreateAt root root)
+            let lockPath =
+                    toFilePath handle.sessionDir FilePath.</> ".agent-running"
+            Directory.createDirectory lockPath
+            old <- addUTCTime (-10) <$> getCurrentTime
+            Directory.setModificationTime lockPath old
+            acquireSessionLock handle `shouldReturn` Right lockPath
+            releaseSessionLock lockPath
 
     it "does not terminate background sessions when the manager closes" $
         withTempDir "agent-session-runtime-" \root -> do
