@@ -4,11 +4,15 @@ import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
+    , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
+    , installCompactOutcome
     , runProviderCompact
+    , runProviderCompactWith
     )
+import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
 import Agent.OpenAI.Compaction
@@ -24,6 +28,13 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider (Provider(..), TokenProvider(..))
+import Control.Exception
+    ( AsyncException(..)
+    , MaskingState(..)
+    , getMaskingState
+    , throwIO
+    , try
+    )
 import Data.IORef
 import Control.Monad.Trans.Except (runExceptT)
 import Data.Text (Text)
@@ -50,6 +61,154 @@ spec = do
                     error "empty compaction unexpectedly requested credentials"
             runProviderCompact OpenAIProvider (Just provider) params transcript Nothing
                 `shouldReturn` Left "nothing to compact"
+
+        it "uses an injected OpenAI sender and records its response usage" do
+            params <- newIORef defaultResponseCreateParams
+            let history = [userTextItem "old context"]
+            transcript <- newIORef history
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                record usage =
+                    modifyIORef' recordedUsage (<> [usage])
+            result <-
+                runProviderCompactWith
+                    (Just sender)
+                    record
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn` [history <> [compactionTriggerItem]]
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+        it "records completed-response usage with asynchronous exceptions masked" do
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [userTextItem "old context"]
+            senderMasking <- newIORef MaskedUninterruptible
+            recorderMasking <- newIORef Unmasked
+            result <-
+                runProviderCompactWith
+                    (Just \_ -> do
+                        getMaskingState >>= writeIORef senderMasking
+                        pure (Right remoteCompactionResponse))
+                    (\_ -> getMaskingState >>= writeIORef recorderMasking)
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef senderMasking `shouldReturn` Unmasked
+            readIORef recorderMasking `shouldReturn` MaskedInterruptible
+
+        it "records local-summary response usage when summary text is missing" do
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [userTextItem "old context"]
+            recordedUsage <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \_ -> pure (Right responseWithoutCompaction))
+                    (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    (Just "focus")
+            result `shouldSatisfy` \case
+                Left message ->
+                    "compaction produced no summary text"
+                        `Text.isInfixOf` message
+                Right _ -> False
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+        it "does not record usage for a transport failure" do
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [userTextItem "old context"]
+            recordedUsage <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \_ -> pure (Left (ConnectionError "offline")))
+                    (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` \case
+                Left message -> "offline" `Text.isInfixOf` message
+                Right _ -> False
+            readIORef recordedUsage `shouldReturn` []
+
+        it "records completed-response usage even when the checkpoint is invalid" do
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [userTextItem "old context"]
+            recordedUsage <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \_ -> pure (Right responseWithoutCompaction))
+                    (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` \case
+                Left message ->
+                    "expected exactly one compaction" `Text.isInfixOf` message
+                Right _ -> False
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+    describe "installCompactOutcome" do
+        it "clears the previous response id with transcript and token state" do
+            previous <- newIORef (Just "resp-old")
+            transcript <- newIORef [userTextItem "old context"]
+            contextState <- newIORef (Just (100, 1))
+            actionMasking <- newIORef MaskedUninterruptible
+            let compactedHistory = [userTextItem "compacted context"]
+                outcome = CompactOutcome
+                    { compactBeforeTokens = 100
+                    , compactAfterTokens = 12
+                    , compactHistory = compactedHistory
+                    , compactSummary = "checkpoint"
+                    }
+                compactAction _ = do
+                    getMaskingState >>= writeIORef actionMasking
+                    pure (Right outcome)
+            installCompactOutcome
+                previous
+                transcript
+                (Just contextState)
+                compactAction
+                Nothing
+                `shouldReturn` Right outcome
+            readIORef actionMasking `shouldReturn` Unmasked
+            readIORef previous `shouldReturn` Nothing
+            readIORef transcript `shouldReturn` compactedHistory
+            readIORef contextState `shouldReturn`
+                Just (outcome.compactAfterTokens, length compactedHistory)
+
+        it "leaves live state unchanged when compaction fails" do
+            let oldHistory = [userTextItem "old context"]
+                oldContextState = Just (100, length oldHistory)
+            previous <- newIORef (Just "resp-old")
+            transcript <- newIORef oldHistory
+            contextState <- newIORef oldContextState
+            installCompactOutcome
+                previous
+                transcript
+                (Just contextState)
+                (const (pure (Left "failed")))
+                Nothing
+                `shouldReturn` Left "failed"
+            readIORef previous `shouldReturn` Just "resp-old"
+            readIORef transcript `shouldReturn` oldHistory
+            readIORef contextState `shouldReturn` oldContextState
 
     describe "compactOpenAIWith" do
         it "uses remote compaction v2 on normal Responses" do
@@ -184,6 +343,117 @@ spec = do
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
 
+        it "records active-session compaction usage before a failed continuation" do
+            let history = [userTextItem "old"]
+                threshold = 20
+                oldContextState = Just (threshold - 2, length history)
+            transcript <- newIORef history
+            contextState <- newIORef oldContextState
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                base = Backend \_ _ _ ->
+                    pure (Left (ConnectionError "continuation failed"))
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        contextState
+                        base
+            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+                `shouldReturn` Left (ConnectionError "continuation failed")
+            map requestItems <$> readIORef requests
+                `shouldReturn` [history <> [compactionTriggerItem]]
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+            readIORef transcript `shouldReturn` history
+            readIORef contextState `shouldReturn` oldContextState
+
+        it "rolls back compacted state when the continuation is cancelled" do
+            let history = [userTextItem "old"]
+                threshold = 20
+                oldContextState = Just (threshold, length history)
+            transcript <- newIORef history
+            contextState <- newIORef oldContextState
+            continuationMasking <- newIORef MaskedUninterruptible
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \_ _ _ -> do
+                    getMaskingState >>= writeIORef continuationMasking
+                    throwIO UserInterrupt
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        contextState
+                        base
+                submit =
+                    backend.submitTurn Nothing
+                        [UserMessage "new"]
+                        (const (pure ()))
+            result <- try submit
+                :: IO (Either AsyncException (Either ApiError TurnOutput))
+            result `shouldBe` Left UserInterrupt
+            readIORef continuationMasking `shouldReturn` Unmasked
+            readIORef transcript `shouldReturn` history
+            readIORef contextState `shouldReturn` oldContextState
+
+        it "does not rerun compaction while its continuation reconnects" do
+            let history = [userTextItem "old"]
+                threshold = 20
+            transcript <- newIORef history
+            contextState <- newIORef
+                (Just (threshold, length history))
+            compactCalls <- newIORef (0 :: Int)
+            continuationCalls <- newIORef (0 :: Int)
+            recordedUsage <- newIORef []
+            waits <- newIORef []
+            seenPrevious <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                continuation = Backend \previous _inputs _onEvent -> do
+                    modifyIORef' seenPrevious (<> [previous])
+                    attempt <- atomicModifyIORef' continuationCalls
+                        \n -> (n + 1, n + 1)
+                    pure $
+                        if attempt == 1
+                            then Left (ConnectionError "offline")
+                            else Right TurnOutput
+                                { responseId = "resp-new"
+                                , toolCalls = []
+                                , assistantText = Just "ok"
+                                , tokenUsage = TokenUsage 20 5 0
+                                }
+                reconnectingContinuation =
+                    withConnectionRecoveryUsing
+                        (\attempt -> modifyIORef' waits (<> [attempt]))
+                        continuation
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        contextState
+                        reconnectingContinuation
+            result <- backend.submitTurn (Just "resp-old")
+                [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+            readIORef continuationCalls `shouldReturn` 2
+            readIORef waits `shouldReturn` [1]
+            readIORef seenPrevious `shouldReturn` [Nothing, Nothing]
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
         it "compacts when a pending tool output crosses the limit" do
             let danglingCall = FunctionCallItem FunctionCall
                     { itemId = Nothing
@@ -204,18 +474,14 @@ spec = do
             contextState <- newIORef
                 (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
             compactCalls <- newIORef (0 :: Int)
+            recordedUsage <- newIORef []
             historyAtCompact <- newIORef []
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
-            let compactAction = do
+            let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     readIORef transcript >>= writeIORef historyAtCompact
-                    pure $ Right CompactOutcome
-                        { compactBeforeTokens = codexAutoCompactTokenLimit
-                        , compactAfterTokens = 10
-                        , compactHistory = [userTextItem "compacted"]
-                        , compactSummary = "checkpoint"
-                        }
+                    pure (Right remoteCompactionResponse)
                 base = Backend \previous inputs _ -> do
                     modifyIORef' seenPrevious (<> [previous])
                     modifyIORef' seenInputs (<> [inputs])
@@ -225,8 +491,15 @@ spec = do
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
                         }
-                backend = autoCompactOpenAiBackendWith compactAction
-                    transcript contextState base
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just codexAutoCompactTokenLimit)
+                        sender
+                        (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        contextState
+                        base
                 inputs = [CompletedTool toolResult]
             result <- backend.submitTurn (Just "resp-tool") inputs
                 (const (pure ()))
@@ -241,9 +514,11 @@ spec = do
                     _ -> False
             readIORef seenPrevious `shouldReturn` [Nothing]
             readIORef seenInputs `shouldReturn` [[]]
-            readIORef transcript `shouldReturn` [userTextItem "compacted"]
+            compacted <- readIORef transcript
+            compacted `shouldSatisfy` hasCompactionCheckpoint
             readIORef contextState `shouldReturn`
-                Just (25, 1)
+                Just (25, length compacted)
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
@@ -303,20 +578,44 @@ requestItems request = case request.input of
 
 remoteCompactionResponse :: Response
 remoteCompactionResponse =
+    responseWithOutput
+        [ Aeson.object
+            [ "type" .= ("compaction" :: Text)
+            , "encrypted_content" .= ("opaque" :: Text)
+            ]
+        ]
+
+responseWithoutCompaction :: Response
+responseWithoutCompaction =
+    responseWithOutput []
+
+responseWithOutput :: [Aeson.Value] -> Response
+responseWithOutput output =
     case Aeson.fromJSON $ Aeson.object
         [ "id" .= ("resp-compact" :: Text)
         , "created_at" .= (0 :: Int)
         , "status" .= ("completed" :: Text)
         , "model" .= ("gpt-test" :: Text)
-        , "output" .=
-            [ Aeson.object
-                [ "type" .= ("compaction" :: Text)
-                , "encrypted_content" .= ("opaque" :: Text)
+        , "output" .= output
+        , "usage" .= Aeson.object
+            [ "input_tokens" .= compactionUsage.inputTokens
+            , "output_tokens" .= compactionUsage.outputTokens
+            , "total_tokens" .=
+                (compactionUsage.inputTokens + compactionUsage.outputTokens)
+            , "input_tokens_details" .= Aeson.object
+                [ "cached_tokens" .= compactionUsage.cachedTokens
                 ]
             ]
         ] of
         Aeson.Success response -> response
         Aeson.Error err -> error err
+
+compactionUsage :: TokenUsage
+compactionUsage = TokenUsage
+    { inputTokens = 80
+    , outputTokens = 6
+    , cachedTokens = 40
+    }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =

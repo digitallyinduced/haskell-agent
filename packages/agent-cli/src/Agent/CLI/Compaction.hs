@@ -1,13 +1,17 @@
 -- | Run provider compaction and rewrite the local transcript.
 module Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , OpenAiCompactionSender
     , codexAutoCompactTokenLimit
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWithThreshold
+    , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , compactOpenAIWith
+    , installCompactOutcome
     , runProviderCompact
+    , runProviderCompactWith
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -17,6 +21,7 @@ import Agent.Loop
     , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
+    , emptyTokenUsage
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
@@ -37,6 +42,7 @@ import Agent.OpenAI.ModelMetadata
     )
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
+    , responseTokenUsage
     , toolResultToItem
     , turnInputsToItems
     , withRequestInput
@@ -53,12 +59,11 @@ import qualified Agent.XAI.Client as XAI
 import qualified Agent.XAI.Options as XAI
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
-    ( ExceptT(..)
-    , runExceptT
+    ( ExceptT
     , throwE
-    , withExceptT
     )
-import Control.Exception.Safe (onException)
+import Control.Exception.Safe (mask, onException)
+import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -74,6 +79,14 @@ data CompactOutcome = CompactOutcome
     , compactSummary :: !Text
     } deriving (Eq, Show)
 
+type OpenAiCompactionSender =
+    ResponseCreateParams -> IO (Either ApiError Response)
+
+data CompactAttempt error = CompactAttempt
+    { compactAttemptUsage :: !TokenUsage
+    , compactAttemptResult :: !(Either error CompactOutcome)
+    }
+
 runProviderCompact
     :: Provider
     -> Maybe TokenProvider
@@ -81,30 +94,157 @@ runProviderCompact
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runProviderCompact provider tokenProvider paramsRef transcriptRef focus =
-    runExceptT do
-        params <- lift (readIORef paramsRef)
-        history <- lift (readIORef transcriptRef)
-        case provider of
-            OpenAIProvider ->
-                compactOpenAI tokenProvider params history
-                    (estimateItemsTokens history) focus
-            XAIProvider ->
-                compactLocalXai tokenProvider params history
-                    (estimateItemsTokens history) focus
-            OpenRouterProvider ->
-                compactLocalOpenRouter tokenProvider params history
-                    (estimateItemsTokens history) focus
+runProviderCompact =
+    runProviderCompactWith Nothing (const (pure ()))
 
-compactOpenAI
-    :: Maybe TokenProvider
-    -> ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
+-- | Run manual compaction, optionally routing OpenAI through the active model
+-- session. Provider-reported compaction usage is recorded as soon as a
+-- completed response arrives, including protocol-invalid responses.
+runProviderCompactWith
+    :: Maybe OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> Provider
+    -> Maybe TokenProvider
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
     -> Maybe Text
-    -> ExceptT Text IO CompactOutcome
-compactOpenAI =
-    compactOpenAIWith sendOpenAIRemoteCompaction
+    -> IO (Either Text CompactOutcome)
+runProviderCompactWith openAiSender recordUsage provider tokenProvider
+        paramsRef transcriptRef focus = do
+    params <- readIORef paramsRef
+    history <- readIORef transcriptRef
+    attempt <- runAttemptAndRecord recordUsage $ case provider of
+        OpenAIProvider ->
+            case openAiSender of
+                Just sender ->
+                    compactTextAttempt sender params history focus
+                Nothing ->
+                    case tokenProvider of
+                        Nothing ->
+                            pure (compactTextFailure
+                                "openai compact requires a token provider")
+                        Just tokens ->
+                            compactTextAttempt
+                                (sendOpenAIRemoteCompaction tokens)
+                                params
+                                history
+                                focus
+        XAIProvider ->
+            case tokenProvider of
+                Nothing ->
+                    pure (compactTextFailure
+                        "xai compact requires a token provider")
+                Just tokens -> do
+                    options <- XAI.clientOptionsFromEnv
+                    summarizeTextAttempt
+                        (\request ->
+                            runWithTokenProvider tokens \credential ->
+                                XAI.createResponseWith options credential request)
+                        params
+                        history
+                        focus
+        OpenRouterProvider ->
+            case tokenProvider of
+                Nothing ->
+                    pure (compactTextFailure
+                        "openrouter compact requires a token provider")
+                Just tokens -> do
+                    options <- OpenRouter.clientOptionsFromEnv
+                    summarizeTextAttempt
+                        (\request ->
+                            runWithTokenProvider tokens \credential ->
+                                OpenRouter.createResponseWith
+                                    options credential request)
+                        params
+                        history
+                        focus
+    pure attempt.compactAttemptResult
+  where
+    compactTextAttempt sender params history focus
+        | null history = pure (compactTextFailure "nothing to compact")
+        | otherwise =
+            mapCompactAttemptError formatApiError
+                <$> compactOpenAIAttempt
+                    sender
+                    params
+                    history
+                    (estimateItemsTokens history)
+                    focus
+
+    summarizeTextAttempt sender params history focus
+        | null history = pure (compactTextFailure "nothing to compact")
+        | otherwise =
+            mapCompactAttemptError formatApiError
+                <$> summarizeLocalAttempt
+                    sender
+                    params
+                    history
+                    (estimateItemsTokens history)
+                    focus
+
+compactTextFailure :: Text -> CompactAttempt Text
+compactTextFailure message =
+    CompactAttempt emptyTokenUsage (Left message)
+
+mapCompactAttemptError
+    :: (source -> target)
+    -> CompactAttempt source
+    -> CompactAttempt target
+mapCompactAttemptError f attempt =
+    CompactAttempt
+        { compactAttemptUsage = attempt.compactAttemptUsage
+        , compactAttemptResult =
+            either (Left . f) Right attempt.compactAttemptResult
+        }
+
+recordAttemptUsage
+    :: (TokenUsage -> IO ())
+    -> CompactAttempt error
+    -> IO ()
+recordAttemptUsage recordUsage attempt =
+    when (attempt.compactAttemptUsage /= emptyTokenUsage) $
+        recordUsage attempt.compactAttemptUsage
+
+-- Keep the model request cancellable, but once it returns a completed response
+-- close the ordinary asynchronous-exception window before entering the usage
+-- recorder.
+runAttemptAndRecord
+    :: (TokenUsage -> IO ())
+    -> IO (CompactAttempt error)
+    -> IO (CompactAttempt error)
+runAttemptAndRecord recordUsage action =
+    mask \restore -> do
+        attempt <- restore action
+        recordAttemptUsage recordUsage attempt
+        pure attempt
+
+-- | Install a successful manual compaction as one masked local state change.
+-- Clearing the server continuation id together with replacing the transcript
+-- prevents the next request from pairing compacted local history with the
+-- pre-compaction response chain.
+installCompactOutcome
+    :: IORef (Maybe Text)
+    -> IORef [ResponseItem]
+    -> Maybe (IORef (Maybe (Int, Int)))
+    -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+installCompactOutcome previous transcript contextTokens runCompact focus =
+    mask \restore -> do
+        result <- restore (runCompact focus)
+        case result of
+            Left _ -> pure ()
+            Right outcome -> do
+                writeIORef previous Nothing
+                writeIORef transcript outcome.compactHistory
+                case contextTokens of
+                    Nothing -> pure ()
+                    Just ref ->
+                        writeIORef ref $ Just
+                            ( outcome.compactAfterTokens
+                            , length outcome.compactHistory
+                            )
+        pure result
 
 sendOpenAIRemoteCompaction
     :: TokenProvider
@@ -124,148 +264,125 @@ compactOpenAIWith
     -> ExceptT Text IO CompactOutcome
 compactOpenAIWith send tokenProvider params history before focus = do
     provider <- requireTokenProvider OpenAIProvider tokenProvider
-    if hasFocus focus
-        then summarizeLocal
-            send
-            provider
+    requireHistory history
+    attempt <- lift $
+        compactOpenAIAttempt
+            (send provider)
             params
             history
             before
             focus
-        else compactRemoteV2
-            send
-            provider
-            params
-            history
-            before
+    either (throwE . formatApiError) pure attempt.compactAttemptResult
 
-compactRemoteV2
-    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
-    -> TokenProvider
+compactOpenAIAttempt
+    :: OpenAiCompactionSender
     -> ResponseCreateParams
     -> [ResponseItem]
     -> Int
-    -> ExceptT Text IO CompactOutcome
-compactRemoteV2 send provider params history before =
-    do
-        requireHistory history
-        withExceptT formatApiError $
-            ExceptT (compactRemoteV2Api send provider params history before)
+    -> Maybe Text
+    -> IO (CompactAttempt ApiError)
+compactOpenAIAttempt send params history before focus
+    | hasFocus focus =
+        summarizeLocalAttempt send params history before focus
+    | otherwise =
+        compactRemoteV2Attempt send params history before
 
-compactRemoteV2Api
-    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
-    -> TokenProvider
+compactRemoteV2Attempt
+    :: OpenAiCompactionSender
     -> ResponseCreateParams
     -> [ResponseItem]
     -> Int
-    -> IO (Either ApiError CompactOutcome)
-compactRemoteV2Api send provider params history before =
-    runExceptT do
-        requireHistoryApi history
+    -> IO (CompactAttempt ApiError)
+compactRemoteV2Attempt send params history before
+    | null history =
+        pure $ CompactAttempt emptyTokenUsage $
+            Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
+    | otherwise = do
         let requestHistory =
                 trimRemoteCompactionHistoryToFit
                     (codexEffectiveContextWindowFor params.model)
                     params.instructions
                     history
             request = buildRemoteCompactionRequest params requestHistory
-        response <- ExceptT (send provider request)
-        checkpoint <-
-            either
-                (throwE . protocolError)
-                pure
-                (extractRemoteCompactionItem response)
-        let items =
-                buildRemoteCompactedHistory
-                    remoteCompactionRetainedTokenBudget
-                    history
-                    checkpoint
-        pure CompactOutcome
-            { compactBeforeTokens = before
-            , compactAfterTokens = estimateItemsTokens items
-            , compactHistory = items
-            , compactSummary = "Context compacted remotely."
-            }
+        send request >>= \case
+            Left err ->
+                pure (CompactAttempt emptyTokenUsage (Left err))
+            Right response ->
+                pure CompactAttempt
+                    { compactAttemptUsage = responseTokenUsage response
+                    , compactAttemptResult = do
+                        checkpoint <-
+                            either
+                                (Left . protocolError)
+                                Right
+                                (extractRemoteCompactionItem response)
+                        let items =
+                                buildRemoteCompactedHistory
+                                    remoteCompactionRetainedTokenBudget
+                                    history
+                                    checkpoint
+                        Right CompactOutcome
+                            { compactBeforeTokens = before
+                            , compactAfterTokens = estimateItemsTokens items
+                            , compactHistory = items
+                            , compactSummary = "Context compacted remotely."
+                            }
+                    }
   where
     protocolError message =
         ProviderError ApiErrorType message Nothing
 
-compactLocalXai
-    :: Maybe TokenProvider
+summarizeLocalAttempt
+    :: OpenAiCompactionSender
     -> ResponseCreateParams
     -> [ResponseItem]
     -> Int
     -> Maybe Text
-    -> ExceptT Text IO CompactOutcome
-compactLocalXai tokenProvider params history before focus = do
-    provider <- requireTokenProvider XAIProvider tokenProvider
-    options <- lift XAI.clientOptionsFromEnv
-    summarizeLocal
-        (\tokens request ->
-            runWithTokenProvider tokens \credential ->
-                XAI.createResponseWith options credential request)
-        provider
-        params
-        history
-        before
-        focus
-
-compactLocalOpenRouter
-    :: Maybe TokenProvider
-    -> ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-    -> Maybe Text
-    -> ExceptT Text IO CompactOutcome
-compactLocalOpenRouter tokenProvider params history before focus = do
-    provider <- requireTokenProvider OpenRouterProvider tokenProvider
-    options <- lift OpenRouter.clientOptionsFromEnv
-    summarizeLocal
-        (\tokens request ->
-            runWithTokenProvider tokens \credential ->
-                OpenRouter.createResponseWith options credential request)
-        provider
-        params
-        history
-        before
-        focus
-
-summarizeLocal
-    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
-    -> TokenProvider
-    -> ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-    -> Maybe Text
-    -> ExceptT Text IO CompactOutcome
-summarizeLocal send provider params history before focus = do
-    requireHistory history
-    let summaryPrompt = summarizationPrompt focus
-        ResponseCreateParams{..} = params
-        summaryParams =
-            ResponseCreateParams
-                { tools = Nothing
-                , parallelToolCalls = Just False
-                -- The ChatGPT Codex REST endpoint only accepts streaming
-                -- Responses requests, and this client decodes its SSE result.
-                , stream = Just True
-                , ..
-                }
-        request =
-            withRequestInput
-                summaryParams
-                (history <> [userTextItem summaryPrompt])
-    response <- withExceptT formatApiError $
-        ExceptT (send provider request)
-    summary <- case assistantTextFromResponse response of
-        Nothing -> throwE "compaction produced no summary text"
-        Just text -> pure text
-    let items = buildLocalCompactedHistory 6 history summary
-    pure CompactOutcome
-        { compactBeforeTokens = before
-        , compactAfterTokens = estimateItemsTokens items
-        , compactHistory = items
-        , compactSummary = summary
-        }
+    -> IO (CompactAttempt ApiError)
+summarizeLocalAttempt send params history before focus
+    | null history =
+        pure $ CompactAttempt emptyTokenUsage $
+            Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
+    | otherwise = do
+        let summaryPrompt = summarizationPrompt focus
+            ResponseCreateParams{..} = params
+            summaryParams =
+                ResponseCreateParams
+                    { tools = Nothing
+                    , parallelToolCalls = Just False
+                    -- The ChatGPT Codex REST endpoint only accepts streaming
+                    -- Responses requests, and this client decodes its SSE result.
+                    , stream = Just True
+                    , ..
+                    }
+            request =
+                withRequestInput
+                    summaryParams
+                    (history <> [userTextItem summaryPrompt])
+        send request >>= \case
+            Left err ->
+                pure (CompactAttempt emptyTokenUsage (Left err))
+            Right response ->
+                pure CompactAttempt
+                    { compactAttemptUsage = responseTokenUsage response
+                    , compactAttemptResult =
+                        case assistantTextFromResponse response of
+                            Nothing ->
+                                Left (ProviderError ApiErrorType
+                                    "compaction produced no summary text"
+                                    Nothing)
+                            Just summary ->
+                                let items =
+                                        buildLocalCompactedHistory
+                                            6 history summary
+                                in Right CompactOutcome
+                                    { compactBeforeTokens = before
+                                    , compactAfterTokens =
+                                        estimateItemsTokens items
+                                    , compactHistory = items
+                                    , compactSummary = summary
+                                    }
+                    }
 
 autoCompactOpenAiBackend
     :: TokenProvider
@@ -289,9 +406,33 @@ autoCompactOpenAiBackendWithThreshold
     -> Backend
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
         getParams transcriptRef contextTokensRef backend =
+    autoCompactOpenAiBackendWithSender
+        configuredThreshold
+        (sendOpenAIRemoteCompaction tokenProvider)
+        (const (pure ()))
+        getParams
+        transcriptRef
+        contextTokensRef
+        backend
+
+-- | Automatic compaction with an injected Responses sender and an immediate
+-- usage recorder. The root CLI uses this to share its active WebSocket session
+-- and persist billable compaction usage even if the following turn fails.
+autoCompactOpenAiBackendWithSender
+    :: Maybe Int
+    -> OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> IORef (Maybe (Int, Int))
+    -> Backend
+    -> Backend
+autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
+        getParams transcriptRef contextTokensRef backend =
     autoCompactOpenAiBackendWithLimit
         getLimit
         compactAction
+        recordUsage
         transcriptRef
         contextTokensRef
         backend
@@ -304,9 +445,8 @@ autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
     compactAction = do
         params <- getParams
         history <- readIORef transcriptRef
-        compactRemoteV2Api
-            sendOpenAIRemoteCompaction
-            tokenProvider
+        compactRemoteV2Attempt
+            send
             params
             history
             (estimateItemsTokens history)
@@ -330,18 +470,22 @@ autoCompactOpenAiBackendWithApi
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
-autoCompactOpenAiBackendWithApi =
+autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
+        (CompactAttempt emptyTokenUsage <$> compactAction)
+        (const (pure ()))
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
-    -> IO (Either ApiError CompactOutcome)
+    -> IO (CompactAttempt ApiError)
+    -> (TokenUsage -> IO ())
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
-autoCompactOpenAiBackendWithLimit getLimit compactAction transcriptRef contextTokensRef
+autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
+        transcriptRef contextTokensRef
         (Backend submit) =
     Backend \previous inputs onEvent -> do
         contextState <- readIORef contextTokensRef
@@ -365,6 +509,10 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction transcriptRef contextTo
                 else compactThenSubmit contextState inputs onEvent
             else submitAndTrack contextState previous inputs onEvent
   where
+    runCompaction =
+        (.compactAttemptResult)
+            <$> runAttemptAndRecord recordUsage compactAction
+
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
@@ -373,38 +521,77 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction transcriptRef contextTo
     -- not committed them yet. Absorb them into history before compaction, then
     -- resume from the new checkpoint without sending them a second time.
     compactToolContinuation oldTokens inputs onEvent = do
-        oldHistory <- readIORef transcriptRef
-        let (toolItems, remainingInputs) = absorbCompletedTools inputs
-        writeIORef transcriptRef (oldHistory <> toolItems)
-        onEvent (ActivityUpdated "Compacting context…")
-        (compactAction `onException` writeIORef transcriptRef oldHistory) >>= \case
-            Left err -> do
-                writeIORef transcriptRef oldHistory
-                pure (Left (automaticCompactionError err))
-            Right outcome -> do
-                writeIORef transcriptRef outcome.compactHistory
-                submitAndTrack oldTokens Nothing remainingInputs onEvent
+        mask \restore -> do
+            oldHistory <- readIORef transcriptRef
+            let (toolItems, remainingInputs) = absorbCompletedTools inputs
+                rollback = do
+                    writeIORef transcriptRef oldHistory
+                    writeIORef contextTokensRef oldTokens
+            writeIORef transcriptRef (oldHistory <> toolItems)
+            (do
+                onEvent (ActivityUpdated "Compacting context…")
+                restore runCompaction >>= \case
+                    Left err -> do
+                        rollback
+                        pure (Left (automaticCompactionError err))
+                    Right outcome ->
+                        installSubmitAndTrack
+                            restore
+                            rollback
+                            outcome
+                            remainingInputs
+                            onEvent
+                ) `onException` rollback
 
     compactThenSubmit oldTokens inputs onEvent = do
+        oldHistory <- readIORef transcriptRef
         onEvent (ActivityUpdated "Compacting context…")
-        compactAction >>= \case
+        runCompaction >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
-                Right outcome -> do
-                    writeIORef transcriptRef outcome.compactHistory
-                    submitAndTrack oldTokens Nothing inputs onEvent
+                Right outcome ->
+                    mask \restore -> do
+                        let rollback = do
+                                writeIORef transcriptRef oldHistory
+                                writeIORef contextTokensRef oldTokens
+                        installSubmitAndTrack
+                            restore
+                            rollback
+                            outcome
+                            inputs
+                            onEvent
+                            `onException` rollback
+
+    installCompactedHistory outcome = do
+        let history = outcome.compactHistory
+            contextState =
+                Just (outcome.compactAfterTokens, length history)
+        writeIORef transcriptRef history
+        writeIORef contextTokensRef contextState
+
+    installSubmitAndTrack restore rollback outcome inputs onEvent = do
+        installCompactedHistory outcome
+        result <- restore (submit Nothing inputs onEvent)
+        case result of
+            Left _ -> rollback
+            Right output -> trackSuccessfulOutput output
+        pure result
 
     submitAndTrack oldTokens previous inputs onEvent = do
-        result <- submit previous inputs onEvent
+        result <-
+            submit previous inputs onEvent
+                `onException` writeIORef contextTokensRef oldTokens
         case result of
             Left _ -> writeIORef contextTokensRef oldTokens
-            Right output -> do
-                historyLength <- length <$> readIORef transcriptRef
-                writeIORef contextTokensRef $ Just
-                    ( output.tokenUsage.inputTokens + output.tokenUsage.outputTokens
-                    , historyLength
-                    )
+            Right output -> trackSuccessfulOutput output
         pure result
+
+    trackSuccessfulOutput output = do
+        historyLength <- length <$> readIORef transcriptRef
+        writeIORef contextTokensRef $ Just
+            ( output.tokenUsage.inputTokens + output.tokenUsage.outputTokens
+            , historyLength
+            )
 
     absorbCompletedTools =
         foldr
@@ -435,14 +622,6 @@ requireTokenProvider provider =
 requireHistory :: [ResponseItem] -> ExceptT Text IO ()
 requireHistory history
     | null history = throwE "nothing to compact"
-    | otherwise = pure ()
-
-requireHistoryApi :: [ResponseItem] -> ExceptT ApiError IO ()
-requireHistoryApi history
-    | null history =
-        throwE $ ProviderError InvalidRequestError
-            "nothing to compact"
-            Nothing
     | otherwise = pure ()
 
 providerLabel :: Provider -> Text

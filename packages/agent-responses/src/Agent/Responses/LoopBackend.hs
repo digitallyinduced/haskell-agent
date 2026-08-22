@@ -4,6 +4,7 @@ module Agent.Responses.LoopBackend
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
+    , responseTokenUsage
     , streamEventToLoopEvent
     , assistantTextFromResponse
     , toolResultToItem
@@ -230,8 +231,12 @@ responseToTurnOutput response = TurnOutput
     { responseId = response.responseId
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
-    , tokenUsage = tokenUsageFromResponse response.usage
+    , tokenUsage = responseTokenUsage response
     }
+
+responseTokenUsage :: Response -> TokenUsage
+responseTokenUsage response =
+    tokenUsageFromResponse response.usage
 
 tokenUsageFromResponse :: Maybe ResponseUsage -> TokenUsage
 tokenUsageFromResponse = maybe emptyTokenUsage \usage ->

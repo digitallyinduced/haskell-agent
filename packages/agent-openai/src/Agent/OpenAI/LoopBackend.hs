@@ -5,6 +5,12 @@
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
     , openAiBackendReconnecting
+    , openAiAuxiliaryResponseSenderReconnecting
+    , openAiAuxiliaryResponseSenderWithConnectionRecovery
+    , openAiResponseSenderReconnecting
+    , openAiResponseSenderWithConnectionRecoveryWhen
+    , openAiResponseSenderWithConnectionRecovery
+    , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
@@ -12,6 +18,7 @@ module Agent.OpenAI.LoopBackend
     , statelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
+    , responseTokenUsage
     , streamEventToLoopEvent
     , assistantTextFromResponse
     , toolResultToItem
@@ -21,6 +28,7 @@ module Agent.OpenAI.LoopBackend
 import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
+    , isInlineRetryableProviderError
     , isInlineRetryableProviderResponseError
     )
 import Agent.Loop (Backend(..), LoopEvent(..))
@@ -40,6 +48,7 @@ import Agent.Provider
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseToTurnOutput
+    , responseTokenUsage
     , statelessResponsesBackend
     , streamEventToLoopEvent
     , toolResultToItem
@@ -89,7 +98,76 @@ openAiBackendReconnecting
     -> IORef [ResponseItem]
     -> Backend
 openAiBackendReconnecting provider currentCredential connectionHealthy conn =
-    openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh
+    openAiBackendWith
+        (openAiResponseSenderReconnecting
+            provider
+            currentCredential
+            connectionHealthy
+            conn)
+
+-- | Send a Responses request through the active Codex WebSocket while it is
+-- healthy, with the same replay-safe fresh-connection recovery used by the
+-- normal model backend. Callers can reuse this for auxiliary model requests
+-- such as remote compaction without opening a separate REST session/account.
+openAiResponseSenderReconnecting
+    :: TokenProvider
+    -> Credential
+    -> IORef Bool
+    -> CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderReconnecting =
+    openAiResponseSenderReconnectingWhen
+        (isJust . streamEventToLoopEvent)
+        markLoopReplayUnsafe
+
+-- | Auxiliary Responses requests are not rendered to the loop, so their
+-- replay boundary also includes completed output items such as an opaque
+-- compaction checkpoint. Replaying after one of those items arrived could
+-- bill the request twice even though no text delta was visible.
+openAiAuxiliaryResponseSenderReconnecting
+    :: TokenProvider
+    -> Credential
+    -> IORef Bool
+    -> CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiAuxiliaryResponseSenderReconnecting provider currentCredential
+        connectionHealthy conn =
+    openAiResponseSenderWithRetryPolicy
+        transientStreamingResultPolicy
+        auxiliaryOutputObserved
+        (openAiResponseSenderReconnectingWhen
+            auxiliaryOutputObserved
+            markAuxiliaryReplayUnsafe
+            provider
+            currentCredential
+            connectionHealthy
+            conn)
+
+openAiResponseSenderReconnectingWhen
+    :: (ResponseStreamEvent -> Bool)
+    -> (ApiError -> ApiError)
+    -> TokenProvider
+    -> Credential
+    -> IORef Bool
+    -> CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderReconnectingWhen observed markObservedFailure provider
+        currentCredential connectionHealthy conn =
+    openAiResponseSenderWithConnectionRecoveryUsing
+        observed
+        markObservedFailure
+        connectionHealthy
+        sendCurrent
+        sendFresh
   where
     sendCurrent request previousResponseId onEvent =
         sendWsRequestWithEvents conn request previousResponseId onEvent
@@ -106,7 +184,19 @@ openAiBackendReconnecting provider currentCredential connectionHealthy conn =
                 withCodexWsRetrying provider
                     (sendOnFresh request previousResponseId onEvent)
     sendOnFresh request previousResponseId onEvent freshConn _credential =
-        sendWsRequestWithEvents freshConn request previousResponseId onEvent
+        do
+            emittedOutput <- newIORef False
+            result <-
+                sendWsRequestWithEvents freshConn request previousResponseId
+                    \event -> do
+                        if observed event
+                            then writeIORef emittedOutput True
+                            else pure ()
+                        onEvent event
+            emitted <- readIORef emittedOutput
+            pure $ case result of
+                Left err | emitted -> Left (markObservedFailure err)
+                _ -> result
 
 -- | Injectable connection recovery used by the reconnecting backend.
 openAiBackendWithConnectionRecovery
@@ -124,13 +214,101 @@ openAiBackendWithConnectionRecovery
     -> IORef [ResponseItem]
     -> Backend
 openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
-    openAiBackendWith sendWithRecovery
+    openAiBackendWith $
+        openAiResponseSenderWithConnectionRecovery
+            connectionHealthy
+            sendCurrent
+            sendFresh
+
+openAiResponseSenderWithConnectionRecovery
+    :: IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (Maybe ApiError
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderWithConnectionRecovery =
+    openAiResponseSenderWithConnectionRecoveryUsing
+        (isJust . streamEventToLoopEvent)
+        markLoopReplayUnsafe
+
+openAiAuxiliaryResponseSenderWithConnectionRecovery
+    :: IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (Maybe ApiError
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiAuxiliaryResponseSenderWithConnectionRecovery =
+    openAiResponseSenderWithConnectionRecoveryUsing
+        auxiliaryOutputObserved
+        markAuxiliaryReplayUnsafe
+
+-- | Connection recovery with an explicit definition of when a request has
+-- produced enough output that replaying it is no longer safe.
+openAiResponseSenderWithConnectionRecoveryWhen
+    :: (ResponseStreamEvent -> Bool)
+    -> IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (Maybe ApiError
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderWithConnectionRecoveryWhen observed =
+    openAiResponseSenderWithConnectionRecoveryUsing
+        observed
+        markLoopReplayUnsafe
+
+openAiResponseSenderWithConnectionRecoveryUsing
+    :: (ResponseStreamEvent -> Bool)
+    -> (ApiError -> ApiError)
+    -> IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (Maybe ApiError
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderWithConnectionRecoveryUsing observed markObservedFailure
+        connectionHealthy sendCurrent sendFresh =
+    sendWithRecovery
   where
     sendWithRecovery request previousResponseId onEvent = do
         healthy <- readIORef connectionHealthy
         if healthy
             then tryCurrent request previousResponseId onEvent
-            else sendFresh Nothing request previousResponseId onEvent
+            else sendFreshTracked Nothing request previousResponseId onEvent
 
     tryCurrent request previousResponseId onEvent = do
         emittedLoopEvent <- newIORef False
@@ -138,17 +316,36 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
             (trackOutput emittedLoopEvent onEvent)
             `onException` writeIORef connectionHealthy False
         case result of
-            Left err
-                | isDeadConnectionOrAccount err -> do
-                    writeIORef connectionHealthy False
-                    emitted <- readIORef emittedLoopEvent
-                    if emitted
-                        then pure result
-                        else sendFresh (Just err) request previousResponseId onEvent
+            Left err -> do
+                let deadConnectionOrAccount =
+                        isDeadConnectionOrAccount err
+                if deadConnectionOrAccount
+                    then writeIORef connectionHealthy False
+                    else pure ()
+                emitted <- readIORef emittedLoopEvent
+                if emitted
+                    then pure (Left (markObservedFailure err))
+                    else if deadConnectionOrAccount
+                        then sendFreshTracked
+                            (Just err)
+                            request
+                            previousResponseId
+                            onEvent
+                        else pure result
             _ -> pure result
 
+    sendFreshTracked previousFailure request previousResponseId onEvent = do
+        emittedOutput <- newIORef False
+        result <-
+            sendFresh previousFailure request previousResponseId
+                (trackOutput emittedOutput onEvent)
+        emitted <- readIORef emittedOutput
+        pure $ case result of
+            Left err | emitted -> Left (markObservedFailure err)
+            _ -> result
+
     trackOutput emittedLoopEvent onEvent event = do
-        if isJust (streamEventToLoopEvent event)
+        if observed event
             then writeIORef emittedLoopEvent True
             else pure ()
         onEvent event
@@ -157,6 +354,80 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
         ConnectionError {} -> True
         ProviderError WebSocketConnectionLimitReached _ _ -> True
         err -> isJust (accountFailureFromApiError err)
+
+-- | Retry transient provider responses only while a request has produced no
+-- output that would make replay unsafe.
+openAiResponseSenderWithRetryPolicy
+    :: RetryPolicyM IO
+    -> (ResponseStreamEvent -> Bool)
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> (ResponseStreamEvent -> IO ())
+    -> IO (Either ApiError Response)
+openAiResponseSenderWithRetryPolicy retryPolicy observed send
+        request previousResponseId onEvent = do
+    emittedOutput <- newIORef False
+    go emittedOutput defaultRetryStatus
+  where
+    go emittedOutput retryStatus = do
+        result <- send request previousResponseId \event -> do
+            if observed event
+                then writeIORef emittedOutput True
+                else pure ()
+            onEvent event
+        emitted <- readIORef emittedOutput
+        case result of
+            Left apiError
+                | not emitted
+                , isInlineRetryableProviderError apiError ->
+                    applyPolicy retryPolicy retryStatus >>= \case
+                        Nothing -> pure result
+                        Just nextStatus -> do
+                            threadDelay
+                                (fromMaybe 0 nextStatus.rsPreviousDelay)
+                            go emittedOutput nextStatus
+            _ -> pure result
+
+auxiliaryOutputObserved :: ResponseStreamEvent -> Bool
+auxiliaryOutputObserved = \case
+    ResponseCompletedEvent{} -> True
+    ResponseFailedEvent{response} -> not (null response.output)
+    ResponseIncompleteEvent{} -> True
+    ResponseOutputItemAddedEvent{} -> True
+    ResponseOutputItemDoneEvent{} -> True
+    event -> isJust (streamEventToLoopEvent event)
+
+markLoopReplayUnsafe :: ApiError -> ApiError
+markLoopReplayUnsafe err
+    | isJust (accountFailureFromApiError err) =
+        replayUnsafeError "model output" err
+    | otherwise = err
+
+markAuxiliaryReplayUnsafe :: ApiError -> ApiError
+markAuxiliaryReplayUnsafe =
+    replayUnsafeError "auxiliary response output"
+
+replayUnsafeError :: Text -> ApiError -> ApiError
+replayUnsafeError outputLabel err =
+    if isReplayUnsafeError err
+        then err
+        else ProviderError (UnknownErrorType "replay_unsafe")
+            ( "provider failed after "
+                <> outputLabel
+                <> "; refusing to replay: "
+                <> Text.pack (show err)
+            )
+            Nothing
+
+isReplayUnsafeError :: ApiError -> Bool
+isReplayUnsafeError = \case
+    ProviderError (UnknownErrorType errorType) _ _ ->
+        errorType == "replay_unsafe"
+    _ -> False
 
 -- | Prefer a WebSocket backend, then switch this agent session permanently to
 -- a fallback transport when the socket dies before exposing model output.
