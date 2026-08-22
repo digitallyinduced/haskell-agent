@@ -3,6 +3,7 @@ module Agent.CLI
     ( DevResult(..)
     , afterDev
     , applyReplMode
+    , buildPromptState
     , cycleReplInteraction
     , devArgs
     , devMain
@@ -2152,6 +2153,7 @@ runPendingTurnWithCooldownRetry
 runPendingTurnWithCooldownRetry
     allowCooldownRetry presentation env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    syncFullscreenPrompt env
     case env.sessionFullscreen of
         Nothing -> pure ()
         Just runtime -> case presentation of
@@ -2165,6 +2167,49 @@ runPendingTurnWithCooldownRetry
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
+
+-- | A retained fullscreen runtime survives provider rebuilds. Publish the new
+-- session's prompt metadata before replaying a pending turn so the composer
+-- does not keep showing the exhausted provider while its replacement runs.
+syncFullscreenPrompt :: SessionEnv -> IO ()
+syncFullscreenPrompt env =
+    forM_ env.sessionFullscreen \runtime -> do
+        planState <- readIORef env.sessionPlanMode.planStateRef
+        params <- readIORef env.sessionParams
+        policy <- readIORef env.sessionPolicy
+        account <- readIORef env.sessionAccount
+        usage <- readIORef env.sessionUsage
+        attachments <- readIORef env.sessionAttachments
+        emitUiEvent runtime $ UiSetPrompt $
+            buildPromptState
+                params
+                planState
+                policy
+                account
+                (isJust env.sessionSelectAccount)
+                usage
+                (length attachments)
+
+buildPromptState
+    :: ResponseCreateParams
+    -> PlanModeState
+    -> ApprovalPolicy
+    -> Text
+    -> Bool
+    -> TokenUsage
+    -> Int
+    -> PromptState
+buildPromptState params planState policy account accountSelectable usage attachments =
+    PromptState
+        { promptModel = currentModel params
+        , promptEffort = currentEffort params
+        , promptMode =
+            replModeLabel (replModeFromState planState policy)
+        , promptAccount = account
+        , promptAccountSelectable = accountSelectable
+        , promptUsage = usage
+        , promptAttachments = attachments
+        }
 
 finishTurn
     :: SessionEnv
@@ -2392,15 +2437,14 @@ replWithDraft env@SessionEnv
         Just runtime -> do
             setFullscreenImagePreviews runtime pendingAttachments
             readFullscreenLine runtime skillCommands
-                PromptState
-                    { promptModel = currentModel params
-                    , promptEffort = currentEffort params
-                    , promptMode = replModeLabel idleMode
-                    , promptAccount = account
-                    , promptAccountSelectable = isJust selectAccount
-                    , promptUsage = usage
-                    , promptAttachments = length pendingAttachments
-                    }
+                (buildPromptState
+                    params
+                    planState
+                    policy
+                    account
+                    (isJust selectAccount)
+                    usage
+                    (length pendingAttachments))
                 draft
         Nothing -> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
