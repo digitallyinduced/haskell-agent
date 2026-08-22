@@ -1,22 +1,38 @@
 -- | Project-scoped settings under @<project>/.haskell-agent/settings.json@.
 module Agent.CLI.Project
-    ( ProjectSettings(..)
+    ( ProjectModel(..)
+    , ProjectSettings(..)
     , defaultProjectSettings
     , loadProjectSettings
+    , projectModelFor
+    , projectModelProvider
     , projectSettingsPath
     , resolveProjectRoot
     , saveProjectAutoApprove
+    , saveProjectModel
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Exception (try)
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
+import Agent.Provider (Provider, parseProvider, providerSlug)
+import Control.Exception.Safe (tryIO)
+import Data.Aeson
+    ( FromJSON(..)
+    , ToJSON(..)
+    , object
+    , withObject
+    , (.:)
+    , (.:?)
+    , (.=)
+    )
 import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import System.Directory.OsPath
     ( canonicalizePath
     , createDirectoryIfMissing
@@ -37,30 +53,63 @@ projectSettingsPath projectRoot =
         </> unsafeEncodeUtf ".haskell-agent"
         </> unsafeEncodeUtf "settings.json"
 
+data ProjectModel = ProjectModel
+    { projectModelProvider :: !Provider
+    , projectModelName :: !Text
+    } deriving (Eq, Show)
+
 data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
     , settingsAutoApprove :: !Bool
+    , settingsLastModel :: !(Maybe ProjectModel)
     } deriving (Eq, Show)
 
 defaultProjectSettings :: ProjectSettings
 defaultProjectSettings = ProjectSettings
     { settingsVersion = settingsSchemaVersion
     , settingsAutoApprove = False
+    , settingsLastModel = Nothing
     }
+
+instance ToJSON ProjectModel where
+    toJSON model = object
+        [ "provider" .= providerSlug model.projectModelProvider
+        , "model" .= model.projectModelName
+        ]
+
+instance FromJSON ProjectModel where
+    parseJSON = withObject "ProjectModel" \o -> do
+        providerText <- o .: "provider"
+        provider <- case parseProvider providerText of
+            Just parsed -> pure parsed
+            Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
+        model <- o .: "model"
+        if Text.null (Text.strip model)
+            then fail "model must not be empty"
+            else pure ProjectModel
+                { projectModelProvider = provider
+                , projectModelName = model
+                }
 
 instance ToJSON ProjectSettings where
     toJSON settings = object
         [ "version" .= settings.settingsVersion
         , "autoApprove" .= settings.settingsAutoApprove
+        , "lastModel" .= settings.settingsLastModel
         ]
 
 instance FromJSON ProjectSettings where
     parseJSON = withObject "ProjectSettings" \o -> do
         version <- fromMaybe settingsSchemaVersion <$> o .:? "version"
         autoApprove <- fromMaybe False <$> o .:? "autoApprove"
+        lastModelValue <- o .:? "lastModel"
         pure ProjectSettings
             { settingsVersion = version
             , settingsAutoApprove = autoApprove
+            -- A malformed or obsolete model selection should not discard
+            -- unrelated project settings such as auto-approve.
+            , settingsLastModel =
+                lastModelValue >>= parseMaybe parseJSON
             }
 
 -- | Settings root for the checkout that contains @cwd@.
@@ -82,7 +131,7 @@ loadProjectSettings projectRoot = do
     if not exists
         then pure defaultProjectSettings
         else do
-            result <- try @IOError (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
+            result <- tryIO (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
             pure $ case result of
                 Left _ -> defaultProjectSettings
                 Right bytes ->
@@ -92,17 +141,48 @@ loadProjectSettings projectRoot = do
 
 -- | Persist the project-wide auto-approve flag, creating @.haskell-agent@ as needed.
 saveProjectAutoApprove :: OsPath -> Bool -> IO ()
-saveProjectAutoApprove projectRoot autoApprove = do
+saveProjectAutoApprove projectRoot autoApprove =
+    updateProjectSettings projectRoot \settings ->
+        settings { settingsAutoApprove = autoApprove }
+
+-- | Remember the most recently selected provider/model pair for this project.
+saveProjectModel :: OsPath -> Provider -> Text -> IO ()
+saveProjectModel projectRoot provider model =
+    updateProjectSettings projectRoot \settings ->
+        settings
+            { settingsLastModel = Just ProjectModel
+                { projectModelProvider = provider
+                , projectModelName = model
+                }
+            }
+
+projectModelProvider :: ProjectSettings -> Maybe Provider
+projectModelProvider settings =
+    (.projectModelProvider) <$> settings.settingsLastModel
+
+-- | Return the remembered model only when it belongs to the active provider.
+projectModelFor :: Provider -> ProjectSettings -> Maybe Text
+projectModelFor provider settings = do
+    remembered <- settings.settingsLastModel
+    if remembered.projectModelProvider == provider
+        then Just remembered.projectModelName
+        else Nothing
+
+updateProjectSettings
+    :: OsPath
+    -> (ProjectSettings -> ProjectSettings)
+    -> IO ()
+updateProjectSettings projectRoot update = do
     let dir = projectRoot </> unsafeEncodeUtf ".haskell-agent"
         path = projectSettingsPath projectRoot
-        settings = defaultProjectSettings { settingsAutoApprove = autoApprove }
+    settings <- update <$> loadProjectSettings projectRoot
     createDirectoryIfMissing True dir
-    _ <- try @IOError (setFileMode (unsafeToFilePath dir) 0o700)
+    _ <- tryIO (setFileMode (unsafeToFilePath dir) 0o700)
     writeLazyFileAtomically path 0o600 (Aeson.encode settings)
 
 gitToplevel :: OsPath -> IO (Maybe OsPath)
 gitToplevel dir = do
-    result <- try @IOError $
+    result <- tryIO $
         readCreateProcessWithExitCode
             (proc "git" ["rev-parse", "--show-toplevel"])
                 { cwd = Just (unsafeToFilePath dir) }

@@ -124,7 +124,10 @@ import Agent.CLI.Progress
 import Agent.CLI.Project
     ( ProjectSettings(..)
     , loadProjectSettings
+    , projectModelFor
+    , projectModelProvider
     , resolveProjectRoot
+    , saveProjectModel
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Request (requestParams)
@@ -846,7 +849,12 @@ runAgentInitialized options transition home root resumed cwd startup = do
             Just target -> Just target.modelProvider
             Nothing -> case resumed of
                 Just (meta, _) -> Just meta.metaProvider
-                Nothing -> options.optProvider
+                Nothing -> case options.optProvider of
+                    Just requested -> Just requested
+                    Nothing
+                        | isNothing options.optModel ->
+                            projectModelProvider projectSettings
+                        | otherwise -> Nothing
     loaded <-
         loadAuth requestedProvider
             >>= either (startupDie startup . Text.unpack) pure
@@ -874,13 +882,22 @@ runAgentInitialized options transition home root resumed cwd startup = do
             (case transitionTarget of
                 Just target -> target.modelId
                 Nothing ->
-                    maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
+                    case fst <$> resumed of
+                        Just meta -> meta.metaModel
+                        Nothing ->
+                            fromMaybe
+                                (defaultModelFor provider)
+                                (projectModelFor provider projectSettings))
             options.optModel
         effort = fromMaybe
             (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
             options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
+    -- Provider transitions commit their selection separately: manual switches
+    -- immediately, automatic fallbacks only after the replacement succeeds.
+    when (isNothing transition) $
+        saveProjectModel projectRoot provider model
     sessionProcessManager <- newSessionProcessManager root
     managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
     activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
@@ -1103,7 +1120,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                     transcriptRef)
                                                 focus
                                 activeBackend <-
-                                    prepareTransitionBackend transition persist noticingBackend
+                                    prepareTransitionBackend
+                                        projectRoot transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend)
@@ -1149,7 +1167,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
-                            prepareTransitionBackend transition persist backend
+                            prepareTransitionBackend
+                                projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
@@ -1183,7 +1202,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
-                            prepareTransitionBackend transition persist backend
+                            prepareTransitionBackend
+                                projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
@@ -2333,7 +2353,7 @@ replWithDraft env@SessionEnv
                     ReplSetModel name -> do
                         color <- resolveColor stdout
                         message <- applyModelChange
-                            provider name paramsRef render previous persist
+                            projectRoot provider name paramsRef render previous persist
                         displayInfo message $
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
@@ -2777,7 +2797,7 @@ replWithDraft env@SessionEnv
                     next
                 | choice.modelProvider == provider -> do
                     message <- applyModelChange
-                        provider choice.modelId paramsRef render previous persist
+                        projectRoot provider choice.modelId paramsRef render previous persist
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -3021,16 +3041,18 @@ fetchSnapshot snapshot = do
         , usageResult = result
         }
 applyModelChange
-    :: Provider
+    :: OsPath
+    -> Provider
     -> Text
     -> IORef ResponseCreateParams
     -> RenderConfig
     -> IORef (Maybe Text)
     -> Persistence
     -> IO Text
-applyModelChange provider name paramsRef render previous persist = do
+applyModelChange projectRoot provider name paramsRef render previous persist = do
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
+    saveProjectModel projectRoot provider name
     clearedChain <- case provider of
         OpenAIProvider ->
             atomicModifyIORef' previous \prev ->
@@ -3208,51 +3230,63 @@ ensureTransitionSessionId (PersistenceEnabled slotRef) = do
     pure (Just handle.sessionMeta.metaId)
 
 commitProviderTransition
-    :: Maybe ProviderTransition
+    :: OsPath
+    -> Maybe ProviderTransition
     -> Persistence
     -> IO ()
-commitProviderTransition Nothing _ = pure ()
-commitProviderTransition _ PersistenceDisabled = pure ()
-commitProviderTransition (Just transition) (PersistenceEnabled slotRef) = do
-    slot <- readIORef slotRef
-    case slot of
-        PersistencePending pending ->
-            writeIORef slotRef $ PersistencePending pending
-                { createProvider = transition.transitionTarget.modelProvider
-                , createModel = transition.transitionTarget.modelId
-                }
-        PersistenceActive handle -> do
-            now <- getCurrentTime
-            let meta = handle.sessionMeta
-                    { metaProvider = transition.transitionTarget.modelProvider
-                    , metaModel = transition.transitionTarget.modelId
-                    , metaLastResponseId = Nothing
-                    , metaUpdatedAt = now
-                    }
-            writeSessionMeta handle.sessionMetaPath meta
-            writeIORef slotRef (PersistenceActive handle { sessionMeta = meta })
+commitProviderTransition _ Nothing _ = pure ()
+commitProviderTransition projectRoot (Just transition) persist = do
+    saveProjectModel
+        projectRoot
+        transition.transitionTarget.modelProvider
+        transition.transitionTarget.modelId
+    case persist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                PersistencePending pending ->
+                    writeIORef slotRef $ PersistencePending pending
+                        { createProvider = transition.transitionTarget.modelProvider
+                        , createModel = transition.transitionTarget.modelId
+                        }
+                PersistenceActive handle -> do
+                    now <- getCurrentTime
+                    let meta = handle.sessionMeta
+                            { metaProvider = transition.transitionTarget.modelProvider
+                            , metaModel = transition.transitionTarget.modelId
+                            , metaLastResponseId = Nothing
+                            , metaUpdatedAt = now
+                            }
+                    writeSessionMeta handle.sessionMetaPath meta
+                    writeIORef slotRef
+                        (PersistenceActive handle { sessionMeta = meta })
 
 prepareTransitionBackend
-    :: Maybe ProviderTransition
+    :: OsPath
+    -> Maybe ProviderTransition
     -> Persistence
     -> Backend
     -> IO Backend
-prepareTransitionBackend Nothing _ backend = pure backend
-prepareTransitionBackend (Just transition) persist backend
+prepareTransitionBackend _ Nothing _ backend = pure backend
+prepareTransitionBackend projectRoot (Just transition) persist backend
     | transition.transitionCause == ManualTransition = do
-        commitProviderTransition (Just transition) persist
+        commitProviderTransition projectRoot (Just transition) persist
         pure backend
     | otherwise = do
         committed <- newIORef False
-        pure $ commitBackendOnSuccess committed transition persist backend
+        pure $
+            commitBackendOnSuccess
+                projectRoot committed transition persist backend
 
 commitBackendOnSuccess
-    :: IORef Bool
+    :: OsPath
+    -> IORef Bool
     -> ProviderTransition
     -> Persistence
     -> Backend
     -> Backend
-commitBackendOnSuccess committed transition persist (Backend submit) =
+commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
     Backend \previous inputs onEvent -> do
         result <- submit previous inputs onEvent
         case result of
@@ -3260,7 +3294,7 @@ commitBackendOnSuccess committed transition persist (Backend submit) =
                 shouldCommit <- atomicModifyIORef' committed \done ->
                     (True, not done)
                 when shouldCommit $
-                    commitProviderTransition (Just transition) persist
+                    commitProviderTransition projectRoot (Just transition) persist
             Left _ -> pure ()
         pure result
 
