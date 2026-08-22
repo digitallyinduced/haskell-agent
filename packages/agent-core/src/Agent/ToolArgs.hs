@@ -10,6 +10,7 @@ module Agent.ToolArgs
     , objectArgsLenient
     , reqText
     , reqTextList
+    , reqInt
     , optText
     , optInt
     , optIntOrString
@@ -131,6 +132,14 @@ reqTextList obj key =
             one _ = failText ("Expected string entries in array for key: " <> key)
         Just (String t) -> pure [t]
         Just _ -> failText ("Expected array for key: " <> key)
+        Nothing -> failText ("Missing parameter: " <> key)
+
+-- | Required exact, bounded integer.
+reqInt :: Object -> Text -> Parser Int
+reqInt obj key =
+    case look obj key of
+        Just (Number n) -> parseExactInt key n
+        Just _ -> expectedInteger key
         Nothing -> failText ("Missing parameter: " <> key)
 
 -- | Optional string; an empty string counts as absent.

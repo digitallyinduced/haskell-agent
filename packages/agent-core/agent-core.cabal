@@ -65,6 +65,7 @@ library
                     , Agent.Tools
                     , Agent.Tools.ApplyPatch
                     , Agent.Tools.Codex
+                    , Agent.Tools.Codex.Shell
                     , Agent.Tools.Dangerous
                     , Agent.Tools.FileSystem
                     , Agent.Tools.Grok

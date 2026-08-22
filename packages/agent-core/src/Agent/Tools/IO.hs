@@ -14,9 +14,15 @@ module Agent.Tools.IO
     , runShellCommand
     , runShellCommandStreaming
     , startShellCommand
+    , startShellCommandWithInput
+    , writeShellCommandInput
+    , interruptShellCommand
     , stopShellCommand
     , terminateProcessGroup
+    , RunningOutputCursor
+    , initialRunningOutputCursor
     , runningLiveOutput
+    , runningOutputSince
     ) where
 
 import Agent.Cancel (isCancelled, waitCancel)
@@ -43,7 +49,9 @@ import Control.Concurrent.Async
     )
 import Control.Concurrent.MVar
     ( MVar
+    , modifyMVar
     , newEmptyMVar
+    , newMVar
     , readMVar
     , tryReadMVar
     , tryPutMVar
@@ -63,9 +71,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8With)
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode(..))
-import System.IO (Handle, hClose)
+import System.IO (Handle, hClose, hFlush)
 import System.Posix.Signals
     ( nullSignal
     , sigINT
@@ -125,8 +134,11 @@ data RunningCommand = RunningCommand
     { runningHandle :: !ProcessHandle
     , runningGroupId :: !(Maybe ProcessGroupID)
     , runningResult :: !(MVar CommandResult)
+    , runningStdin :: !(MVar (Maybe Handle))
     , runningStdout :: !(IORef CapturedBytes)
     , runningStderr :: !(IORef CapturedBytes)
+    , runningStdoutRecent :: !(IORef RecentBytes)
+    , runningStderrRecent :: !(IORef RecentBytes)
     , runningStdoutHandle :: !Handle
     , runningStderrHandle :: !Handle
     , runningSupervisor :: !(Async ())
@@ -137,6 +149,19 @@ data CapturedBytes = CapturedBytes
     , capturedDropped :: !Int
     }
 
+data RecentBytes = RecentBytes
+    { recentBytes :: !BS.ByteString
+    , recentDropped :: !Int
+    }
+
+data RunningOutputCursor = RunningOutputCursor
+    { cursorStdoutBytes :: !Int
+    , cursorStderrBytes :: !Int
+    }
+
+initialRunningOutputCursor :: RunningOutputCursor
+initialRunningOutputCursor = RunningOutputCursor 0 0
+
 -- | Bytes already drained from a still-running command, decoded and capped.
 runningLiveOutput :: RunningCommand -> IO (Text, Text)
 runningLiveOutput running = do
@@ -145,6 +170,24 @@ runningLiveOutput running = do
     pure
         ( renderCapturedBytes out
         , renderCapturedBytes err
+        )
+
+-- | Return output produced after a prior cursor. The capture is a bounded tail,
+-- so a slow reader may receive a truncation marker followed by the newest data.
+runningOutputSince
+    :: RunningCommand
+    -> RunningOutputCursor
+    -> IO ((Text, Text), RunningOutputCursor)
+runningOutputSince running cursor = do
+    out <- readIORef running.runningStdoutRecent
+    err <- readIORef running.runningStderrRecent
+    let (outText, outCursor) =
+            renderRecentBytesSince cursor.cursorStdoutBytes out
+        (errText, errCursor) =
+            renderRecentBytesSince cursor.cursorStderrBytes err
+    pure
+        ( (outText, errText)
+        , RunningOutputCursor outCursor errCursor
         )
 
 -- | Run a shell command in @workdir@, killing the process group on timeout.
@@ -200,8 +243,8 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
                     -- fills one pipe cannot deadlock the other.
                     withAsync sampleSnapshots \_sampler -> do
                         (out, err) <- concurrently
-                            (drainHandle env.toolStdoutCap hout stdoutRef)
-                            (drainHandle env.toolStdoutCap herr stderrRef)
+                            (drainHandle env.toolStdoutCap hout stdoutRef Nothing)
+                            (drainHandle env.toolStdoutCap herr stderrRef Nothing)
                         code <- waitForProcess processHandle
                         emitSnapshot
                         pure (out, err, code)
@@ -292,7 +335,25 @@ startShellCommand
     -> OsPath
     -> String
     -> IO (Either Text RunningCommand)
-startShellCommand env workdir command = do
+startShellCommand = startShellCommandWithStdin False
+
+-- | Start a command without waiting and retain stdin for later writes.
+-- Call 'stopShellCommand' when its owner is closed or the task is explicitly
+-- killed.
+startShellCommandWithInput
+    :: ToolEnv
+    -> OsPath
+    -> String
+    -> IO (Either Text RunningCommand)
+startShellCommandWithInput = startShellCommandWithStdin True
+
+startShellCommandWithStdin
+    :: Bool
+    -> ToolEnv
+    -> OsPath
+    -> String
+    -> IO (Either Text RunningCommand)
+startShellCommandWithStdin keepStdin env workdir command = do
     let spec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
@@ -301,37 +362,49 @@ startShellCommand env workdir command = do
             , create_group = True
             }
     try @_ @SomeException
-        (acquireRunningCommand spec env.toolStdoutCap) >>= \case
+        (acquireRunningCommand spec env.toolStdoutCap keepStdin) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
 
-acquireRunningCommand :: CreateProcess -> Int -> IO RunningCommand
-acquireRunningCommand spec outputCap = mask \restore -> do
+acquireRunningCommand :: CreateProcess -> Int -> Bool -> IO RunningCommand
+acquireRunningCommand spec outputCap keepStdin = mask \restore -> do
     created@(_, _, _, processHandle) <- createProcess spec
     groupId <- getPid processHandle
     case created of
         (Just hin, Just hout, Just herr, _) -> do
+            stdinVar <- newMVar (if keepStdin then Just hin else Nothing)
             let closePipes =
                     mapM_ (void . try @_ @SomeException . hClose) [hin, hout, herr]
                 stopCreated = do
                     terminateProcessGroup groupId processHandle
                     closePipes
-            hClose hin `onException` stopCreated
+            unless keepStdin $
+                hClose hin `onException` stopCreated
             resultVar <- newEmptyMVar
             stdoutRef <- newIORef emptyCapturedBytes
             stderrRef <- newIORef emptyCapturedBytes
+            stdoutRecentRef <- newIORef emptyRecentBytes
+            stderrRecentRef <- newIORef emptyRecentBytes
             supervisor <- asyncWithUnmask \unmask ->
                 (do
                     result <- try @_ @SomeException $ unmask do
                         ((out, err), code) <- concurrently
                             (concurrently
-                                (drainHandle outputCap hout stdoutRef)
-                                (drainHandle outputCap herr stderrRef))
+                                (drainHandle
+                                    outputCap hout stdoutRef (Just stdoutRecentRef))
+                                (drainHandle
+                                    outputCap herr stderrRef (Just stderrRecentRef)))
                             (waitForProcessPolling processHandle)
                         pure (out, err, code)
                     commandResult <- case result of
                         Left exception -> do
                             terminateProcessGroup groupId processHandle
+                            let diagnostic =
+                                    TextEncoding.encodeUtf8 (Text.pack (show exception))
+                            atomicModifyIORef' stderrRef \soFar ->
+                                (appendCapturedBytes outputCap diagnostic soFar, ())
+                            atomicModifyIORef' stderrRecentRef \soFar ->
+                                (appendRecentBytes outputCap diagnostic soFar, ())
                             pure (failedCommandResult exception)
                         Right (out, err, code) ->
                             pure CommandResult
@@ -344,13 +417,17 @@ acquireRunningCommand spec outputCap = mask \restore -> do
                     void $ tryPutMVar resultVar commandResult)
                 `finally` do
                     void $ tryPutMVar resultVar cancelledResult
+                    closeRunningStdinVar stdinVar
                     mapM_ (void . try @_ @SomeException . hClose) [hout, herr]
             let running = RunningCommand
                     { runningHandle = processHandle
                     , runningGroupId = groupId
                     , runningResult = resultVar
+                    , runningStdin = stdinVar
                     , runningStdout = stdoutRef
                     , runningStderr = stderrRef
+                    , runningStdoutRecent = stdoutRecentRef
+                    , runningStderrRecent = stderrRecentRef
                     , runningStdoutHandle = hout
                     , runningStderrHandle = herr
                     , runningSupervisor = supervisor
@@ -361,8 +438,37 @@ acquireRunningCommand spec outputCap = mask \restore -> do
             closeOptionalPipes [hin, hout, herr]
             fail "Failed to capture command output"
 
+-- | Write input to a running command. The command must have been started with
+-- 'startShellCommandWithInput'.
+writeShellCommandInput :: RunningCommand -> Text -> IO (Either Text ())
+writeShellCommandInput running input =
+    modifyMVar running.runningStdin \case
+        Nothing ->
+            pure (Nothing, Left "stdin is closed")
+        Just handle ->
+            try @_ @SomeException
+                (BS.hPut handle (TextEncoding.encodeUtf8 input) >> hFlush handle) >>= \case
+                    Left exception -> do
+                        void $ try @_ @SomeException (hClose handle)
+                        pure
+                            ( Nothing
+                            , Left ("Failed to write stdin: " <> Text.pack (show exception))
+                            )
+                    Right () ->
+                        pure (Just handle, Right ())
+
+-- | Send an interrupt to the command's process group.
+interruptShellCommand :: RunningCommand -> IO ()
+interruptShellCommand running =
+    case running.runningGroupId of
+        Nothing ->
+            void $ try @_ @SomeException (terminateProcess running.runningHandle)
+        Just groupId ->
+            void $ try @_ @SomeException (signalProcessGroup sigINT groupId)
+
 stopShellCommand :: RunningCommand -> IO ()
 stopShellCommand running = do
+    closeRunningStdin running
     finished <- tryReadMVar running.runningResult
     case finished of
         Just _ ->
@@ -387,6 +493,15 @@ closeRunningPipes running =
     mapM_ (void . try @_ @SomeException . hClose)
         [running.runningStdoutHandle, running.runningStderrHandle]
 
+closeRunningStdin :: RunningCommand -> IO ()
+closeRunningStdin = closeRunningStdinVar . (.runningStdin)
+
+closeRunningStdinVar :: MVar (Maybe Handle) -> IO ()
+closeRunningStdinVar stdinVar =
+    modifyMVar stdinVar \current -> do
+        mapM_ (void . try @_ @SomeException . hClose) current
+        pure (Nothing, ())
+
 closeOptionalPipes :: [Maybe Handle] -> IO ()
 closeOptionalPipes =
     mapM_ (mapM_ (void . try @_ @SomeException . hClose))
@@ -401,8 +516,13 @@ failedCommandResult exception = CommandResult
     }
 
 -- | Read the handle in chunks so a live snapshot can see output before EOF.
-drainHandle :: Int -> Handle -> IORef CapturedBytes -> IO CapturedBytes
-drainHandle cap handle ref = go
+drainHandle
+    :: Int
+    -> Handle
+    -> IORef CapturedBytes
+    -> Maybe (IORef RecentBytes)
+    -> IO CapturedBytes
+drainHandle cap handle ref recentRef = go
   where
     go = do
         chunk <- BS.hGetSome handle 8192
@@ -411,12 +531,23 @@ drainHandle cap handle ref = go
             else do
                 atomicModifyIORef' ref \soFar ->
                     (appendCapturedBytes cap chunk soFar, ())
+                mapM_
+                    (\recent ->
+                        atomicModifyIORef' recent \soFar ->
+                            (appendRecentBytes cap chunk soFar, ()))
+                    recentRef
                 go
 
 emptyCapturedBytes :: CapturedBytes
 emptyCapturedBytes = CapturedBytes
     { capturedBytes = BS.empty
     , capturedDropped = 0
+    }
+
+emptyRecentBytes :: RecentBytes
+emptyRecentBytes = RecentBytes
+    { recentBytes = BS.empty
+    , recentDropped = 0
     }
 
 appendCapturedBytes :: Int -> BS.ByteString -> CapturedBytes -> CapturedBytes
@@ -442,6 +573,39 @@ renderCapturedBytes captured =
                 "\n...[truncated "
                     <> Text.pack (show captured.capturedDropped)
                     <> " bytes]"
+
+appendRecentBytes :: Int -> BS.ByteString -> RecentBytes -> RecentBytes
+appendRecentBytes cap chunk recent
+    | BS.null chunk = recent
+    | cap <= 0 =
+        recent { recentBytes = recent.recentBytes <> chunk }
+    | otherwise =
+        let combined = recent.recentBytes <> chunk
+            overflow = max 0 (BS.length combined - cap)
+        in RecentBytes
+            { recentBytes = BS.drop overflow combined
+            , recentDropped = recent.recentDropped + overflow
+            }
+
+renderRecentBytesSince :: Int -> RecentBytes -> (Text, Int)
+renderRecentBytesSince cursor recent =
+    let retainedFrom = recent.recentDropped
+        total = retainedFrom + BS.length recent.recentBytes
+        missed = max 0 (retainedFrom - cursor)
+        offset = max 0 (min (BS.length recent.recentBytes) (cursor - retainedFrom))
+        bytes = BS.drop offset recent.recentBytes
+    in
+        ( truncationMarker missed <> decodeUtf8With lenientDecode bytes
+        , total
+        )
+
+truncationMarker :: Int -> Text
+truncationMarker dropped
+    | dropped <= 0 = ""
+    | otherwise =
+        "...[truncated "
+            <> Text.pack (show dropped)
+            <> " bytes]\n"
 
 waitForProcessPolling :: ProcessHandle -> IO ExitCode
 waitForProcessPolling processHandle =
