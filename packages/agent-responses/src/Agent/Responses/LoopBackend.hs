@@ -70,7 +70,44 @@ statelessResponsesBackend send getParams transcript =
 -- ambiguous. Rebuild from the constructor instead.
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
-    ResponseCreateParams { input = Just (ResponseInputItems items), .. }
+    ResponseCreateParams
+        { input = Just (ResponseInputItems (map normalizeRequestItem items))
+        , ..
+        }
+
+-- Older local compaction snapshots accidentally persisted assistant summaries
+-- as input_text. Responses input accepts assistant history, but its content
+-- parts must use output_text (or refusal). Repair those snapshots at the wire
+-- boundary so resumed sessions recover without rewriting their session files.
+normalizeRequestItem :: ResponseItem -> ResponseItem
+normalizeRequestItem = \case
+    MessageItem message
+        | message.role == RoleAssistant ->
+            MessageItem ResponseMessage
+                { messageId = message.messageId
+                , content = case message.content of
+                    MessageContentText text ->
+                        MessageContentParts
+                            [OutputTextPart text Nothing Nothing KeyMap.empty]
+                    MessageContentParts parts ->
+                        MessageContentParts (map normalizeAssistantPart parts)
+                , role = message.role
+                , status = message.status
+                , phase = message.phase
+                , extraFields = message.extraFields
+                }
+    item -> item
+
+normalizeAssistantPart :: ResponseContentPart -> ResponseContentPart
+normalizeAssistantPart = \case
+    InputTextPart { text, extraFields } ->
+        OutputTextPart
+            { text
+            , annotations = Nothing
+            , logprobs = Nothing
+            , extraFields
+            }
+    part -> part
 
 turnInputsToItems :: [TurnInput] -> [ResponseItem]
 turnInputsToItems = map turnInputToItem

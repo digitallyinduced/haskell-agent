@@ -90,7 +90,11 @@ messageText message = case message.content of
     MessageContentParts parts ->
         let texts =
                 [ text
-                | InputTextPart { text } <- parts
+                | part <- parts
+                , text <- case part of
+                    InputTextPart { text } -> [text]
+                    OutputTextPart { text } -> [text]
+                    _ -> []
                 ]
         in case texts of
             [] -> Nothing
@@ -112,8 +116,9 @@ assistantSummaryItem summary =
         { messageId = Nothing
         , content =
             MessageContentParts
-                [ InputTextPart
+                [ OutputTextPart
                     (summaryPrefix <> "\n" <> Text.strip summary)
+                    Nothing
                     Nothing
                     KeyMap.empty
                 ]
