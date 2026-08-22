@@ -9,7 +9,11 @@ module Agent.CLI.ImagePreview
     , detectImagePreviewProtocol
     , parseImagePreviewProtocol
     , kittyImageSequence
+    , kittyPlacedImageSequence
+    , kittyDeleteImageSequence
+    , kittyCompatibleAttachment
     , itermImageSequence
+    , positionImagePayload
     , wrapTmuxPassthrough
     , imagePreviewPayload
     , previewRowsFor
@@ -18,9 +22,11 @@ module Agent.CLI.ImagePreview
     ) where
 
 import Agent.Loop (ImageAttachment(..))
+import Codec.Picture (convertRGBA8, decodeImage, encodePng)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (toLower)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -79,9 +85,8 @@ detectImagePreviewProtocol handle = do
             mIterm <- lookupEnv "ITERM_SESSION_ID"
             pure (parseImagePreviewProtocol mTerm mProgram mKitty mIterm)
 
--- | Kitty graphics transmit-and-display. @f=100@ is PNG; Kitty has no JPEG
--- format code (24/32 are raw RGB/RGBA). We always send 100 and let the
--- terminal sniff, matching Grok Build's overlay path for PNG screenshots.
+-- | Kitty graphics transmit-and-display. @f=100@ is PNG; non-PNG clipboard
+-- formats are transcoded before this sequence is assembled.
 --
 -- Use the combined @a=T@ action rather than uploading with @a=t@ and creating
 -- a separate @a=p@ placement. Besides saving a round trip, this keeps PNG
@@ -95,31 +100,100 @@ detectImagePreviewProtocol handle = do
 -- Chunked at 4096 encoded bytes (Kitty's documented payload limit).
 kittyImageSequence :: Int -> Int -> Int -> Text -> ByteString -> Text
 kittyImageSequence imageId _columns rows mime bytes =
+    let compatible =
+            kittyCompatibleAttachment (ImageAttachment mime bytes)
+    in kittyTransmitSequence
+        imageId
+        Nothing
+        rows
+        compatible.imageMime
+        compatible.imageBytes
+
+-- | Kitty transmit-and-display sequence for a fullscreen placement with an
+-- explicit cell rectangle and placement id. Reusing the image/placement pair
+-- replaces the old placement without flicker.
+kittyPlacedImageSequence
+    :: Int
+    -> Int
+    -> Int
+    -> Int
+    -> Text
+    -> ByteString
+    -> Text
+kittyPlacedImageSequence imageId placementId columns rows mime bytes =
+    let compatible =
+            kittyCompatibleAttachment (ImageAttachment mime bytes)
+    in kittyTransmitSequence
+        imageId
+        (Just (placementId, columns))
+        rows
+        compatible.imageMime
+        compatible.imageBytes
+
+-- | Kitty accepts PNG or raw pixels, not JPEG/WebP/etc. Preserve PNG bytes
+-- unchanged and transcode other decodable clipboard formats once.
+kittyCompatibleAttachment :: ImageAttachment -> ImageAttachment
+kittyCompatibleAttachment attachment@ImageAttachment{imageMime, imageBytes}
+    | Text.toLower imageMime == "image/png" = attachment
+    | otherwise =
+        case decodeImage imageBytes of
+            Left _ -> attachment
+            Right image ->
+                ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes =
+                        LBS.toStrict (encodePng (convertRGBA8 image))
+                    }
+
+kittyTransmitSequence
+    :: Int
+    -> Maybe (Int, Int)
+    -> Int
+    -> Text
+    -> ByteString
+    -> Text
+kittyTransmitSequence imageId placement rows mime bytes =
     let fmt = kittyFormat mime
         chunks = chunkBytes 4096 (Base64.encode bytes)
         total = length chunks
         transmit n chunk =
             let more = if n + 1 < total then 1 else 0 :: Int
-                action = if n == 0 then "T" else "t"
-                extras
+                controls
                     | n == 0 =
-                        ",f="
+                        "a=T,q=2,i="
+                            <> Text.pack (show imageId)
+                            <> ",f="
                             <> Text.pack (show fmt)
                             <> ",t=d,r="
                             <> Text.pack (show rows)
+                            <> case placement of
+                                Nothing -> ""
+                                Just (placementId, columns) ->
+                                    ",c="
+                                        <> Text.pack (show columns)
+                                        <> ",p="
+                                        <> Text.pack (show placementId)
+                                        <> ",z=1"
                             <> ",C=1"
-                    | otherwise = ""
-            in "\ESC_Ga="
-                <> action
-                <> ",q=2,i="
-                <> Text.pack (show imageId)
-                <> extras
+                    -- The protocol permits only m and optionally q after the
+                    -- first chunk. Repeating a/i makes larger images fail in
+                    -- stricter implementations.
+                    | otherwise = "q=2"
+            in "\ESC_G"
+                <> controls
                 <> ",m="
                 <> Text.pack (show more)
                 <> ";"
                 <> TextEncoding.decodeLatin1 chunk
                 <> "\ESC\\"
     in Text.concat (zipWith transmit [0 ..] chunks)
+
+-- | Delete one Kitty image and all of its placements, freeing its image data.
+kittyDeleteImageSequence :: Int -> Text
+kittyDeleteImageSequence imageId =
+    "\ESC_Ga=d,d=I,q=2,i="
+        <> Text.pack (show imageId)
+        <> "\ESC\\"
 
 kittyFormat :: Text -> Int
 kittyFormat _ = 100
@@ -135,6 +209,20 @@ itermImageSequence columns rows bytes =
         <> ";preserveAspectRatio=1:"
         <> TextEncoding.decodeLatin1 (Base64.encode bytes)
         <> "\BEL"
+
+-- | Draw a graphics payload at a zero-based terminal cell while preserving
+-- Vty's cursor position.
+positionImagePayload :: Int -> Int -> Text -> Text
+positionImagePayload row column payload
+    | Text.null payload = payload
+    | otherwise =
+        "\ESC7\ESC["
+            <> Text.pack (show (row + 1))
+            <> ";"
+            <> Text.pack (show (column + 1))
+            <> "H"
+            <> payload
+            <> "\ESC8"
 
 -- | tmux DCS passthrough so Kitty/iTerm sequences reach the outer emulator.
 -- @ST@ must be @ESC \\@ (not BEL) so tmux does not swallow the payload.

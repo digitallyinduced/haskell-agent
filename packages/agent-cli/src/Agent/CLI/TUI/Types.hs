@@ -115,6 +115,11 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
     , runtimeFirstFrame :: !(IO ())
     , runtimeRunning :: !(IORef Bool)
+    , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
+    , runtimeImagePreviewRevision :: !(IORef Int)
+    , runtimeImagePreviewVisible :: !(IORef Bool)
+    , runtimeImagePreviewIdBase :: !Int
+    , runtimeNativeImagePreviews :: !Bool
     , runtimeColor :: !Bool
     , runtimeInitial :: !UiState
     }

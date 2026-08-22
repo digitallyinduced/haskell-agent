@@ -42,6 +42,13 @@ import Agent.CLI.AgentViewport
     , agentEntryTreeLabel
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.ImagePreview
+    ( ImagePreviewProtocol(..)
+    , detectImagePreviewProtocol
+    , kittyDeleteImageSequence
+    , kittyPlacedImageSequence
+    , positionImagePayload
+    )
 import Agent.CLI.Command
     ( SkillCommand
     )
@@ -53,8 +60,11 @@ import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import qualified Agent.CLI.TUI.Composer as Composer
 import Agent.CLI.TUI.ImagePreview
-    ( TuiImagePreview(..)
+    ( NativePreviewPlacement(..)
+    , TuiImagePreview(..)
+    , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCellSize
     , renderTuiImagePreview
     )
 import Agent.TUI.Markdown
@@ -64,7 +74,7 @@ import Agent.TUI.Markdown
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
-import Agent.Loop (ImageAttachment, LoopEvent(..))
+import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
 import qualified Brick.Types as B
@@ -96,19 +106,25 @@ import Control.Exception.Safe (finally, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Foldable (toList)
 import Data.IORef
-    ( newIORef
+    ( modifyIORef'
+    , newIORef
     , readIORef
     , writeIORef
     )
 import Data.List (find, findIndex, intersperse, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
+import System.Environment (lookupEnv)
+import System.IO (stdout)
+import System.Posix.Process (getProcessID)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer = Composer.newFullscreenInputBuffer
@@ -143,6 +159,12 @@ newFullscreenRuntime
         events <- newBChan 512
         mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
         running <- newIORef (uiNeedsTick initial)
+        imagePreviews <- newIORef []
+        imagePreviewRevision <- newIORef 0
+        imagePreviewVisible <- newIORef True
+        imagePreviewIdBase <- allocateNativePreviewImageIdBase
+        imagePreviewProtocol <- detectImagePreviewProtocol stdout
+        imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
@@ -157,6 +179,13 @@ newFullscreenRuntime
             , runtimeAgentSelect = agentSelect
             , runtimeFirstFrame = firstFrame
             , runtimeRunning = running
+            , runtimeImagePreviews = imagePreviews
+            , runtimeImagePreviewRevision = imagePreviewRevision
+            , runtimeImagePreviewVisible = imagePreviewVisible
+            , runtimeImagePreviewIdBase = imagePreviewIdBase
+            , runtimeNativeImagePreviews =
+                imagePreviewProtocol == PreviewKitty
+                    && not imagePreviewInTmux
             , runtimeColor = color
             , runtimeInitial = initial
             }
@@ -292,7 +321,7 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
-            pure vty
+            wrapNativePreviewVty runtime vty
     initialVty <- buildVty
     let
         initialState = AppState
@@ -373,6 +402,96 @@ runFullscreen runtime workerAction = do
                         (uncurry AppAgentSnapshot snapshot)
                     pure snapshot
         agentTicker previous'
+
+wrapNativePreviewVty :: FullscreenRuntime -> V.Vty -> IO V.Vty
+wrapNativePreviewVty runtime vty
+    | not runtime.runtimeNativeImagePreviews = pure vty
+    | otherwise = do
+        rendered <- newIORef Nothing
+        let output = V.outputIface vty
+            deletePayload imageId =
+                kittyDeleteImageSequence imageId
+            placementPayload placement =
+                let attachment = placement.nativePreviewAttachment
+                    graphics =
+                        kittyPlacedImageSequence
+                            placement.nativePreviewImageId
+                            placement.nativePreviewImageId
+                            placement.nativePreviewColumns
+                            placement.nativePreviewRows
+                            attachment.imageMime
+                            attachment.imageBytes
+                in positionImagePayload
+                    placement.nativePreviewRow
+                    placement.nativePreviewColumn
+                    graphics
+            renderNative force = do
+                revision <- readIORef runtime.runtimeImagePreviewRevision
+                bounds@(terminalColumns, terminalRows) <-
+                    V.displayBounds output
+                previous <- readIORef rendered
+                let unchanged = case previous of
+                        Just (oldRevision, oldBounds, _) ->
+                            oldRevision == revision && oldBounds == bounds
+                        Nothing -> False
+                when (force || not unchanged) do
+                    visible <-
+                        readIORef runtime.runtimeImagePreviewVisible
+                    previews <-
+                        if visible
+                            then readIORef runtime.runtimeImagePreviews
+                            else pure []
+                    let placements =
+                            nativePreviewPlacements
+                                runtime.runtimeImagePreviewIdBase
+                                terminalColumns
+                                terminalRows
+                                previews
+                        oldImageIds = case previous of
+                            Just (_, _, imageIds) -> imageIds
+                            Nothing -> []
+                        payload =
+                            Text.concat
+                                ( map deletePayload oldImageIds
+                                    <> map placementPayload placements
+                                )
+                    when (not (Text.null payload)) $
+                        V.outputByteBuffer output
+                            (TextEncoding.encodeUtf8 payload)
+                    writeIORef rendered $
+                        Just
+                            ( revision
+                            , bounds
+                            , map (.nativePreviewImageId) placements
+                            )
+            clearNative = do
+                previous <- readIORef rendered
+                let imageIds = case previous of
+                        Just (_, _, ids) -> ids
+                        Nothing -> []
+                    payload = Text.concat (map deletePayload imageIds)
+                when (not (Text.null payload)) $
+                    V.outputByteBuffer output
+                        (TextEncoding.encodeUtf8 payload)
+                writeIORef rendered Nothing
+        pure vty
+            { V.update = \picture ->
+                V.update vty picture >> renderNative False
+            , V.refresh =
+                V.refresh vty >> renderNative True
+            , V.shutdown =
+                clearNative `finally` V.shutdown vty
+            }
+
+allocateNativePreviewImageIdBase :: IO Int
+allocateNativePreviewImageIdBase = do
+    micros <- floor . (* 1_000_000) <$> getPOSIXTime :: IO Integer
+    pid <- fromIntegral <$> getProcessID :: IO Integer
+    -- Kitty ids are terminal-global uint32s. Leave room for the other two
+    -- simultaneously displayed previews and vary the base per process/runtime.
+    let availableBases = 4_294_967_293 :: Integer
+    pure $
+        fromInteger ((micros * 65_537 + pid) `mod` availableBases) + 1
 
 -- | Move events from the producer-facing mailbox into Brick. UI updates are
 -- collected for one frame so a fast token stream causes at most one redraw
@@ -726,7 +845,9 @@ drawApp state =
     let mainLayers = stickyPromptLayers state <> [drawMain state]
         interactiveLayers =
             agentPopoverLayers state
-                <> imagePreviewLayers state.appImagePreviews
+                <> imagePreviewLayers
+                    state.appRuntime.runtimeNativeImagePreviews
+                    state.appImagePreviews
                 <> mainLayers
         dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
     in
@@ -753,17 +874,17 @@ drawMain state =
             , drawFooter state
             ]
 
-imagePreviewLayers :: [TuiImagePreview] -> [Widget Name]
-imagePreviewLayers previews =
+imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
+imagePreviewLayers native previews =
     case takeLast 3 previews of
         [] -> []
-        shown -> [centerLayer (drawImagePreviews shown)]
+        shown -> [centerLayer (drawImagePreviews native shown)]
   where
     takeLast count values =
         drop (max 0 (length values - count)) values
 
-drawImagePreviews :: [TuiImagePreview] -> Widget Name
-drawImagePreviews previews =
+drawImagePreviews :: Bool -> [TuiImagePreview] -> Widget Name
+drawImagePreviews native previews =
     Widget Fixed Fixed do
         context <- getContext
         let maxWidth = viewportPreviewSize context.availWidth
@@ -787,7 +908,9 @@ drawImagePreviews previews =
         hLimit maxWidth $
             vBox
                 [ hCenter $
-                    renderTuiImagePreview maxWidth maxHeight preview
+                    if native
+                        then nativeImagePlaceholder maxWidth maxHeight preview
+                        else renderTuiImagePreview maxWidth maxHeight preview
                 , hCenter $
                     withAttr Theme.mutedAttr $
                         txt $
@@ -800,6 +923,13 @@ drawImagePreviews previews =
                                 <> " · "
                                 <> formatImageSize preview.previewBytes
                 ]
+
+    nativeImagePlaceholder maxWidth maxHeight preview =
+        let (width, height) =
+                previewCellSize maxWidth maxHeight preview
+        in hLimit width $
+            vLimit height $
+                fill ' '
 
 viewportPreviewSize :: Int -> Int
 viewportPreviewSize available =
@@ -1886,7 +2016,27 @@ applyUiEvent uiEvent state =
         state { appUi = reduceUi uiEvent state.appUi }
 
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
-handleEvent event = case event of
+handleEvent event = do
+    handleEventInner event
+    state <- get
+    let visible =
+            isNothing state.appTextPrompt
+                && isNothing state.appChoice
+                && isNothing state.appUi.uiPermission
+                && isNothing state.appAgentHover
+    liftIO do
+        previous <-
+            readIORef state.appRuntime.runtimeImagePreviewVisible
+        when (previous /= visible) do
+            writeIORef
+                state.appRuntime.runtimeImagePreviewVisible
+                visible
+            modifyIORef'
+                state.appRuntime.runtimeImagePreviewRevision
+                (+ 1)
+
+handleEventInner :: BrickEvent Name AppEvent -> EventM Name AppState ()
+handleEventInner event = case event of
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
@@ -1900,13 +2050,29 @@ handleEvent event = case event of
                 , appSlashDismissed = False
                 }
     AppEvent (AppSetImagePreviews images) ->
-        modify' \state ->
-            state
-                { appImagePreviews =
+        do
+            state <- get
+            let prepared =
                     mapMaybe
-                        (either (const Nothing) Just . prepareTuiImagePreview)
+                        (\image ->
+                            case prepareTuiImagePreview image of
+                                Left _ -> Nothing
+                                Right preview -> Just (image, preview))
                         images
-                }
+            liftIO do
+                previous <-
+                    readIORef state.appRuntime.runtimeImagePreviews
+                when (map fst previous /= map fst prepared) do
+                    writeIORef
+                        state.appRuntime.runtimeImagePreviews
+                        prepared
+                    modifyIORef'
+                        state.appRuntime.runtimeImagePreviewRevision
+                        (+ 1)
+            modify' \current ->
+                current
+                    { appImagePreviews = map snd prepared
+                    }
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
