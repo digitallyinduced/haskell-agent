@@ -2,6 +2,7 @@ module Agent.CLI.AuthSpec (spec) where
 
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
+import qualified Agent.CLI.Login as Login
 import Agent.Error (ApiError(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
@@ -59,12 +60,261 @@ spec = do
                     , loadedTokenProvider = tokenProvider SubscriptionBilled \_ ->
                         pure (Left (CredentialsExhausted retryAt))
                     , loadedAccountLabel = pure . credentialAccountLabel
+                    , loadedSelectionId = Nothing
                     , loadedOpenAiPool = Nothing
                     }
             result <- probeLoadedAuth exhausted
             case result of
                 Left err -> err `shouldBe` CredentialsExhausted retryAt
                 Right _ -> expectationFailure "expected exhausted auth"
+
+        it "returns and seeds the credential used for the account display" do
+            calls <- newIORef (0 :: Int)
+            let first = Credential "first" "account-first" Nothing XAIProvider
+                second = Credential "second" "account-second" Nothing XAIProvider
+                loaded = LoadedAuth
+                    { loadedProvider = XAIProvider
+                    , loadedTokenProvider =
+                        tokenProvider SubscriptionBilled \_ -> do
+                            call <- atomicModifyIORef' calls \count ->
+                                (count + 1, count)
+                            pure (Right (if call == 0 then first else second))
+                    , loadedAccountLabel = pure . (.accountId)
+                    , loadedSelectionId = Nothing
+                    , loadedOpenAiPool = Nothing
+                    }
+            probeLoadedAuthCredential loaded >>= \case
+                Left err ->
+                    expectationFailure
+                        ("expected usable credential, got " <> show err)
+                Right (credential, usable) -> do
+                    credential `shouldBe` first
+                    getNextToken usable.loadedTokenProvider Nothing
+                        `shouldReturn` Right first
+                    getNextToken usable.loadedTokenProvider Nothing
+                        `shouldReturn` Right second
+
+    describe "loadAuthForAccount" do
+        it "loads the selected managed Grok account" $
+            withTempHome \_ ->
+                withEnv "GROK_AUTH_JSON" Nothing $
+                withEnv "GROK_ACCESS_TOKEN" Nothing do
+                    storeManagedAccount
+                        SubscriptionBilled
+                        XAIProvider
+                        "grok-a"
+                        "account-a"
+                        "first@example.com"
+                        True
+                        "token-a"
+                    storeManagedAccount
+                        SubscriptionBilled
+                        XAIProvider
+                        "grok-b"
+                        "account-b"
+                        "second@example.com"
+                        True
+                        "token-b"
+                    loadAuthForAccount XAIProvider "account-b" >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            (fmap
+                                (fmap (.accountId))
+                                (getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing))
+                                `shouldReturn` Right "account-b"
+                            getNextToken loaded.loadedTokenProvider Nothing
+                                >>= \case
+                                    Left err ->
+                                        expectationFailure (show err)
+                                    Right credential ->
+                                        loaded.loadedAccountLabel credential
+                                            `shouldReturn`
+                                                "second@example.com"
+
+        it "loads the selected managed OpenRouter account" $
+            withTempHome \_ ->
+                withEnv "OPENROUTER_API_KEY" Nothing do
+                    storeManagedAccount
+                        ApiBilled
+                        OpenRouterProvider
+                        "router-a"
+                        "account-a"
+                        "OpenRouter A"
+                        True
+                        "key-a"
+                    storeManagedAccount
+                        ApiBilled
+                        OpenRouterProvider
+                        "router-b"
+                        "account-b"
+                        "OpenRouter B"
+                        True
+                        "key-b"
+                    loadAuthForAccount
+                        OpenRouterProvider
+                        "account-b"
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded ->
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= \case
+                                        Left err ->
+                                            expectationFailure (show err)
+                                        Right credential -> do
+                                            credential.accountId
+                                                `shouldBe` "account-b"
+                                            loaded.loadedAccountLabel credential
+                                                `shouldReturn`
+                                                    "OpenRouter B"
+
+        it "selects duplicate OpenRouter account labels by managed id" $
+            withTempHome \_ ->
+                withEnv "OPENROUTER_API_KEY" Nothing do
+                    storeManagedAccount
+                        ApiBilled
+                        OpenRouterProvider
+                        "router-a"
+                        "shared-label"
+                        "OpenRouter A"
+                        True
+                        "key-a"
+                    storeManagedAccount
+                        ApiBilled
+                        OpenRouterProvider
+                        "router-b"
+                        "shared-label"
+                        "OpenRouter B"
+                        True
+                        "key-b"
+                    loadAuthForAccount
+                        OpenRouterProvider
+                        (managedAuthSelectionId "router-b")
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded -> do
+                                loaded.loadedSelectionId
+                                    `shouldBe`
+                                        Just
+                                            (managedAuthSelectionId
+                                                "router-b")
+                                getNextToken
+                                    loaded.loadedTokenProvider
+                                    Nothing
+                                    >>= \case
+                                        Left err ->
+                                            expectationFailure (show err)
+                                        Right credential ->
+                                            credential.accessToken
+                                                `shouldBe` "key-b"
+
+        it "loads a Grok auth file even when a different env source exists" $
+            withTempHome \home ->
+                withEnv "GROK_AUTH_JSON" Nothing $
+                withEnv "GROK_ACCESS_TOKEN" (Just "env-token") do
+                    let grokDirectory = toFilePath home </> ".grok"
+                        authPath = grokDirectory </> "auth.json"
+                        selectionId =
+                            externalAuthSelectionId
+                                XAIProvider
+                                (Text.pack authPath)
+                    createDirectoryIfMissing True grokDirectory
+                    LBS.writeFile authPath $
+                        Aeson.encode $
+                            Aeson.object
+                                [ "access_token" .= ("file-token" :: Text)
+                                ]
+                    loadAuthForAccount XAIProvider selectionId >>= \case
+                        Left err ->
+                            expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            loaded.loadedSelectionId
+                                `shouldBe` Just selectionId
+                            getNextToken
+                                loaded.loadedTokenProvider
+                                Nothing
+                                >>= \case
+                                    Left err ->
+                                        expectationFailure (show err)
+                                    Right credential ->
+                                        credential.accessToken
+                                            `shouldBe` "file-token"
+
+        it "rejects an unknown or disabled managed account" $
+            withTempHome \_ ->
+                withEnv "GROK_AUTH_JSON" Nothing $
+                withEnv "GROK_ACCESS_TOKEN" Nothing do
+                    storeManagedAccount
+                        SubscriptionBilled
+                        XAIProvider
+                        "grok-disabled"
+                        "account-disabled"
+                        "Disabled"
+                        False
+                        "token-disabled"
+                    loadAuthForAccount
+                        XAIProvider
+                        "account-disabled"
+                        >>= \case
+                            Left err ->
+                                err `shouldBe`
+                                    "no enabled xai credential found for account account-disabled"
+                            Right _ ->
+                                expectationFailure
+                                    "expected disabled account selection to fail"
+
+        it "uses the same stable id for an OpenRouter environment account" $
+            withTempHome \_ ->
+                withEnv "OPENROUTER_API_KEY" (Just "openrouter-key") do
+                    let selectionId =
+                            externalAuthSelectionId
+                                OpenRouterProvider
+                                "environment"
+                    loadAuthForAccount
+                        OpenRouterProvider
+                        selectionId
+                        >>= \case
+                            Left err ->
+                                expectationFailure (Text.unpack err)
+                            Right loaded -> do
+                                loaded.loadedSelectionId
+                                    `shouldBe` Just selectionId
+                                (fmap
+                                    (fmap (.accountId))
+                                    (getNextToken
+                                        loaded.loadedTokenProvider
+                                        Nothing))
+                                    `shouldReturn` Right "openrouter"
+
+    describe "discoverSelectableLoginAccounts" do
+        it "does not let a disabled managed account shadow an external source" $
+            withTempHome \_ ->
+                withCleanGrokEnv $
+                withEnv "GROK_ACCESS_TOKEN" (Just "external-token") do
+                    storeManagedAccount
+                        SubscriptionBilled
+                        XAIProvider
+                        "disabled-grok"
+                        "grok"
+                        "Disabled"
+                        False
+                        "disabled-token"
+                    accounts <- Login.discoverSelectableLoginAccounts
+                    let grokAccounts =
+                            filter
+                                ((== XAIProvider) . (.loginProvider))
+                                accounts
+                    map Login.loginAccountSelectionId grokAccounts
+                        `shouldBe`
+                            [ externalAuthSelectionId
+                                XAIProvider
+                                "environment"
+                            ]
 
     describe "credentialAccountLabel" do
         it "prefers an email claim over the provider account id" do
@@ -629,6 +879,36 @@ storeOpenAiAccountWithBilling billing credentialId accountId enabled token =
         (openAiMetadata billing credentialId accountId enabled)
         (ManagedSecret credentialId (authJson accountId token))
         `shouldReturn` Right ()
+
+storeManagedAccount
+    :: BillingMode
+    -> Provider
+    -> Text
+    -> Text
+    -> Text
+    -> Bool
+    -> Text
+    -> IO ()
+storeManagedAccount
+    billing
+    provider
+    credentialId
+    accountId
+    label
+    enabled
+    token =
+        upsertManagedCredential
+            ManagedCredential
+                { managedId = credentialId
+                , managedProvider = provider
+                , managedAccountId = accountId
+                , managedLabel = label
+                , managedBilling = billing
+                , managedAuthKind = ManagedBearerToken
+                , managedEnabled = enabled
+                }
+            (ManagedSecret credentialId token)
+            `shouldReturn` Right ()
 
 openAiMetadata
     :: BillingMode

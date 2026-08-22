@@ -59,6 +59,7 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)
     , sessionAccountId :: !(IORef Text)
+    , sessionAccountSelectionId :: !(IORef Text)
     , sessionAccountLabel :: !(Credential -> IO Text)
     , sessionSelectAccount
         :: !(Maybe (Text -> IO (Either ApiError Text)))

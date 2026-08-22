@@ -19,8 +19,10 @@ import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , loadAuth
+    , loadAuthForAccount
     , preferredOpenAiTokenProvider
     , probeLoadedAuth
+    , probeLoadedAuthCredential
     )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
@@ -109,7 +111,15 @@ import Agent.CLI.Interrupt
     , withTurnCancel
     )
 import Agent.CLI.Login
-    ( connectProviderAccount
+    ( AccountBilling(..)
+    , AccountUsage(..)
+    , LoginAccount(..)
+    , UsageState(..)
+    , UsageWindow(..)
+    , connectProviderAccount
+    , discoverSelectableLoginAccounts
+    , loginAccountSelectionId
+    , refreshLoginAccount
     , runLoginManager
     )
 import Agent.CLI.ModelPicker (pickModel)
@@ -314,7 +324,7 @@ import Agent.OpenAI.WebSocketClient
     )
 import Agent.Provider
     ( AccountFailure(..)
-    , BillingMode
+    , BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
@@ -324,6 +334,7 @@ import Agent.Provider
     , tokenProvider
     , tokenProviderBillingMode
     )
+import qualified Agent.Provider as Provider
 import Agent.Subagents
     ( RootTurnId
     , SubagentId(..)
@@ -369,9 +380,11 @@ import Control.Concurrent.Async (link, mapConcurrently, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
+    , modifyMVar_
     , newEmptyMVar
     , newMVar
     , putMVar
+    , readMVar
     , takeMVar
     , tryPutMVar
     , withMVar
@@ -393,7 +406,7 @@ import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -449,8 +462,15 @@ data PendingTurnPresentation
     | ContinuePendingTurn
 
 data AccountPickerOption
-    = AccountPickerAccount !Text !Text !Text
+    = AccountPickerAccount !Text !Text !Text !Text
     | AccountPickerConnect
+
+data ActiveHttpAuth = ActiveHttpAuth
+    { activeHttpGeneration :: !Int
+    , activeHttpProvider :: !TokenProvider
+    , activeHttpResolveLabel :: !(Credential -> IO Text)
+    , activeHttpAccountId :: !Text
+    }
 
 data OpenAiPersistentConnection
     = OpenAiPersistentConnection !Credential !(IORef Bool) !CodexConn
@@ -1067,6 +1087,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         _ -> pure ()
     activeAccountRef <- newIORef ""
     activeAccountIdRef <- newIORef ""
+    activeSelectionRef <- newIORef ""
     preferredOpenAiAccountRef <- newIORef Nothing
     let selectableTokenProvider =
             case loaded.loadedOpenAiPool of
@@ -1077,12 +1098,143 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         loaded.loadedTokenProvider
                 Nothing ->
                     loaded.loadedTokenProvider
+    initialHttp <- case loaded.loadedProvider of
+        OpenAIProvider ->
+            pure
+                ( selectableTokenProvider
+                , loaded.loadedAccountLabel
+                , ""
+                )
+        _ ->
+            probeLoadedAuthCredential loaded >>= \case
+                Right (credential, usable) -> do
+                    label <- usable.loadedAccountLabel credential
+                    writeIORef activeAccountRef label
+                    writeIORef activeAccountIdRef credential.accountId
+                    let selectionId =
+                            fromMaybe
+                                credential.accountId
+                                usable.loadedSelectionId
+                    writeIORef activeSelectionRef selectionId
+                    pure
+                        ( usable.loadedTokenProvider
+                        , usable.loadedAccountLabel
+                        , credential.accountId
+                        )
+                Left _ -> do
+                    let fallback = case loaded.loadedProvider of
+                            XAIProvider -> "Grok"
+                            OpenRouterProvider -> "OpenRouter"
+                        selectionId = fromMaybe "" loaded.loadedSelectionId
+                    writeIORef activeAccountRef fallback
+                    writeIORef activeSelectionRef selectionId
+                    pure
+                        ( selectableTokenProvider
+                        , loaded.loadedAccountLabel
+                        , ""
+                        )
+    let
+        ( initialHttpProvider
+            , initialHttpResolver
+            , initialHttpAccountId
+            ) = initialHttp
+    activeHttpAuth <- newMVar ActiveHttpAuth
+        { activeHttpGeneration = 0
+        , activeHttpProvider = initialHttpProvider
+        , activeHttpResolveLabel = initialHttpResolver
+        , activeHttpAccountId = initialHttpAccountId
+        }
+    let switchableTokenProvider =
+            Provider.tokenProvider
+                (tokenProviderBillingMode selectableTokenProvider)
+                \failed -> do
+                    snapshot <- readMVar activeHttpAuth
+                    let routedFailure = case failed of
+                            Just reported
+                                | reported.credential.accountId
+                                    == snapshot.activeHttpAccountId ->
+                                    Just reported
+                            _ -> Nothing
+                    getNextToken
+                        snapshot.activeHttpProvider
+                        routedFailure
+                        >>= \case
+                            Left err -> pure (Left err)
+                            Right credential -> do
+                                label <-
+                                    snapshot.activeHttpResolveLabel credential
+                                modifyMVar_ activeHttpAuth \current ->
+                                    if current.activeHttpGeneration
+                                        == snapshot.activeHttpGeneration
+                                        then do
+                                            writeIORef
+                                                activeAccountIdRef
+                                                credential.accountId
+                                            writeIORef activeAccountRef label
+                                            pure current
+                                                { activeHttpAccountId =
+                                                    credential.accountId
+                                                }
+                                        else pure current
+                                pure (Right credential)
+        resolveActiveAccountLabel credential =
+            case loaded.loadedProvider of
+                OpenAIProvider ->
+                    loaded.loadedAccountLabel credential
+                _ -> do
+                    active <- readMVar activeHttpAuth
+                    active.activeHttpResolveLabel credential
         tokenProvider =
-            trackCredentialAccount
-                activeAccountRef
-                activeAccountIdRef
-                loaded.loadedAccountLabel
-                selectableTokenProvider
+            case loaded.loadedProvider of
+                OpenAIProvider ->
+                    trackCredentialAccount
+                        activeAccountRef
+                        activeAccountIdRef
+                        activeSelectionRef
+                        resolveActiveAccountLabel
+                        selectableTokenProvider
+                _ -> switchableTokenProvider
+        selectHttpAccount selectedSelectionId =
+            loadAuthForAccount loaded.loadedProvider selectedSelectionId
+                >>= \case
+                    Left err ->
+                        pure (Left (CredentialError err))
+                    Right selected
+                        | tokenProviderBillingMode
+                            selected.loadedTokenProvider
+                            /= tokenProviderBillingMode
+                                selectableTokenProvider ->
+                            pure $ Left $ CredentialError
+                                "selected account uses a different billing mode"
+                        | otherwise ->
+                            probeLoadedAuthCredential selected >>= \case
+                                Left err -> pure (Left err)
+                                Right (credential, usable) -> do
+                                    label <-
+                                        usable.loadedAccountLabel credential
+                                    let selectionId =
+                                            fromMaybe
+                                                selectedSelectionId
+                                                usable.loadedSelectionId
+                                    modifyMVar_ activeHttpAuth \current -> do
+                                        writeIORef
+                                            activeAccountIdRef
+                                            credential.accountId
+                                        writeIORef
+                                            activeSelectionRef
+                                            selectionId
+                                        writeIORef activeAccountRef label
+                                        pure ActiveHttpAuth
+                                            { activeHttpGeneration =
+                                                current.activeHttpGeneration + 1
+                                            , activeHttpProvider =
+                                                usable.loadedTokenProvider
+                                            , activeHttpResolveLabel =
+                                                usable.loadedAccountLabel
+                                            , activeHttpAccountId =
+                                                credential.accountId
+                                            }
+                                    pure (Right label)
 
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
@@ -1359,7 +1511,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                             newHealthy <-
                                                                 newIORef True
                                                             label <-
-                                                                loaded.loadedAccountLabel
+                                                                resolveActiveAccountLabel
                                                                     newCredential
                                                             writeIORef
                                                                 activeConnectionRef $
@@ -1369,6 +1521,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                                     newConn
                                                             writeIORef
                                                                 activeAccountIdRef
+                                                                newCredential.accountId
+                                                            writeIORef
+                                                                activeSelectionRef
                                                                 newCredential.accountId
                                                             writeIORef
                                                                 activeAccountRef
@@ -1523,7 +1678,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     link switchWorker
                                     runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1545,8 +1700,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         subagentRuntime
                                         XAIProvider
                                         (\childParamsRef childTranscript ->
-                                            xaiBackend xaiOptions
-                                                loaded.loadedTokenProvider
+                                            xaiBackend xaiOptions tokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
@@ -1571,7 +1725,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1582,7 +1736,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         OpenRouterProvider
                                         (\childParamsRef childTranscript ->
                                             openRouterBackend openRouterOptions
-                                                loaded.loadedTokenProvider
+                                                tokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
@@ -1607,20 +1761,22 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
 
 trackCredentialAccount
     :: IORef Text
     -> IORef Text
+    -> IORef Text
     -> (Credential -> IO Text)
     -> TokenProvider
     -> TokenProvider
-trackCredentialAccount accountRef accountIdRef resolveLabel provider =
+trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
     tokenProvider (tokenProviderBillingMode provider) \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
                 writeIORef accountIdRef credential.accountId
+                writeIORef selectionRef credential.accountId
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
 
@@ -1760,6 +1916,7 @@ runSession
     -> IORef TokenUsage
     -> IORef Text
     -> IORef Text
+    -> IORef Text
     -> (Credential -> IO Text)
     -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
@@ -1767,7 +1924,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2075,6 +2232,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionUsage = usageRef
             , sessionAccount = accountRef
             , sessionAccountId = accountIdRef
+            , sessionAccountSelectionId = selectionRef
             , sessionAccountLabel = accountLabel
             , sessionSelectAccount = selectAccount
             , sessionLastAssistant = lastAssistantRef
@@ -2363,7 +2521,7 @@ replWithDraft env@SessionEnv
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAccount = accountRef
-    , sessionAccountId = accountIdRef
+    , sessionAccountSelectionId = selectionRef
     , sessionAccountLabel = accountLabel
     , sessionSelectAccount = selectAccount
     , sessionLastAssistant = lastAssistantRef
@@ -3276,75 +3434,107 @@ replWithDraft env@SessionEnv
                             next
                         Right result -> pure result
     chooseAccount _keptDraft next =
-        case (fullscreen, openAiPool) of
-            (Just runtime, Just pool) -> do
-                currentAccountId <- readIORef accountIdRef
+        case (fullscreen, selectAccount) of
+            (Just runtime, Just select) -> do
+                currentSelectionId <- readIORef selectionRef
                 options <- withReplActivity
                     "Loading account usage…"
-                    (loadAccountPickerOptions accountLabel pool)
+                    (case openAiPool of
+                        Just pool ->
+                            loadAccountPickerOptions accountLabel pool
+                        Nothing -> case tokenProvider of
+                            Just active ->
+                                loadProviderAccountPickerOptions
+                                    provider
+                                    (tokenProviderBillingMode active)
+                                    currentSelectionId
+                            Nothing ->
+                                pure [AccountPickerConnect])
                 let initial =
                         fromMaybe 0 $
                             findIndex
-                                (accountPickerMatches currentAccountId)
+                                (accountPickerMatches currentSelectionId)
                                 options
                 requestFullscreenChoiceWithBody
                     runtime
                     "Account"
-                    "Choose the ChatGPT subscription account for future requests."
+                    ("Choose the "
+                        <> providerSlug provider
+                        <> " account for future requests.")
                     initial
-                    (map (accountPickerRow currentAccountId) options)
+                    (map (accountPickerRow currentSelectionId) options)
                     >>= \case
                         Just index
                             | Just option <- atMay index options ->
                                 case option of
                                     AccountPickerAccount
-                                        selectedId
+                                        selectedSelectionId
+                                        _
                                         selectedLabel
                                         _
-                                            | selectedId == currentAccountId ->
+                                            | selectedSelectionId
+                                                == currentSelectionId ->
                                                 displayInfo
                                                     ("account: " <> selectedLabel)
                                                     (pure ())
                                                     >> next
                                             | otherwise ->
                                                 chooseSelectedAccount
-                                                    selectedId
+                                                    selectedSelectionId
                                     AccountPickerConnect -> do
                                         color <- resolveColor stderr
                                         connected <-
                                             withFullscreenSuspended runtime $
                                                 connectProviderAccount
                                                     color
-                                                    OpenAIProvider
+                                                    provider
                                         case connected of
                                             Nothing -> next
-                                            Just selectedId ->
-                                                chooseSelectedAccount
-                                                    selectedId
+                                            Just selectedAccountId -> do
+                                                refreshed <-
+                                                    loadProviderAccountPickerOptions
+                                                        provider
+                                                        (maybe
+                                                            SubscriptionBilled
+                                                            tokenProviderBillingMode
+                                                            tokenProvider)
+                                                        currentSelectionId
+                                                let connectedSelection =
+                                                        [ selectionId
+                                                        | AccountPickerAccount
+                                                            selectionId
+                                                            accountId
+                                                            _
+                                                            _ <- refreshed
+                                                        , accountId
+                                                            == selectedAccountId
+                                                        ]
+                                                chooseSelectedAccount $
+                                                    fromMaybe
+                                                        selectedAccountId
+                                                        (listToMaybe
+                                                            connectedSelection)
                         _ -> next
               where
                 chooseSelectedAccount selectedId =
-                    case selectAccount of
-                        Nothing -> next
-                        Just select -> do
-                            select selectedId >>= \case
-                                Left err -> do
-                                    now <- getCurrentTime
-                                    let message =
-                                            "could not select account: "
-                                                <> formatApiErrorInlineAt
-                                                    now
-                                                    err
-                                    displayError message (pure ())
-                                    next
-                                Right label -> do
-                                    displayInfo
-                                        ("account switched to " <> label)
-                                        (pure ())
-                                    next
+                    select selectedId >>= \case
+                        Left err -> do
+                            now <- getCurrentTime
+                            let message =
+                                    "could not select account: "
+                                        <> formatApiErrorInlineAt
+                                            now
+                                            err
+                            displayError message (pure ())
+                            next
+                        Right label -> do
+                            displayInfo
+                                ("account switched to " <> label)
+                                (pure ())
+                            next
             _ -> do
                 displayError
-                    "Account switching is only available for ChatGPT subscription accounts."
+                    "Account switching is unavailable for this session."
                     (pure ())
                 next
     copyCommand label missing payload = case payload of
@@ -3444,28 +3634,93 @@ loadAccountPickerOptions resolveLabel pool = do
         pure $
             AccountPickerAccount
                 auth.accountId
+                auth.accountId
                 label
                 (formatUsageSummary
                     now
                     snapshot.snapshotCooldownUntil
                     usage)
 
+loadProviderAccountPickerOptions
+    :: Provider
+    -> BillingMode
+    -> Text
+    -> IO [AccountPickerOption]
+loadProviderAccountPickerOptions provider billing _currentSelectionId = do
+    discovered <- discoverSelectableLoginAccounts
+    refreshed <-
+        mapConcurrently refreshLoginAccount
+            [ account
+            | account <- discovered
+            , account.loginProvider == provider
+            , accountBillingMode provider account.loginBilling == billing
+            ]
+    now <- getCurrentTime
+    pure $
+        [ AccountPickerAccount
+            (loginAccountSelectionId account)
+            account.loginAccountId
+            account.loginLabel
+            (formatLoginUsageSummary provider now account)
+        | account <- refreshed
+        ]
+            <> [AccountPickerConnect]
+
+accountBillingMode :: Provider -> AccountBilling -> BillingMode
+accountBillingMode provider = case provider of
+    OpenRouterProvider -> const ApiBilled
+    _ -> \case
+        SubscriptionBilling _ -> SubscriptionBilled
+        ApiCreditsBilling -> ApiBilled
+
+formatLoginUsageSummary :: Provider -> UTCTime -> LoginAccount -> Text
+formatLoginUsageSummary provider now account =
+    Text.intercalate " · " $
+        billing <> case account.loginUsage of
+            UsageNotChecked -> []
+            UsageUnavailable _ -> ["usage unavailable"]
+            UsageAvailable usage ->
+                maybeToList usage.usagePlan
+                    <> map summarizeWindow usage.usageWindows
+                    <> maybeToList
+                        (("credits " <>) <$> usage.creditsRemaining)
+                    <> maybeToList
+                        (("used " <>) <$> usage.creditsUsed)
+  where
+    billing = case accountBillingMode provider account.loginBilling of
+        ApiBilled -> ["API credits"]
+        SubscriptionBilled -> case account.loginBilling of
+            SubscriptionBilling plan ->
+                maybe ["subscription"] (\value -> ["subscription", value]) plan
+            ApiCreditsBilling -> ["subscription"]
+    summarizeWindow window =
+        window.windowName
+            <> " "
+            <> Text.pack (show (max 0 (100 - window.usedPercent)))
+            <> "% left"
+            <> if window.resetsAt > now
+                then " · resets "
+                    <> formatDuration (diffUTCTime window.resetsAt now)
+                else ""
+    maybeToList = maybe [] pure
+
 accountPickerMatches :: Text -> AccountPickerOption -> Bool
-accountPickerMatches currentAccountId = \case
-    AccountPickerAccount accountPickerId _ _ ->
-        accountPickerId == currentAccountId
+accountPickerMatches currentSelectionId = \case
+    AccountPickerAccount selectionId _ _ _ ->
+        selectionId == currentSelectionId
     AccountPickerConnect -> False
 
 accountPickerRow
     :: Text
     -> AccountPickerOption
     -> (Text, Text)
-accountPickerRow currentAccountId = \case
+accountPickerRow currentSelectionId = \case
     AccountPickerAccount
-        accountPickerId
+        selectionId
+        _
         accountPickerLabel
         accountPickerUsage ->
-            ( (if accountPickerId == currentAccountId then "✓ " else "")
+            ( (if selectionId == currentSelectionId then "✓ " else "")
                 <> accountPickerLabel
             , accountPickerUsage
             )
@@ -3953,28 +4208,31 @@ reloadAuth provider = \case
                 <> "restart after refreshing ~/.codex/auth.json "
                 <> "(OAuth pools already rotate on handshake failure)"
     Just tokenProvider ->
-        -- Force a disk/env re-read by pretending the cached credential was
-        -- rejected for authentication; the reloadable provider clears its cache.
-        getNextToken tokenProvider (Just FailedCredential
-            { credential = Credential
-                { accessToken = ""
-                , accountId = ""
-                , leaseId = Nothing
-                , provider
-                }
-            , failure = AccountAuthenticationRejected
-            }) >>= \case
+        -- Force a disk/env re-read by rejecting the credential that is
+        -- actually active. Switchable providers intentionally ignore failures
+        -- from older accounts, so a fabricated empty account id is insufficient.
+        getNextToken tokenProvider Nothing >>= \case
             Left err -> do
                 now <- getCurrentTime
                 pure $ Left $
                     "reload-auth failed: " <> formatApiErrorInlineAt now err
-            Right credential ->
-                pure $ Right $
-                    "auth reloaded ("
-                        <> providerSlug provider
-                        <> " account "
-                        <> credential.accountId
-                        <> ")"
+            Right current ->
+                getNextToken tokenProvider (Just FailedCredential
+                    { credential = current
+                    , failure = AccountAuthenticationRejected
+                    }) >>= \case
+                    Left err -> do
+                        now <- getCurrentTime
+                        pure $ Left $
+                            "reload-auth failed: "
+                                <> formatApiErrorInlineAt now err
+                    Right credential ->
+                        pure $ Right $
+                            "auth reloaded ("
+                                <> providerSlug provider
+                                <> " account "
+                                <> credential.accountId
+                                <> ")"
 
 
 requestReload
