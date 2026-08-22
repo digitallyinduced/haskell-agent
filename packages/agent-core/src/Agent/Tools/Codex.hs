@@ -38,9 +38,10 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , ToolEnv(..)
-    , freeformApplyPatchAppTool
-    , jsonAppTool
+    , freeformApplyPatchAppToolWithExecution
+    , jsonAppToolWithExecution
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Object, Value(..), withObject)
@@ -74,11 +75,13 @@ jsonTool
     -> Text
     -> [PropertySchema]
     -> Bool
+    -> ToolExecutionPolicy
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly =
-    jsonAppTool name description parameters
+jsonTool name description parameters readOnly execution =
+    jsonAppToolWithExecution name description parameters
         (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+        execution
 
 --------------------------------------------------------------------------------
 -- shell_command
@@ -116,6 +119,7 @@ shellCommandTool env = jsonTool "shell_command" shellDescription
         "Maximum command runtime. Defaults to 10000 ms."
     ]
     False
+    TurnSequential
     (typedStreamingTool "shell_command" (runShell env))
 
 shellDescription :: Text
@@ -179,7 +183,8 @@ instance FromJSON ApplyPatchArgs where
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
-    freeformApplyPatchAppTool "apply_patch" applyPatchDescription AlwaysPrompt
+    freeformApplyPatchAppToolWithExecution
+        "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
         (typedTool "apply_patch" (runApplyPatch env))
 
 applyPatchDescription :: Text
@@ -238,6 +243,7 @@ updatePlanTool planMode planRef = jsonTool "update_plan" updatePlanDescription
         ])) True $ Just "The list of steps"
     ]
     True
+    TurnSequential
     (typedTool "update_plan" (runUpdatePlan planMode planRef))
 
 updatePlanDescription :: Text

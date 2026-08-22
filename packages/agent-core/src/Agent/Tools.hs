@@ -8,14 +8,18 @@ module Agent.Tools
     ( AppTool(..)
     , ToolSchema(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
     , jsonAppTool
+    , jsonAppToolWithExecution
     , freeformApplyPatchAppTool
+    , freeformApplyPatchAppToolWithExecution
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
+    , toolExecutionPolicyFor
     , dispatchRegisteredToolCall
     , appToolHandlers
     , CodingTools(..)

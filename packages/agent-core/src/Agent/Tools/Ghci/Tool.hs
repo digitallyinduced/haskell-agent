@@ -25,7 +25,8 @@ import Agent.Tools.Ghci.Runtime
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Object)
@@ -64,7 +65,7 @@ readTimeout text =
 
 runGhciTool :: GhciSession -> AppTool
 runGhciTool session =
-    jsonAppTool "run_ghci" ghciDescription
+    jsonAppToolWithExecution "run_ghci" ghciDescription
         [ PropertySchema "expression" PropertyString True $ Just
             "Haskell expression, statement, or GHCi :command to evaluate."
         , PropertySchema "timeout" PropertyInteger False $ Just
@@ -73,6 +74,7 @@ runGhciTool session =
             "One sentence explanation as to why this evaluation is needed."
         ]
         (ClassifyReadOnly (isGhciReadOnlyCall session))
+        TurnSequential
         (typedTool "run_ghci" (runGhci session))
 
 ghciDescription :: Text

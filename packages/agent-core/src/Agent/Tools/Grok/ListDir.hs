@@ -6,7 +6,11 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Grok.Common (isGitIgnored, jsonTool)
 import Agent.Tools.IO (listDirectoryEntries, resolveUnderCwd)
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ToolEnv(..)
+    , ToolExecutionPolicy(..)
+    )
 import Data.Aeson (FromJSON(..))
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
@@ -26,6 +30,7 @@ listDirTool env = jsonTool "list_dir" listDirDescription
         "Path to directory to list contents of, relative to the workspace root or absolute."
     ]
     True
+    ParallelSafe
     (typedTool "list_dir" (runListDir env))
 
 listDirDescription :: Text

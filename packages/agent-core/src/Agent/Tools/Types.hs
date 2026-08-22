@@ -2,14 +2,18 @@ module Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
     , jsonAppTool
+    , jsonAppToolWithExecution
     , freeformApplyPatchAppTool
+    , freeformApplyPatchAppToolWithExecution
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
+    , toolExecutionPolicyFor
     , dispatchRegisteredToolCall
     , jsonToolParameters
     , appToolHandlers
@@ -17,7 +21,6 @@ module Agent.Tools.Types
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
-import System.OsPath (OsPath)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -32,7 +35,7 @@ import Control.Monad (foldM)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.OsPath (dropTrailingPathSeparator)
+import System.OsPath (OsPath, dropTrailingPathSeparator)
 
 -- | Provider-facing schema. The sum prevents freeform tools from carrying
 -- meaningless JSON parameters.
@@ -47,12 +50,23 @@ data ApprovalRule
     | AlwaysPrompt
     | ClassifyReadOnly !(ToolCall -> IO Bool)
 
+-- | Whether a tool handler may overlap other handlers emitted in the same
+-- model turn. Approval callbacks are always evaluated serially in call order.
+--
+-- This policy is intentionally turn-local: it does not coordinate separate
+-- loops or background work that outlives a handler.
+data ToolExecutionPolicy
+    = ParallelSafe
+    | TurnSequential
+    deriving (Eq, Show)
+
 data AppTool = AppTool
     { appToolName :: !Text
     , appToolDescription :: !Text
     , appToolSchema :: !ToolSchema
     , appToolHandler :: !ToolHandler
     , appToolApproval :: !ApprovalRule
+    , appToolExecution :: !ToolExecutionPolicy
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -78,6 +92,7 @@ defaultToolEnv cwd = do
         , toolCancel = cancel
         }
 
+-- | Construct a JSON tool with the conservative turn-sequential default.
 jsonAppTool
     :: Text
     -> Text
@@ -85,26 +100,54 @@ jsonAppTool
     -> ApprovalRule
     -> ToolHandler
     -> AppTool
-jsonAppTool name description parameters approval handler = AppTool
+jsonAppTool name description parameters approval =
+    jsonAppToolWithExecution
+        name description parameters approval TurnSequential
+
+jsonAppToolWithExecution
+    :: Text
+    -> Text
+    -> [PropertySchema]
+    -> ApprovalRule
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+jsonAppToolWithExecution
+        name description parameters approval execution handler = AppTool
     { appToolName = name
     , appToolDescription = description
     , appToolSchema = JsonFunctionSchema parameters
     , appToolHandler = handler
     , appToolApproval = approval
+    , appToolExecution = execution
     }
 
+-- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
     :: Text
     -> Text
     -> ApprovalRule
     -> ToolHandler
     -> AppTool
-freeformApplyPatchAppTool name description approval handler = AppTool
+freeformApplyPatchAppTool name description approval =
+    freeformApplyPatchAppToolWithExecution
+        name description approval TurnSequential
+
+freeformApplyPatchAppToolWithExecution
+    :: Text
+    -> Text
+    -> ApprovalRule
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+freeformApplyPatchAppToolWithExecution
+        name description approval execution handler = AppTool
     { appToolName = name
     , appToolDescription = description
     , appToolSchema = FreeformApplyPatchSchema
     , appToolHandler = handler
     , appToolApproval = approval
+    , appToolExecution = execution
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -137,6 +180,13 @@ toolRegistryTools = (.registryTools)
 lookupRegisteredTool :: Text -> ToolRegistry -> Maybe AppTool
 lookupRegisteredTool name registry =
     Map.lookup (canonicalToolName name) registry.registryByName
+
+-- | Unknown tools are conservative barriers. Their dispatch will still
+-- produce the normal unknown-tool result, but never overlap known work.
+toolExecutionPolicyFor :: ToolRegistry -> ToolCall -> ToolExecutionPolicy
+toolExecutionPolicyFor registry call =
+    maybe TurnSequential (\tool -> tool.appToolExecution)
+        (lookupRegisteredTool call.name registry)
 
 dispatchRegisteredToolCall
     :: ToolDispatchConfig

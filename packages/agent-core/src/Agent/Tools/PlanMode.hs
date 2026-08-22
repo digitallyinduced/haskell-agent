@@ -38,7 +38,8 @@ import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     )
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
@@ -175,11 +176,13 @@ jsonTool
     -> Text
     -> [PropertySchema]
     -> Bool
+    -> ToolExecutionPolicy
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly =
-    jsonAppTool name description parameters
+jsonTool name description parameters readOnly execution =
+    jsonAppToolWithExecution name description parameters
         (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+        execution
 
 data EnterPlanArgs = EnterPlanArgs
     { explanation :: Maybe Text
@@ -197,6 +200,7 @@ enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
     -- The tool performs its own explicit user confirmation through
     -- planConfirmEnter, so it must not also trigger generic tool approval.
     True
+    TurnSequential
     (typedTool "enter_plan_mode" (runEnterPlanMode env))
 
 enterPlanDescription :: Text
@@ -237,6 +241,7 @@ exitPlanModeTool env = jsonTool "exit_plan_mode" exitPlanDescription
         "Optional short summary shown with the plan approval prompt."
     ]
     False
+    TurnSequential
     (typedTool "exit_plan_mode" (runExitPlanMode env))
 
 exitPlanDescription :: Text
@@ -295,6 +300,7 @@ askUserQuestionTool env = jsonTool "ask_user_question" askUserDescription
         "Optional newline- or comma-separated choices."
     ]
     True
+    TurnSequential
     (typedTool "ask_user_question" (runAskUserQuestion env))
 
 askUserDescription :: Text

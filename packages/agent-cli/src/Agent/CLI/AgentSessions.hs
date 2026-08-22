@@ -31,7 +31,8 @@ import Agent.ToolDispatch (ToolHandler, typedTool)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     )
 import Control.Concurrent.MVar
     ( MVar
@@ -299,10 +300,12 @@ jsonTool
     -> Text
     -> [PropertySchema]
     -> Bool
+    -> ToolExecutionPolicy
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly handler =
-    jsonAppTool name description parameters approval handler
+jsonTool name description parameters readOnly execution handler =
+    jsonAppToolWithExecution
+        name description parameters approval execution handler
   where
     approval
         | readOnly = AlwaysReadOnly
@@ -336,6 +339,7 @@ createAgentSessionTool env = jsonTool
         "Optional reasoning-effort override. Defaults to the current session effort."
     ]
     False
+    TurnSequential
     (typedTool "create_agent_session" (runCreateAgentSession env))
 
 runCreateAgentSession
@@ -393,6 +397,7 @@ readAgentSessionTool env = jsonTool
         "Maximum number of most recent turns to return. Defaults to 20; maximum 100."
     ]
     True
+    ParallelSafe
     (typedTool "read_agent_session" (runReadAgentSession env))
 
 runReadAgentSession
@@ -431,6 +436,7 @@ sendAgentSessionMessageTool env = jsonTool
         "Message or follow-up task for the target session."
     ]
     False
+    TurnSequential
     (typedTool "send_agent_session_message" (runSendAgentSessionMessage env))
 
 runSendAgentSessionMessage

@@ -7,16 +7,26 @@ import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Types
     ( ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , ToolRegistry
-    , jsonAppTool
+    , jsonAppToolWithExecution
     , mkToolRegistry
+    , toolExecutionPolicyFor
     )
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    , tryReadMVar
+    )
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -118,18 +128,17 @@ spec = describe "runLoop" do
             }
         readIORef maxInFlight `shouldReturn` 1
 
-    it "dispatches parallel tool calls" do
-        inFlight <- newIORef (0 :: Int)
-        maxInFlight <- newIORef (0 :: Int)
-        let bump = do
-                now <- atomicModifyIORef' inFlight \n -> (n + 1, n + 1)
-                atomicModifyIORef' maxInFlight \seen -> (max seen now, ())
-                threadDelay 80000
-                atomicModifyIORef' inFlight \n -> (n - 1, ())
+    it "dispatches consecutive parallel-safe tool calls concurrently" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        release <- newEmptyMVar
+        let blocked started = do
+                putMVar started ()
+                readMVar release
                 pure (Right "ok")
             handlers =
-                [ noArgsTool "a" bump
-                , noArgsTool "b" bump
+                [ noArgsTool "a" (blocked firstStarted)
+                , noArgsTool "b" (blocked secondStarted)
                 ]
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -141,14 +150,177 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         config0 <- testConfig backend
-        result <- runLoop config0 { loopTools = registryFromHandlers handlers } Nothing "go"
-        result `shouldBe` Right LoopResult
-            { finalResponseId = "resp-2"
-            , finalText = Just "ok"
-            , turnsUsed = 2
-            , tokenUsage = emptyTokenUsage
-            }
-        readIORef maxInFlight `shouldReturn` 2
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromHandlers handlers }
+                Nothing
+                "go")
+            \running -> do
+                bothStarted <- timeout concurrencyProbeMicros do
+                    takeMVar firstStarted
+                    takeMVar secondStarted
+                bothStarted `shouldBe` Just ()
+                putMVar release ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "resp-2"
+                    , finalText = Just "ok"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+
+    it "preserves order between consecutive turn-sequential calls" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        releaseFirst <- newEmptyMVar
+        let first = do
+                putMVar firstStarted ()
+                takeMVar releaseFirst
+                pure (Right "first")
+            second = putMVar secondStarted () >> pure (Right "second")
+            tools =
+                [ (TurnSequential, noArgsTool "first" first)
+                , (TurnSequential, noArgsTool "second" second)
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "second" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromPolicies tools }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (takeMVar firstStarted)
+                    `shouldReturn` Just ()
+                tryReadMVar secondStarted `shouldReturn` Nothing
+                putMVar releaseFirst ()
+                timeout concurrencyProbeMicros (takeMVar secondStarted)
+                    `shouldReturn` Just ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "resp-2"
+                    , finalText = Just "ok"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+
+    it "evaluates approvals serially before parallel-safe handlers" do
+        firstApprovalStarted <- newEmptyMVar
+        secondApprovalStarted <- newEmptyMVar
+        releaseFirstApproval <- newEmptyMVar
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "a" "{}"
+                , functionToolCall "c2" "b" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let approve :: ToolCall -> IO (Either Text Bool)
+            approve call
+                | call.name == "a" = do
+                    putMVar firstApprovalStarted ()
+                    takeMVar releaseFirstApproval
+                    pure (Right True)
+                | otherwise =
+                    putMVar secondApprovalStarted () >> pure (Right True)
+            handlers =
+                [ noArgsTool "a" (pure (Right "a"))
+                , noArgsTool "b" (pure (Right "b"))
+                ]
+            config = config0
+                { loopTools = registryFromHandlers handlers
+                , loopApprove = approve
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (takeMVar firstApprovalStarted)
+                `shouldReturn` Just ()
+            tryReadMVar secondApprovalStarted `shouldReturn` Nothing
+            putMVar releaseFirstApproval ()
+            timeout concurrencyProbeMicros (takeMVar secondApprovalStarted)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "ok"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+
+    it "keeps sequential calls as barriers around parallel-safe batches" do
+        firstSafeStarted <- newEmptyMVar
+        secondSafeStarted <- newEmptyMVar
+        sequentialStarted <- newEmptyMVar
+        finalSafeStarted <- newEmptyMVar
+        releaseSafe <- newEmptyMVar
+        releaseSequential <- newEmptyMVar
+        let blockedSafe started = do
+                putMVar started ()
+                readMVar releaseSafe
+                pure (Right "safe")
+            sequential = do
+                putMVar sequentialStarted ()
+                takeMVar releaseSequential
+                pure (Right "sequential")
+            finalSafe = putMVar finalSafeStarted () >> pure (Right "final")
+            tools =
+                [ (ParallelSafe, noArgsTool "safe-a" (blockedSafe firstSafeStarted))
+                , (ParallelSafe, noArgsTool "safe-b" (blockedSafe secondSafeStarted))
+                , (TurnSequential, noArgsTool "sequential" sequential)
+                , (ParallelSafe, noArgsTool "safe-c" finalSafe)
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "safe-a" "{}"
+                , functionToolCall "c2" "safe-b" "{}"
+                , functionToolCall "c3" "sequential" "{}"
+                , functionToolCall "c4" "safe-c" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromPolicies tools }
+                Nothing
+                "go")
+            \running -> do
+                safeBatchStarted <- timeout concurrencyProbeMicros do
+                    takeMVar firstSafeStarted
+                    takeMVar secondSafeStarted
+                safeBatchStarted `shouldBe` Just ()
+                tryReadMVar sequentialStarted `shouldReturn` Nothing
+                tryReadMVar finalSafeStarted `shouldReturn` Nothing
+
+                putMVar releaseSafe ()
+                timeout concurrencyProbeMicros (takeMVar sequentialStarted)
+                    `shouldReturn` Just ()
+                tryReadMVar finalSafeStarted `shouldReturn` Nothing
+
+                putMVar releaseSequential ()
+                timeout concurrencyProbeMicros (takeMVar finalSafeStarted)
+                    `shouldReturn` Just ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "resp-2"
+                    , finalText = Just "ok"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+
+    it "treats unknown tools as sequential" do
+        toolExecutionPolicyFor
+            (registryFromHandlers [noArgsTool "known" (pure (Right "ok"))])
+            (functionToolCall "c1" "unknown" "{}")
+            `shouldBe` TurnSequential
 
     it "returns a denial as tool output when approval is refused" do
         submissions <- newIORef []
@@ -379,11 +551,24 @@ testConfig backend = do
         }
 
 registryFromHandlers :: [ToolHandler] -> ToolRegistry
-registryFromHandlers handlers =
+registryFromHandlers =
+    registryFromPolicies . map (\handler -> (ParallelSafe, handler))
+
+registryFromPolicies :: [(ToolExecutionPolicy, ToolHandler)] -> ToolRegistry
+registryFromPolicies tools =
     either (error . Text.unpack) id $ mkToolRegistry
-        [ jsonAppTool (handlerName handler) "" [] AlwaysReadOnly handler
-        | handler <- handlers
+        [ jsonAppToolWithExecution
+            (handlerName handler)
+            ""
+            []
+            AlwaysReadOnly
+            execution
+            handler
+        | (execution, handler) <- tools
         ]
+
+concurrencyProbeMicros :: Int
+concurrencyProbeMicros = 5000000
 
 data EchoArgs = EchoArgs { message :: Text }
 

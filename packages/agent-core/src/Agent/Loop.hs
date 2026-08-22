@@ -30,7 +30,12 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     )
-import Agent.Tools.Types (ToolRegistry, dispatchRegisteredToolCall)
+import Agent.Tools.Types
+    ( ToolExecutionPolicy(..)
+    , ToolRegistry
+    , dispatchRegisteredToolCall
+    , toolExecutionPolicyFor
+    )
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
@@ -206,8 +211,9 @@ runLoopInputs
     -> [TurnInput]
     -> IO (Either LoopError LoopResult)
 runLoopInputs config0 previousResponseId firstInputs = do
-    -- Tools run with mapConcurrently. Serialize onEvent so a printer
-    -- (hPutStrLn on String is not atomic) cannot interleave characters.
+    -- Parallel-safe tool batches run with mapConcurrently. Serialize onEvent
+    -- so a printer (hPutStrLn on String is not atomic) cannot interleave
+    -- characters.
     eventLock <- newMVar ()
     let config = config0
             { loopOnEvent = \event ->
@@ -255,7 +261,7 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                                     , tokenUsage = usageAcc'
                                                     }
                                                 else do
-                                                    results <- mapConcurrently (runOne config) turn.toolCalls
+                                                    results <- runToolCalls config turn.toolCalls
                                                     cancelledAfter <- isCancelled config.loopCancel
                                                     if cancelledAfter
                                                         then pure (Left (LoopCancelled results))
@@ -263,24 +269,78 @@ runLoopInputs config0 previousResponseId firstInputs = do
                                                             (map CompletedTool results) (Just turn) usageAcc'
     go previousResponseId 0 firstInputs Nothing emptyTokenUsage
 
+-- | Preserve model order around stateful tools while retaining concurrency
+-- for maximal consecutive runs of explicitly parallel-safe calls.
+runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls config = go
+  where
+    go [] = pure []
+    go calls@(call : rest) =
+        case toolExecutionPolicyFor config.loopTools call of
+            ParallelSafe -> do
+                let (batch, remaining) =
+                        span
+                            ((== ParallelSafe)
+                                . toolExecutionPolicyFor config.loopTools)
+                            calls
+                prepared <- traverse (prepareToolCall config) batch
+                batchResults <-
+                    mapConcurrently (runPreparedToolCall config) prepared
+                continue batchResults remaining
+            TurnSequential -> do
+                result <- runOne config call
+                continue [result] rest
+
+    continue completed remaining = do
+        cancelled <- isCancelled config.loopCancel
+        if cancelled
+            then pure completed
+            else (completed <>) <$> go remaining
+
+data ToolApproval
+    = ToolApprovalDenied !Text
+    | ToolApprovalRejected
+    | ToolApprovalGranted
+
+data PreparedToolCall =
+    PreparedToolCall !ToolCall !ToolApproval
+
 runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
-runOne config call = do
+runOne config call =
+    prepareToolCall config call >>= runPreparedToolCall config
+
+-- | Approval may touch interactive or otherwise order-sensitive state, so it
+-- is prepared serially even when the resulting handlers may run concurrently.
+prepareToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
+prepareToolCall config call = do
+    approval <- config.loopApprove call
+    pure (PreparedToolCall call (normalizeApproval approval))
+  where
+    normalizeApproval = \case
+        Left denial -> ToolApprovalDenied denial
+        Right False -> ToolApprovalRejected
+        Right True -> ToolApprovalGranted
+
+runPreparedToolCall
+    :: LoopConfig
+    -> PreparedToolCall
+    -> IO ToolCallResult
+runPreparedToolCall config (PreparedToolCall call approval) = do
     config.loopOnEvent (ToolStarted call)
-    approved <- config.loopApprove call
-    result <- case approved of
-        Left denial ->
+    result <- case approval of
+        ToolApprovalDenied denial ->
             pure ToolCallResult
                 { callId = call.callId
                 , output = denial
                 , callKind = call.callKind
                 }
-        Right False ->
+        ToolApprovalRejected ->
             pure ToolCallResult
                 { callId = call.callId
                 , output = "Tool call rejected by user."
                 , callKind = call.callKind
                 }
-        Right True ->
+        ToolApprovalGranted ->
             dispatchRegisteredToolCall
                 config.loopDispatch
                     { toolDispatchOnOutput = \progressCall output ->
