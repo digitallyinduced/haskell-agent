@@ -20,6 +20,7 @@ module Agent.CLI.TUI.Composer
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , takeFullscreenInput
+    , wrapDraft
     ) where
 
 import Agent.CLI.Clipboard
@@ -34,6 +35,8 @@ import Agent.CLI.Command
 import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
+    , displayEditorText
+    , terminalCharWidth
     , terminalTextWidth
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
@@ -212,62 +215,79 @@ queuePreview text =
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =
-    let focused = state.uiFocus == FocusComposer
-        attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
-        leading =
-            filter (not . Text.null)
-                [ if state.uiPrompt.promptAttachments > 0
-                    then "image "
-                        <> Text.pack
-                            (show state.uiPrompt.promptAttachments)
-                    else ""
-                , if Seq.null state.uiQueuedInputs
-                    then
-                        if not state.uiAwaitingInput
-                            then "next message"
-                            else ""
-                    else "queued "
-                        <> Text.pack
-                            (show (Seq.length state.uiQueuedInputs))
-                ]
-        label =
-            if null leading
-                then Nothing
-                else Just $
-                    hBox (intersperse (txt " · ") (map txt leading))
-        editor =
-            clickable ComposerArea $
-                padLeftRight 1 $
-                    hBox
-                        [ withAttr
-                            (if focused then Theme.borderActiveAttr else Theme.mutedAttr)
-                            (txt "❯ ")
-                        , withAttr Theme.assistantAttr (renderDraft focused state)
-                        , vLimit 1 (fill ' ')
-                        ]
-        composer =
-            withBorderStyle unicodeRounded $
-                composerBorder
-                    (withAttr Theme.footerAttr <$> label)
-                    (drawComposerStatus appState)
-                    editor
-    in overrideAttr Border.borderAttr attr composer
+    Widget Greedy Fixed do
+        context <- getContext
+        let focused = state.uiFocus == FocusComposer
+            attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
+            leading =
+                filter (not . Text.null)
+                    [ if state.uiPrompt.promptAttachments > 0
+                        then "image "
+                            <> Text.pack
+                                (show state.uiPrompt.promptAttachments)
+                        else ""
+                    , if Seq.null state.uiQueuedInputs
+                        then
+                            if not state.uiAwaitingInput
+                                then "next message"
+                                else ""
+                        else "queued "
+                            <> Text.pack
+                                (show (Seq.length state.uiQueuedInputs))
+                    ]
+            label =
+                if null leading
+                    then Nothing
+                    else Just $
+                        hBox (intersperse (txt " · ") (map txt leading))
+            draftWidth = max 1 (context.availWidth - composerDraftChromeWidth)
+            (draftRows, _) =
+                wrapDraft draftWidth state.uiDraft state.uiCursor
+            bodyHeight = min maxComposerRows (length draftRows)
+            editor =
+                clickable ComposerArea $
+                    padLeftRight 1 $
+                        hBox
+                            [ withAttr
+                                (if focused
+                                    then Theme.borderActiveAttr
+                                    else Theme.mutedAttr)
+                                (txt "❯ ")
+                            , withAttr Theme.assistantAttr
+                                (renderDraft focused bodyHeight state)
+                            ]
+            composer =
+                withBorderStyle unicodeRounded $
+                    composerBorder
+                        bodyHeight
+                        (withAttr Theme.footerAttr <$> label)
+                        (drawComposerStatus appState)
+                        editor
+        render (overrideAttr Border.borderAttr attr composer)
   where
     state = appState.appUi
 
+composerDraftChromeWidth :: Int
+composerDraftChromeWidth = 6
+
+maxComposerRows :: Int
+maxComposerRows = 8
+
 composerBorder
-    :: Maybe (Widget Name)
+    :: Int
+    -> Maybe (Widget Name)
     -> Widget Name
     -> Widget Name
     -> Widget Name
-composerBorder topLabel bottomLabel body =
+composerBorder bodyHeight topLabel bottomLabel body =
     vBox
         [ hBox
             [ Border.borderElem BorderStyle.bsCornerTL
             , topBorder
             , Border.borderElem BorderStyle.bsCornerTR
             ]
-        , vLimit 1 $ hBox [Border.vBorder, body, Border.vBorder]
+        , vLimit bodyHeight $
+            hBox [Border.vBorder, body, Border.vBorder]
         , hBox
             [ Border.borderElem BorderStyle.bsCornerBL
             , bottomBorder
@@ -315,20 +335,139 @@ modeAttr mode = case Text.toLower mode of
     "plan" -> Theme.headingAttr
     _ -> Theme.linkAttr
 
-renderDraft :: Bool -> UiState -> Widget Name
-renderDraft focused state =
-    let content =
-            if Text.null state.uiDraft
-                then withAttr Theme.mutedAttr $
-                    txt
-                        (if not state.uiAwaitingInput
-                            then "Type a follow-up…"
-                            else " ")
-                else txt state.uiDraft
-        (row, column) = draftCursorLocation state.uiDraft state.uiCursor
-    in if focused
-        then showCursor ComposerCursor (Location (column, row)) content
-        else content
+renderDraft :: Bool -> Int -> UiState -> Widget Name
+renderDraft focused height state =
+    Widget Greedy Fixed do
+        context <- getContext
+        let width = max 1 context.availWidth
+            (rows, (row, column)) =
+                wrapDraft width state.uiDraft state.uiCursor
+            firstVisibleRow = max 0 (row - height + 1)
+            visibleRows = take height (drop firstVisibleRow rows)
+            visibleCursorRow = row - firstVisibleRow
+            content
+                | Text.null state.uiDraft =
+                    withAttr Theme.mutedAttr $
+                        txt
+                            (if not state.uiAwaitingInput
+                                then "Type a follow-up…"
+                                else " ")
+                | otherwise =
+                    vBox (map renderRow visibleRows)
+            cursorContent
+                | focused =
+                    showCursor
+                        ComposerCursor
+                        (Location (column, visibleCursorRow))
+                        content
+                | otherwise = content
+        render (padRight Max cursorContent)
+  where
+    -- Empty visual rows still need one cell so Brick preserves their height
+    -- and can place the insertion cursor on them.
+    renderRow row
+        | Text.null row = txt " "
+        | otherwise = txt (displayEditorText row)
+
+-- | Visually wrap a draft without changing its underlying text. The cursor
+-- offset is measured in the original text and returned in wrapped row/column
+-- coordinates. Long unbroken text is split at terminal cell boundaries.
+wrapDraft :: Int -> Text -> Int -> ([Text], (Int, Int))
+wrapDraft requestedWidth text requestedCursor =
+    let width = max 1 requestedWidth
+        cursor = max 0 (min (Text.length text) requestedCursor)
+        (rowsRev, currentRev, currentWidth, currentRow, cursorLocation) =
+            go width cursor 0 [] [] 0 0 Nothing (Text.unpack text)
+        (finalRowsRev, finalCurrentRev, finalRow, finalColumn)
+            | cursor == Text.length text && currentWidth >= width =
+                (finishRow rowsRev currentRev, [], currentRow + 1, 0)
+            | otherwise =
+                (rowsRev, currentRev, currentRow, currentWidth)
+        rows = reverse (Text.pack (reverse finalCurrentRev) : finalRowsRev)
+        location =
+            fromMaybe
+                (finalRow, finalColumn)
+                cursorLocation
+    in (rows, location)
+  where
+    go
+        :: Int
+        -> Int
+        -> Int
+        -> [Text]
+        -> [Char]
+        -> Int
+        -> Int
+        -> Maybe (Int, Int)
+        -> [Char]
+        -> ([Text], [Char], Int, Int, Maybe (Int, Int))
+    go _ _ _ rowsRev currentRev currentWidth currentRow location [] =
+        (rowsRev, currentRev, currentWidth, currentRow, location)
+    go width cursor index rowsRev currentRev currentWidth currentRow location
+        (character : rest)
+        | character == '\n' =
+            let atVisualBoundary = currentWidth >= width
+                rowsAfterBoundary
+                    | atVisualBoundary = finishRow rowsRev currentRev
+                    | otherwise = rowsRev
+                rowAfterBoundary
+                    | atVisualBoundary = currentRow + 1
+                    | otherwise = currentRow
+                columnAfterBoundary
+                    | atVisualBoundary = 0
+                    | otherwise = currentWidth
+                location' =
+                    recordCursor
+                        cursor
+                        index
+                        (rowAfterBoundary, columnAfterBoundary)
+                        location
+                (nextRows, nextRow)
+                    | atVisualBoundary =
+                        (rowsAfterBoundary, rowAfterBoundary)
+                    | otherwise =
+                        (finishRow rowsAfterBoundary currentRev, currentRow + 1)
+            in go
+                width cursor (index + 1) nextRows [] 0 nextRow location' rest
+        | otherwise =
+            let characterWidth = terminalCharWidth character
+                shouldWrap =
+                    characterWidth > 0
+                        && ( currentWidth >= width
+                            || (currentWidth > 0
+                                && currentWidth + characterWidth > width)
+                           )
+                rows' =
+                    if shouldWrap
+                        then finishRow rowsRev currentRev
+                        else rowsRev
+                currentRev' = if shouldWrap then [] else currentRev
+                currentWidth' = if shouldWrap then 0 else currentWidth
+                currentRow' = if shouldWrap then currentRow + 1 else currentRow
+                location' =
+                    recordCursor
+                        cursor
+                        index
+                        (currentRow', currentWidth')
+                        location
+            in go
+                width
+                cursor
+                (index + 1)
+                rows'
+                (character : currentRev')
+                (currentWidth' + characterWidth)
+                currentRow'
+                location'
+                rest
+
+    finishRow rowsRev currentRev =
+        Text.pack (reverse currentRev) : rowsRev
+
+    recordCursor cursor index location = \case
+        Nothing
+            | cursor == index -> Just location
+        previous -> previous
 
 draftCursorLocation :: Text -> Int -> (Int, Int)
 draftCursorLocation text cursor =
