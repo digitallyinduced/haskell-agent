@@ -10,17 +10,22 @@ module Agent.CLI.Login
     , applyLoginKey
     , connectProviderAccount
     , discoverLoginAccounts
+    , discoverSelectableLoginAccounts
     , formatLoginAccounts
     , initialLoginState
+    , loginAccountSelectionId
+    , refreshLoginAccount
     , renderLoginFrame
     , runLoginManager
     ) where
 
 import Agent.CLI.Auth
     ( GrokAuthState(..)
+    , externalAuthSelectionId
     , grokAuthStateToJson
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
+    , managedAuthSelectionId
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
@@ -285,6 +290,35 @@ replaceAt index replacement accounts =
 
 discoverLoginAccounts :: IO [LoginAccount]
 discoverLoginAccounts = do
+    accounts <- discoverLoginAccountSources
+    pure (nubBy sameAccount accounts)
+  where
+    sameAccount left right =
+        left.loginProvider == right.loginProvider
+            && left.loginAccountId == right.loginAccountId
+
+-- | Accounts that can be selected in a live session. Unlike the login
+-- dashboard, disabled managed entries do not shadow usable external sources,
+-- and distinct managed credentials remain separately addressable.
+discoverSelectableLoginAccounts :: IO [LoginAccount]
+discoverSelectableLoginAccounts = do
+    accounts <- filter (.loginEnabled) <$> discoverLoginAccountSources
+    pure (nubBy sameSelection accounts)
+  where
+    sameSelection left right =
+        loginAccountSelectionId left == loginAccountSelectionId right
+
+loginAccountSelectionId :: LoginAccount -> Text
+loginAccountSelectionId account =
+    case account.loginManagedId of
+        Just managedId -> managedAuthSelectionId managedId
+        Nothing ->
+            externalAuthSelectionId
+                account.loginProvider
+                account.loginSource
+
+discoverLoginAccountSources :: IO [LoginAccount]
+discoverLoginAccountSources = do
     home <- getHomeDirectory
     now <- getCurrentTime
     openaiEnv <- discoverOpenAIEnv
@@ -298,7 +332,7 @@ discoverLoginAccounts = do
     let managedAccounts = case managed of
             Left _ -> []
             Right entries -> map (managedLoginAccount now) entries
-    pure $ nubBy sameAccount $
+    pure $
         managedAccounts
             <> catMaybes
                 [ openaiEnv
@@ -307,10 +341,6 @@ discoverLoginAccounts = do
                 , grokFile
                 , openRouter
                 ]
-  where
-    sameAccount left right =
-        left.loginProvider == right.loginProvider
-            && left.loginAccountId == right.loginAccountId
 
 managedLoginAccount
     :: UTCTime

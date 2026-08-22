@@ -1,7 +1,8 @@
 module Agent.CLI.ApprovalSpec (spec) where
 
 import Agent.CLI.Approval
-    ( approveToolDecisionWith
+    ( ApprovalNotice(..)
+    , approveToolDecisionWithReporter
     , childApprove
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
@@ -14,44 +15,137 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , ToolEnv(..)
     , ToolRegistry
-    , defaultToolEnv
     , jsonAppTool
     , mkToolRegistry
     )
 import Agent.Tools.PlanMode
-    ( PlanModeEnv
+    ( activatePlanMode
     , newPlanModeEnv
     )
-import Control.Exception.Safe (bracket)
 import Data.IORef
+    ( modifyIORef'
+    , newIORef
+    , readIORef
+    )
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
-import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
 spec = do
     describe "approveToolDecisionWith" do
-        it "prompts for every PromptEveryCall invocation" do
-            withTempApproval \planMode -> do
-                policy <- newIORef PromptMutating
-                allowed <- newIORef Set.empty
-                prompts <- newIORef (0 :: Int)
-                let tools = registry [perCallTool]
-                    request _call = do
-                        modifyIORef' prompts (+ 1)
-                        pure (Just PermissionAllowTool)
-                    approve = approveToolDecisionWith
-                        request policy allowed tools planMode perCallCall
-                approve `shouldReturn` Right True
-                approve `shouldReturn` Right True
-                readIORef prompts `shouldReturn` 2
+        it "reports plan-mode denials without requiring terminal output" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            notices <- newIORef []
+            permissionRequests <- newIORef (0 :: Int)
+            let call = functionToolCall "call-patch" "apply_patch" "{}"
+
+            result <- approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\notice -> modifyIORef' notices (<> [notice]))
+                policy
+                allowed
+                (registry [])
+                plan
+                call
+
+            result `shouldSatisfy` \case
+                Left message ->
+                    "file edits are not allowed in plan mode"
+                        `Text.isInfixOf` message
+                Right _ -> False
+            readIORef permissionRequests `shouldReturn` 0
+            readIORef notices `shouldReturn`
+                [ApprovalWarning
+                    "Rejected: file edits are not allowed in plan mode - \
+                    \the only editable file is the plan file \
+                    \(/tmp/approval-test/plan.md)."]
+
+        it "reports dangerous shell denials through the callback" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            let call =
+                    functionToolCall
+                        "call-shell"
+                        "shell_command"
+                        "{\"command\":\"rm -rf /\"}"
+
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\notice -> modifyIORef' notices (<> [notice]))
+                policy
+                allowed
+                (registry [])
+                plan
+                call
+
+            result `shouldSatisfy` either (const True) (const False)
+            recorded <- readIORef notices
+            recorded `shouldSatisfy` \case
+                [ApprovalWarning message] ->
+                    "blocked dangerous shell command"
+                        `Text.isInfixOf` Text.toLower message
+                _ -> False
+
+        it "reports remembered tool approval through the callback" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                report notice = modifyIORef' notices (<> [notice])
+
+            approveToolDecisionWithReporter
+                request report policy allowed
+                (registry [mutatingTool]) plan mutatingCall
+                `shouldReturn` Right True
+            approveToolDecisionWithReporter
+                request report policy allowed
+                (registry [mutatingTool]) plan mutatingCall
+                `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 1
+            readIORef notices `shouldReturn`
+                [ApprovalSuccess "✓ always allow write this session"]
+            readIORef allowed `shouldReturn` Set.singleton "write"
+
+        it "prompts and reports every PromptEveryCall invocation" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                report notice = modifyIORef' notices (<> [notice])
+                approve = approveToolDecisionWithReporter
+                    request report policy allowed
+                    (registry [perCallTool]) plan perCallCall
+
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef notices `shouldReturn`
+                [ ApprovalSuccess
+                    "✓ allowed once; program requires approval for every call"
+                , ApprovalSuccess
+                    "✓ allowed once; program requires approval for every call"
+                ]
+            readIORef allowed `shouldReturn` Set.empty
 
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do
@@ -65,19 +159,13 @@ spec = do
                 `shouldReturn` Right False
 
         it "recognizes namespaced collaboration tools as read-only" do
-            childApprove DenyMutating
-                (registry [namespacedReadOnlyTool])
-                namespacedReadOnlyCall
+            childApprove DenyMutating (registry [namespacedReadOnlyTool]) namespacedReadOnlyCall
                 `shouldReturn` Right True
 
         it "returns an in-band denial when a child would need to prompt" do
-            result <- childApprove
-                PromptMutating
-                (registry [mutatingTool])
-                mutatingCall
+            result <- childApprove PromptMutating (registry [mutatingTool]) mutatingCall
             result `shouldSatisfy` \case
-                Left message ->
-                    "cannot prompt for approval" `Text.isInfixOf` message
+                Left message -> "cannot prompt for approval" `Text.isInfixOf` message
                 Right _ -> False
 
         it "honors per-call read-only classifiers" do
@@ -128,13 +216,3 @@ tool name approval =
 
 registry :: [AppTool] -> ToolRegistry
 registry = either (error . Text.unpack) id . mkToolRegistry
-
-withTempApproval :: (PlanModeEnv -> IO a) -> IO a
-withTempApproval action =
-    bracket acquire removeDirectoryRecursive \dir -> do
-        env <- defaultToolEnv (unsafeEncodeUtf dir)
-        newPlanModeEnv env.toolCwd Nothing >>= action
-  where
-    acquire = do
-        tmp <- getTemporaryDirectory
-        mkdtemp (tmp </> "agent-approval-")

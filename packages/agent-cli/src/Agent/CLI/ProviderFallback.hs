@@ -89,6 +89,10 @@ isUsageExhausted :: ApiError -> Bool
 isUsageExhausted = \case
     CredentialsExhausted{} -> True
     ProviderError UsageLimitReached _ _ -> True
+    ProviderError UsageBalanceExhausted _ _ -> True
+    ProviderError QuotaExceeded _ _ -> True
+    ProviderError UsageNotIncluded _ _ -> True
+    ProviderError BillingError _ _ -> True
     _ -> False
 
 -- | Failures for which rebuilding the same provider cannot make progress.

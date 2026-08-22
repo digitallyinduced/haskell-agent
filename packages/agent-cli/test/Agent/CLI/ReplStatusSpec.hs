@@ -2,8 +2,10 @@ module Agent.CLI.ReplStatusSpec (spec) where
 
 import Agent.CLI
     ( DevResult(..)
+    , accountSwitchTarget
     , afterDev
     , applyReplMode
+    , buildPromptState
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
@@ -12,7 +14,9 @@ import Agent.CLI
     , formatTokenUsage
     , withRestoredCurrentDirectory
     )
+import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -20,8 +24,17 @@ import Agent.CLI.ReplMode
     , cycleReplMode
     , replModeFromState
     )
-import Agent.Loop (TokenUsage(..), emptyTokenUsage)
+import Agent.Loop (LoopEvent(..), TokenUsage(..), emptyTokenUsage)
+import Agent.Provider (Provider(..))
+import Agent.Responses.Types (defaultResponseCreateParams)
 import System.OsPath (unsafeEncodeUtf)
+import Agent.TUI.Model
+    ( PromptState(..)
+    , UiEvent(..)
+    , UiState(..)
+    , initialUiState
+    , reduceUi
+    )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
 import Data.IORef (newIORef, readIORef)
@@ -38,6 +51,25 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "accountSwitchTarget" do
+        it "uses the destination provider default when changing provider" do
+            let target =
+                    accountSwitchTarget
+                        OpenAIProvider
+                        "gpt-5.6-sol"
+                        XAIProvider
+            target.modelProvider `shouldBe` XAIProvider
+            target.modelId `shouldBe` "grok-4.6"
+
+        it "keeps the current model when only the account backend restarts" do
+            let target =
+                    accountSwitchTarget
+                        OpenAIProvider
+                        "gpt-5.6-sol"
+                        OpenAIProvider
+            target.modelProvider `shouldBe` OpenAIProvider
+            target.modelId `shouldBe` "gpt-5.6-sol"
+
     describe "devArgs" do
         it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do
             devArgs Nothing False
@@ -125,6 +157,35 @@ spec = do
                         ReplModeNormal "" emptyTokenUsage
             terminalTextWidth line `shouldBe` 16
             line `shouldBe` "  模型模型 · hi…"
+
+    describe "buildPromptState" do
+        it "replaces stale Grok metadata before a fallback turn starts" do
+            let stalePrompt =
+                    initialUiState.uiPrompt
+                        { promptModel = "grok-4.6"
+                        , promptEffort = "high"
+                        , promptAccount = "grok@example.com"
+                        }
+                openAiParams =
+                    setReasoningEffort "medium" $
+                        setModel "gpt-5.6-sol" defaultResponseCreateParams
+                replacement =
+                    buildPromptState
+                        openAiParams
+                        PlanInactive
+                        PromptMutating
+                        "openai@example.com"
+                        True
+                        emptyTokenUsage
+                        0
+                running =
+                    reduceUi (UiLoop TurnStarted) $
+                        reduceUi (UiSetPrompt replacement) $
+                            reduceUi UiTurnRestarted $
+                                reduceUi (UiSetPrompt stalePrompt) initialUiState
+            running.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
+            running.uiPrompt.promptEffort `shouldBe` "medium"
+            running.uiPrompt.promptAccount `shouldBe` "openai@example.com"
 
     describe "formatStartupTimings" do
         it "sorts cumulative startup markers and keeps subsecond precision" do

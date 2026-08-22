@@ -109,6 +109,7 @@ toolVerb name = case canonicalToolName name of
     "apply_patch" -> "Edited"
     "run_terminal_cmd" -> "$"
     "shell_command" -> "$"
+    "write_stdin" -> "Continued"
     "run_ghci" -> "$"
     "run_haskell_program" -> "λ"
     "get_task_output" -> "Read"
@@ -137,6 +138,8 @@ toolDetail call = case canonicalToolName call.name of
     "run_haskell_program" ->
         firstLine (jsonTextFieldDefault "source" call.arguments)
     "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "write_stdin" ->
+        maybe "" ("session " <>) (jsonIntField "session_id" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
@@ -154,6 +157,14 @@ nonEmptyJsonText :: Text -> Text -> Maybe Text
 nonEmptyJsonText key input = jsonTextField key input >>= \value ->
     let stripped = Text.strip value
     in if Text.null stripped then Nothing else Just stripped
+
+jsonIntField :: Text -> Text -> Maybe Text
+jsonIntField key input = do
+    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 input)
+    field <- KeyMap.lookup (Key.fromText key) object
+    case Aeson.fromJSON field :: Aeson.Result Int of
+        Aeson.Success value -> pure (Text.pack (show value))
+        Aeson.Error _ -> Nothing
 
 formatAgentList :: Text -> Maybe Text
 formatAgentList output = do

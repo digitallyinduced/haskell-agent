@@ -20,12 +20,17 @@ import Agent.Tools
     , codingToolsForWithHaskellProgram
     , defaultToolEnv
     )
-import Agent.Tools.Types (jsonToolParameters)
+import Agent.Tools.Types (jsonToolParameters, toolAllowsWithoutPrompt)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
+import Agent.Tools.Codex.Shell
+    ( closeCodexShellSession
+    , newCodexShellSession
+    )
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
 import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -54,6 +59,7 @@ spec = describe "Agent.Tools.Codex" do
             let names = map (.appToolName) coding.codingAppTools
             names `shouldBe`
                 [ "shell_command"
+                , "write_stdin"
                 , "apply_patch"
                 , "update_plan"
                 , "run_ghci"
@@ -120,15 +126,16 @@ spec = describe "Agent.Tools.Codex" do
     it "lets the OpenAI agent enter plan mode proactively" do
         withTempEnv \env -> do
             ghci <- newGhciSession env
+            shell <- newCodexShellSession env
             plan <- newPlanModeEnv env.toolCwd Nothing
-            tools <- codexTools env ghci plan Nothing
+            tools <- codexTools env shell ghci plan Nothing
             (do
                 result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
                     (functionToolCall "call-enter-plan" "enter_plan_mode"
                         "{\"explanation\":\"The user requested a design plan.\"}")
                 result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
                 isPlanModeActive plan `shouldReturn` True)
-                `finally` closeGhciSession ghci
+                `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
 
     it "adds, updates, and deletes files via apply_patch" do
         withTempEnv \env -> do
@@ -289,6 +296,133 @@ spec = describe "Agent.Tools.Codex" do
                 "{\"command\":\"sleep 5\",\"timeout_ms\":\"200\"}"
             timed `shouldSatisfy` Text.isInfixOf "timed out"
 
+    it "rejects timeout_ms together with yield_time_ms" do
+        withTempEnv \env -> do
+            output <- runFn env "shell_command"
+                "{\"command\":\"sleep 1\",\"timeout_ms\":100,\"yield_time_ms\":10}"
+            output `shouldSatisfy`
+                Text.isInfixOf "timeout_ms and yield_time_ms are mutually exclusive"
+
+    it "only treats write_stdin polling as read-only" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                let tool =
+                        fromMaybe (error "missing write_stdin") $
+                            findTool "write_stdin" tools
+                toolAllowsWithoutPrompt tool
+                    (functionToolCall "poll" "write_stdin" "{\"session_id\":1}")
+                    `shouldReturn` True
+                toolAllowsWithoutPrompt tool
+                    (functionToolCall "write" "write_stdin"
+                        "{\"session_id\":1,\"chars\":\"hello\\n\"}")
+                    `shouldReturn` False
+
+    it "yields a long-running shell_command and polls it to completion" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                started <- runFnWith tools "shell_command"
+                    "{\"command\":\"printf first; sleep 0.2; printf second\",\"workdir\":\".\",\"yield_time_ms\":20}"
+                started `shouldSatisfy` Text.isInfixOf "Process still running"
+                started `shouldSatisfy` Text.isInfixOf "first"
+                let sessionId = sessionIdFrom started
+                finished <- runFnWith tools "write_stdin" $
+                    "{\"session_id\":" <> Text.pack (show sessionId)
+                        <> ",\"yield_time_ms\":1000}"
+                finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+                finished `shouldSatisfy` Text.isInfixOf "second"
+                finished `shouldNotSatisfy` Text.isInfixOf "firstsecond"
+
+    it "writes stdin to a managed shell_command" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                started <- runFnWith tools "shell_command"
+                    "{\"command\":\"IFS= read -r line; printf 'got:%s' \\\"$line\\\"\",\"workdir\":\".\",\"yield_time_ms\":20}"
+                let sessionId = sessionIdFrom started
+                finished <- runFnWith tools "write_stdin" $
+                    "{\"session_id\":" <> Text.pack (show sessionId)
+                        <> ",\"chars\":\"hello\\n\",\"yield_time_ms\":1000}"
+                finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+                finished `shouldSatisfy` Text.isInfixOf "got:hello"
+
+    it "returns completed output when stdin is written after process exit" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                started <- runFnWith tools "shell_command"
+                    "{\"command\":\"sleep 0.05; printf done\",\"workdir\":\".\",\"yield_time_ms\":10}"
+                let sessionId = sessionIdFrom started
+                threadDelay 150000
+                finished <- runFnWith tools "write_stdin" $
+                    "{\"session_id\":" <> Text.pack (show sessionId)
+                        <> ",\"chars\":\"late\",\"yield_time_ms\":10}"
+                finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+                (started <> finished) `shouldSatisfy` Text.isInfixOf "done"
+
+    it "keeps completed sessions available until they are polled" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                first <- runFnWith tools "shell_command"
+                    "{\"command\":\"sleep 0.05; printf first\",\"workdir\":\".\",\"yield_time_ms\":10}"
+                let firstId = sessionIdFrom first
+                threadDelay 150000
+                _ <- runFnWith tools "shell_command"
+                    "{\"command\":\"sleep 1\",\"workdir\":\".\",\"yield_time_ms\":10}"
+                finished <- runFnWith tools "write_stdin" $
+                    "{\"session_id\":" <> Text.pack (show firstId)
+                        <> ",\"yield_time_ms\":10}"
+                finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
+                (first <> finished) `shouldSatisfy` Text.isInfixOf "first"
+
+    it "returns new output even after the capture cap has rolled forward" do
+        withTempEnv \base -> do
+            let env = base { toolStdoutCap = 64 }
+            withCodexTools env \tools -> do
+                started <- runFnWith tools "shell_command"
+                    "{\"command\":\"yes x | head -c 4096; sleep 0.1; printf LATE; sleep 0.5\",\"workdir\":\".\",\"yield_time_ms\":50}"
+                let sessionId = sessionIdFrom started
+                threadDelay 200000
+                polled <- runFnWith tools "write_stdin" $
+                    "{\"session_id\":" <> Text.pack (show sessionId)
+                        <> ",\"yield_time_ms\":1}"
+                polled `shouldSatisfy` Text.isInfixOf "LATE"
+
+    it "rejects a command before spawning when the session is full" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                mapM_
+                    (\_ -> do
+                        started <- runFnWith tools "shell_command"
+                            "{\"command\":\"sleep 5\",\"workdir\":\".\",\"yield_time_ms\":1}"
+                        started `shouldSatisfy` Text.isInfixOf "session_id:")
+                    [1 :: Int .. 64]
+                let marker = toFilePath env.toolCwd </> "over-cap"
+                rejected <- runFnWith tools "shell_command" $
+                    "{\"command\":\"printf bad > "
+                        <> Text.pack marker
+                        <> "\",\"workdir\":\".\",\"yield_time_ms\":1}"
+                rejected `shouldSatisfy` Text.isInfixOf "session is full"
+                threadDelay 100000
+                doesFileExist marker `shouldReturn` False
+
+    it "rejects unknown managed shell sessions" do
+        withTempEnv \env ->
+            withCodexTools env \tools -> do
+                output <- runFnWith tools "write_stdin"
+                    "{\"session_id\":999,\"yield_time_ms\":1}"
+                output `shouldSatisfy` Text.isInfixOf "Unknown session_id: 999"
+
+    it "stops managed shell commands when coding tools close" do
+        withTempEnv \env -> do
+            let marker = toFilePath env.toolCwd </> "escaped"
+            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            started <- runFnWith coding.codingAppTools "shell_command" $
+                "{\"command\":\"sleep 0.3; printf done > "
+                    <> Text.pack marker
+                    <> "\",\"workdir\":\".\",\"yield_time_ms\":20}"
+            started `shouldSatisfy` Text.isInfixOf "session_id:"
+            coding.codingClose
+            threadDelay 500000
+            doesFileExist marker `shouldReturn` False
+
     it "stores an update_plan and rejects two in_progress steps" do
         withTempEnv \env -> do
             ok <- runFn env "update_plan"
@@ -311,16 +445,43 @@ runPatch env patch = withCodexTools env \tools -> do
 
 runFn :: ToolEnv -> Text -> Text -> IO Text
 runFn env name arguments = withCodexTools env \tools -> do
+    runFnWith tools name arguments
+
+runFnWith :: [AppTool] -> Text -> Text -> IO Text
+runFnWith tools name arguments = do
     result <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
         (functionToolCall "call-1" name arguments)
     pure result.output
 
 withCodexTools :: ToolEnv -> ([AppTool] -> IO a) -> IO a
 withCodexTools env action = do
+    shell <- newCodexShellSession env
     ghci <- newGhciSession env
     plan <- newPlanModeEnv env.toolCwd Nothing
-    tools <- codexTools env ghci plan Nothing
-    action tools `finally` closeGhciSession ghci
+    tools <- codexTools env shell ghci plan Nothing
+    action tools
+        `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
+
+sessionIdFrom :: Text -> Int
+sessionIdFrom output =
+    case
+        [ Text.strip rest
+        | line <- Text.lines output
+        , Just rest <- [Text.stripPrefix "session_id:" line]
+        ] of
+        value : _ -> case reads (Text.unpack value) of
+            [(sessionId, "")] -> sessionId
+            _ -> error ("invalid session_id: " <> Text.unpack value)
+        [] -> error ("missing session_id in: " <> Text.unpack output)
+
+findTool :: Text -> [AppTool] -> Maybe AppTool
+findTool name = go
+  where
+    go :: [AppTool] -> Maybe AppTool
+    go [] = Nothing
+    go (tool : tools)
+        | tool.appToolName == name = Just tool
+        | otherwise = go tools
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action = do

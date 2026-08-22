@@ -767,6 +767,7 @@ toolBlockKind name
     | name `elem`
         [ "run_terminal_cmd"
         , "shell_command"
+        , "write_stdin"
         , "run_ghci"
         , "run_haskell_program"
         ] =

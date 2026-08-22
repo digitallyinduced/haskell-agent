@@ -38,6 +38,10 @@ import Agent.ResourceScope
     , newResourceScope
     )
 import Agent.Tools.Codex (codexTools)
+import Agent.Tools.Codex.Shell
+    ( closeCodexShellSession
+    , newCodexShellSession
+    )
 import Agent.Tools.Ghci
     ( closeGhciSession
     , newGhciProgramSession
@@ -65,8 +69,9 @@ data CodingTools = CodingTools
 
 -- | Tools advertised for a model vendor. Surfaces are never mixed.
 -- Every provider gets a persistent GHCi session for 'run_ghci'.
--- Grok/OpenRouter also keep a persistent shell session. 'codingClose'
--- closes owned sessions; run it in 'finally'.
+-- OpenAI keeps managed long-running shell processes. Grok/OpenRouter also keep
+-- persistent cwd/environment shell state. 'codingClose' closes owned sessions;
+-- run it in 'finally'.
 codingToolsFor
     :: Provider
     -> ToolEnv
@@ -120,11 +125,14 @@ codingToolsForWithTypesAndHaskellProgram
             OpenRouterProvider ->
                 grokCodingTools resources plan
             OpenAIProvider -> do
+                (_, shellSession) <- allocateResource resources
+                    (newCodexShellSession env)
+                    closeCodexShellSession
                 (_, ghci) <- allocateResource resources
                     (newGhciSession env)
                     closeGhciSession
                 programTools <- haskellProgramTools resources plan
-                tools <- codexTools env ghci plan multi
+                tools <- codexTools env shellSession ghci plan multi
                 pure CodingTools
                     { codingAppTools =
                         tools ++ programTools

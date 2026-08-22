@@ -19,6 +19,9 @@ spec = describe "tool presentation" do
             (customToolCall "patch" "apply_patch"
                 "*** Begin Patch\n*** Update File: src/Main.hs\n*** End Patch")
             `shouldBe` "src/Main.hs"
+        summarizeToolCall
+            (functionToolCall "continue" "write_stdin" "{\"session_id\":12}")
+            `shouldBe` "Continued session 12"
 
     it "parses and truncates search-replace diffs once for all renderers" do
         let oldText = Text.intercalate "\\n"
