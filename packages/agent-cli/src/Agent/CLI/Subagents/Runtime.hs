@@ -5,6 +5,7 @@ module Agent.CLI.Subagents.Runtime
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
+    , lookupOrCreateSubagentSession
     , persistSubagentSnapshotWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
@@ -104,7 +105,15 @@ import Agent.Tools.Types
     , ToolRegistry
     , defaultToolEnv
     )
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newMVar
+    , readMVar
+    )
 import Control.Exception.Safe (finally)
+import Control.Monad (unless, when)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -115,6 +124,7 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
     , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
+    , subSessionHydrated :: !(MVar Bool)
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
@@ -222,9 +232,11 @@ flushAllSubagentSnapshots
 flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
     sessions <- readIORef sessionsRef
     mapM_
-        (\(agentId, session) ->
-            persistSubagentSnapshot storeRootRef registry typesRef agentId
-                session.subSessionTranscript)
+        (\(agentId, session) -> do
+            hydrated <- readMVar session.subSessionHydrated
+            when hydrated $
+                persistSubagentSnapshot storeRootRef registry typesRef agentId
+                    session.subSessionTranscript)
         (Map.toList sessions)
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
@@ -244,40 +256,42 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
         _ -> pure (Right ())
   where
     restore = do
+        session <- getOrInstallSubagentSession sessionsRef agentId
+        modifyMVar session.subSessionHydrated \hydrated -> do
+            currentStatus <- getStatus registry agentId
+            case currentStatus of
+                NotFound -> restoreLocked session hydrated
+                Closed -> restoreLocked session hydrated
+                _ -> do
+                    hydrated' <-
+                        ensureSubagentSessionHydratedLocked
+                            storeRootRef typesRef agentId session hydrated
+                    pure (hydrated', Right ())
+    restoreLocked session hydrated = do
         mroot <- readIORef storeRootRef
         case mroot of
             Nothing ->
-                pure (Left "no session directory; cannot restore subagent from disk")
+                pure
+                    ( hydrated
+                    , Left "no session directory; cannot restore subagent from disk"
+                    )
             Just sessionDir ->
                 loadSubagentState sessionDir agentId >>= \case
-                    Left err -> pure (Left err)
+                    Left err -> pure (hydrated, Left err)
                     Right Nothing ->
                         -- Same-process close with no disk yet: still reopen.
-                        reopenInMemory Nothing Nothing
+                        reopenInMemory Nothing Nothing >>= \case
+                            Left err -> pure (hydrated, Left err)
+                            Right () -> pure (True, Right ())
                     Right (Just (items, meta)) -> do
                         result <- reopenPersisted meta
                         case result of
-                            Left err -> pure (Left err)
+                            Left err -> pure (hydrated, Left err)
                             Right () -> do
-                                case meta.diskAgentType of
-                                    Just agentType ->
-                                        recordAgentSpec typesRef agentId GrokSubagentSpec
-                                            { agentType
-                                            , modelOverride = meta.diskAgentModel
-                                            , reasoningEffortOverride =
-                                                meta.diskReasoningEffort
-                                            }
-                                    Nothing -> pure ()
-                                transcript <- newIORef items
-                                contextTokens <- newIORef Nothing
-                                let session =
-                                        SubagentSession
-                                            { subSessionTranscript = transcript
-                                            , subSessionContextTokens = contextTokens
-                                            }
-                                atomicModifyIORef' sessionsRef \m ->
-                                    (Map.insert agentId session m, ())
-                                pure (Right ())
+                                recordPersistedAgentSpec typesRef agentId meta
+                                unless hydrated $
+                                    writeIORef session.subSessionTranscript items
+                                pure (True, Right ())
     reopenPersisted meta =
         case meta.diskTaskPath of
             Nothing -> restoreAt taskPathRoot
@@ -572,31 +586,63 @@ lookupOrCreateSubagentSession
     -> SubagentId
     -> IO SubagentSession
 lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
-    sessions <- readIORef sessionsRef
-    case Map.lookup agentId sessions of
-        Just session -> pure session
-        Nothing -> do
-            mroot <- readIORef storeRootRef
-            loaded <- case mroot of
-                Just sessionDir -> loadSubagentState sessionDir agentId
-                Nothing -> pure (Right Nothing)
-            let (items, meta) = case loaded of
-                    Right (Just (xs, m)) -> (xs, Just m)
-                    _ -> ([], Nothing)
-            transcript <- newIORef items
-            contextTokens <- newIORef Nothing
-            case meta >>= (.diskAgentType) of
-                Just agentType ->
-                    recordAgentSpec typesRef agentId GrokSubagentSpec
-                        { agentType
-                        , modelOverride = meta >>= (.diskAgentModel)
-                        , reasoningEffortOverride =
-                            meta >>= (.diskReasoningEffort)
-                        }
-                Nothing -> pure ()
-            let session = SubagentSession
-                    { subSessionTranscript = transcript
-                    , subSessionContextTokens = contextTokens
-                    }
-            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
-            pure session
+    session <- getOrInstallSubagentSession sessionsRef agentId
+    modifyMVar_ session.subSessionHydrated $
+        ensureSubagentSessionHydratedLocked
+            storeRootRef typesRef agentId session
+    pure session
+
+getOrInstallSubagentSession
+    :: IORef (Map SubagentId SubagentSession)
+    -> SubagentId
+    -> IO SubagentSession
+getOrInstallSubagentSession sessionsRef agentId = do
+    transcript <- newIORef []
+    contextTokens <- newIORef Nothing
+    hydrated <- newMVar False
+    let candidate = SubagentSession
+            { subSessionTranscript = transcript
+            , subSessionContextTokens = contextTokens
+            , subSessionHydrated = hydrated
+            }
+    atomicModifyIORef' sessionsRef \sessions ->
+        case Map.lookup agentId sessions of
+            Just existing -> (sessions, existing)
+            Nothing -> (Map.insert agentId candidate sessions, candidate)
+
+ensureSubagentSessionHydratedLocked
+    :: SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentSession
+    -> Bool
+    -> IO Bool
+ensureSubagentSessionHydratedLocked
+        storeRootRef typesRef agentId session hydrated
+    | hydrated = pure True
+    | otherwise = do
+        mroot <- readIORef storeRootRef
+        loaded <- case mroot of
+            Just sessionDir -> loadSubagentState sessionDir agentId
+            Nothing -> pure (Right Nothing)
+        case loaded of
+            Right (Just (items, meta)) -> do
+                writeIORef session.subSessionTranscript items
+                recordPersistedAgentSpec typesRef agentId meta
+            _ -> pure ()
+        pure True
+
+recordPersistedAgentSpec
+    :: GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentDiskMeta
+    -> IO ()
+recordPersistedAgentSpec typesRef agentId meta =
+    case meta.diskAgentType of
+        Just agentType ->
+            recordAgentSpec typesRef agentId GrokSubagentSpec
+                { agentType
+                , modelOverride = meta.diskAgentModel
+                , reasoningEffortOverride = meta.diskReasoningEffort
+                }
+        Nothing -> pure ()
