@@ -80,6 +80,7 @@ import Brick.BChan
 import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
+import qualified Brick.Widgets.Border.Style as BorderStyle
 import Brick.Widgets.Center (center, centerLayer)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
@@ -1929,7 +1930,6 @@ drawComposer :: AppState -> Widget Name
 drawComposer appState =
     let focused = state.uiFocus == FocusComposer
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
-        mode = state.uiPrompt.promptMode
         leading =
             filter (not . Text.null)
                 [ if state.uiPrompt.promptAttachments > 0
@@ -1946,48 +1946,11 @@ drawComposer appState =
                         <> Text.pack
                             (show (Seq.length state.uiQueuedInputs))
                 ]
-        modelControl
-            | Text.null state.uiPrompt.promptModel = []
-            | otherwise =
-                [ clickable ComposerModel $
-                    forceAttr
-                        (controlAttr
-                            appState
-                            ComposerModel
-                            Theme.controlLinkAttr)
-                        (txt state.uiPrompt.promptModel)
-                ]
-        effortControl
-            | Text.null state.uiPrompt.promptEffort = []
-            | otherwise =
-                [ clickable ComposerEffort $
-                    forceAttr
-                        (controlAttr
-                            appState
-                            ComposerEffort
-                            Theme.assistantAttr)
-                        (txt (" (" <> state.uiPrompt.promptEffort <> ")"))
-                ]
-        modelAndEffort = case modelControl <> effortControl of
-            [] -> []
-            controls -> [hBox controls]
-        labelWidgets =
-            map txt leading
-                <> modelAndEffort
-                <> [ clickable ComposerMode $
-                        forceAttr
-                            (controlAttr
-                                appState
-                                ComposerMode
-                                (modeAttr mode))
-                            (txt mode)
-                   | not (Text.null mode)
-                   ]
         label =
-            if null labelWidgets
-                then txt " "
-                else hBox
-                    (txt " " : intersperse (txt " · ") labelWidgets <> [txt " "])
+            if null leading
+                then Nothing
+                else Just $
+                    hBox (intersperse (txt " · ") (map txt leading))
         editor =
             clickable ComposerArea $
                 padLeftRight 1 $
@@ -2000,11 +1963,51 @@ drawComposer appState =
                         ]
         composer =
             withBorderStyle unicodeRounded $
-                borderWithLabel (withAttr Theme.footerAttr label) $
+                composerBorder
+                    (withAttr Theme.footerAttr <$> label)
+                    (drawComposerStatus appState)
                     editor
     in overrideAttr Border.borderAttr attr composer
   where
     state = appState.appUi
+
+composerBorder
+    :: Maybe (Widget Name)
+    -> Widget Name
+    -> Widget Name
+    -> Widget Name
+composerBorder topLabel bottomLabel body =
+    vBox
+        [ hBox
+            [ Border.borderElem BorderStyle.bsCornerTL
+            , topBorder
+            , Border.borderElem BorderStyle.bsCornerTR
+            ]
+        , vLimit 1 $ hBox [Border.vBorder, body, Border.vBorder]
+        , hBox
+            [ Border.borderElem BorderStyle.bsCornerBL
+            , bottomBorder
+            , Border.borderElem BorderStyle.bsCornerBR
+            ]
+        ]
+  where
+    topBorder = case topLabel of
+        Nothing -> Border.hBorder
+        Just label ->
+            hBox
+                [ hLimit 1 Border.hBorder
+                , txt " "
+                , label
+                , txt " "
+                , Border.hBorder
+                ]
+    bottomBorder =
+        hBox
+            [ Border.hBorder
+            , txt " "
+            , bottomLabel
+            , txt " "
+            ]
 
 controlAttr :: AppState -> Name -> AttrName -> AttrName
 controlAttr state name fallback =
@@ -2073,6 +2076,37 @@ drawFooter state =
                             "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
                             "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+
+drawComposerStatus :: AppState -> Widget Name
+drawComposerStatus state =
+    hBox $
+        intersperse (txt " · ") $
+            modelAndEffort
+                <> [ modeControl
+                   | not (Text.null mode)
+                   ]
+  where
+    prompt = state.appUi.uiPrompt
+    mode = prompt.promptMode
+    modelControl =
+        clickable ComposerModel $
+            forceAttr
+                (controlAttr state ComposerModel Theme.controlLinkAttr)
+                (txt prompt.promptModel)
+    effortControl =
+        clickable ComposerEffort $
+            forceAttr
+                (controlAttr state ComposerEffort Theme.assistantAttr)
+                (txt ("(" <> prompt.promptEffort <> ")"))
+    modelAndEffort
+        | Text.null prompt.promptModel = []
+        | Text.null prompt.promptEffort = [modelControl]
+        | otherwise = [hBox [modelControl, txt " ", effortControl]]
+    modeControl =
+        clickable ComposerMode $
+            forceAttr
+                (controlAttr state ComposerMode (modeAttr mode))
+                (txt mode)
 
 drawPermission :: PermissionOverlay -> Widget Name
 drawPermission permission =
