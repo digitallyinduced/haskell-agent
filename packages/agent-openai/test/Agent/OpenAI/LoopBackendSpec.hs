@@ -449,7 +449,7 @@ spec = do
             let sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
                     pure $ Left $ ConnectionError "socket closed"
-                sendFresh _request _previous _onEvent = do
+                sendFresh _failure _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
@@ -471,7 +471,7 @@ spec = do
             let sendCurrent _request _previous onEvent = do
                     onEvent (deltaEvent EventOutputTextDelta "partial")
                     pure $ Left $ ConnectionError "socket closed"
-                sendFresh _request _previous _onEvent = do
+                sendFresh _failure _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 streamingBackend = openAiBackendWithConnectionRecovery
@@ -489,7 +489,7 @@ spec = do
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent =
                     pure $ Left $ ProviderError InvalidRequestError "bad request" Nothing
-                sendFresh _request _previous _onEvent = do
+                sendFresh _failure _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 providerErrorBackend = openAiBackendWithConnectionRecovery
@@ -509,7 +509,7 @@ spec = do
                     modifyIORef' currentCalls (+ 1)
                     pure $ Left $ ProviderError WebSocketConnectionLimitReached
                         "too many websocket connections" Nothing
-                sendFresh _request _previous _onEvent = do
+                sendFresh _failure _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
@@ -528,7 +528,7 @@ spec = do
             let sendCurrent _request _previous _onEvent =
                     pure $ Left $ ProviderError UsageLimitReached
                         "usage limit reached" (Just 120)
-                sendFresh _request _previous _onEvent = do
+                sendFresh _failure _request _previous _onEvent = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
@@ -538,6 +538,41 @@ spec = do
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             readIORef healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
+
+        it "reports the exhausted reusable connection before replaying on a fresh account" do
+            healthy <- newIORef True
+            transcript <- newIORef (turnInputsToItems [UserMessage "old"])
+            failures <- newIORef []
+            seen <- newIORef []
+            let exhausted = ProviderError UsageLimitReached
+                    "usage limit reached" (Just 120)
+                sendCurrent _request _previous _onEvent =
+                    pure (Left exhausted)
+                sendFresh failure request previous _onEvent = do
+                    modifyIORef' failures (<> [failure])
+                    modifyIORef' seen (<> [(inputItems request, previous)])
+                    case previous of
+                        Just _ ->
+                            pure $ Left $ ProviderError PreviousResponseNotFound
+                                "previous_response_id belongs to another account"
+                                Nothing
+                        Nothing ->
+                            pure $ Right $
+                                testResponse "resp-fresh" [assistantItem "ok"]
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn (Just "resp-old")
+                [UserMessage "new"] (const (pure ()))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            readIORef failures `shouldReturn` [Just exhausted, Nothing]
+            readIORef seen `shouldReturn`
+                [ (turnInputsToItems [UserMessage "new"], Just "resp-old")
+                , ( turnInputsToItems [UserMessage "old"]
+                        <> turnInputsToItems [UserMessage "new"]
+                  , Nothing
+                  )
+                ]
 
     describe "openAiBackendWithTransportFallback" do
         it "switches permanently to fallback after a pre-output connection error" do

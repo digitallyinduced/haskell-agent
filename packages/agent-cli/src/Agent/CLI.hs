@@ -1030,7 +1030,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
-                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn _credential -> do
+                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
                                 wsHealthy <- newIORef True
                                 case multiCtx of
@@ -1045,6 +1045,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         lockedOpenAiBackend
                                             wsLock
                                             loaded.loadedTokenProvider
+                                            credential
                                             wsHealthy
                                             conn
                                             (readIORef paramsRef)
@@ -3540,16 +3541,18 @@ currentSessionId = \case
 lockedOpenAiBackend
     :: MVar ()
     -> TokenProvider
+    -> Credential
     -> IORef Bool
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
+lockedOpenAiBackend wsLock provider credential connectionHealthy conn getParams transcript
         contextTokens =
     let Backend submit =
-            openAiBackendReconnecting provider connectionHealthy conn getParams transcript
+            openAiBackendReconnecting
+                provider credential connectionHealthy conn getParams transcript
         serialized = Backend \previous inputs onEvent ->
             withMVar wsLock \_ -> submit previous inputs onEvent
     in autoCompactOpenAiBackend provider

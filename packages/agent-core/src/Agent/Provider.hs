@@ -9,6 +9,7 @@ module Agent.Provider
     , AccountFailure(..)
     , getNextToken
     , runWithTokenProvider
+    , runWithTokenProviderAfter
     , seedTokenProvider
     , accountFailureFromApiError
     ) where
@@ -91,8 +92,21 @@ runWithTokenProvider
     :: TokenProvider
     -> (Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-runWithTokenProvider provider action =
-    go maxProviderFailoverAttempts Nothing
+runWithTokenProvider provider =
+    runWithTokenProviderAfter provider Nothing
+
+-- | Run an action after reporting a credential that already failed outside
+-- this invocation. This is used when a long-lived transport (for example a
+-- resumed session WebSocket) encounters an in-band account failure: the
+-- replacement checkout must cool down that exact account before selecting
+-- another credential.
+runWithTokenProviderAfter
+    :: TokenProvider
+    -> Maybe FailedCredential
+    -> (Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+runWithTokenProviderAfter provider initialFailure action =
+    go maxProviderFailoverAttempts initialFailure
   where
     go attemptsLeft failed
         | attemptsLeft <= 0 = pure $ Left $ ConnectionError
