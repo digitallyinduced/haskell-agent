@@ -5,8 +5,7 @@ module Agent.Tools.Ghci.Tool
 
 import Agent.ToolArgs
     ( objectArgs
-    , optInt
-    , optText
+    , optIntOrString
     , reqText
     )
 import Agent.ToolDSL
@@ -28,7 +27,6 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
     )
-import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Object)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -52,16 +50,8 @@ instance FromJSON GhciArgs where
         <*> reqText object "description"
 
 optionalTimeout :: Object -> Parser (Maybe Int)
-optionalTimeout object = do
-    fromInt <- optInt object "timeout"
-    fromText <- optText object "timeout"
-    pure (fromInt <|> (fromText >>= readTimeout))
-
-readTimeout :: Text -> Maybe Int
-readTimeout text =
-    case reads (Text.unpack text) of
-        [(n, "")] -> Just n
-        _ -> Nothing
+optionalTimeout object =
+    optIntOrString object "timeout"
 
 runGhciTool :: GhciSession -> AppTool
 runGhciTool session =

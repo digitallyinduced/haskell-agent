@@ -1,6 +1,6 @@
 { mkDerivation, aeson, async, base, bytestring, containers
 , directory, filepath, hspec, lib, process, resourcet, retry
-, safe-exceptions, stm, text, time, transformers, unix, vector
+, safe-exceptions, scientific, stm, text, time, transformers, unix, vector
 , websockets, yaml
 }:
 mkDerivation {
@@ -9,7 +9,7 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson async base bytestring containers directory filepath process
-    resourcet retry safe-exceptions stm text time transformers unix
+    resourcet retry safe-exceptions scientific stm text time transformers unix
     vector websockets yaml
   ];
   testHaskellDepends = [

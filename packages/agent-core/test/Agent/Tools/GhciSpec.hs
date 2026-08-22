@@ -227,7 +227,7 @@ spec = describe "Agent.Tools.Ghci" do
             let handlers = appToolHandlers tools
             result <- dispatchToolCall defaultLoopDispatch handlers
                 (functionToolCall "c1" "run_ghci"
-                    "{\"expression\":\"3 + 4\",\"description\":\"add\"}")
+                    "{\"expression\":\"3 + 4\",\"timeout\":\"10000\",\"description\":\"add\"}")
             result.output `shouldSatisfy` Text.isInfixOf "class: pure"
             result.output `shouldSatisfy` Text.isInfixOf "7"
             let names = map (.appToolName) tools

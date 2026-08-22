@@ -183,7 +183,7 @@ spec = describe "Agent.Tools.Grok" do
     it "times out a long-running shell command" do
         withTempSession \(session, ghci) -> do
             output <- runTool session ghci "run_terminal_cmd"
-                "{\"command\":\"sleep 5\",\"timeout\":200,\"description\":\"timeout test\"}"
+                "{\"command\":\"sleep 5\",\"timeout\":\"200\",\"description\":\"timeout test\"}"
             output `shouldSatisfy` Text.isPrefixOf "exit: killed (timeout)"
 
     it "starts read_file from a negative offset" do

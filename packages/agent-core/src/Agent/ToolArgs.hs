@@ -12,6 +12,8 @@ module Agent.ToolArgs
     , reqTextList
     , optText
     , optInt
+    , optIntOrString
+    , readExactInt
     , optBool
     , intOr
     , optList
@@ -22,8 +24,10 @@ import Data.Aeson (FromJSON(..), Object, Value(..))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser)
+import Data.Scientific (Scientific, toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Read as TextRead
 import qualified Data.Vector as Vector
 
 extractText :: Value -> Text -> Either Text Text
@@ -59,7 +63,7 @@ extractTextOr _ _ def = def
 extractIntOr :: Value -> Text -> Int -> Int
 extractIntOr (Object obj) key def =
     case KeyMap.lookup (Key.fromText key) obj of
-        Just (Number n) -> round n
+        Just (Number n) -> maybe def id (exactInt n)
         _ -> def
 extractIntOr _ _ def = def
 
@@ -73,7 +77,7 @@ extractMaybeText _ _ = Nothing
 extractMaybeInt :: Value -> Text -> Maybe Int
 extractMaybeInt (Object obj) key =
     case KeyMap.lookup (Key.fromText key) obj of
-        Just (Number n) -> Just (round n)
+        Just (Number n) -> exactInt n
         _ -> Nothing
 extractMaybeInt _ _ = Nothing
 
@@ -135,11 +139,38 @@ optText obj key = pure $ case look obj key of
     Just (String t) | not (Text.null t) -> Just t
     _ -> Nothing
 
--- | Optional integer (JSON number, rounded).
+-- | Optional exact, bounded integer. An absent or null field is 'Nothing';
+-- fractional, out-of-range, and wrongly typed values fail.
 optInt :: Object -> Text -> Parser (Maybe Int)
-optInt obj key = pure $ case look obj key of
-    Just (Number n) -> Just (round n)
-    _ -> Nothing
+optInt obj key = case look obj key of
+    Nothing -> pure Nothing
+    Just Null -> pure Nothing
+    Just (Number n) -> Just <$> parseExactInt key n
+    Just _ -> expectedInteger key
+
+-- | 'optInt' plus compatibility for integer strings emitted by some
+-- model tool surfaces. Strings are still required to be exact and in range.
+optIntOrString :: Object -> Text -> Parser (Maybe Int)
+optIntOrString obj key = case look obj key of
+    Nothing -> pure Nothing
+    Just Null -> pure Nothing
+    Just (Number n) -> Just <$> parseExactInt key n
+    Just (String value) ->
+        maybe (expectedInteger key) (pure . Just) (readExactInt value)
+    Just _ -> expectedInteger key
+
+-- | Read a signed decimal 'Int' without rounding or overflow. Leading and
+-- trailing whitespace is ignored; non-decimal syntax and trailing input fail.
+readExactInt :: Text -> Maybe Int
+readExactInt value = do
+    (integer, rest) <-
+        either (const Nothing) Just $
+            TextRead.signed TextRead.decimal (Text.strip value)
+    if Text.null rest
+        && integer >= toInteger (minBound :: Int)
+        && integer <= toInteger (maxBound :: Int)
+        then Just (fromInteger integer)
+        else Nothing
 
 -- | Optional boolean accepting stringy forms.
 optBool :: Object -> Text -> Parser (Maybe Bool)
@@ -154,11 +185,13 @@ optBool obj key = pure $ case look obj key of
             _       -> Nothing
     _ -> Nothing
 
--- | Integer with a default.
+-- | Exact, bounded integer with a default for an absent or null field.
 intOr :: Object -> Text -> Int -> Parser Int
-intOr obj key def = pure $ case look obj key of
-    Just (Number n) -> round n
-    _ -> def
+intOr obj key def = case look obj key of
+    Nothing -> pure def
+    Just Null -> pure def
+    Just (Number n) -> parseExactInt key n
+    Just _ -> expectedInteger key
 
 -- | Optional array field decoded element-wise via 'FromJSON'. Absent key
 -- means 'Nothing'; present-but-not-an-array fails with the supplied message.
@@ -180,3 +213,14 @@ stripAesonPrefix t
 
 failText :: Text -> Parser a
 failText = fail . Text.unpack
+
+exactInt :: Scientific -> Maybe Int
+exactInt = toBoundedInteger
+
+parseExactInt :: Text -> Scientific -> Parser Int
+parseExactInt key =
+    maybe (expectedInteger key) pure . exactInt
+
+expectedInteger :: Text -> Parser a
+expectedInteger key =
+    failText ("Expected integer for key: " <> key)
