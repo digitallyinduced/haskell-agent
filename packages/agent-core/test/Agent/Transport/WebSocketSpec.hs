@@ -15,9 +15,19 @@ import Control.Concurrent
     , writeChan
     )
 import Control.Exception (SomeException, finally, throwIO, toException)
+import qualified Control.Exception.Safe as Safe
+import Control.Retry
+    ( RetryPolicyM
+    , applyPolicy
+    , constantDelay
+    , defaultRetryStatus
+    , limitRetries
+    , rsPreviousDelay
+    )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
 import System.Timeout (timeout)
@@ -28,6 +38,18 @@ spec = describe "Agent.Transport.WebSocket" do
     it "classifies websocket connection timeouts" do
         transientWsConnectFailureLabel (toException WS.ConnectionTimeout :: SomeException)
             `shouldBe` Just "WebSocket handshake timed out"
+
+    it "backs off transient handshake retries exponentially with a cap" do
+        retryPolicyDelays 7 transientWsConnectRetryPolicy
+            `shouldReturn`
+                [ 1000000
+                , 2000000
+                , 4000000
+                , 8000000
+                , 15000000
+                , 15000000
+                , 15000000
+                ]
 
     it "classifies websocket parse errors during a run" do
         transientWsMidRunFailureLabel (toException (WS.ParseException "not enough bytes") :: SomeException)
@@ -43,6 +65,52 @@ spec = describe "Agent.Transport.WebSocket" do
         wsHandshakeAuthFailureStatus exception `shouldBe` Just 401
         wsHandshakeAuthFailure exception
             `shouldBe` Just (HttpError 401 "WebSocket handshake returned HTTP 401")
+
+    it "retries a transient handshake failure before the connection callback" do
+        attempts <- newIORef (0 :: Int)
+        let exception = transientHandshakeException 503
+        result <- retryTransientWsConnectWithPolicy
+            (constantDelay 0 <> limitRetries 3)
+            \connected -> do
+                attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
+                if attempt == 1
+                    then throwIO exception
+                    else connected >> pure ("connected" :: String)
+
+        result `shouldBe` "connected"
+        readIORef attempts `shouldReturn` 2
+
+    it "does not retry after the connection callback has started" do
+        attempts <- newIORef (0 :: Int)
+        result <- Safe.tryAny $
+            retryTransientWsConnectWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                \connected -> do
+                    modifyIORef' attempts (+ 1)
+                    connected
+                    throwIO (transientHandshakeException 503)
+
+        case result of
+            Left exception ->
+                transientWsConnectFailureLabel exception
+                    `shouldBe` Just "WebSocket handshake returned HTTP 503"
+            Right () -> expectationFailure "expected the callback exception to escape"
+        readIORef attempts `shouldReturn` 1
+
+    it "does not retry a non-transient handshake rejection" do
+        attempts <- newIORef (0 :: Int)
+        result <- Safe.tryAny $
+            retryTransientWsConnectWithPolicy
+                (constantDelay 0 <> limitRetries 3)
+                \_connected -> do
+                    modifyIORef' attempts (+ 1)
+                    throwIO (transientHandshakeException 401)
+
+        case result of
+            Left exception ->
+                wsHandshakeAuthFailureStatus exception `shouldBe` Just 401
+            Right () -> expectationFailure "expected the handshake rejection to escape"
+        readIORef attempts `shouldReturn` 1
 
     it "handles server pings while delivering application data" do
         withConnectionPair \client server -> do
@@ -104,6 +172,28 @@ spec = describe "Agent.Transport.WebSocket" do
                     `shouldReturn` Left
                         (ConnectionError
                             "WebSocket session invalidated: response consumer interrupted")
+
+transientHandshakeException :: Int -> SomeException
+transientHandshakeException status =
+    toException $ WS.MalformedResponse responseHead "Wrong response status"
+  where
+    responseHead = WS.ResponseHead
+        { WS.responseCode = status
+        , WS.responseMessage = BS8.pack "Service Unavailable"
+        , WS.responseHeaders = []
+        }
+
+retryPolicyDelays :: Int -> RetryPolicyM IO -> IO [Int]
+retryPolicyDelays count policy = go count defaultRetryStatus
+  where
+    go remaining retryStatus
+        | remaining <= 0 = pure []
+        | otherwise =
+            applyPolicy policy retryStatus >>= \case
+                Nothing -> pure []
+                Just nextStatus -> do
+                    rest <- go (remaining - 1) nextStatus
+                    pure (maybe 0 id nextStatus.rsPreviousDelay : rest)
 
 -- WebSocket session fixtures.
 testSessionReuse :: WS.Connection -> WS.Connection -> IO ()

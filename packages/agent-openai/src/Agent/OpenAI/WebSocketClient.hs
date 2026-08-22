@@ -144,11 +144,21 @@ runConnectionAttempt credential action = do
                 , ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
                 , ("OpenAI-Beta", "responses_websockets=2026-02-06")
                 ]
-        Wuss.runSecureClientWith wsHost 443 wsPath WS.defaultConnectionOptions headers $ \conn ->
-            WebSocket.withWebSocketSession
-                WebSocket.defaultWebSocketSessionOptions
-                conn
-                (\session -> action (CodexWsConn session) credential)
+        WebSocket.retryTransientWsConnectWithPolicy
+            WebSocket.transientWsConnectRetryPolicy
+            \connected ->
+                Wuss.runSecureClientWith
+                    wsHost
+                    443
+                    wsPath
+                    WS.defaultConnectionOptions
+                    headers
+                    \conn -> do
+                        connected
+                        WebSocket.withWebSocketSession
+                            WebSocket.defaultWebSocketSessionOptions
+                            conn
+                            (\session -> action (CodexWsConn session) credential)
     case result of
         Right value -> pure value
         Left exception
