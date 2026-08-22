@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Remove the deprecated `Agent.OpenAI.Responses.Types`,
+  `Agent.OpenAI.Responses.Codec`, and `Agent.OpenAI.ResponseMerge`
+  compatibility modules. Import their `Agent.Responses.*` counterparts
+  instead.
 - Add `Agent.OpenAI.LoopBackend`: map `TurnInput` / `TurnOutput` onto the
   Responses WebSocket transport, including `function_call` and
   `custom_tool_call` (Codex `apply_patch`).

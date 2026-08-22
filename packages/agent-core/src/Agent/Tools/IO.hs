@@ -14,10 +14,10 @@ module Agent.Tools.IO
     , stopShellCommand
     , terminateProcessGroup
     , runningLiveOutput
-    , truncateText
     ) where
 
 import Agent.Cancel (isCancelled, waitCancel)
+import Agent.OsPath (unsafeToFilePath)
 import Agent.Tools.FileSystem
     ( deleteTextFile
     , listDirectoryEntries
@@ -26,7 +26,7 @@ import Agent.Tools.FileSystem
     , resolveUnderCwd
     , writeTextFile
     )
-import System.OsPath (OsPath, decodeUtf)
+import System.OsPath (OsPath)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -48,7 +48,6 @@ import Control.Concurrent.MVar
 import Control.Exception.Safe
     ( SomeException
     , finally
-    , impureThrow
     , mask
     , onException
     , try
@@ -140,7 +139,7 @@ runShellCommandStreaming
 runShellCommandStreaming env workdir command timeoutMs onSnapshot =
     mask \restore -> do
     let spec = (shell command)
-            { cwd = Just (decodeUtfPath workdir)
+            { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
@@ -264,7 +263,7 @@ startShellCommand
     -> IO (Either Text RunningCommand)
 startShellCommand env workdir command = do
     let spec = (shell command)
-            { cwd = Just (decodeUtfPath workdir)
+            { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
@@ -426,16 +425,6 @@ exitCodeInt = \case
     ExitSuccess -> 0
     ExitFailure n -> n
 
-truncateText :: Int -> Text -> Text
-truncateText cap text
-    | cap <= 0 = text
-    | Text.length text <= cap = text
-    | otherwise =
-        Text.take cap text
-            <> "\n...[truncated "
-            <> Text.pack (show (Text.length text - cap))
-            <> " chars]"
-
 terminateProcessGroup
     :: Maybe ProcessGroupID
     -> ProcessHandle
@@ -494,6 +483,3 @@ processGroupAlive groupId processHandle = do
         Just pid ->
             isRight <$> try @_ @SomeException
                 (signalProcessGroup nullSignal pid)
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

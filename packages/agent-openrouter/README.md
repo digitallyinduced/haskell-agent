@@ -23,7 +23,7 @@ Those concerns belong to the harness around the provider client. The transport
 owns only the bounded replay-safe retry policy described above.
 
 ```haskell
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.OpenRouter
 import Agent.Provider (Credential(..), Provider(..))
 

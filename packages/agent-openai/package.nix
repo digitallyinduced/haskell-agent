@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-core, agent-responses, base, base64-bytestring
 , bytestring, case-insensitive, containers, directory, exceptions
-, filepath, hashable, HsOpenSSL, hspec, http-client
-, http-client-tls, http-conduit, http-streams, http-types
-, io-streams, lib, network-uri, retry, safe-exceptions, scientific
+, filepath, HsOpenSSL, hspec, http-client
+, http-conduit, http-streams, http-types
+, io-streams, lib, network-uri, retry, safe-exceptions
 , temporary, text, time, unix, vector, wai, warp, websockets, wuss
 }:
 mkDerivation {
@@ -13,9 +13,8 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson agent-core agent-responses base base64-bytestring bytestring containers
-    directory exceptions filepath hashable HsOpenSSL http-client
-    http-client-tls http-conduit http-streams http-types io-streams
-    network-uri retry safe-exceptions scientific text time unix vector
+    directory exceptions filepath HsOpenSSL http-client http-conduit http-streams
+    io-streams network-uri retry safe-exceptions text time vector
     websockets wuss
   ];
   executableHaskellDepends = [

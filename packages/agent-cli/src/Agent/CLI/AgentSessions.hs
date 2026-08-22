@@ -23,7 +23,7 @@ import Agent.CLI.Session
     , loadSession
     , sessionTitleFromPrompt
     )
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -39,7 +39,7 @@ import Control.Concurrent.MVar
     , modifyMVar_
     , newMVar
     )
-import Control.Exception.Safe (SomeException, impureThrow, try)
+import Control.Exception.Safe (SomeException, try)
 import Control.Monad (forM_)
 import Data.Aeson (FromJSON(..), Value, object, (.=))
 import qualified Data.Aeson as Aeson
@@ -63,7 +63,7 @@ import System.Exit (ExitCode(..))
 import System.FilePath (takeFileName)
 import qualified System.FilePath as FilePath
 import System.IO (IOMode(AppendMode), hClose, openTempFile, withFile)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process
     ( CreateProcess(..)
@@ -135,7 +135,7 @@ launchSessionTurn manager background policy handle message =
                     Right executable -> do
                         parentEnv <- getEnvironment
                         (promptPath, promptHandle) <- openTempFile
-                            (decodeUtfPath handle.sessionDir) ".agent-prompt-"
+                            (unsafeToFilePath handle.sessionDir) ".agent-prompt-"
                         TextIO.hPutStr promptHandle message
                         hClose promptHandle
                         setFileMode promptPath 0o600
@@ -144,7 +144,7 @@ launchSessionTurn manager background policy handle message =
                                     : filter
                                         ((/= "HASKELL_AGENT_MANAGED_SESSION") . fst)
                                         parentEnv
-                            logPath = decodeUtfPath handle.sessionDir FilePath.</> "agent.log"
+                            logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
                             approvalArgs = case policy of
                                 ApproveAll -> ["--yolo"]
                                 DenyMutating -> ["--no-yolo"]
@@ -172,7 +172,7 @@ launchSessionTurn manager background policy handle message =
                             withFile logPath AppendMode \logHandle ->
                                 setFileMode logPath 0o600 >>
                                 createProcess (proc "/bin/sh" args)
-                                    { cwd = Just (decodeUtfPath handle.sessionMeta.metaCwd)
+                                    { cwd = Just (unsafeToFilePath handle.sessionMeta.metaCwd)
                                     , std_in = NoStream
                                     , std_out = UseHandle logHandle
                                     , std_err = UseHandle logHandle
@@ -247,7 +247,7 @@ closeSessionProcessManager manager =
 
 acquireSessionLock :: SessionHandle -> IO (Either Text FilePath)
 acquireSessionLock handle = do
-    let lockPath = decodeUtfPath handle.sessionDir FilePath.</> ".agent-running"
+    let lockPath = unsafeToFilePath handle.sessionDir FilePath.</> ".agent-running"
     try @_ @SomeException (createDirectory lockPath) >>= \case
         Right () -> pure (Right lockPath)
         Left _ -> pure $ Left
@@ -265,7 +265,7 @@ removePrivateFile path = do
 
 sessionLockPath :: SessionProcessManager -> Text -> FilePath
 sessionLockPath manager sessionId =
-    decodeUtfPath manager.managedRoot
+    unsafeToFilePath manager.managedRoot
         FilePath.</> Text.unpack sessionId
         FilePath.</> ".agent-running"
 
@@ -481,7 +481,7 @@ sessionJson meta status = object
     , "provider" .= providerSlug meta.metaProvider
     , "model" .= meta.metaModel
     , "reasoning_effort" .= meta.metaEffort
-    , "cwd" .= decodeUtfPath meta.metaCwd
+    , "cwd" .= unsafeToFilePath meta.metaCwd
     , "created_at" .= meta.metaCreatedAt
     , "updated_at" .= meta.metaUpdatedAt
     ]
@@ -496,6 +496,3 @@ turnJson turn = object
 
 encodeJson :: Value -> Text
 encodeJson = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

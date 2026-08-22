@@ -19,7 +19,7 @@ in as a plain `AuthState -> IO (Either ApiError AuthState)` callback.
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Client (createCodexMessageWithProvider)
 import Agent.OpenAI.Credential (poolTokenProvider)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 
 main :: IO ()
 main = do
@@ -122,7 +122,7 @@ Pass `myRefresh` to `newPool` instead of the configured
 
 | Module | What it does |
 |---|---|
-| `Agent.OpenAI.Responses.Types` | Lossless, wire-aligned Responses API request, response, item, tool, and stream-event types |
+| `Agent.Responses.Types` | Lossless, wire-aligned Responses API request, response, item, tool, and stream-event types |
 | `Agent.OpenAI.Error` | OpenAI error-envelope decoding and Responses error normalization |
 | `Agent.OpenAI.Http` | Successful HTTP/SSE response-body decoding and failed-response normalization |
 | `Agent.OpenAI.Auth` | Pool, round-robin, cooldown, pure HTTP refresh, JWT exp parsing |

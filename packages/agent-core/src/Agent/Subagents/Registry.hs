@@ -41,7 +41,6 @@ module Agent.Subagents.Registry
     , queueMessageFromForTurn
     , closeSubagent
     , interruptSubagent
-    , resumeSubagent
     , getStatus
     , getPreviousResponseId
     , getSubagentCwd
@@ -49,7 +48,6 @@ module Agent.Subagents.Registry
     , setPreviousResponseId
     , getTaskPath
     , resolveAgentTarget
-    , listLive
     , listAgents
     ) where
 
@@ -1431,39 +1429,6 @@ restoreSubagentResolvedWithCwd
                         pure (Left err)
                     Right () -> pure (Right agentId)
 
-resumeSubagent
-    :: SubagentRegistry
-    -> SubagentId
-    -> IO (Either Text SubagentStatus)
-resumeSubagent registry agentId =
-    withMVar registry.registryLifecycle \_ -> do
-        closed <- atomically $ readTVar registry.registryClosed
-        if closed
-            then pure (Left "Subagent registry is closed.")
-            else do
-                mrecord <- atomically $
-                    Map.lookup agentId <$> readTVar registry.registryAgents
-                case mrecord of
-                    Nothing ->
-                        pure (Left ("unknown agent id: " <> agentId.unSubagentId))
-                    Just record -> do
-                        status <- atomically $
-                            phaseStatus <$> readTVar record.recordPhase
-                        case status of
-                            Closed -> do
-                                resetCancel record.recordCancel
-                                atomically do
-                                    writeTVar record.recordPhase
-                                        (AgentIdle (Completed Nothing) Nothing)
-                                startRecordSupervisor registry record mempty >>= \case
-                                    Left err -> do
-                                        atomically $
-                                            writeTVar record.recordPhase AgentClosed
-                                        pure (Left err)
-                                    Right () ->
-                                        pure (Right (Completed Nothing))
-                            other -> pure (Right other)
-
 getStatus :: SubagentRegistry -> SubagentId -> IO SubagentStatus
 getStatus registry agentId = atomically (readStatusSTM registry agentId)
 
@@ -1505,15 +1470,6 @@ readStatusSTM registry agentId = do
     case Map.lookup agentId agents of
         Nothing -> pure NotFound
         Just record -> phaseStatus <$> readTVar record.recordPhase
-
-listLive :: SubagentRegistry -> IO [(SubagentId, SubagentStatus)]
-listLive registry = atomically do
-    agents <- readTVar registry.registryAgents
-    mapM
-        (\record -> do
-            status <- phaseStatus <$> readTVar record.recordPhase
-            pure (record.recordId, status))
-        (Map.elems agents)
 
 newSubagentId :: IO SubagentId
 newSubagentId = do

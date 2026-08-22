@@ -371,15 +371,6 @@ spec = do
             wrapThinkingLines 4 "abcdefgh"
                 `shouldBe` ["abcd", "efgh"]
 
-    describe "visibleDisplayRows" do
-        it "counts soft-wrapped rows without ANSI" do
-            visibleDisplayRows 5 "abcdefghij" `shouldBe` 2
-            visibleDisplayRows 10 "abcdefghij" `shouldBe` 1
-
-        it "ignores SGR when measuring width" do
-            let painted = "\ESC[1mabcdefghij\ESC[0m"
-            visibleDisplayRows 5 painted `shouldBe` 2
-
 containsOsc9 :: Int -> Text.Text -> Bool
 containsOsc9 state body =
     let raw = "\ESC]9;4;" <> Text.pack (show state) <> "\BEL"

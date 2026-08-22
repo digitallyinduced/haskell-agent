@@ -20,8 +20,8 @@ module Agent.ProjectInstructions
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Provider (Provider(..))
-import Agent.OsPath (toText)
-import Control.Exception.Safe (impureThrow, tryAny)
+import Agent.OsPath (toText, unsafeToFilePath)
+import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as BS
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -30,7 +30,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Encoding.Error as TextEncodingError
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (doesFileExist, doesPathExist)
-import System.OsPath (OsPath, decodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 
 -- | One loaded instruction file and its absolute path.
 data InstructionFile = InstructionFile
@@ -125,7 +125,7 @@ readAgentsFile path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
-        else tryAny (retryOnFileBusy (Text.readFile (decodeUtfPath path))) >>= \case
+        else tryAny (retryOnFileBusy (Text.readFile (unsafeToFilePath path))) >>= \case
             Left _ -> pure Nothing
             Right text ->
                 if Text.null (Text.strip text)
@@ -226,6 +226,3 @@ neutralizeReminderTags =
         . Text.replace "</system-reminder" "&lt;/system-reminder"
         . Text.replace "<system_reminder" "&lt;system_reminder"
         . Text.replace "</system_reminder" "&lt;/system_reminder"
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

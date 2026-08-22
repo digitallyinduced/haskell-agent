@@ -2,7 +2,7 @@
 
 module Agent.OsPathSpec (spec) where
 
-import Agent.OsPath (fromText, toText)
+import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import qualified Data.Text as Text
 import System.OsPath (decodeUtf, pack, unsafeFromChar)
 import Test.Hspec
@@ -14,6 +14,7 @@ spec = describe "Agent.OsPath" do
             path = fromText text
         decodeUtf path `shouldReturn` Text.unpack text
         toText path `shouldBe` text
+        unsafeToFilePath path `shouldBe` Text.unpack text
 
 #ifndef mingw32_HOST_OS
     it "uses an escaped representation only for human-readable output" do

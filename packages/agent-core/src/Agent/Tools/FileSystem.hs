@@ -9,9 +9,9 @@ module Agent.Tools.FileSystem
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (toText)
+import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Exception.Safe (SomeException, impureThrow, try, tryIO)
+import Control.Exception.Safe (SomeException, try, tryIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -29,7 +29,6 @@ import System.Directory.OsPath
     )
 import System.OsPath
     ( OsPath
-    , decodeUtf
     , equalFilePath
     , isAbsolute
     , makeRelative
@@ -93,7 +92,7 @@ isInside root path
 
 readTextFile :: OsPath -> IO (Either Text Text)
 readTextFile path =
-    try @_ @SomeException (retryOnFileBusy (BS.readFile (decodeUtfPath path))) >>= \case
+    try @_ @SomeException (retryOnFileBusy (BS.readFile (unsafeToFilePath path))) >>= \case
     Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
     Right bytes
         | BS.elem 0 (BS.take 8192 bytes) ->
@@ -105,7 +104,7 @@ writeTextFile :: OsPath -> Text -> IO (Either Text ())
 writeTextFile path content = do
     createDirectoryIfMissing True (takeDirectory path)
     try @_ @SomeException
-        (retryOnFileBusy (BS.writeFile (decodeUtfPath path) (encodeUtf8 content))) >>= \case
+        (retryOnFileBusy (BS.writeFile (unsafeToFilePath path) (encodeUtf8 content))) >>= \case
         Left err -> pure $ Left $ "Failed to write file: " <> Text.pack (show err)
         Right () -> pure (Right ())
 
@@ -130,6 +129,3 @@ listDirectoryEntries path = try @_ @SomeException (listDirectory path) >>= \case
     classify root name = do
         isDir <- doesDirectoryExist (root </> name)
         pure (name, isDir)
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

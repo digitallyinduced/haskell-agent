@@ -6,7 +6,6 @@ module Agent.ResourceScope
     ( ResourceScope
     , ResourceKey
     , newResourceScope
-    , withResourceScope
     , closeResourceScope
     , allocateResource
     , registerResource
@@ -19,7 +18,7 @@ import Control.Concurrent.MVar
     , newMVar
     , withMVar
     )
-import Control.Exception.Safe (bracket, throwIO)
+import Control.Exception.Safe (throwIO)
 import Control.Monad.Trans.Resource
     ( InternalState
     , ReleaseKey
@@ -40,9 +39,6 @@ newResourceScope :: IO ResourceScope
 newResourceScope = do
     state <- createInternalState
     ResourceScope <$> newMVar (Just state)
-
-withResourceScope :: (ResourceScope -> IO a) -> IO a
-withResourceScope = bracket newResourceScope closeResourceScope
 
 closeResourceScope :: ResourceScope -> IO ()
 closeResourceScope (ResourceScope stateVar) = do

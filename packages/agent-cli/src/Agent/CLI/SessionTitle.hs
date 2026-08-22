@@ -13,7 +13,7 @@ module Agent.CLI.SessionTitle
 
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
     ( ResponseCreateParams(..)
     , ResponseItem
     , ToolChoice(..)
