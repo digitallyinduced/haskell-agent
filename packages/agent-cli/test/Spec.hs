@@ -7,6 +7,7 @@ import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
+import qualified Agent.CLI.BenchmarkSpec as BenchmarkSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
@@ -61,6 +62,7 @@ main = hspec do
     ApprovalSpec.spec
     ArtifactSpec.spec
     AuthSpec.spec
+    BenchmarkSpec.spec
     BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec

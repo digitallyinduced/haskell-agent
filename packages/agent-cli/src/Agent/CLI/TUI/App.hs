@@ -64,7 +64,10 @@ import Agent.CLI.ImagePreview
 import Agent.CLI.Command
     ( SkillCommand
     )
-import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Permission
+    ( PermissionChoice(..)
+    , summarizePermissionCall
+    )
 import Agent.CLI.Resume
     ( ResumeBrowser(..)
     , ResumeEntry(..)
@@ -403,7 +406,7 @@ requestFullscreenPermission
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
-    let summary = summarizeToolCall call
+    let summary = summarizePermissionCall call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 

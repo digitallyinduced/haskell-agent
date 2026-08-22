@@ -6,6 +6,7 @@ import qualified Control.Exception as Exception
 import Data.Aeson (FromJSON(..), Value(..))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 newtype EchoArgs = EchoArgs
@@ -17,7 +18,13 @@ instance FromJSON EchoArgs where
         <$> reqText object "message"
 
 spec :: Spec
-spec = describe "dispatchToolCall" do
+spec = do
+  describe "canonicalToolName" do
+    it "accepts provider function namespace prefixes" do
+        canonicalToolName "functions.shell_command"
+            `shouldBe` "shell_command"
+
+  describe "dispatchToolCall" do
     it "keeps plaintext tool arguments useful in Show output" do
         let rendered =
                 show (functionToolCall "call-visible" "echo" "{\"message\":\"hello\"}")
@@ -60,6 +67,44 @@ spec = describe "dispatchToolCall" do
             [noArgsTool "ping" (pure (Right "pong"))]
             (functionToolCall "call-1" "ping" "{this is ignored")
         result `shouldBe` functionResult "call-1" "pong"
+
+    it "supplies the active nested-tool runtime to context-aware handlers" do
+        nestedCalls <- newIORef []
+        let runtime = ToolRuntime
+                { invokeNestedTool = \call -> do
+                    modifyIORef' nestedCalls (<> [call])
+                    pure (functionResult call.callId "nested-result")
+                }
+            config = testConfig { toolDispatchRuntime = Just runtime }
+        result <- dispatchToolCall config
+            [ typedToolWithRuntimeAndCall "orchestrate"
+                \active outerCall (EchoArgs message) -> do
+                    nested <- active.invokeNestedTool
+                        (functionToolCall
+                            (outerCall.callId <> "/nested")
+                            "echo"
+                            ("{\"message\":\"" <> message <> "\"}"))
+                    pure (Right nested.output)
+            ]
+            (functionToolCall
+                "call-outer"
+                "orchestrate"
+                "{\"message\":\"hello\"}")
+        result `shouldBe` functionResult "call-outer" "nested-result"
+        map (.name) <$> readIORef nestedCalls `shouldReturn` ["echo"]
+
+    it "fails context-aware handlers outside an active agent loop" do
+        result <- dispatchToolCall testConfig
+            [ typedToolWithRuntimeAndCall "orchestrate"
+                \_runtime _call (EchoArgs message) ->
+                    pure (Right message)
+            ]
+            (functionToolCall
+                "call-outer"
+                "orchestrate"
+                "{\"message\":\"hello\"}")
+        result.output
+            `shouldSatisfy` Text.isInfixOf "requires an active agent-loop runtime"
 
     it "forwards snapshots from streaming typed tools with their call" do
         seen <- newIORef []
@@ -106,6 +151,7 @@ testConfig = ToolDispatchConfig
     , toolDispatchFormatException = \name _ -> "EX " <> name
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchRuntime = Nothing
     }
 
 functionResult :: Text -> Text -> ToolCallResult

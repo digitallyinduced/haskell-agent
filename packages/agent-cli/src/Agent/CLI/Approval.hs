@@ -36,6 +36,7 @@ import Agent.Tools.Types
     ( ToolRegistry
     , lookupRegisteredTool
     , toolAllowsWithoutPrompt
+    , toolRequiresPerCallApproval
     )
 import Data.IORef
     ( IORef
@@ -96,7 +97,10 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
                     putTextLn stderr (roleWarn color msg)
                     pure (Left msg)
                 else do
-                    readOnly <- case lookupRegisteredTool call.name tools of
+                    let registeredTool = lookupRegisteredTool call.name tools
+                        perCallApproval =
+                            maybe False toolRequiresPerCallApproval registeredTool
+                    readOnly <- case registeredTool of
                         Nothing -> pure False
                         Just tool -> toolAllowsWithoutPrompt tool call
                     -- plan.md edits are auto-approved while plan mode is active.
@@ -104,7 +108,8 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
                         then pure (Right True)
                         else do
                             allowed <- readIORef allowedToolsRef
-                            if Set.member call.name allowed
+                            if not perCallApproval
+                                && Set.member call.name allowed
                                 then pure (Right True)
                                 else case policy of
                                     ApproveAll -> pure (Right True)
@@ -118,14 +123,22 @@ approveToolDecisionWith requestPermission policyRef allowedToolsRef tools planMo
                                                 Just PermissionAllowOnce ->
                                                     pure (Right True)
                                                 Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert call.name)
-                                                    putTextLn stderr
-                                                        (roleSuccess color
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session"))
+                                                    if perCallApproval
+                                                        then putTextLn stderr
+                                                            (roleSuccess color
+                                                                (glyphOk
+                                                                    <> "allowed once; "
+                                                                    <> call.name
+                                                                    <> " requires approval for every call"))
+                                                        else do
+                                                            modifyIORef' allowedToolsRef
+                                                                (Set.insert call.name)
+                                                            putTextLn stderr
+                                                                (roleSuccess color
+                                                                    (glyphOk
+                                                                        <> "always allow "
+                                                                        <> call.name
+                                                                        <> " this session"))
                                                     pure (Right True)
                                                 Just PermissionDeny ->
                                                     pure (Right False)

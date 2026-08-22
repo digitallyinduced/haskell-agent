@@ -21,7 +21,10 @@ import Agent.CLI.Options
     , CliOptions(..)
     , defaultEffortFor
     )
-import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Prompt
+    ( defaultModelFor
+    , systemPromptWithHaskellProgram
+    )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
@@ -82,7 +85,7 @@ import Agent.Subagents.TaskPath
     )
 import Agent.Tools
     ( CodingTools(..)
-    , codingToolsFor
+    , codingToolsForWithHaskellProgram
     , filterChildGrokTools
     )
 import Agent.Tools.Grok.Task
@@ -336,7 +339,8 @@ runCodexSubagent runtime tokenProvider sendToRoot =
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
         coding <-
-            codingToolsFor
+            codingToolsForWithHaskellProgram
+                runtime.subagentOptions.optHaskellProgram
                 OpenAIProvider
                 prepared.preparedToolEnv
                 (Just runtime.subagentPlanHooks)
@@ -352,7 +356,12 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         childEffort
                 baseInstructions =
                     fromMaybe
-                        (systemPrompt OpenAIProvider env.subCwd today True)
+                        (systemPromptWithHaskellProgram
+                            runtime.subagentOptions.optHaskellProgram
+                            OpenAIProvider
+                            env.subCwd
+                            today
+                            True)
                         prepared.preparedParentParams.instructions
                 instructions =
                     baseInstructions
@@ -411,7 +420,8 @@ runHttpSubagent runtime provider mkBackend =
         childEffort <-
             lookupAgentReasoningEffort runtime.subagentTypes env.subId
         coding <-
-            codingToolsFor
+            codingToolsForWithHaskellProgram
+                runtime.subagentOptions.optHaskellProgram
                 provider
                 prepared.preparedToolEnv
                 (Just runtime.subagentPlanHooks)
@@ -424,7 +434,12 @@ runHttpSubagent runtime provider mkBackend =
                         prepared.preparedParentParams
                         childModel
                         childEffort
-                baseInstructions = systemPrompt provider env.subCwd today True
+                baseInstructions = systemPromptWithHaskellProgram
+                    runtime.subagentOptions.optHaskellProgram
+                    provider
+                    env.subCwd
+                    today
+                    True
                 instructions =
                     baseInstructions
                         <> "\n\n"

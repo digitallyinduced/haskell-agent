@@ -2,6 +2,7 @@
 module Agent.CLI.Prompt
     ( defaultModelFor
     , systemPrompt
+    , systemPromptWithHaskellProgram
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
@@ -23,7 +24,23 @@ defaultModelFor = \case
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Provider -> OsPath -> Day -> Bool -> Text
 systemPrompt provider cwd today isNonInteractive =
-    base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
+    systemPromptWithHaskellProgram
+        True provider cwd today isNonInteractive
+
+systemPromptWithHaskellProgram
+    :: Bool
+    -> Provider
+    -> OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptWithHaskellProgram
+        haskellProgramEnabled provider cwd today isNonInteractive =
+    base
+        <> "\n\n"
+        <> ghciGuidance haskellProgramEnabled
+        <> "\n"
+        <> timeContextGuidance
   where
     base = case provider of
         XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
@@ -31,17 +48,25 @@ systemPrompt provider cwd today isNonInteractive =
         OpenAIProvider -> codexSystemPrompt cwd today
 
 -- | Prefer GHCI as the general-purpose scripting environment.
-ghciGuidance :: Text
-ghciGuidance =
+ghciGuidance :: Bool -> Text
+ghciGuidance haskellProgramEnabled =
     Text.unlines
-        [ "Prefer ghci for scripting."
-        , "When you need a short program, calculation, or one-off script, use the run_ghci tool rather than Python, Node, bash, or compiling a binary."
-        , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
-        , "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
-        , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
-        , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
-        , "Drive GHCi with complete expressions; do not expect interactive human input."
-        ]
+        ( [ "Prefer ghci for scripting."
+          , "When you need a short program, calculation, or one-off script, use the run_ghci tool rather than Python, Node, bash, or compiling a binary."
+          , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
+          ]
+            <> (if haskellProgramEnabled
+                then
+                    [ "For multi-tool orchestration or filtering large intermediate results, use run_haskell_program. Its callTool helper accepts the current provider's advertised tools and schemas, returns their formatted Text results, and routes nested calls through normal approvals while only the Haskell program's selected output returns to the model."
+                    , "run_haskell_program uses a fresh dedicated GHCi process for each call and is not OS-sandboxed, so the outer program always requires approval."
+                    ]
+                else [])
+            <> [ "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
+               , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
+               , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
+               , "Drive GHCi with complete expressions; do not expect interactive human input."
+               ]
+        )
 
 codexSystemPrompt :: OsPath -> Day -> Text
 codexSystemPrompt cwd today =

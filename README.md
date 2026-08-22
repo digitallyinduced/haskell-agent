@@ -77,6 +77,61 @@ Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
 `--provider` overrides auto-detection.
 
+## Haskell programmatic tool calling
+
+Every provider exposes `run_haskell_program` alongside its direct coding
+tools. It executes a Haskell expression, usually a `do` block, in a dedicated
+fresh GHCi process. Programs can invoke registered harness tools:
+
+```haskell
+do
+  matches <- callTool "shell_command" (object
+    [ "command" .= ("rg TODO packages" :: String)
+    , "workdir" .= ("." :: String)
+    ])
+  emitText (Text.unlines (take 20 (Text.lines matches)))
+  pure ()
+```
+
+Nested calls use the same approvals, plan-mode restrictions, cancellation,
+and handlers as direct model tool calls. Their raw results stay inside GHCi;
+only stdout selected by the program becomes the outer tool result and enters
+model history. Each outer invocation has isolated Haskell bindings, preventing
+one approved program from poisoning the helper environment used by a later
+program. Tool names and argument schemas follow the active provider's
+advertised surface. `callTool` returns the same formatted result as a direct
+call, including metadata such as shell exit-status lines.
+
+The GHCi process is not OS-sandboxed. Arbitrary Haskell IO can bypass
+`callTool`, so every `run_haskell_program` call requires approval and the tool
+is unavailable while Plan Mode is active. Pass `--no-haskell-program` to omit
+the tool and its prompt guidance, including from spawned subagents.
+
+### Benchmarking
+
+`agent-benchmark` runs paired real-model sessions against generated fixtures.
+It compares direct tools, optional Haskell orchestration, forced Haskell
+orchestration, and an optional forced-shell control. The runner records exact
+answer correctness, wall time, provider-reported tokens, top-level tool calls,
+visible tool-output bytes, and privacy-canary exposure:
+
+```console
+nix develop
+agent="$(cabal list-bin agent-cli:exe:agent-cli)"
+cabal run agent-benchmark -- \
+  --agent "$agent" \
+  --provider openai \
+  --model gpt-5.6-sol \
+  --effort medium \
+  --repetitions 3
+```
+
+Results are written to a timestamped directory under `benchmark-results/` as
+`runs.jsonl`, per-run logs, generated fixtures, and a Markdown summary. Arm
+order rotates for each task and repetition. The default tasks include a
+privacy canary, a multi-file fan-out/reduce workload, and a simple negative
+control where programmatic orchestration should not help.
+
 OpenAI sessions compact automatically at the selected model's default context
 threshold. Pass `--compact-threshold N` to override it in estimated tokens, for
 example `--model gpt-5.6-luna --compact-threshold 120000`.

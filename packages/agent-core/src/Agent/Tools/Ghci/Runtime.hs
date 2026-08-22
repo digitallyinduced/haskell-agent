@@ -8,8 +8,10 @@ module Agent.Tools.Ghci.Runtime
     , GhciOutcome(..)
     , GhciResult(..)
     , newGhciSession
+    , newGhciProgramSession
     , closeGhciSession
     , evalGhci
+    , evalGhciProgram
     , classifyGhci
     ) where
 
@@ -30,6 +32,7 @@ import Control.Concurrent.Async
     , cancel
     , race
     , waitCatch
+    , withAsync
     )
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -50,14 +53,20 @@ import Control.Concurrent.STM
     )
 import Control.Exception.Safe
     ( SomeException
+    , catchAny
     , finally
     , mask
     , onException
     , try
     )
-import Control.Monad (void)
+import Control.Monad (forever, void)
+import Data.Aeson (FromJSON(..), Value, (.:))
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (withObject)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -65,6 +74,19 @@ import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , listDirectory
+    , removeDirectoryRecursive
+    , removeFile
+    , renameFile
+    )
+import System.FilePath
+    ( dropExtension
+    , takeExtension
+    , (</>)
+    )
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -84,6 +106,8 @@ import System.Process
     , proc
     )
 import System.Posix.Signals (sigINT, signalProcessGroup)
+import System.Posix.Files (setFileMode)
+import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessGroupID)
 
 data GhciOutcome
@@ -140,15 +164,29 @@ data GhciSession = GhciSession
     , ghciNextMarker :: !(IORef Int)
     , ghciMarkerSeed :: !Text
     , ghciClassificationCache :: !(IORef (Maybe (Text, GhciClass)))
+    , ghciRpcDir :: !(Maybe FilePath)
     }
 
 newGhciSession :: ToolEnv -> IO GhciSession
-newGhciSession env = do
+newGhciSession env = newGhciSessionWithRpc env False
+
+-- | Dedicated GHCi runtime with the file-based nested-tool bridge installed.
+-- Each program evaluation gets a fresh process so prior source cannot poison
+-- helper bindings or leave background Haskell threads running.
+newGhciProgramSession :: ToolEnv -> IO GhciSession
+newGhciProgramSession env = newGhciSessionWithRpc env True
+
+newGhciSessionWithRpc :: ToolEnv -> Bool -> IO GhciSession
+newGhciSessionWithRpc env enableRpc = do
     lock <- newMVar ()
     state <- newIORef GhciNotStarted
     nextMarkerRef <- newIORef 0
     seed <- Text.pack . show <$> getMonotonicTimeNSec
     classificationCache <- newIORef Nothing
+    rpcDir <-
+        if enableRpc
+            then Just <$> createRpcDirectory seed
+            else pure Nothing
     pure GhciSession
         { ghciEnv = env
         , ghciLock = lock
@@ -156,6 +194,7 @@ newGhciSession env = do
         , ghciNextMarker = nextMarkerRef
         , ghciMarkerSeed = seed
         , ghciClassificationCache = classificationCache
+        , ghciRpcDir = rpcDir
         }
 
 closeGhciSession :: GhciSession -> IO ()
@@ -168,6 +207,7 @@ closeGhciSession session =
             GhciRunning process -> shutdownProcess process
             GhciNotStarted -> pure ()
             GhciClosed -> pure ()
+        mapM_ removeRpcDirectory session.ghciRpcDir
 
 -- | Evaluate @expression@ in the persistent GHCi, classifying side effects first.
 -- The timeout is an overall budget for classification and execution.
@@ -189,6 +229,69 @@ evalGhci session expression requestedTimeout =
             else do
                 result <- evalRawGhci session expression remaining
                 pure result { ghciClass = classification }
+
+-- | Evaluate an approval-gated Haskell program with a local nested-tool
+-- callback. Requests and responses travel through a private temporary
+-- directory, so intermediate tool results never enter GHCi stdout or the
+-- model transcript unless the program explicitly emits them.
+evalGhciProgram
+    :: GhciSession
+    -> Text
+    -> Int
+    -> (Text -> Value -> IO Text)
+    -> IO GhciResult
+evalGhciProgram session expression requestedTimeout invokeTool =
+    withGhciLock session do
+        case session.ghciRpcDir of
+            Nothing ->
+                pure $ emptyResult GhciProcessFailed GhciEffectful
+                    "This GHCi session does not have the nested-tool bridge."
+            Just rpcDir -> do
+                clearRpcDirectory rpcDir
+                stopGhciProcess session
+                let timeoutMs = normalizeTimeout requestedTimeout
+                started <- getMonotonicTimeNSec
+                token <- programRpcToken session
+                inFlight <- newIORef (0 :: Int)
+                (do
+                    result <-
+                        withAsync
+                            (serveRpcRequests rpcDir token inFlight invokeTool)
+                            \_worker -> do
+                                bound <- evalRawGhci
+                                    session
+                                    (bindProgramCallTool token)
+                                    (min 5000 timeoutMs)
+                                if bound.ghciOutcome /= GhciCompleted
+                                    || not bound.ghciOk
+                                    then pure bound
+                                    else do
+                                        remaining <-
+                                            remainingMillis started timeoutMs
+                                        if remaining <= 0
+                                            then pure $ emptyResult
+                                                GhciTimedOut
+                                                GhciEffectful
+                                                "Timed out while preparing the Haskell program."
+                                            else do
+                                                evaluated <- evalRawGhci
+                                                    session expression remaining
+                                                -- The submitted expression has
+                                                -- returned. Stop its process
+                                                -- before draining accepted RPCs
+                                                -- so delayed forked threads
+                                                -- cannot start new tool calls.
+                                                stopGhciProcess session
+                                                finishProgramRequests
+                                                    rpcDir
+                                                    inFlight
+                                                    started
+                                                    timeoutMs
+                                                    evaluated
+                    pure result { ghciClass = GhciEffectful })
+                    `finally` do
+                        stopGhciProcess session
+                        clearRpcDirectory rpcDir
 
 -- | Classify without evaluating. Fail closed on ambiguity.
 classifyGhci :: GhciSession -> Text -> IO GhciClass
@@ -415,7 +518,9 @@ startProcess session = mask \restore ->
                     "GHCi produced excessive output during startup."
             else do
                 marker <- nextMarker session
-                sent <- try @_ @SomeException (sendMarker process marker)
+                sent <- try @_ @SomeException do
+                    mapM_ (installRpcHelpers process) session.ghciRpcDir
+                    sendMarker process marker
                 case sent of
                     Left err -> do
                         shutdownProcess process
@@ -455,6 +560,21 @@ restartProcess session = do
     case current of
         GhciClosed -> pure False
         _ -> either (const False) (const True) <$> startProcess session
+
+-- | Stop the current process without starting a replacement. Programmatic
+-- evaluations use this at both boundaries to isolate helper bindings and
+-- terminate any Haskell threads forked by the submitted source.
+stopGhciProcess :: GhciSession -> IO ()
+stopGhciProcess session = do
+    current <- atomicModifyIORef' session.ghciState \state ->
+        (case state of
+            GhciClosed -> GhciClosed
+            _ -> GhciNotStarted, state)
+    case current of
+        GhciRunning process -> shutdownProcess process
+        GhciNotStarted -> pure ()
+        GhciClosed -> pure ()
+    writeIORef session.ghciClassificationCache Nothing
 
 ghciArgs :: [String]
 ghciArgs =
@@ -613,6 +733,201 @@ sendMarker process marker = do
             <> "AgentGhciIOInternal.hFlush AgentGhciIOInternal.stdout "
             <> "AgentGhciPreludeInternal.>> "
             <> "AgentGhciIOInternal.hFlush AgentGhciIOInternal.stderr"
+
+installRpcHelpers :: GhciProcess -> FilePath -> IO ()
+installRpcHelpers process rpcDir = do
+    mapM_ (sendLine process)
+        [ "import Prelude"
+        , "import qualified Prelude as AgentGhciPreludeInternal"
+        , "import Data.Aeson (Value, object, (.=))"
+        , "import qualified Data.Aeson as AgentGhciAesonInternal"
+        , "import qualified Data.ByteString.Lazy as AgentGhciLazyBytesInternal"
+        , "import Data.Text (Text)"
+        , "import qualified Data.Text as Text"
+        , "import qualified Data.Text as T"
+        , "import qualified Data.Text as AgentGhciTextInternal"
+        , "import qualified Data.Text.IO as AgentGhciTextIOInternal"
+        , "import qualified Data.Unique as AgentGhciUniqueInternal"
+        , "import qualified Control.Concurrent as AgentGhciConcurrentInternal"
+        , "import qualified System.Directory as AgentGhciDirectoryInternal"
+        , "import qualified System.FilePath as AgentGhciFilePathInternal"
+        , "import qualified System.IO as AgentGhciIOInternal"
+        ]
+    sendLine process ":{"
+    mapM_ (sendLine process)
+        [ "let agentGhciAwaitResponseInternal responsePath = do"
+        , "      exists <- AgentGhciDirectoryInternal.doesFileExist responsePath"
+        , "      if exists"
+        , "        then AgentGhciLazyBytesInternal.readFile responsePath"
+        , "        else AgentGhciConcurrentInternal.threadDelay 10000 >> agentGhciAwaitResponseInternal responsePath"
+        , "    agentGhciCallToolInternal :: AgentGhciPreludeInternal.String -> AgentGhciTextInternal.Text -> Value -> IO AgentGhciTextInternal.Text"
+        , "    agentGhciCallToolInternal requestPrefix name arguments = do"
+        , "      unique <- AgentGhciUniqueInternal.newUnique"
+        , "      let requestId = requestPrefix AgentGhciPreludeInternal.++ \"-\" AgentGhciPreludeInternal.++ AgentGhciPreludeInternal.show (AgentGhciUniqueInternal.hashUnique unique)"
+        , "          requestPath = AgentGhciFilePathInternal.combine "
+            <> quotedRpcDir <> " (requestId AgentGhciPreludeInternal.++ \".request\")"
+        , "          requestTmp = requestPath AgentGhciPreludeInternal.++ \".tmp\""
+        , "          responsePath = AgentGhciFilePathInternal.combine "
+            <> quotedRpcDir <> " (requestId AgentGhciPreludeInternal.++ \".response\")"
+        , "      AgentGhciLazyBytesInternal.writeFile requestTmp"
+        , "        (AgentGhciAesonInternal.encode (object [\"name\" .= name, \"arguments\" .= arguments]))"
+        , "      AgentGhciDirectoryInternal.renameFile requestTmp requestPath"
+        , "      responseBytes <- agentGhciAwaitResponseInternal responsePath"
+        , "      AgentGhciDirectoryInternal.removeFile responsePath"
+        , "      case AgentGhciAesonInternal.eitherDecode responseBytes of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError (\"Invalid tool response: \" AgentGhciPreludeInternal.++ err))"
+        , "        AgentGhciPreludeInternal.Right output -> AgentGhciPreludeInternal.pure output"
+        , "    callTool = agentGhciCallToolInternal \"inactive\""
+        , "    emitText :: AgentGhciTextInternal.Text -> IO ()"
+        , "    emitText text = do"
+        , "      AgentGhciTextIOInternal.putStrLn text"
+        , "      AgentGhciIOInternal.hFlush AgentGhciIOInternal.stdout"
+        ]
+    sendLine process ":}"
+  where
+    quotedRpcDir = Text.pack (show rpcDir)
+
+data RpcRequest = RpcRequest !Text !Value
+
+instance FromJSON RpcRequest where
+    parseJSON = withObject "GHCi tool request" \object ->
+        RpcRequest
+            <$> object .: "name"
+            <*> object .: "arguments"
+
+createRpcDirectory :: Text -> IO FilePath
+createRpcDirectory seed = do
+    root <- getTemporaryDirectory
+    pid <- getProcessID
+    let path =
+            root
+                </> ( "haskell-agent-ghci-rpc-"
+                        <> show pid
+                        <> "-"
+                        <> Text.unpack seed
+                    )
+    createDirectory path
+    setFileMode path 0o700
+    pure path
+
+removeRpcDirectory :: FilePath -> IO ()
+removeRpcDirectory path =
+    removeDirectoryRecursive path `catchAny` \_ -> pure ()
+
+clearRpcDirectory :: FilePath -> IO ()
+clearRpcDirectory path =
+    (listDirectory path >>= mapM_ removeEntry)
+        `catchAny` \_ -> pure ()
+  where
+    removeEntry entry =
+        removeFile (path </> entry) `catchAny` \_ -> pure ()
+
+serveRpcRequests
+    :: FilePath
+    -> Text
+    -> IORef Int
+    -> (Text -> Value -> IO Text)
+    -> IO ()
+serveRpcRequests rpcDir token inFlight invokeTool = forever do
+    entries <- sort <$> listDirectory rpcDir
+    let requests =
+            [ entry
+            | entry <- entries
+            , takeExtension entry == ".request"
+            ]
+    if null requests
+        then threadDelay 10000
+        else mapM_ serve requests
+  where
+    tokenPrefix = token <> "-"
+
+    serve entry =
+        serveOne entry `catchAny` \exception ->
+            writeResponse entry
+                ("Nested tool bridge failed: " <> Text.pack (show exception))
+
+    serveOne entry = do
+        let requestPath = rpcDir </> entry
+        bytes <- LBS.readFile requestPath
+        removeFile requestPath
+        output <-
+            if tokenPrefix `Text.isPrefixOf` Text.pack entry
+                then case Aeson.eitherDecode bytes :: Either String RpcRequest of
+                    Left err ->
+                        pure ("Invalid nested tool request: " <> Text.pack err)
+                    Right (RpcRequest name arguments) -> do
+                        atomicModifyIORef' inFlight \count ->
+                            (count + 1, ())
+                        invokeTool name arguments
+                            `finally` atomicModifyIORef' inFlight \count ->
+                                (max 0 (count - 1), ())
+                else pure
+                    "Error: this callTool capability belongs to an earlier \
+                    \run_haskell_program invocation"
+        writeResponse entry output
+
+    writeResponse entry output = do
+        let base = dropExtension entry
+            responsePath = rpcDir </> (base <> ".response")
+            responseTmp = responsePath <> ".tmp"
+        LBS.writeFile responseTmp (Aeson.encode output)
+        renameFile responseTmp responsePath
+
+programRpcToken :: GhciSession -> IO Text
+programRpcToken session = do
+    now <- getMonotonicTimeNSec
+    pure (session.ghciMarkerSeed <> "-" <> Text.pack (show now))
+
+bindProgramCallTool :: Text -> Text
+bindProgramCallTool token =
+    "let callTool = agentGhciCallToolInternal "
+        <> Text.pack (show (Text.unpack token))
+
+finishProgramRequests
+    :: FilePath
+    -> IORef Int
+    -> Word64
+    -> Int
+    -> GhciResult
+    -> IO GhciResult
+finishProgramRequests rpcDir inFlight started timeoutMs result
+    | result.ghciOutcome /= GhciCompleted = pure result
+    | otherwise = do
+        remaining <- remainingMillis started timeoutMs
+        drained <- waitForRpcDrain rpcDir inFlight remaining
+        if drained
+            then pure result
+            else pure $ emptyResult
+                GhciTimedOut
+                GhciEffectful
+                "Timed out waiting for nested tool calls to finish."
+
+waitForRpcDrain :: FilePath -> IORef Int -> Int -> IO Bool
+waitForRpcDrain rpcDir inFlight = go 0
+  where
+    go quiet remaining
+        | remaining <= 0 = drainedNow
+        | otherwise = do
+            drained <- drainedNow
+            if drained && quiet >= 1
+                then pure True
+                else do
+                    let delayMs = min 10 remaining
+                    threadDelay (delayMs * 1000)
+                    go (if drained then quiet + 1 else 0) (remaining - delayMs)
+
+    drainedNow = do
+        active <- readIORef inFlight
+        entries <- listDirectory rpcDir `catchAny` \_ -> pure []
+        let bridgeFiles =
+                [ entry
+                | entry <- entries
+                , takeExtension entry `elem`
+                    [".request", ".tmp"]
+                ]
+        pure (active == 0 && null bridgeFiles)
 
 sendLine :: GhciProcess -> Text -> IO ()
 sendLine process text = do

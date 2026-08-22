@@ -43,6 +43,7 @@ library
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Auth
+                    , Agent.CLI.Benchmark
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -138,6 +139,14 @@ executable agent-cli
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
+executable agent-benchmark
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Benchmark.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -148,6 +157,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AuthSpec
+                    , Agent.CLI.BenchmarkSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec

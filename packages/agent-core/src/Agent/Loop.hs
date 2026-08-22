@@ -29,6 +29,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolRuntime(..)
     )
 import Agent.Tools.Types
     ( ToolExecutionPolicy(..)
@@ -194,6 +195,7 @@ defaultLoopDispatch = ToolDispatchConfig
         "Tool " <> name <> " crashed: " <> Text.pack (show exception)
     , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
     , toolDispatchOnOutput = \_call _output -> pure ()
+    , toolDispatchRuntime = Nothing
     }
 
 runLoop
@@ -347,6 +349,9 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                         config.loopDispatch.toolDispatchOnOutput progressCall output
                             >> config.loopOnEvent
                                 (ToolOutputUpdated progressCall.callId output)
+                    , toolDispatchRuntime = Just ToolRuntime
+                        { invokeNestedTool = runOne config
+                        }
                     }
                 config.loopTools
                 call

@@ -15,6 +15,11 @@ Provider-neutral infrastructure shared by the harness transports:
   (`read_file`, `grep`, `list_dir`, `search_replace`, `run_terminal_cmd`).
 - `Agent.Tools.Codex` registers Codex tools (`shell_command`, `apply_patch`,
   `update_plan`). `apply_patch` is the Codex freeform patch language.
+- `Agent.Tools.HaskellProgram` provides approval-gated programmatic tool
+  calling in a fresh dedicated GHCi process. Haskell code invokes normal harness
+  tools with `callTool`; nested results remain runtime-local unless selected
+  output is emitted. The GHCi process is not an OS sandbox, so outer programs
+  always require approval.
 - `Agent.Tools.IO` owns path confinement, file IO, and timed shell commands.
 - `Agent.Transport.WebSocket` owns reusable WebSocket sessions, ping/pong
   handling, STM-scoped request ownership, serialized writes, bounded receive

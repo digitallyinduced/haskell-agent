@@ -110,6 +110,7 @@ toolVerb name = case canonicalToolName name of
     "run_terminal_cmd" -> "$"
     "shell_command" -> "$"
     "run_ghci" -> "$"
+    "run_haskell_program" -> "λ"
     "get_task_output" -> "Read"
     "kill_task" -> "Killed"
     "task" -> "Ran"
@@ -133,6 +134,8 @@ toolDetail call = case canonicalToolName call.name of
     "grep" -> jsonTextFieldDefault "pattern" call.arguments
     "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
     "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
+    "run_haskell_program" ->
+        firstLine (jsonTextFieldDefault "source" call.arguments)
     "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
     "update_plan" -> "plan"

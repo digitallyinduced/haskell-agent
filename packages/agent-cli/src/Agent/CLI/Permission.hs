@@ -6,8 +6,10 @@ module Agent.CLI.Permission
     , initialPermissionState
     , promptPermission
     , renderPermissionFrame
+    , summarizePermissionCall
     ) where
 
+import Agent.JsonText (jsonTextFieldDefault)
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested)
@@ -17,7 +19,10 @@ import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
-import Agent.ToolDispatch (ToolCall)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , canonicalToolName
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -96,7 +101,7 @@ renderRow color selected label =
 promptPermission :: Bool -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermission color call = do
     isTty <- hIsTerminalDevice stdin
-    let summary = summarizeToolCall call
+    let summary = summarizePermissionCall call
     if not isTty
         then cooked color summary
         else do
@@ -118,3 +123,21 @@ cooked color summary = do
             AllowOnce -> PermissionAllowOnce
             AllowAlways -> PermissionAllowTool
             Deny -> PermissionDeny
+
+-- | Permission prompts for unrestricted Haskell must show the complete source
+-- being authorized. Compact activity summaries intentionally show only a
+-- first-line detail, so they are not sufficient for this approval boundary.
+summarizePermissionCall :: ToolCall -> Text
+summarizePermissionCall call
+    | canonicalToolName call.name == "run_haskell_program" =
+        let source = Text.stripEnd
+                (jsonTextFieldDefault "source" call.arguments)
+            description = Text.strip
+                (jsonTextFieldDefault "description" call.arguments)
+            heading
+                | Text.null description = "Haskell program"
+                | otherwise = "Haskell program (" <> description <> ")"
+        in if Text.null source
+            then heading
+            else heading <> ":\n\n" <> source
+    | otherwise = summarizeToolCall call

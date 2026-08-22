@@ -145,7 +145,10 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectModel
     )
-import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Prompt
+    ( defaultModelFor
+    , systemPromptWithHaskellProgram
+    )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
@@ -340,7 +343,10 @@ import Agent.Subagents
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Tools
+    ( CodingTools(..)
+    , codingToolsForWithTypesAndHaskellProgram
+    )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
@@ -360,9 +366,12 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , defaultToolEnv
     )
+import Agent.ToolDispatch (ToolCall(..))
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
+import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy as LBS
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.Async (link, mapConcurrently, withAsync)
@@ -1151,7 +1160,13 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
-    coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
+    coding <- codingToolsForWithTypesAndHaskellProgram
+        options.optHaskellProgram
+        provider
+        toolEnv
+        (Just planHooks)
+        multiCtx
+        agentTypesRef
     case multiCtx of
         Just ctx ->
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1212,7 +1227,12 @@ runAgentInitialized options transition home root resumed cwd startup = do
             coding.codingClose
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let instructions = systemPrompt provider cwd today (isOneShot options)
+        let instructions = systemPromptWithHaskellProgram
+                options.optHaskellProgram
+                provider
+                cwd
+                today
+                (isOneShot options)
             params = requestParams model instructions
                 (schemasFromAppTools provider tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
@@ -1724,6 +1744,23 @@ isJustCwd options = case options.optCwd of
     Just _ -> True
     Nothing -> False
 
+appendToolEvent :: Maybe FilePath -> LoopEvent -> IO ()
+appendToolEvent Nothing _ = pure ()
+appendToolEvent (Just path) event = case event of
+    ToolStarted call ->
+        LBS.appendFile path
+            ( encode (object
+                [ "event" .= ("tool_started" :: Text)
+                , "callId" .= call.callId
+                , "name" .= call.name
+                , "arguments" .=
+                    if call.argumentsEncrypted
+                        then ("<redacted>" :: Text)
+                        else call.arguments
+                ])
+                <> "\n"
+            )
+    _ -> pure ()
 
 runSession
     :: CliOptions
@@ -1988,19 +2025,21 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                         options.optMotionMode
             , renderMotionMode = options.optMotionMode
             }
-        emitLoop event = case fullscreen of
-            Nothing -> renderEvent render event
-            Just runtime -> do
-                case event of
-                    TurnStarted -> do
-                        now <- getCurrentTime
-                        writeIORef startedAtRef (Just now)
-                        writeIORef activityRef "Thinking…"
-                    TextDelta _ -> writeIORef printed True
-                    ToolStarted _ ->
-                        writeIORef activityRef "Running tool…"
-                    _ -> pure ()
-                emitUiEvent runtime (UiLoop event)
+        emitLoop event = do
+            appendToolEvent options.optToolEventLog event
+            case fullscreen of
+                Nothing -> renderEvent render event
+                Just runtime -> do
+                    case event of
+                        TurnStarted -> do
+                            now <- getCurrentTime
+                            writeIORef startedAtRef (Just now)
+                            writeIORef activityRef "Thinking…"
+                        TextDelta _ -> writeIORef printed True
+                        ToolStarted _ ->
+                            writeIORef activityRef "Running tool…"
+                        _ -> pure ()
+                    emitUiEvent runtime (UiLoop event)
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry

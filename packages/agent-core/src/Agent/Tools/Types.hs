@@ -19,6 +19,7 @@ module Agent.Tools.Types
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
+    , toolRequiresPerCallApproval
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
@@ -49,6 +50,7 @@ data ToolSchema
 data ApprovalRule
     = AlwaysReadOnly
     | AlwaysPrompt
+    | PromptEveryCall
     | ClassifyReadOnly !(ToolCall -> IO Bool)
 
 -- | Whether a tool handler may overlap other handlers emitted in the same
@@ -228,4 +230,14 @@ toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
 toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
     AlwaysReadOnly -> pure True
     AlwaysPrompt -> pure False
+    PromptEveryCall -> pure False
     ClassifyReadOnly classify -> classify call
+
+-- | Whether a session-level “always allow this tool” choice must be ignored.
+--
+-- This is intended for unsandboxed interpreters where approving one source
+-- program must not silently approve unrelated source submitted later.
+toolRequiresPerCallApproval :: AppTool -> Bool
+toolRequiresPerCallApproval tool = case tool.appToolApproval of
+    PromptEveryCall -> True
+    _ -> False

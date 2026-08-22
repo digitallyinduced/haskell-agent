@@ -68,9 +68,23 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
         grok `shouldSatisfy` Text.isInfixOf "run_ghci"
         openai `shouldSatisfy` Text.isInfixOf "run_ghci"
+        grok `shouldSatisfy` Text.isInfixOf "run_haskell_program"
+        openai `shouldSatisfy` Text.isInfixOf "run_haskell_program"
+        openai `shouldSatisfy` Text.isInfixOf "selected output returns to the model"
+        openai `shouldSatisfy` Text.isInfixOf "not OS-sandboxed"
         grok `shouldSatisfy` Text.isInfixOf "OverloadedStrings"
         openai `shouldSatisfy` Text.isInfixOf "LambdaCase"
         grok `shouldSatisfy` Text.isInfixOf "Pure expressions do not need user approval"
+
+    it "omits Haskell programmatic-tool guidance when disabled" do
+        let prompt = systemPromptWithHaskellProgram
+                False
+                OpenAIProvider
+                (fromFilePath "/tmp/repo")
+                (fromGregorian 2026 8 19)
+                True
+        prompt `shouldSatisfy` Text.isInfixOf "run_ghci"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_haskell_program"
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.6"

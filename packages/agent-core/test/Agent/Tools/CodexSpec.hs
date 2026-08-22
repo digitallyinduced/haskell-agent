@@ -13,7 +13,13 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools
+    ( CodingTools(..)
+    , appToolHandlers
+    , codingToolsFor
+    , codingToolsForWithHaskellProgram
+    , defaultToolEnv
+    )
 import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
@@ -53,10 +59,19 @@ spec = describe "Agent.Tools.Codex" do
                 , "run_ghci"
                 , "enter_plan_mode"
                 , "ask_user_question"
+                , "run_haskell_program"
                 ]
             names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
+            coding.codingClose
+
+    it "can omit Haskell programmatic tool calling" do
+        withTempEnv \env -> do
+            coding <- codingToolsForWithHaskellProgram
+                False OpenAIProvider env Nothing Nothing
+            map (.appToolName) coding.codingAppTools
+                `shouldNotContain` ["run_haskell_program"]
             coding.codingClose
 
     it "registers multi-agent tools when a registry is provided" do

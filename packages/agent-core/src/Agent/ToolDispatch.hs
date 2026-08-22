@@ -5,9 +5,11 @@ module Agent.ToolDispatch
     , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolRuntime(..)
     , ToolHandler
     , typedTool
     , typedToolWithCall
+    , typedToolWithRuntimeAndCall
     , typedStreamingTool
     , noArgsTool
     , functionToolCall
@@ -91,11 +93,22 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFormatException :: Text -> SomeException -> Text
     , toolDispatchOnException :: Text -> SomeException -> IO ()
     , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
+    , toolDispatchRuntime :: !(Maybe ToolRuntime)
+    }
+
+-- | Capabilities supplied by the active agent loop to a tool handler.
+--
+-- Nested calls use the same approval, event, registry, and dispatch path as
+-- model-authored calls, but their results remain local to the invoking tool.
+newtype ToolRuntime = ToolRuntime
+    { invokeNestedTool :: ToolCall -> IO ToolCallResult
     }
 
 data ToolHandler
     = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
     | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
+    | forall args. FromJSON args => TypedToolWithRuntimeAndCall Text
+        (ToolRuntime -> ToolCall -> args -> IO (Either Text Text))
     | forall args. FromJSON args => TypedStreamingTool Text ((Text -> IO ()) -> args -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
@@ -104,6 +117,13 @@ typedTool = TypedTool
 
 typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
 typedToolWithCall = TypedToolWithCall
+
+typedToolWithRuntimeAndCall
+    :: FromJSON args
+    => Text
+    -> (ToolRuntime -> ToolCall -> args -> IO (Either Text Text))
+    -> ToolHandler
+typedToolWithRuntimeAndCall = TypedToolWithRuntimeAndCall
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
@@ -135,6 +155,7 @@ dispatchToolHandler config maybeHandler call = do
             Just handler ->
                 runHandler
                     (config.toolDispatchOnOutput call)
+                    config.toolDispatchRuntime
                     call
                     input
                     handler
@@ -173,6 +194,7 @@ findHandler name handlers =
 -- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
 canonicalToolName :: Text -> Text
 canonicalToolName name
+    | Just rest <- Text.stripPrefix "functions." name = rest
     | Just rest <- Text.stripPrefix "collaboration." name = rest
     | Just rest <- Text.stripPrefix "collaboration" name
     , rest `elem` multiAgentBareNames =
@@ -200,16 +222,18 @@ handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ -> name
     TypedToolWithCall name _ -> name
+    TypedToolWithRuntimeAndCall name _ -> name
     TypedStreamingTool name _ -> name
     NoArgsTool name _ -> name
 
 runHandler
     :: (Text -> IO ())
+    -> Maybe ToolRuntime
     -> ToolCall
     -> Value
     -> ToolHandler
     -> IO (Either Text Text)
-runHandler emitOutput call value = \case
+runHandler emitOutput runtime call value = \case
     TypedTool _ run ->
         case decodeToolArguments value of
             Right args -> run args
@@ -218,6 +242,13 @@ runHandler emitOutput call value = \case
         case decodeToolArguments value of
             Right args -> run call args
             Left err -> pure (Left err)
+    TypedToolWithRuntimeAndCall _ run ->
+        case (runtime, decodeToolArguments value) of
+            (Nothing, _) ->
+                pure (Left "This tool requires an active agent-loop runtime.")
+            (_, Left err) -> pure (Left err)
+            (Just activeRuntime, Right args) ->
+                run activeRuntime call args
     TypedStreamingTool _ run ->
         case decodeToolArguments value of
             Right args -> run emitOutput args

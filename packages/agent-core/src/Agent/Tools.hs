@@ -25,7 +25,9 @@ module Agent.Tools
     , appToolHandlers
     , CodingTools(..)
     , codingToolsFor
+    , codingToolsForWithHaskellProgram
     , codingToolsForWithTypes
+    , codingToolsForWithTypesAndHaskellProgram
     , filterChildGrokTools
     ) where
 
@@ -36,9 +38,14 @@ import Agent.ResourceScope
     , newResourceScope
     )
 import Agent.Tools.Codex (codexTools)
-import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
+import Agent.Tools.Ghci
+    ( closeGhciSession
+    , newGhciProgramSession
+    , newGhciSession
+    )
 import Agent.Tools.Grok (closeGrokSession, filterGrokToolsForType, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpecs)
+import Agent.Tools.HaskellProgram (haskellProgramTool)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
@@ -67,8 +74,19 @@ codingToolsFor
     -> Maybe MultiAgentContext
     -> IO CodingTools
 codingToolsFor provider env hooks multi = do
+    codingToolsForWithHaskellProgram True provider env hooks multi
+
+codingToolsForWithHaskellProgram
+    :: Bool
+    -> Provider
+    -> ToolEnv
+    -> Maybe PlanModeHooks
+    -> Maybe MultiAgentContext
+    -> IO CodingTools
+codingToolsForWithHaskellProgram includeHaskellProgram provider env hooks multi = do
     typesRef <- newIORef Map.empty
-    codingToolsForWithTypes provider env hooks multi typesRef
+    codingToolsForWithTypesAndHaskellProgram
+        includeHaskellProgram provider env hooks multi typesRef
 
 -- | Same as 'codingToolsFor', but reuses an existing agent-type map so the
 -- host can wire resume-from-disk before tools are built.
@@ -80,6 +98,19 @@ codingToolsForWithTypes
     -> GrokSubagentSpecs
     -> IO CodingTools
 codingToolsForWithTypes provider env hooks multi typesRef = do
+    codingToolsForWithTypesAndHaskellProgram
+        True provider env hooks multi typesRef
+
+codingToolsForWithTypesAndHaskellProgram
+    :: Bool
+    -> Provider
+    -> ToolEnv
+    -> Maybe PlanModeHooks
+    -> Maybe MultiAgentContext
+    -> GrokSubagentSpecs
+    -> IO CodingTools
+codingToolsForWithTypesAndHaskellProgram
+        includeHaskellProgram provider env hooks multi typesRef = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
         plan <- newPlanModeEnv env.toolCwd hooks
@@ -92,9 +123,11 @@ codingToolsForWithTypes provider env hooks multi typesRef = do
                 (_, ghci) <- allocateResource resources
                     (newGhciSession env)
                     closeGhciSession
+                programTools <- haskellProgramTools resources plan
                 tools <- codexTools env ghci plan multi
                 pure CodingTools
-                    { codingAppTools = tools
+                    { codingAppTools =
+                        tools ++ programTools
                     , codingPlanMode = plan
                     , codingClose = closeResourceScope resources
                     , codingAgentTypes = typesRef
@@ -107,12 +140,23 @@ codingToolsForWithTypes provider env hooks multi typesRef = do
         (_, ghci) <- allocateResource resources
             (newGhciSession env)
             closeGhciSession
+        programTools <- haskellProgramTools resources plan
         pure CodingTools
-            { codingAppTools = grokTools session ghci plan multi typesRef
+            { codingAppTools =
+                grokTools session ghci plan multi typesRef
+                    ++ programTools
             , codingPlanMode = plan
             , codingClose = closeResourceScope resources
             , codingAgentTypes = typesRef
             }
+
+    haskellProgramTools resources plan
+        | not includeHaskellProgram = pure []
+        | otherwise = do
+            (_, programGhci) <- allocateResource resources
+                (newGhciProgramSession env)
+                closeGhciSession
+            pure [haskellProgramTool programGhci plan]
 
 -- | Re-export for CLI child runners.
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]

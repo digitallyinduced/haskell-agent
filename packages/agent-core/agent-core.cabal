@@ -81,6 +81,7 @@ library
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
                     , Agent.Tools.Ghci.Tool
+                    , Agent.Tools.HaskellProgram
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
@@ -137,6 +138,7 @@ test-suite agent-core-test
                     , Agent.Tools.GrokSpec
                     , Agent.Tools.Grok.TaskSpec
                     , Agent.Tools.GhciSpec
+                    , Agent.Tools.HaskellProgramSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec
