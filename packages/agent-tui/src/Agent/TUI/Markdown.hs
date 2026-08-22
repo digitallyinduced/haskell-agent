@@ -135,7 +135,7 @@ renderLines codeHeader codeIndex inFence (line : rest)
     | Text.null (Text.strip line) =
         txt " " : renderLines codeHeader codeIndex False rest
     | isThematicBreak line =
-        withAttr Theme.mutedAttr (fill '─')
+        withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             : renderLines codeHeader codeIndex False rest
     | otherwise =
         inlineWidget (parseInline line)
