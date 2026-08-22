@@ -285,6 +285,15 @@ spec = describe "Agent.CLI.Session" do
                 loadSession root "missing-session"
                     `shouldReturn` Left "session not found: missing-session"
 
+        it "deletes a persisted session without escaping the session root" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                deleteSession root handle.sessionMeta.metaId
+                    `shouldReturn` Right ()
+                doesDirectoryExist handle.sessionDir `shouldReturn` False
+                deleteSession root "../outside"
+                    `shouldReturn` Left "invalid session id"
+
         it "rejects metadata whose id does not match its directory" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)

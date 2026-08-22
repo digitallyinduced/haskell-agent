@@ -11,6 +11,7 @@ module Agent.CLI.TUI.Types
     , Name(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
+    , ResumeOverlay(..)
     , TextOverlay(..)
     ) where
 
@@ -19,6 +20,7 @@ import Agent.CLI.Command (SkillCommand)
 import Agent.CLI.Input (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
+import Agent.CLI.Resume (ResumeBrowser, ResumeEntry)
 import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
@@ -51,6 +53,9 @@ data Name
     | ComposerEffort
     | ComposerMode
     | ChoiceRow !Int
+    | ResumeViewport
+    | ResumeRow !Text
+    | ResumeSearchCursor
     | PermissionRow !Int
     | SlashRow !Int
     | OverlayCursor
@@ -74,6 +79,11 @@ data AppEvent
         !Text
         !Text
         !(TMVar (Maybe Text))
+    | AppAskResume
+        !ResumeBrowser
+        !(Text -> IO (Either Text ResumeEntry))
+        !(Text -> IO (Either Text ()))
+        !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
     | AppSetImagePreviews ![ImageAttachment]
@@ -134,6 +144,10 @@ data AppState = AppState
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
     , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
+    , appResume :: !(Maybe ResumeOverlay)
+    , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
+    , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
+    , appResumeDelete :: !(Maybe (Text -> IO (Either Text ())))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
@@ -167,6 +181,10 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
+    }
+
+data ResumeOverlay = ResumeOverlay
+    { resumeOverlayBrowser :: !ResumeBrowser
     }
 
 data TextOverlay = TextOverlay
