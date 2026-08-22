@@ -95,7 +95,20 @@ spec = do
                     , ("CLAUDE_CODE_USE_BEDROCK", Just "1")
                     , ("CLAUDE_CODE_USE_VERTEX", Just "1")
                     , ("CLAUDE_CODE_USE_FOUNDRY", Just "1")
+                    , ("CLAUDE_CODE_USE_ANTHROPIC_AWS", Just "1")
+                    , ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", Just "1")
+                    , ("CLAUDE_CODE_USE_GATEWAY", Just "1")
+                    , ("CLAUDE_CODE_USE_MANTLE", Just "1")
+                    , ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", Just "1")
                     , ("CLAUDE_CODE_API_BASE_URL", Just "https://example.invalid")
+                    , ("CLAUDE_CODE_OAUTH_TOKEN", Just "must-not-leak")
+                    , ("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", Just "9")
+                    , ("CLAUDE_CODE_HOST_CREDS_FILE", Just "/tmp/credentials")
+                    , ("CLAUDE_CODE_HFI_BEARER_TOKEN", Just "must-not-leak")
+                    , ( "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+                      , Just "1"
+                      )
+                    , ("AGENT_PROXY_URL", Just "https://example.invalid")
                     , ("AWS_BEARER_TOKEN_BEDROCK", Just "must-not-leak")
                     , ("CLAUDE_TEST_PRESERVED", Just "yes")
                     ]
@@ -126,7 +139,7 @@ fakeAuthScript =
         , "test \"$2\" = status || exit 42"
         , "test \"$3\" = --json || exit 43"
         , "test \"$CLAUDE_TEST_PRESERVED\" = yes || exit 44"
-        , "if env | grep -E '^(ANTHROPIC_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)=|CLAUDE_CODE_API_BASE_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
+        , "if env | grep -E '^(ANTHROPIC_|CLAUDE_CODE_|_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=|AGENT_PROXY_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
         , "  echo 'billing override leaked into auth subprocess' >&2"
         , "  exit 45"
         , "fi"

@@ -1,4 +1,4 @@
--- | Adapt an interactive Claude Code subscription session to the
+-- | Adapt a structured Claude Code subscription session to the
 -- provider-neutral agent loop.
 module Agent.ClaudeCode.LoopBackend
     ( withClaudeCodeBackend
@@ -13,20 +13,19 @@ import Agent.ClaudeCode.Session
     , claudeCodeTurnIsNewSession
     , claudeCodeTurnProcessExit
     , claudeCodeTurnSessionId
-    , claudeCodeTurnTranscriptOffset
-    , claudeCodeTurnTranscriptPath
+    , readClaudeCodeOutputLine
+    , resolveClaudeCodeTurnUsage
     , sendClaudeCodePrompt
     , withClaudeCodeSession
     , withClaudeCodeSessionWithoutTools
     , withClaudeCodeTurn
     )
-import Agent.ClaudeCode.Transcript
+import Agent.ClaudeCode.Stream
     ( CompletedTurn(..)
-    , TurnAccumulator
-    , consumeTranscriptLine
-    , emptyTurnAccumulator
-    , finishTranscriptOnExit
-    , turnAccumulatorError
+    , StreamAccumulator
+    , consumeStreamLine
+    , emptyStreamAccumulator
+    , streamAccumulatorError
     )
 import Agent.Error
     ( ApiError(..)
@@ -56,14 +55,6 @@ import Agent.Responses.Types
     , TaggedObject
     )
 import qualified Agent.ToolDispatch as ToolDispatch
-import Control.Applicative ((<|>))
-import Control.Concurrent (threadDelay)
-import Control.Exception.Safe
-    ( SomeException
-    , displayException
-    , tryAny
-    )
-import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
@@ -71,26 +62,30 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
+    , newIORef
     , readIORef
+    , writeIORef
     )
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
-import Data.Word (Word8, Word64)
-import GHC.Clock (getMonotonicTimeNSec)
-import System.Directory (doesFileExist)
+import qualified Data.UUID.Types as UUID
 import System.Exit (ExitCode)
-import System.IO
-    ( IOMode(ReadMode)
-    , SeekMode(AbsoluteSeek)
-    , hFileSize
-    , hSeek
-    , withBinaryFile
+import System.Mem.StableName
+    ( StableName
+    , eqStableName
+    , makeStableName
     )
+import System.Timeout (timeout)
 
--- | Keep one interactive Claude process alive for the callback's complete
+data HostTranscriptCheckpoint = HostTranscriptCheckpoint
+    { checkpointTranscript :: !(StableName [ResponseItem])
+    , checkpointSessionId :: !Text
+    }
+
+-- | Keep one structured Claude process alive for the callback's complete
 -- lifetime. The initial previous-response ID is consumed only by the first
 -- submission when the caller does not provide an explicit ID.
 withClaudeCodeBackend
@@ -101,21 +96,24 @@ withClaudeCodeBackend
     -> (Backend -> IO a)
     -> IO a
 withClaudeCodeBackend options initialPrevious getParams transcript callback =
-    withClaudeCodeSession options initialPrevious \session ->
-        callback (backendForSession session getParams transcript)
+    withClaudeCodeSession options initialPrevious \session -> do
+        checkpoint <- newIORef Nothing
+        callback (backendForSession session checkpoint getParams transcript)
 
 -- | A backend for isolated side requests. Every submission owns and cleans up
--- its own interactive Claude process, while still using subscription auth.
+-- its own structured Claude process, while still using subscription auth.
 claudeCodeOneShotBackend
     :: ClaudeCodeOptions
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
 claudeCodeOneShotBackend options getParams transcript =
-    Backend \previous inputs onEvent ->
+    Backend \previous inputs onEvent -> do
+        checkpoint <- newIORef Nothing
         withClaudeCodeSessionWithoutTools options previous \session ->
             submitClaudeCodeTurn
                 session
+                checkpoint
                 Nothing
                 getParams
                 transcript
@@ -124,13 +122,15 @@ claudeCodeOneShotBackend options getParams transcript =
 
 backendForSession
     :: ClaudeCodeSession
+    -> IORef (Maybe HostTranscriptCheckpoint)
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-backendForSession session getParams transcript =
+backendForSession session checkpoint getParams transcript =
     Backend \previous inputs onEvent ->
         submitClaudeCodeTurn
             session
+            checkpoint
             previous
             getParams
             transcript
@@ -139,51 +139,65 @@ backendForSession session getParams transcript =
 
 submitClaudeCodeTurn
     :: ClaudeCodeSession
+    -> IORef (Maybe HostTranscriptCheckpoint)
     -> Maybe Text
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> [TurnInput]
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
-submitClaudeCodeTurn session previous getParams transcript inputs onEvent =
+submitClaudeCodeTurn
+    session
+    checkpoint
+    previous
+    getParams
+    transcript
+    inputs
+    onEvent =
     case flattenTurnInputs inputs of
         Left err -> pure (Left err)
         Right inputText -> do
             params <- getParams
-            history <- readIORef transcript
             withClaudeCodeTurn
                 session
+                (hostTranscriptMatches checkpoint transcript previous)
                 previous
                 params.model
                 (params.reasoning >>= (.effort))
                 \turn -> do
+                    history <- readIORef transcript
                     let prompt =
                             buildClaudePrompt
                                 params
                                 (claudeCodeTurnIsNewSession turn)
                                 history
                                 inputText
-                    sendClaudeCodePrompt turn prompt
-                    awaitResult <- awaitClaudeTurn turn onEvent
+                    awaitResult <- awaitClaudeTurn turn prompt onEvent
                     case awaitResult of
                         Left err ->
                             pure (Left err)
                         Right completed -> do
+                            usage <- resolveClaudeCodeTurnUsage
+                                turn
+                                completed.tokenUsage
+                                completed.cumulativeModelUsage
                             let output = TurnOutput
-                                    { responseId =
-                                        claudeCodeTurnSessionId turn
+                                    { responseId = completed.sessionId
                                     -- Claude Code executes its own local tools.
                                     -- Returning them here would execute each
                                     -- call a second time in the host loop.
                                     , toolCalls = []
                                     , assistantText = completed.assistantText
-                                    , tokenUsage = completed.tokenUsage
+                                    , tokenUsage = usage
                                     }
-                            appendHostTranscript
-                                transcript
-                                inputs
-                                completed.assistantText
-                            pure (Right output)
+                                commit =
+                                    commitHostTranscript
+                                        checkpoint
+                                        transcript
+                                        completed.sessionId
+                                        inputs
+                                        completed.assistantText
+                            pure (Right (output, commit))
 
 flattenTurnInputs :: [TurnInput] -> Either ApiError Text
 flattenTurnInputs inputs =
@@ -201,7 +215,7 @@ flattenTurnInputs inputs =
                 Left ProviderError
                     { errorType = InvalidImageError
                     , message =
-                        "Claude Code subscription sessions do not support image attachments through this bridge."
+                        "Claude Code subscription sessions do not support image attachments through this provider."
                     , retryAfter = Nothing
                     }
         CompletedTool
@@ -344,6 +358,62 @@ renderJsonValue = \case
         TextEncoding.decodeUtf8With lenientDecode
             (LazyByteString.toStrict (Aeson.encode value))
 
+hostTranscriptMatches
+    :: IORef (Maybe HostTranscriptCheckpoint)
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO Bool
+hostTranscriptMatches checkpoint transcript previous = do
+    expected <- readIORef checkpoint
+    case expected of
+        Nothing ->
+            pure True
+        Just expectedCheckpoint -> do
+            current <- readIORef transcript
+            currentName <- makeStableName current
+            pure $
+                eqStableName
+                    expectedCheckpoint.checkpointTranscript
+                    currentName
+                    || requestedDifferentSession expectedCheckpoint
+  where
+    requestedDifferentSession :: HostTranscriptCheckpoint -> Bool
+    requestedDifferentSession expectedCheckpoint =
+        case previous >>= canonicalSessionId of
+            Just requested ->
+                requested
+                    /= expectedCheckpoint.checkpointSessionId
+            Nothing ->
+                False
+
+    canonicalSessionId value =
+        UUID.toText <$> UUID.fromText (Text.strip value)
+
+commitHostTranscript
+    :: IORef (Maybe HostTranscriptCheckpoint)
+    -> IORef [ResponseItem]
+    -> Text
+    -> [TurnInput]
+    -> Maybe Text
+    -> IO ()
+commitHostTranscript
+    checkpoint
+    transcript
+    sessionId
+    inputs
+    assistantText = do
+    appendHostTranscript transcript inputs assistantText
+    -- Read the exact object installed in the IORef. GHC is free to rebuild an
+    -- equivalent result returned from atomicModifyIORef', which would give it
+    -- a different StableName despite no host-side transcript change.
+    committed <- readIORef transcript
+    committedName <- makeStableName committed
+    writeIORef checkpoint $
+        Just HostTranscriptCheckpoint
+            { checkpointTranscript = committedName
+            , checkpointSessionId = sessionId
+            }
+
 appendHostTranscript
     :: IORef [ResponseItem]
     -> [TurnInput]
@@ -375,313 +445,105 @@ assistantMessageItem assistantText =
         , extraFields = KeyMap.empty
         }
 
-data TranscriptTail = TranscriptTail
-    { tailOffset :: !Integer
-    , tailPending :: !ByteString.ByteString
-    }
-
 awaitClaudeTurn
     :: ClaudeCodeTurn
+    -> Text
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError CompletedTurn)
-awaitClaudeTurn turn onEvent = do
-    startedAt <- getMonotonicTimeNSec
-    go startedAt emptyTurnAccumulator TranscriptTail
-        { tailOffset = claudeCodeTurnTranscriptOffset turn
-        , tailPending = ByteString.empty
-        }
-        Nothing
-        startedAt
-        False
+awaitClaudeTurn turn prompt onEvent = do
+    completed <-
+        timeout turnTimeoutMicros
+            do
+                accepted <- sendClaudeCodePrompt turn prompt
+                if accepted
+                    then go emptyStreamAccumulator False
+                    else
+                        Left <$> timeoutError
+                            "did not accept the prompt within the prompt-write timeout"
+    case completed of
+        Nothing ->
+            Left <$> timeoutError
+                "did not complete within the turn timeout"
+        Just result ->
+            pure result
   where
-    go
-        startedAt
-        accumulator
-        tailState
-        endTurnObservedAt
-        lastProgressAt
-        sawTranscriptProgress = do
-        readResult <-
-            readTranscriptAppend
-                (claudeCodeTurnTranscriptPath turn)
-                tailState
-        case readResult of
-            Left err ->
-                pure (Left err)
-            Right (nextTail, completeLines) -> do
-                now <- getMonotonicTimeNSec
-                let madeProgress =
-                        nextTail.tailOffset /= tailState.tailOffset
-                            || nextTail.tailPending /= tailState.tailPending
-                    nextLastProgressAt =
-                        if madeProgress then now else lastProgressAt
-                    nextSawTranscriptProgress =
-                        sawTranscriptProgress || madeProgress
-                consumed <-
-                    consumeLines accumulator completeLines onEvent
-                case consumed of
-                    Left err ->
-                        pure (Left err)
-                    Right (_nextAccumulator, Just completed) ->
-                        pure (Right completed)
-                    Right (nextAccumulator, Nothing) -> do
-                        let endTurnFallback =
-                                finishTranscriptOnExit nextAccumulator
-                            nextEndTurnObservedAt =
-                                case endTurnFallback of
-                                    Nothing -> Nothing
-                                    Just _ ->
-                                        endTurnObservedAt <|> Just now
-                        case (endTurnFallback, nextEndTurnObservedAt) of
-                            (Just completed, Just observedAt)
-                                | elapsedAtLeast
-                                    endTurnGraceNanoseconds
-                                    observedAt
-                                    now ->
-                                    pure (Right completed)
-                            _ -> do
-                                processExit <-
-                                    claudeCodeTurnProcessExit turn
-                                waitingForConfirmation <-
-                                    if nextSawTranscriptProgress
-                                        then pure False
-                                        else
-                                            looksLikeInteractivePrompt
-                                                <$> claudeCodeTurnDiagnostic turn
-                                case processExit of
-                                    Just exitCode ->
-                                        finishAfterExit
-                                            exitCode
-                                            nextAccumulator
-                                            nextTail
-                                    Nothing
-                                        | waitingForConfirmation ->
-                                            Left <$> timeoutError
-                                                "is waiting for an interactive confirmation"
-                                        | not nextSawTranscriptProgress
-                                        , elapsedAtLeast
-                                            transcriptStartupTimeoutNanoseconds
-                                            startedAt
-                                            now ->
-                                            Left <$> timeoutError
-                                                "did not create or update its transcript"
-                                        | nextSawTranscriptProgress
-                                        , elapsedAtLeast
-                                            transcriptInactivityTimeoutNanoseconds
-                                            nextLastProgressAt
-                                            now ->
-                                            Left <$> timeoutError
-                                                "stopped making transcript progress"
-                                        | elapsedAtLeast
-                                            turnTimeoutNanoseconds
-                                            startedAt
-                                            now ->
-                                            Left <$> timeoutError
-                                                "did not complete within the turn timeout"
-                                        | otherwise -> do
-                                            threadDelay transcriptPollMicros
-                                            go
-                                                startedAt
-                                                nextAccumulator
-                                                nextTail
-                                                nextEndTurnObservedAt
-                                                nextLastProgressAt
-                                                nextSawTranscriptProgress
-
-    finishAfterExit exitCode accumulator tailState = do
-        -- Re-read once after observing process exit. The child may have
-        -- flushed its final transcript records between the preceding file
-        -- read and 'getProcessExitCode'.
-        finalRead <-
-            readTranscriptAppend
-                (claudeCodeTurnTranscriptPath turn)
-                tailState
-        case finalRead of
-            Left err ->
-                pure (finishOrError accumulator err)
-            Right (finalTail, completeLines) -> do
-                completeConsumed <-
-                    consumeLines accumulator completeLines onEvent
-                case completeConsumed of
-                    Left err ->
-                        pure (Left err)
-                    Right (_, Just completed) ->
-                        pure (Right completed)
-                    Right (afterLines, Nothing) -> do
-                        let pending =
-                                stripCarriageReturn finalTail.tailPending
-                        if ByteString.null pending
-                            then pure $
-                                finishOrError
-                                    afterLines
-                                    (processExitError exitCode)
-                            else do
-                                pendingConsumed <-
-                                    consumeLines afterLines [pending] onEvent
-                                pure case pendingConsumed of
-                                    Left err@JsonDecodeError{} ->
-                                        finishOrError afterLines err
-                                    Left err ->
-                                        Left err
-                                    Right (_, Just completed) ->
-                                        Right completed
-                                    Right (finalAccumulator, Nothing) ->
-                                        finishOrError
-                                            finalAccumulator
-                                            (processExitError exitCode)
-
-    finishOrError accumulator err =
-        case finishTranscriptOnExit accumulator of
-            Just completed -> Right completed
-            Nothing -> Left err
+    go :: StreamAccumulator -> Bool -> IO (Either ApiError CompletedTurn)
+    go accumulator sawOutput = do
+        maybeLine <-
+            timeout
+                (if sawOutput
+                    then streamInactivityTimeoutMicros
+                    else streamStartupTimeoutMicros)
+                (readClaudeCodeOutputLine turn)
+        case maybeLine of
+            Nothing ->
+                Left <$> timeoutError
+                    (if sawOutput
+                        then "stopped producing structured output"
+                        else "did not produce structured output")
+            Just Nothing ->
+                Left <$> prematureExitError turn
+            Just (Just line)
+                | ByteString.null (trimAsciiWhitespace line) ->
+                    go accumulator sawOutput
+                | otherwise ->
+                    case consumeStreamLine accumulator line of
+                        Left decodeError ->
+                            pure $ Left JsonDecodeError
+                                { decodeError
+                                , rawBody =
+                                    Text.take 2_000 $
+                                        TextEncoding.decodeUtf8With
+                                            lenientDecode
+                                            line
+                                }
+                        Right (nextAccumulator, events, completed) -> do
+                            case streamAccumulatorError nextAccumulator of
+                                Just message ->
+                                    pure $ Left ProviderError
+                                        { errorType = ApiErrorType
+                                        , message
+                                        , retryAfter = Nothing
+                                        }
+                                Nothing ->
+                                    case completed of
+                                        Just value
+                                            | value.sessionId
+                                                == claudeCodeTurnSessionId turn ->
+                                                mapM_ onEvent events
+                                                    >> pure (Right value)
+                                            | otherwise ->
+                                                pure $ Left ProviderError
+                                                    { errorType = ApiErrorType
+                                                    , message =
+                                                        "Claude Code returned session "
+                                                            <> value.sessionId
+                                                            <> " while "
+                                                            <> claudeCodeTurnSessionId turn
+                                                            <> " was active."
+                                                    , retryAfter = Nothing
+                                                    }
+                                        Nothing -> do
+                                            mapM_ onEvent events
+                                            go nextAccumulator True
 
     timeoutError reason = do
         diagnostic <- claudeCodeTurnDiagnostic turn
         pure $ ConnectionError
             ( "Claude Code "
-                <> if looksLikeInteractivePrompt diagnostic
-                    then
-                        "is waiting at an interactive confirmation prompt that this bridge cannot answer."
-                    else reason <> "."
+                <> reason
+                <> "."
+                <> diagnosticSuffix diagnostic
             )
 
-transcriptPollMicros :: Int
-transcriptPollMicros = 50_000
+streamStartupTimeoutMicros :: Int
+streamStartupTimeoutMicros = 60 * 1_000_000
 
-endTurnGraceNanoseconds :: Word64
-endTurnGraceNanoseconds = 1_000_000_000
+streamInactivityTimeoutMicros :: Int
+streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
 
-transcriptStartupTimeoutNanoseconds :: Word64
-transcriptStartupTimeoutNanoseconds = 60 * 1_000_000_000
-
-transcriptInactivityTimeoutNanoseconds :: Word64
-transcriptInactivityTimeoutNanoseconds = 15 * 60 * 1_000_000_000
-
-turnTimeoutNanoseconds :: Word64
-turnTimeoutNanoseconds = 2 * 60 * 60 * 1_000_000_000
-
-elapsedAtLeast :: Word64 -> Word64 -> Word64 -> Bool
-elapsedAtLeast duration startedAt now =
-    now - startedAt >= duration
-
-looksLikeInteractivePrompt :: Text -> Bool
-looksLikeInteractivePrompt raw =
-    any (`Text.isInfixOf` Text.toCaseFold raw)
-        [ "trust this folder"
-        , "do you trust"
-        , "press enter to confirm"
-        , "waiting for confirmation"
-        ]
-
-consumeLines
-    :: TurnAccumulator
-    -> [ByteString.ByteString]
-    -> (LoopEvent -> IO ())
-    -> IO (Either ApiError (TurnAccumulator, Maybe CompletedTurn))
-consumeLines initial lines_ onEvent =
-    foldM step (Right (initial, Nothing)) lines_
-  where
-    step result _line
-        | Right (_, Just _) <- result =
-            pure result
-    step (Left err) _ =
-        pure (Left err)
-    step (Right (accumulator, Nothing)) line
-        | ByteString.null (trimAsciiWhitespace line) =
-            pure (Right (accumulator, Nothing))
-        | otherwise =
-            case consumeTranscriptLine accumulator line of
-                Left decodeError ->
-                    pure $ Left JsonDecodeError
-                        { decodeError
-                        , rawBody =
-                            Text.take 2_000 $
-                                TextEncoding.decodeUtf8With lenientDecode line
-                        }
-                Right (nextAccumulator, events, completed) -> do
-                    mapM_ onEvent events
-                    pure case turnAccumulatorError nextAccumulator of
-                        Just message ->
-                            Left ProviderError
-                                { errorType = ApiErrorType
-                                , message
-                                , retryAfter = Nothing
-                                }
-                        Nothing ->
-                            Right (nextAccumulator, completed)
-
-readTranscriptAppend
-    :: FilePath
-    -> TranscriptTail
-    -> IO
-        (Either
-            ApiError
-            (TranscriptTail, [ByteString.ByteString]))
-readTranscriptAppend path tailState = do
-    result <- tryAny (readAvailable path tailState)
-    pure case result of
-        Left exception ->
-            Left (transcriptReadError path exception)
-        Right value ->
-            Right value
-
-readAvailable
-    :: FilePath
-    -> TranscriptTail
-    -> IO (TranscriptTail, [ByteString.ByteString])
-readAvailable path tailState = do
-    exists <- doesFileExist path
-    if not exists
-        then pure (tailState, [])
-        else withBinaryFile path ReadMode \handle -> do
-            size <- hFileSize handle
-            let (startOffset, oldPending)
-                    | size < tailState.tailOffset =
-                        (0, ByteString.empty)
-                    | otherwise =
-                        (tailState.tailOffset, tailState.tailPending)
-            hSeek handle AbsoluteSeek startOffset
-            appended <- ByteString.hGet
-                handle
-                (fromIntegral (size - startOffset))
-            let newOffset = size
-                combined = oldPending <> appended
-            let (completeLines, pending) = splitCompleteLines combined
-            pure
-                ( TranscriptTail
-                    { tailOffset = newOffset
-                    , tailPending = pending
-                    }
-                , completeLines
-                )
-
-splitCompleteLines
-    :: ByteString.ByteString
-    -> ([ByteString.ByteString], ByteString.ByteString)
-splitCompleteLines bytes
-    | ByteString.null bytes =
-        ([], ByteString.empty)
-    | otherwise =
-        let pieces = ByteString.split newlineByte bytes
-            terminated =
-                ByteString.last bytes == newlineByte
-            (lines_, pending)
-                | terminated =
-                    (init pieces, ByteString.empty)
-                | otherwise =
-                    (init pieces, last pieces)
-        in (map stripCarriageReturn lines_, pending)
-
-newlineByte :: Word8
-newlineByte = 10
-
-stripCarriageReturn :: ByteString.ByteString -> ByteString.ByteString
-stripCarriageReturn line
-    | not (ByteString.null line)
-    , ByteString.last line == 13 =
-        ByteString.init line
-    | otherwise =
-        line
+turnTimeoutMicros :: Int
+turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
 
 trimAsciiWhitespace :: ByteString.ByteString -> ByteString.ByteString
 trimAsciiWhitespace =
@@ -691,19 +553,26 @@ trimAsciiWhitespace =
     isAsciiWhitespace byte =
         byte `elem` [9, 10, 13, 32]
 
-transcriptReadError :: FilePath -> SomeException -> ApiError
-transcriptReadError path exception =
-    ConnectionError
-        ( "Unable to read Claude Code transcript "
-            <> Text.pack path
-            <> ": "
-            <> Text.pack (displayException exception)
+prematureExitError :: ClaudeCodeTurn -> IO ApiError
+prematureExitError turn = do
+    processExit <- claudeCodeTurnProcessExit turn
+    diagnostic <- claudeCodeTurnDiagnostic turn
+    pure $ ConnectionError
+        ( "Claude Code closed its structured output before completing the turn"
+            <> exitSuffix processExit
+            <> "."
+            <> diagnosticSuffix diagnostic
         )
 
-processExitError :: ExitCode -> ApiError
-processExitError exitCode =
-    ConnectionError
-        ( "Claude Code exited before completing its response ("
-            <> Text.pack (show exitCode)
-            <> ")."
-        )
+exitSuffix :: Maybe ExitCode -> Text
+exitSuffix = \case
+    Nothing -> ""
+    Just exitCode ->
+        " (" <> Text.pack (show exitCode) <> ")"
+
+diagnosticSuffix :: Text -> Text
+diagnosticSuffix diagnostic
+    | Text.null (Text.strip diagnostic) =
+        ""
+    | otherwise =
+        "\nClaude Code stderr:\n" <> Text.takeEnd 2_000 diagnostic

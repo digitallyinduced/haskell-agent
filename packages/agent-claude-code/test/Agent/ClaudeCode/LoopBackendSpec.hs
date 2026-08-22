@@ -4,15 +4,21 @@ import Agent.ClaudeCode.LoopBackend
     ( claudeCodeOneShotBackend
     , withClaudeCodeBackend
     )
-import Agent.ClaudeCode.Session (defaultClaudeCodeOptions)
+import Agent.ClaudeCode.Session
+    ( ClaudeCodeOptions(..)
+    , ClaudeCodePermission(..)
+    , defaultClaudeCodeOptions
+    )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
     , ImageAttachment(..)
     , LoopEvent(..)
+    , TokenUsage(..)
     , TurnInput(..)
     , TurnOutput(..)
     )
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
     ( MessageContent(..)
     , ReasoningConfig(..)
@@ -22,7 +28,6 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , defaultResponseCreateParams
     )
-import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -60,7 +65,7 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "Claude Code loop backend" do
-        it "uses a PTY, tails JSONL, and persists normalized host messages" $
+        it "renders validated structured JSONL and persists normalized host messages" $
             withFakeClaude \fake -> do
                 transcript <- newIORef []
                 events <- newIORef []
@@ -108,12 +113,15 @@ spec = do
                 turn.responseId `shouldSatisfy` looksLikeUuid
                 turn.assistantText `shouldBe` Just "fake response"
                 turn.toolCalls `shouldBe` []
+                turn.tokenUsage.inputTokens `shouldBe` 10
+                turn.tokenUsage.outputTokens `shouldBe` 7
+                turn.tokenUsage.cachedTokens `shouldBe` 5
                 observedEvents <- readIORef events
-                observedEvents `shouldContain` [TextDelta "fake response"]
-                observedEvents `shouldContain`
-                    [ToolStarted expectedFakeToolCall]
-                observedEvents `shouldContain`
-                    [ToolFinished expectedFakeToolResult]
+                observedEvents `shouldBe`
+                    [ ToolStarted expectedFakeToolCall
+                    , ToolFinished expectedFakeToolResult
+                    , TextDelta "fake response"
+                    ]
 
                 history <- readIORef transcript
                 map responseMessageText
@@ -128,11 +136,146 @@ spec = do
                 submitted `shouldContain`
                     "Instructions supplied by the outer agent harness"
                 submitted `shouldContain` "hello"
+                submitted `shouldContain` "\"type\":\"user\""
+                submitted `shouldContain` "\"role\":\"user\""
+                submitted `shouldContain` "\"parent_tool_use_id\":null"
                 arguments <- readFile fake.argumentLog
-                arguments `shouldContain` "<--ax-screen-reader>"
+                arguments `shouldContain` "<-p>"
+                arguments `shouldContain`
+                    "<--input-format>\n<stream-json>"
+                arguments `shouldContain`
+                    "<--output-format>\n<stream-json>"
+                arguments `shouldNotContain` "<--include-partial-messages>"
+                arguments `shouldContain` "<--verbose>"
                 arguments `shouldContain`
                     "<--disallowedTools>\n<AskUserQuestion>"
+                arguments `shouldContain`
+                    "<--permission-mode>\n<dontAsk>"
                 arguments `shouldContain` "<--safe-mode>"
+                arguments `shouldContain` "<--disable-slash-commands>"
+                arguments `shouldContain` "<--strict-mcp-config>"
+                arguments `shouldContain`
+                    "<--mcp-config>\n<{\"mcpServers\":{}}>"
+                arguments `shouldContain`
+                    "<--setting-sources>\n<>"
+                arguments `shouldContain` "<--no-chrome>"
+                arguments `shouldNotContain` "<--ax-screen-reader>"
+
+        it "converts cumulative modelUsage snapshots to per-turn deltas" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                turns <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> do
+                            first <- expectTurn =<<
+                                backend.submitTurn
+                                    Nothing
+                                    [UserMessage "one"]
+                                    (\_ -> pure ())
+                            second <- expectTurn =<<
+                                backend.submitTurn
+                                    (Just first.responseId)
+                                    [UserMessage "two"]
+                                    (\_ -> pure ())
+                            pure (first, second)
+                (first, second) <-
+                    maybe
+                        (expectationFailure "usage fake timed out"
+                            >> fail "unreachable")
+                        pure
+                        turns
+                first.tokenUsage `shouldBe` TokenUsage
+                    { inputTokens = 10
+                    , outputTokens = 7
+                    , cachedTokens = 5
+                    }
+                second.tokenUsage `shouldBe` first.tokenUsage
+
+        it "does not recount fallback usage when cumulative modelUsage resumes" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_OMIT_MODEL_USAGE_TURN", Just "2")]
+                    do
+                        transcript <- newIORef []
+                        turns <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend -> do
+                                    first <- expectTurn =<<
+                                        backend.submitTurn
+                                            Nothing
+                                            [UserMessage "one"]
+                                            (\_ -> pure ())
+                                    second <- expectTurn =<<
+                                        backend.submitTurn
+                                            (Just first.responseId)
+                                            [UserMessage "two"]
+                                            (\_ -> pure ())
+                                    third <- expectTurn =<<
+                                        backend.submitTurn
+                                            (Just second.responseId)
+                                            [UserMessage "three"]
+                                            (\_ -> pure ())
+                                    pure [first, second, third]
+                        completed <-
+                            maybe
+                                (expectationFailure "usage recovery fake timed out"
+                                    >> fail "unreachable")
+                                pure
+                                turns
+                        map (.tokenUsage) completed `shouldBe`
+                            replicate 3 (TokenUsage
+                                { inputTokens = 10
+                                , outputTokens = 7
+                                , cachedTokens = 5
+                                })
+
+        it "maps bypass permission mode and can disable safe mode" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                let options =
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                            { permission = ClaudeCodeBypass
+                            , safeMode = False
+                            }
+                    backend =
+                        claudeCodeOneShotBackend
+                            options
+                            (pure defaultResponseCreateParams)
+                            transcript
+                result <- timeout 5_000_000 $
+                    backend.submitTurn
+                        Nothing
+                        [UserMessage "bypass"]
+                        (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                arguments <- readFile fake.argumentLog
+                arguments `shouldContain`
+                    "<--allow-dangerously-skip-permissions>"
+                arguments `shouldContain`
+                    "<--permission-mode>\n<bypassPermissions>"
+                arguments `shouldNotContain` "<--safe-mode>"
+                arguments `shouldNotContain` "<--disable-slash-commands>"
+                arguments `shouldContain` "<--setting-sources>\n<>"
+                arguments `shouldContain` "<--strict-mcp-config>"
+                arguments `shouldContain`
+                    "<--mcp-config>\n<{\"mcpServers\":{}}>"
+                arguments `shouldContain` "<--no-chrome>"
 
         it "disables all Claude tools for isolated auxiliary requests" $
             withFakeClaude \fake -> do
@@ -211,7 +354,7 @@ spec = do
                 arguments <- readFile fake.argumentLog
                 arguments `shouldNotContain` "<--effort>"
 
-        it "returns terminal transcript errors instead of hanging" $
+        it "returns terminal result errors instead of hanging" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
                     [("FAKE_CLAUDE_TERMINAL_ERROR", Just "1")]
@@ -232,13 +375,50 @@ spec = do
                         result `shouldSatisfy` \case
                             Just (Left ProviderError
                                 { errorType = ApiErrorType
-                                }) -> True
+                                , message
+                                }) ->
+                                    "login expired" `Text.isInfixOf` message
                             _ -> False
 
-        it "accepts end_turn when Claude exits before writing turn_duration" $
+        it "rejects a result for a different Claude session" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
-                    [("FAKE_CLAUDE_EXIT_AFTER_END_TURN", Just "1")]
+                    [ ( "FAKE_CLAUDE_RESULT_SESSION_ID"
+                      , Just "00000000-0000-4000-8000-000000000009"
+                      )
+                    ]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        let backend =
+                                claudeCodeOneShotBackend
+                                    (defaultClaudeCodeOptions
+                                        fake.executable
+                                        fake.workingDirectory)
+                                    (pure defaultResponseCreateParams)
+                                    transcript
+                        result <- timeout 5_000_000 $
+                            backend.submitTurn
+                                Nothing
+                                [UserMessage "wrong session"]
+                                (\event ->
+                                    modifyIORef' events (<> [event]))
+                        result `shouldSatisfy` \case
+                            Just (Left ProviderError
+                                { errorType = ApiErrorType
+                                , message
+                                }) ->
+                                    "00000000-0000-4000-8000-000000000009"
+                                        `Text.isInfixOf` message
+                                        && "was active"
+                                            `Text.isInfixOf` message
+                            _ -> False
+                        readIORef events `shouldReturn` []
+
+        it "reports malformed structured output" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_MALFORMED", Just "1")]
                     do
                         transcript <- newIORef []
                         let backend =
@@ -251,17 +431,16 @@ spec = do
                         result <- timeout 5_000_000 $
                             backend.submitTurn
                                 Nothing
-                                [UserMessage "exit fallback"]
+                                [UserMessage "malformed"]
                                 (\_ -> pure ())
                         result `shouldSatisfy` \case
-                            Just (Right turn) ->
-                                turn.assistantText == Just "fake response"
+                            Just (Left JsonDecodeError{}) -> True
                             _ -> False
 
-        it "debounces end_turn when a live Claude process omits turn_duration" $
+        it "reports EOF before the result record" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
-                    [("FAKE_CLAUDE_SKIP_TURN_DURATION", Just "1")]
+                    [("FAKE_CLAUDE_EXIT_EARLY", Just "1")]
                     do
                         transcript <- newIORef []
                         let backend =
@@ -274,11 +453,12 @@ spec = do
                         result <- timeout 5_000_000 $
                             backend.submitTurn
                                 Nothing
-                                [UserMessage "grace fallback"]
+                                [UserMessage "exit early"]
                                 (\_ -> pure ())
                         result `shouldSatisfy` \case
-                            Just (Right turn) ->
-                                turn.assistantText == Just "fake response"
+                            Just (Left (ConnectionError message)) ->
+                                "before completing the turn"
+                                    `Text.isInfixOf` message
                             _ -> False
 
         it "imports existing host history into a fresh Claude session" $
@@ -394,6 +574,9 @@ spec = do
                                     "four"
                             let switchedSessionId =
                                     "00000000-0000-4000-8000-000000000002"
+                            writeIORef transcript $
+                                turnInputsToItems
+                                    [UserMessage "switched session history"]
                             afterSessionSwitch <- expectTurn =<<
                                 submit backend
                                     (Just switchedSessionId)
@@ -436,6 +619,221 @@ spec = do
                     , "new " <> Text.unpack afterReset.responseId
                     ]
 
+        it "starts fresh when the host rolls back a completed turn" $
+            withFakeClaude \fake -> do
+                let initialHistory =
+                        turnInputsToItems
+                            [UserMessage "retained-history-marker"]
+                transcript <- newIORef initialHistory
+                turns <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> do
+                            first <- expectTurn =<<
+                                backend.submitTurn
+                                    Nothing
+                                    [UserMessage "rolled-back-prompt-marker"]
+                                    (\_ -> pure ())
+                            -- This is the same rollback performed by the host
+                            -- when cancellation wins immediately after the
+                            -- backend has returned a successful turn.
+                            writeIORef transcript initialHistory
+                            second <- expectTurn =<<
+                                backend.submitTurn
+                                    (Just (Text.toUpper first.responseId))
+                                    [UserMessage "replacement-prompt-marker"]
+                                    (\_ -> pure ())
+                            pure (first, second)
+                (first, second) <-
+                    maybe
+                        (expectationFailure "rollback recovery fake timed out"
+                            >> fail "unreachable")
+                        pure
+                        turns
+                second.responseId `shouldNotBe` first.responseId
+                starts <- lines <$> readFile fake.startLog
+                starts `shouldBe`
+                    [ "new " <> Text.unpack first.responseId
+                    , "new " <> Text.unpack second.responseId
+                    ]
+                submitted <- lines <$> readFile fake.promptLog
+                length submitted `shouldBe` 2
+                let replacementPrompt = last submitted
+                replacementPrompt `shouldContain`
+                    "retained-history-marker"
+                replacementPrompt `shouldContain`
+                    "replacement-prompt-marker"
+                replacementPrompt `shouldNotContain`
+                    "rolled-back-prompt-marker"
+
+        it "times out blocked prompt writes and starts fresh" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_BLOCK_AFTER_FIRST_TURN", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        let options =
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                    { promptWriteTimeoutMicros = 200_000 }
+                            blockedPrompt =
+                                Text.replicate (4 * 1024 * 1024) "x"
+                        turns <- timeout 8_000_000 $
+                            withClaudeCodeBackend
+                                options
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend -> do
+                                    first <- expectTurn =<<
+                                        backend.submitTurn
+                                            Nothing
+                                            [UserMessage "one"]
+                                            (\_ -> pure ())
+                                    failed <-
+                                        backend.submitTurn
+                                            (Just first.responseId)
+                                            [UserMessage blockedPrompt]
+                                            (\_ -> pure ())
+                                    third <- expectTurn =<<
+                                        backend.submitTurn
+                                            (Just first.responseId)
+                                            [UserMessage "three"]
+                                            (\_ -> pure ())
+                                    pure (first, failed, third)
+                        (first, failed, third) <-
+                            maybe
+                                (expectationFailure "write-timeout fake timed out"
+                                    >> fail "unreachable")
+                                pure
+                                turns
+                        failed `shouldSatisfy` \case
+                            Left (ConnectionError message) ->
+                                "prompt-write timeout"
+                                    `Text.isInfixOf` message
+                            _ -> False
+                        third.responseId `shouldNotBe` first.responseId
+                        starts <- lines <$> readFile fake.startLog
+                        starts `shouldBe`
+                            [ "new " <> Text.unpack first.responseId
+                            , "new " <> Text.unpack third.responseId
+                            ]
+                        history <- readIORef transcript
+                        map responseMessageText
+                            [message | MessageItem message <- history]
+                            `shouldBe`
+                                [ "one"
+                                , "fake response"
+                                , "three"
+                                , "fake response"
+                                ]
+
+        it "starts fresh after a failed turn in an established session" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_FAIL_TURN", Just "2")]
+                    do
+                        transcript <- newIORef []
+                        turns <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend -> do
+                                    first <- expectTurn =<<
+                                        backend.submitTurn
+                                            Nothing
+                                            [UserMessage "one"]
+                                            (\_ -> pure ())
+                                    failed <-
+                                        backend.submitTurn
+                                            (Just first.responseId)
+                                            [UserMessage "two"]
+                                            (\_ -> pure ())
+                                    resumed <- expectTurn =<<
+                                        backend.submitTurn
+                                            (Just first.responseId)
+                                            [UserMessage "three"]
+                                            (\_ -> pure ())
+                                    pure (first, failed, resumed)
+                        (first, failed, resumed) <-
+                            maybe
+                                (expectationFailure "recovery fake timed out"
+                                    >> fail "unreachable")
+                                pure
+                                turns
+                        failed `shouldSatisfy` \case
+                            Left ProviderError
+                                { errorType = ApiErrorType
+                                , message
+                                } ->
+                                    "login expired"
+                                        `Text.isInfixOf` message
+                            _ -> False
+                        resumed.responseId `shouldNotBe` first.responseId
+                        starts <- lines <$> readFile fake.startLog
+                        starts `shouldBe`
+                            [ "new " <> Text.unpack first.responseId
+                            , "new " <> Text.unpack resumed.responseId
+                            ]
+                        submitted <- readFile fake.promptLog
+                        submitted `shouldContain`
+                            "Prior conversation imported from the outer agent harness"
+
+        it "starts fresh after a turn callback throws" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                turns <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> do
+                            first <- expectTurn =<<
+                                backend.submitTurn
+                                    Nothing
+                                    [UserMessage "one"]
+                                    (\_ -> pure ())
+                            failed <-
+                                backend.submitTurn
+                                    (Just first.responseId)
+                                    [UserMessage "two"]
+                                    (\_ -> ioError (userError "renderer failed"))
+                            resumed <- expectTurn =<<
+                                backend.submitTurn
+                                    (Just first.responseId)
+                                    [UserMessage "three"]
+                                    (\_ -> pure ())
+                            pure (first, failed, resumed)
+                (first, failed, resumed) <-
+                    maybe
+                        (expectationFailure "callback recovery fake timed out"
+                            >> fail "unreachable")
+                        pure
+                        turns
+                failed `shouldSatisfy` \case
+                    Left (ConnectionError message) ->
+                        "renderer failed" `Text.isInfixOf` message
+                    _ -> False
+                resumed.responseId `shouldNotBe` first.responseId
+                starts <- lines <$> readFile fake.startLog
+                starts `shouldBe`
+                    [ "new " <> Text.unpack first.responseId
+                    , "new " <> Text.unpack resumed.responseId
+                    ]
+
 data FakeClaude = FakeClaude
     { executable :: !FilePath
     , workingDirectory :: !FilePath
@@ -449,12 +847,10 @@ withFakeClaude action =
     withScratchDirectory "agent-claude-code-test" \root -> do
         let executable = root </> "fake-claude"
             workingDirectory = root </> "work"
-            configDirectory = root </> "config"
             promptLog = root </> "prompt.log"
             startLog = root </> "start.log"
             argumentLog = root </> "arguments.log"
         createDirectory workingDirectory
-        createDirectory configDirectory
         writeFile executable
             (fakeClaudeScript promptLog startLog argumentLog)
         setFileMode executable $
@@ -462,14 +858,26 @@ withFakeClaude action =
                 `unionFileModes` ownerWriteMode
                 `unionFileModes` ownerExecuteMode
         withEnvironmentVariables
-            [ ("CLAUDE_CONFIG_DIR", Just configDirectory)
-            , ("ANTHROPIC_API_KEY", Just "must-not-leak")
+            [ ("ANTHROPIC_API_KEY", Just "must-not-leak")
             , ("ANTHROPIC_AUTH_TOKEN", Just "must-not-leak")
             , ("ANTHROPIC_FUTURE_OVERRIDE", Just "must-not-leak")
             , ("CLAUDE_CODE_USE_BEDROCK", Just "1")
             , ("CLAUDE_CODE_USE_VERTEX", Just "1")
             , ("CLAUDE_CODE_USE_FOUNDRY", Just "1")
+            , ("CLAUDE_CODE_USE_ANTHROPIC_AWS", Just "1")
+            , ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", Just "1")
+            , ("CLAUDE_CODE_USE_GATEWAY", Just "1")
+            , ("CLAUDE_CODE_USE_MANTLE", Just "1")
+            , ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", Just "1")
             , ("CLAUDE_CODE_API_BASE_URL", Just "https://example.invalid")
+            , ("CLAUDE_CODE_OAUTH_TOKEN", Just "must-not-leak")
+            , ("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", Just "9")
+            , ("CLAUDE_CODE_HOST_CREDS_FILE", Just "/tmp/credentials")
+            , ("CLAUDE_CODE_HFI_BEARER_TOKEN", Just "must-not-leak")
+            , ( "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+              , Just "1"
+              )
+            , ("AGENT_PROXY_URL", Just "https://example.invalid")
             , ("AWS_BEARER_TOKEN_BEDROCK", Just "must-not-leak")
             , ("AWS_ACCESS_KEY_ID", Just "tool-credential")
             ] $
@@ -508,9 +916,15 @@ fakeClaudeScript :: FilePath -> FilePath -> FilePath -> String
 fakeClaudeScript promptLog startLog argumentLog =
     unlines
         [ "#!/bin/sh"
-        , "test -t 0 && test -t 1 && test -t 2 || exit 42"
+        , "test ! -t 0 && test ! -t 1 && test ! -t 2 || exit 42"
         , "test \"$AWS_ACCESS_KEY_ID\" = tool-credential || exit 44"
-        , "if env | grep -E '^(ANTHROPIC_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)=|CLAUDE_CODE_API_BASE_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
+        , "test \"$ENABLE_CLAUDEAI_MCP_SERVERS\" = 0 || exit 46"
+        , "test \"$CLAUDE_CODE_ENTRYPOINT\" = sdk-cli || exit 47"
+        , "test \"$CLAUDE_AGENT_SDK_CLIENT_APP\" = haskell-agent || exit 49"
+        , "if env | grep -E '^(ANTHROPIC_|_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=|AGENT_PROXY_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
+        , "  exit 45"
+        , "fi"
+        , "if env | grep '^CLAUDE_CODE_' | grep -v '^CLAUDE_CODE_ENTRYPOINT=sdk-cli$' >/dev/null; then"
         , "  exit 45"
         , "fi"
         , "printf '<%s>\\n' \"$@\" >> " <> shellQuote argumentLog
@@ -528,7 +942,7 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "      session_id=\"$2\""
         , "      shift 2"
         , "      ;;"
-        , "    --model|--effort|--permission-mode|--disallowedTools|--tools)"
+        , "    --model|--effort|--permission-mode|--disallowedTools|--tools|--input-format|--output-format|--setting-sources|--mcp-config)"
         , "      shift 2"
         , "      ;;"
         , "    *) shift ;;"
@@ -536,29 +950,45 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "done"
         , "test -n \"$session_id\" || exit 43"
         , "printf '%s %s\\n' \"$start_mode\" \"$session_id\" >> " <> shellQuote startLog
-        , "slug=$(printf '%s' \"$PWD\" | sed 's/[^A-Za-z0-9]/-/g')"
-        , "transcript_dir=\"$CLAUDE_CONFIG_DIR/projects/$slug\""
-        , "mkdir -p \"$transcript_dir\""
-        , "transcript=\"$transcript_dir/$session_id.jsonl\""
-        , "printf '\\n$\\033[2G'"
+        , "turn=0"
         , "while IFS= read -r prompt; do"
+        , "  turn=$((turn + 1))"
         , "  printf '%s\\n' \"$prompt\" >> " <> shellQuote promptLog
-        , "  if [ \"$FAKE_CLAUDE_TERMINAL_ERROR\" = 1 ]; then"
-        , "    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"api_error\",\"retryAttempt\":1,\"maxRetries\":10,\"error\":{\"status\":401,\"message\":\"login expired\"}}' >> \"$transcript\""
+        , "  printf '%s' \"$prompt\" | grep '\"type\":\"user\"' >/dev/null || exit 48"
+        , "  if [ \"$FAKE_CLAUDE_EXIT_EARLY\" = 1 ]; then"
+        , "    exit 17"
+        , "  fi"
+        , "  if [ \"$FAKE_CLAUDE_MALFORMED\" = 1 ]; then"
+        , "    printf '%s\\n' '{not-json'"
         , "    continue"
         , "  fi"
-        , "  printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"id\":\"fake-tool-message\",\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"Read\",\"input\":{\"file_path\":\"README.md\"}}],\"stop_reason\":\"tool_use\"}}' >> \"$transcript\""
-        , "  printf '%s\\n' '{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}' >> \"$transcript\""
-        , "  printf '%s' '{\"type\":\"assistant\",\"message\":{\"id\":\"fake-message\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7}}}' >> \"$transcript\""
-        , "  if [ \"$FAKE_CLAUDE_EXIT_AFTER_END_TURN\" = 1 ]; then"
-        , "    exit 0"
-        , "  fi"
-        , "  printf '\\n' >> \"$transcript\""
-        , "  if [ \"$FAKE_CLAUDE_SKIP_TURN_DURATION\" = 1 ]; then"
+        , "  printf '{\"type\":\"system\",\"subtype\":\"init\",\"uuid\":\"init-%s\",\"session_id\":\"%s\",\"apiKeySource\":\"none\"}\\n' \"$turn\" \"$session_id\""
+        , "  fail_turn=0"
+        , "  if [ \"$FAKE_CLAUDE_TERMINAL_ERROR\" = 1 ]; then fail_turn=1; fi"
+        , "  if [ -n \"$FAKE_CLAUDE_FAIL_TURN\" ] && [ \"$FAKE_CLAUDE_FAIL_TURN\" = \"$turn\" ]; then fail_turn=1; fi"
+        , "  if [ \"$fail_turn\" = 1 ]; then"
+        , "    printf '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"uuid\":\"error-%s\",\"session_id\":\"%s\",\"is_error\":true,\"api_error_status\":401,\"errors\":[\"login expired\"],\"usage\":{}}\\n' \"$turn\" \"$session_id\""
         , "    continue"
         , "  fi"
-        , "  printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":1}' >> \"$transcript\""
-        , "  printf '\\n$\\033[2G'"
+        , "  printf '{\"type\":\"stream_event\",\"uuid\":\"message-start-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"message-%s\"}}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-a-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fake \"}}}\\n' \"$turn\" \"$session_id\""
+        , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-b-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"response\"}}}\\n' \"$turn\" \"$session_id\""
+        , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"Read\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\""
+        , "  printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
+        , "  cumulative_input=$((turn * 2))"
+        , "  cumulative_cache_creation=$((turn * 3))"
+        , "  cumulative_cache_read=$((turn * 5))"
+        , "  cumulative_output=$((turn * 7))"
+        , "  if [ \"$FAKE_CLAUDE_OMIT_MODEL_USAGE_TURN\" = \"$turn\" ]; then"
+        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7}}\\n' \"$turn\" \"$result_session_id\""
+        , "  else"
+        , "    printf '{\"type\":\"result\",\"subtype\":\"success\",\"uuid\":\"result-%s\",\"session_id\":\"%s\",\"is_error\":false,\"result\":\"fake response\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":7},\"modelUsage\":{\"fake-model\":{\"inputTokens\":%s,\"cacheCreationInputTokens\":%s,\"cacheReadInputTokens\":%s,\"outputTokens\":%s}}}\\n' \"$turn\" \"$result_session_id\" \"$cumulative_input\" \"$cumulative_cache_creation\" \"$cumulative_cache_read\" \"$cumulative_output\""
+        , "  fi"
+        , "  if [ \"$FAKE_CLAUDE_BLOCK_AFTER_FIRST_TURN\" = 1 ] && [ \"$turn\" = 1 ]; then"
+        , "    sleep 30"
+        , "  fi"
         , "done"
         ]
 
@@ -569,7 +999,7 @@ shellQuote value =
     escape '\'' = "'\"'\"'"
     escape character = [character]
 
-responseMessageText :: ResponseMessage -> Text.Text
+responseMessageText :: ResponseMessage -> Text
 responseMessageText message =
     case message.content of
         MessageContentText text -> text
@@ -599,7 +1029,7 @@ expectedFakeToolResult = ToolCallResult
     , callKind = FunctionCallKind
     }
 
-looksLikeUuid :: Text.Text -> Bool
+looksLikeUuid :: Text -> Bool
 looksLikeUuid value =
     case Text.splitOn "-" value of
         [a, b, c, d, e] ->

@@ -2,8 +2,8 @@ cabal-version:      2.2
 name:               agent-claude-code
 version:            0.1.0.0
 synopsis:           Claude Code subscription subprocess backend
-description:        PTY-backed integration with an authenticated interactive
-                    Claude Code process and its persisted JSONL transcripts.
+description:        Structured stream-json integration with an authenticated
+                    subscription-backed Claude Code process.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -41,7 +41,7 @@ library
                     , Agent.ClaudeCode.Auth
                     , Agent.ClaudeCode.LoopBackend
                     , Agent.ClaudeCode.Session
-                    , Agent.ClaudeCode.Transcript
+                    , Agent.ClaudeCode.Stream
     other-modules:    Agent.ClaudeCode.Internal.Environment
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
@@ -52,11 +52,9 @@ library
                     , containers
                     , directory
                     , entropy
-                    , filepath
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text
-                    , unix
                     , uuid-types
 
 test-suite agent-claude-code-test
@@ -66,18 +64,16 @@ test-suite agent-claude-code-test
     main-is:          Spec.hs
     other-modules:    Agent.ClaudeCode.AuthSpec
                     , Agent.ClaudeCode.LoopBackendSpec
-                    , Agent.ClaudeCode.TranscriptSpec
+                    , Agent.ClaudeCode.StreamSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-claude-code
                     , agent-core
                     , agent-responses
-                    , aeson
                     , bytestring
                     , directory
                     , filepath
                     , hspec
-                    , process
                     , safe-exceptions
                     , text
                     , unix

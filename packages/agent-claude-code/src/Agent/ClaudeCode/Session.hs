@@ -1,10 +1,5 @@
--- | Lifecycle management for an interactive, subscription-authenticated
--- Claude Code process.
---
--- Claude Code deliberately keeps subscription use inside its own interactive
--- harness.  This module therefore gives it a real pseudo-terminal and keeps
--- one process alive across turns.  Callers consume the durable JSONL
--- transcript rather than attempting to parse terminal rendering.
+-- | Lifecycle management for a subscription-authenticated Claude Code
+-- process using the same structured JSONL transport as the Agent SDK.
 module Agent.ClaudeCode.Session
     ( ClaudeCodePermission(..)
     , ClaudeCodeOptions(..)
@@ -15,9 +10,9 @@ module Agent.ClaudeCode.Session
     , withClaudeCodeSessionWithoutTools
     , withClaudeCodeTurn
     , sendClaudeCodePrompt
+    , readClaudeCodeOutputLine
+    , resolveClaudeCodeTurnUsage
     , claudeCodeTurnSessionId
-    , claudeCodeTurnTranscriptPath
-    , claudeCodeTurnTranscriptOffset
     , claudeCodeTurnIsNewSession
     , claudeCodeTurnProcessExit
     , claudeCodeTurnDiagnostic
@@ -26,6 +21,11 @@ module Agent.ClaudeCode.Session
 import Agent.ClaudeCode.Internal.Environment
     ( getSanitizedClaudeEnvironment )
 import Agent.Error (ApiError(..))
+import Agent.Loop
+    ( TokenUsage(..)
+    , addTokenUsage
+    , emptyTokenUsage
+    )
 import Agent.Tools.IO (terminateProcessGroup)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
@@ -34,25 +34,28 @@ import Control.Concurrent.Async
     , cancel
     , waitCatch
     )
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( MVar
     , newMVar
     , withMVar
     )
+import Control.Exception (IOException)
 import Control.Exception.Safe
     ( SomeException
     , bracket
     , catchAny
     , mask
     , onException
+    , throwIO
+    , try
     , tryAny
     )
-import Control.Monad (filterM, void)
+import Control.Monad (unless, void)
+import qualified Data.Aeson as Aeson
 import Data.Bits ((.&.), (.|.))
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString8
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Char (isAlphaNum, isAscii, isControl)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -66,22 +69,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.UUID.Types as UUID
-import System.Directory
-    ( canonicalizePath
-    , doesDirectoryExist
-    , doesFileExist
-    , getFileSize
-    , getHomeDirectory
-    , listDirectory
-    )
+import System.Directory (canonicalizePath)
 import System.Entropy (getEntropy)
-import System.Environment (lookupEnv)
 import System.Exit (ExitCode)
-import System.FilePath
-    ( (</>)
-    , isRelative
-    , takeFileName
-    )
 import System.IO
     ( BufferMode(NoBuffering)
     , Handle
@@ -90,26 +80,22 @@ import System.IO
     , hSetBinaryMode
     , hSetBuffering
     )
-import System.Posix.IO
-    ( closeFd
-    , dup
-    , fdToHandle
-    )
-import System.Posix.Terminal (openPseudoTerminal)
+import System.IO.Error (isEOFError)
 import System.Posix.Types (ProcessGroupID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
-    , StdStream(UseHandle)
+    , StdStream(CreatePipe)
     , createProcess
     , getPid
     , getProcessExitCode
     , proc
     , waitForProcess
     )
+import System.Timeout (timeout)
 
--- | Claude's non-interactive permission policies that cannot pause to ask the
--- host terminal user for confirmation.
+-- | Claude's non-interactive permission policies. Neither policy can pause
+-- the hidden subprocess to ask the terminal user for confirmation.
 data ClaudeCodePermission
     = ClaudeCodeDontAsk
     | ClaudeCodeBypass
@@ -126,6 +112,7 @@ data ClaudeCodeOptions = ClaudeCodeOptions
     , cwd :: !FilePath
     , permission :: !ClaudeCodePermission
     , safeMode :: !Bool
+    , promptWriteTimeoutMicros :: !Int
     } deriving (Eq, Show)
 
 defaultClaudeCodeOptions :: FilePath -> FilePath -> ClaudeCodeOptions
@@ -134,9 +121,10 @@ defaultClaudeCodeOptions executable cwd = ClaudeCodeOptions
     , cwd
     , permission = ClaudeCodeDontAsk
     , safeMode = True
+    , promptWriteTimeoutMicros = 60 * 1_000_000
     }
 
--- | A serialized owner for at most one interactive Claude process.
+-- | A serialized owner for at most one structured Claude process.
 data ClaudeCodeSession = ClaudeCodeSession
     { sessionOptions :: !ClaudeCodeOptions
     , sessionToolMode :: !ClaudeCodeToolMode
@@ -151,28 +139,42 @@ data SessionState = SessionState
     -- True when the current session UUID already has a completed turn and may
     -- therefore be resumed after a process restart.
     , stateHadCompletedTurn :: !Bool
+    -- A failed or cancelled turn may already have persisted uncommitted
+    -- context in Claude's session. Force the next turn onto a fresh UUID so
+    -- the host's committed history remains authoritative.
+    , stateNeedsFreshSession :: !Bool
     }
 
 data RunningClaude = RunningClaude
     { runningSessionId :: !Text
     , runningModel :: !(Maybe Text)
     , runningEffort :: !(Maybe Text)
-    , runningTranscriptPath :: !FilePath
     , runningInput :: !Handle
     , runningOutput :: !Handle
+    , runningError :: !Handle
     , runningProcess :: !ProcessHandle
     , runningGroupId :: !(Maybe ProcessGroupID)
     , runningDiagnosticBytes :: !(IORef ByteString.ByteString)
-    , runningReadyPrompts :: !(IORef Int)
-    , runningConsumedPrompts :: !(IORef Int)
-    , runningDrain :: !(Async ())
+    , runningUsageAccounting :: !(IORef UsageAccounting)
+    , runningPromptWriteTimeoutMicros :: !Int
+    , runningErrorDrain :: !(Async ())
     }
 
--- | Immutable view of the process and transcript boundary for one submitted
--- turn.  The owning 'ClaudeCodeSession' keeps the underlying process alive.
+data UsageAccounting = UsageAccounting
+    { usageCumulativeBaseline :: !(Maybe TokenUsage)
+    , usagePendingFallback :: !TokenUsage
+    }
+
+data UsageComponents = UsageComponents
+    { usageUncachedInput :: !Int
+    , usageCachedInput :: !Int
+    , usageOutput :: !Int
+    }
+
+-- | Immutable view of the process selected for one submitted turn. The owning
+-- 'ClaudeCodeSession' keeps the structured process alive across turns.
 data ClaudeCodeTurn = ClaudeCodeTurn
     { turnRunning :: !RunningClaude
-    , turnTranscriptOffset :: !Integer
     , turnIsNewSession :: !Bool
     }
 
@@ -217,74 +219,158 @@ withClaudeCodeSessionMode toolMode options initialPrevious =
         mapM_ stopRunningClaude state.stateRunning
         writeIORef session.sessionState emptySessionState
 
--- | Run one transcript-consuming action against the appropriate persistent
--- Claude process.
+-- | Run one structured-stream action against the appropriate persistent
+-- Claude process. The host-state check must confirm that the previously
+-- committed turn is still present. A failed check invalidates the current
+-- continuation before process selection, preventing rolled-back host history
+-- from reusing hidden Claude state. A successful callback returns a commit
+-- action; that action and the Claude completion marker run together while
+-- asynchronous exceptions are masked.
 --
 -- A valid UUID in the host's previous-response field resumes that Claude
--- session.  Model or effort changes restart the process while preserving the
--- UUID.  Passing no previous response after a completed turn is treated as an
+-- session. Model or effort changes restart the process while preserving the
+-- UUID. Passing no previous response after a completed turn is treated as an
 -- explicit new conversation and receives a fresh UUID.
 withClaudeCodeTurn
     :: ClaudeCodeSession
+    -> IO Bool
     -> Maybe Text
     -> Maybe Text
     -> Maybe Text
-    -> (ClaudeCodeTurn -> IO (Either ApiError a))
+    -> (ClaudeCodeTurn -> IO (Either ApiError (a, IO ())))
     -> IO (Either ApiError a)
-withClaudeCodeTurn session previous model effort callback =
+withClaudeCodeTurn
+    session
+    hostTranscriptMatches
+    previous
+    model
+    effort
+    callback =
     withMVar session.sessionTurnLock \_ ->
         mask \restore -> do
             selectedPrevious <- selectPrevious session previous
-            prepared <- tryAny $ prepareTurn session
-                selectedPrevious
-                (nonEmptyText model)
-                (nonEmptyText effort)
+            prepared <- tryAny $ do
+                matches <- hostTranscriptMatches
+                unless matches (invalidateClaudeCodeContinuation session)
+                prepareTurn session
+                    selectedPrevious
+                    (nonEmptyText model)
+                    (nonEmptyText effort)
             case prepared of
                 Left exception ->
                     pure (Left (connectionError "Failed to start Claude Code" exception))
                 Right turn -> do
                     result <- tryAny $
                         restore (callback turn)
-                            `onException` abortClaudeCodeTurn turn
+                            `onException`
+                                abortAndInvalidateClaudeCodeTurn session turn
                     case result of
                         Left exception ->
                             pure (Left (connectionError "Claude Code turn failed" exception))
-                        Right answer -> do
-                            case answer of
-                                Left _ ->
-                                    abortClaudeCodeTurn turn
-                                Right _ ->
+                        Right (Left err) -> do
+                            abortAndInvalidateClaudeCodeTurn session turn
+                            pure (Left err)
+                        Right (Right (value, commit)) -> do
+                            committed <- tryAny commit
+                            case committed of
+                                Left exception -> do
+                                    abortAndInvalidateClaudeCodeTurn
+                                        session
+                                        turn
+                                    pure $
+                                        Left
+                                            (connectionError
+                                                "Failed to commit Claude Code turn"
+                                                exception)
+                                Right () -> do
                                     markTurnCompleted session turn
-                            pure answer
+                                    pure (Right value)
 
--- | Submit one prompt through bracketed paste.  Escape and NUL characters are
--- removed so prompt content cannot break out of the paste protocol and inject
--- terminal control sequences.
-sendClaudeCodePrompt :: ClaudeCodeTurn -> Text -> IO ()
+-- | Submit one SDK-compatible user message to the persistent process. The
+-- write is bounded so a child that stops reading stdin cannot hang forever.
+sendClaudeCodePrompt :: ClaudeCodeTurn -> Text -> IO Bool
 sendClaudeCodePrompt turn prompt = do
-    awaitReadyPrompt turn.turnRunning
-    let safeCharacter character =
-            not (isControl character)
-                || character == '\n'
-                || character == '\t'
-        clean = Text.filter safeCharacter prompt
-        bytes =
-            "\ESC[200~"
-                <> TextEncoding.encodeUtf8 clean
-                <> "\ESC[201~\r"
-    ByteString.hPut turn.turnRunning.runningInput bytes
-    hFlush turn.turnRunning.runningInput
+    result <-
+        timeout
+            (max 1 turn.turnRunning.runningPromptWriteTimeoutMicros)
+            do
+                LazyByteString.hPut
+                    turn.turnRunning.runningInput
+                    ( Aeson.encode
+                        (Aeson.object
+                            [ "type" Aeson..= ("user" :: Text)
+                            , "message" Aeson..= Aeson.object
+                                [ "role" Aeson..= ("user" :: Text)
+                                , "content" Aeson..=
+                                    [ Aeson.object
+                                        [ "type" Aeson..= ("text" :: Text)
+                                        , "text" Aeson..= prompt
+                                        ]
+                                    ]
+                                ]
+                            , "parent_tool_use_id" Aeson..= Aeson.Null
+                            ]
+                        )
+                        <> "\n"
+                    )
+                hFlush turn.turnRunning.runningInput
+    pure (isJust result)
+
+-- | Read the next complete JSONL record from Claude's stdout. 'Nothing'
+-- denotes EOF; other I/O errors are rethrown for the turn wrapper to report.
+readClaudeCodeOutputLine
+    :: ClaudeCodeTurn
+    -> IO (Maybe ByteString.ByteString)
+readClaudeCodeOutputLine turn = do
+    result <-
+        try (ByteString8.hGetLine turn.turnRunning.runningOutput)
+            :: IO (Either IOException ByteString.ByteString)
+    case result of
+        Right line -> pure (Just line)
+        Left exception
+            | isEOFError exception -> pure Nothing
+            | otherwise -> throwIO exception
+
+-- | Convert Claude's process-cumulative @modelUsage@ snapshot to the per-turn
+-- delta expected by 'Agent.Loop'. If Claude omits or malforms that snapshot,
+-- remember the emitted per-result fallback as debt. Later cumulative deltas
+-- are reduced by that debt so the same usage is not reported twice.
+resolveClaudeCodeTurnUsage
+    :: ClaudeCodeTurn
+    -> TokenUsage
+    -> Maybe TokenUsage
+    -> IO TokenUsage
+resolveClaudeCodeTurnUsage turn fallback cumulative =
+    case cumulative of
+        Nothing ->
+            atomicModifyIORef'
+                turn.turnRunning.runningUsageAccounting
+                \accounting ->
+                    ( accounting
+                        { usagePendingFallback =
+                            addTokenUsage
+                                accounting.usagePendingFallback
+                                fallback
+                        }
+                    , fallback
+                    )
+        Just current ->
+            atomicModifyIORef'
+                turn.turnRunning.runningUsageAccounting
+                \accounting ->
+                    let (reported, pending) =
+                            reconcileCumulativeUsage accounting current
+                    in
+                        ( UsageAccounting
+                            { usageCumulativeBaseline = Just current
+                            , usagePendingFallback = pending
+                            }
+                        , reported
+                        )
 
 claudeCodeTurnSessionId :: ClaudeCodeTurn -> Text
 claudeCodeTurnSessionId turn =
     turn.turnRunning.runningSessionId
-
-claudeCodeTurnTranscriptPath :: ClaudeCodeTurn -> FilePath
-claudeCodeTurnTranscriptPath turn =
-    turn.turnRunning.runningTranscriptPath
-
-claudeCodeTurnTranscriptOffset :: ClaudeCodeTurn -> Integer
-claudeCodeTurnTranscriptOffset = (.turnTranscriptOffset)
 
 claudeCodeTurnIsNewSession :: ClaudeCodeTurn -> Bool
 claudeCodeTurnIsNewSession = (.turnIsNewSession)
@@ -293,8 +379,8 @@ claudeCodeTurnProcessExit :: ClaudeCodeTurn -> IO (Maybe ExitCode)
 claudeCodeTurnProcessExit turn =
     getProcessExitCode turn.turnRunning.runningProcess
 
--- | A bounded tail of the PTY rendering, intended only for connection-error
--- diagnostics.  User-visible model output comes from the JSONL transcript.
+-- | A bounded tail of Claude's stderr, intended only for connection-error
+-- diagnostics. User-visible model output comes from stdout stream-json.
 claudeCodeTurnDiagnostic :: ClaudeCodeTurn -> IO Text
 claudeCodeTurnDiagnostic turn =
     TextEncoding.decodeUtf8With lenientDecode
@@ -304,6 +390,7 @@ emptySessionState :: SessionState
 emptySessionState = SessionState
     { stateRunning = Nothing
     , stateHadCompletedTurn = False
+    , stateNeedsFreshSession = False
     }
 
 selectPrevious :: ClaudeCodeSession -> Maybe Text -> IO (Maybe Text)
@@ -334,9 +421,14 @@ prepareTurn session previous model effort = do
             pure (running, oldState, False)
         Restart mode completed -> do
             mapM_ stopRunningClaude oldState.stateRunning
-            -- Clear ownership before launch.  If launch fails there must be no
-            -- stale handle for outer cleanup to touch.
-            writeIORef session.sessionState emptySessionState
+            -- Clear ownership before launch. If launch fails there must be no
+            -- stale handle for outer cleanup to touch. Preserve dirty-session
+            -- invalidation so a failed replacement launch cannot resume it.
+            writeIORef session.sessionState
+                emptySessionState
+                    { stateNeedsFreshSession =
+                        oldState.stateNeedsFreshSession
+                    }
             running <- startRunningClaude
                 session.sessionOptions
                 session.sessionToolMode
@@ -346,17 +438,15 @@ prepareTurn session previous model effort = do
             let state = SessionState
                     { stateRunning = Just running
                     , stateHadCompletedTurn = completed
+                    , stateNeedsFreshSession = False
                     }
-            -- Store the newly acquired process before exposing it to a caller.
             writeIORef session.sessionState state
             pure (running, state, isNewStart mode)
-    offset <- transcriptSize running.runningTranscriptPath
     -- Keep the state write explicit in the reuse branch as documentation that
     -- the process remains owned for the complete callback lifetime.
     writeIORef session.sessionState newState
     pure ClaudeCodeTurn
         { turnRunning = running
-        , turnTranscriptOffset = offset
         , turnIsNewSession = isNewSession
         }
 
@@ -376,50 +466,50 @@ decideProcess
     -> Maybe Text
     -> IO ProcessDecision
 decideProcess state processExited previous model effort =
-    case state.stateRunning of
-        Nothing ->
-            case previous >>= validSessionId of
-                Just sessionId -> pure (Restart (StartResume sessionId) True)
-                Nothing -> freshStart
-        Just running
-            | Just rawPrevious <- previous
-            , Nothing <- validSessionId rawPrevious ->
-                -- A response ID from another provider cannot identify a Claude
-                -- transcript.  Start clean; LoopBackend can import host history.
-                freshStart
-            | Just sessionId <- previous >>= validSessionId
-            , sessionId /= running.runningSessionId ->
-                pure (Restart (StartResume sessionId) True)
-            | previous == Nothing && state.stateHadCompletedTurn ->
-                freshStart
-            | processExited ->
-                -- A cancelled or failed callback stops the old process before
-                -- releasing the turn lock. Reuse its UUID so late JSONL writes
-                -- from that process cannot cross the next baseline, while
-                -- Claude still retains any durable session context.
-                restartStopped running
-            | modeChanged running model effort ->
-                pure $
-                    Restart
-                        (if state.stateHadCompletedTurn
-                            then StartResume running.runningSessionId
-                            else StartNew running.runningSessionId)
-                        state.stateHadCompletedTurn
-            | otherwise ->
-                pure (Reuse running)
+    if state.stateNeedsFreshSession
+        then freshStart
+        else
+            case state.stateRunning of
+                Nothing ->
+                    case previous >>= validSessionId of
+                        Just sessionId ->
+                            pure (Restart (StartResume sessionId) True)
+                        Nothing ->
+                            freshStart
+                Just running
+                    | Just rawPrevious <- previous
+                    , Nothing <- validSessionId rawPrevious ->
+                        -- A response ID from another provider cannot identify a
+                        -- Claude session. Start clean; LoopBackend can import
+                        -- host history.
+                        freshStart
+                    | Just sessionId <- previous >>= validSessionId
+                    , sessionId /= running.runningSessionId ->
+                        pure (Restart (StartResume sessionId) True)
+                    | previous == Nothing && state.stateHadCompletedTurn ->
+                        freshStart
+                    | processExited ->
+                        if state.stateHadCompletedTurn
+                            then pure
+                                (Restart
+                                    (StartResume running.runningSessionId)
+                                    True)
+                            else freshStart
+                    | modeChanged running model effort ->
+                        pure $
+                            Restart
+                                (if state.stateHadCompletedTurn
+                                    then
+                                        StartResume running.runningSessionId
+                                    else
+                                        StartNew running.runningSessionId)
+                                state.stateHadCompletedTurn
+                    | otherwise ->
+                        pure (Reuse running)
   where
     freshStart = do
         sessionId <- newSessionId
         pure (Restart (StartNew sessionId) False)
-    restartStopped :: RunningClaude -> IO ProcessDecision
-    restartStopped running = do
-        transcriptExists <- doesFileExist running.runningTranscriptPath
-        pure $
-            Restart
-                (if state.stateHadCompletedTurn || transcriptExists
-                    then StartResume running.runningSessionId
-                    else StartNew running.runningSessionId)
-                state.stateHadCompletedTurn
 
 modeChanged :: RunningClaude -> Maybe Text -> Maybe Text -> Bool
 modeChanged running model effort =
@@ -442,6 +532,25 @@ markTurnCompleted session turn =
             , ()
             )
 
+invalidateClaudeCodeContinuation :: ClaudeCodeSession -> IO ()
+invalidateClaudeCodeContinuation session =
+    atomicModifyIORef' session.sessionState \state ->
+        ( state
+            { stateHadCompletedTurn = False
+            , stateNeedsFreshSession = True
+            }
+        , ()
+        )
+
+waitForProcessQuietly :: ProcessHandle -> IO ()
+waitForProcessQuietly processHandle =
+    void $
+        timeout processWaitTimeoutMicros
+            (tryAny (waitForProcess processHandle))
+
+processWaitTimeoutMicros :: Int
+processWaitTimeoutMicros = 2 * 1_000_000
+
 startRunningClaude
     :: ClaudeCodeOptions
     -> ClaudeCodeToolMode
@@ -452,215 +561,151 @@ startRunningClaude
 startRunningClaude options toolMode model effort mode =
     mask \restore -> do
         workingDirectory <- canonicalizePath options.cwd
-        transcriptPath <- transcriptPathFor workingDirectory (startSessionId mode)
-        environment <- prepareInteractiveEnvironment
+        environment <- prepareStructuredEnvironment
             <$> getSanitizedClaudeEnvironment
-        (parentInput, parentOutput, childSlave) <- acquirePtyHandles
-        mapM_ (`hSetBinaryMode` True) [parentInput, parentOutput, childSlave]
-        mapM_ (`hSetBuffering` NoBuffering) [parentInput, parentOutput, childSlave]
         let arguments =
-                startArguments mode
-                    -- Claude's fullscreen renderer waits for terminal geometry
-                    -- and focus events that an internal, drained PTY cannot
-                    -- provide reliably. The flat accessibility renderer keeps
-                    -- the interactive subscription session scriptable while
-                    -- model output still comes from the JSONL transcript.
-                    <> ["--ax-screen-reader"]
+                [ "-p"
+                , "--input-format"
+                , "stream-json"
+                , "--output-format"
+                , "stream-json"
+                , "--verbose"
+                ]
+                    <> startArguments mode
                     <> permissionArguments options.permission
                     <> toolArguments toolMode
-                    <> ["--safe-mode" | options.safeMode]
+                    <> safeModeArguments options.safeMode
                     <> optionalArgument "--model" model
                     <> optionalEffortArgument effort
             processSpec = (proc options.executable arguments)
                 { cwd = Just workingDirectory
                 , env = Just environment
-                , std_in = UseHandle childSlave
-                , std_out = UseHandle childSlave
-                , std_err = UseHandle childSlave
+                , std_in = CreatePipe
+                , std_out = CreatePipe
+                , std_err = CreatePipe
                 , close_fds = True
                 , create_group = True
                 , new_session = True
                 }
-            closePty =
-                mapM_ closeHandleQuietly [parentInput, parentOutput, childSlave]
         created <- createProcess processSpec
-            `onException` closePty
-        let (_, _, _, processHandle) = created
+        let (maybeInput, maybeOutput, maybeError, processHandle) = created
+            closeCreatedHandles =
+                mapM_ closeHandleQuietly
+                    [ handle
+                    | Just handle <-
+                        [maybeInput, maybeOutput, maybeError]
+                    ]
             stopCreated groupId = do
                 terminateProcessGroup groupId processHandle
-                closePty
-                void (tryAny (waitForProcess processHandle))
+                closeCreatedHandles
+                waitForProcessQuietly processHandle
         groupId <- getPid processHandle
             `onException` stopCreated Nothing
-        hClose childSlave
+        (inputHandle, outputHandle, errorHandle) <-
+            case (maybeInput, maybeOutput, maybeError) of
+                (Just inputHandle, Just outputHandle, Just errorHandle) ->
+                    pure (inputHandle, outputHandle, errorHandle)
+                _ -> do
+                    stopCreated groupId
+                    fail "Claude Code did not provide all requested stdio pipes"
+        (do
+            mapM_ (`hSetBinaryMode` True)
+                [inputHandle, outputHandle, errorHandle]
+            mapM_ (`hSetBuffering` NoBuffering)
+                [inputHandle, outputHandle, errorHandle])
             `onException` stopCreated groupId
         diagnosticRef <- newIORef ByteString.empty
-        readyPromptsRef <- newIORef 0
-        consumedPromptsRef <- newIORef 0
-        drain <-
+        usageAccountingRef <- newIORef UsageAccounting
+            { usageCumulativeBaseline = Nothing
+            , usagePendingFallback = emptyTokenUsage
+            }
+        errorDrain <-
             (asyncWithUnmask \unmask ->
-                unmask (drainPty parentInput diagnosticRef readyPromptsRef)
+                unmask (drainDiagnostic errorHandle diagnosticRef)
                     `catchAny` \_ -> pure ())
             `onException` stopCreated groupId
         let running = RunningClaude
                 { runningSessionId = startSessionId mode
                 , runningModel = model
                 , runningEffort = effort
-                , runningTranscriptPath = transcriptPath
-                , runningInput = parentOutput
-                , runningOutput = parentInput
+                , runningInput = inputHandle
+                , runningOutput = outputHandle
+                , runningError = errorHandle
                 , runningProcess = processHandle
                 , runningGroupId = groupId
                 , runningDiagnosticBytes = diagnosticRef
-                , runningReadyPrompts = readyPromptsRef
-                , runningConsumedPrompts = consumedPromptsRef
-                , runningDrain = drain
+                , runningUsageAccounting = usageAccountingRef
+                , runningPromptWriteTimeoutMicros =
+                    options.promptWriteTimeoutMicros
+                , runningErrorDrain = errorDrain
                 }
         restore (pure running) `onException` stopRunningClaude running
-
--- | Allocate distinct read/write Handles for one PTY master and a Handle for
--- its slave.  Distinct master Handles avoid blocking Handle-level locks.
-acquirePtyHandles :: IO (Handle, Handle, Handle)
-acquirePtyHandles =
-    mask \_ -> do
-        (masterFd, slaveFd) <- openPseudoTerminal
-        writeFd <- dup masterFd `onException` do
-            closeFd masterFd
-            closeFd slaveFd
-        readHandle <- fdToHandle masterFd `onException` do
-            closeFd masterFd
-            closeFd writeFd
-            closeFd slaveFd
-        writeHandle <- fdToHandle writeFd `onException` do
-            hClose readHandle
-            closeFd writeFd
-            closeFd slaveFd
-        slaveHandle <- fdToHandle slaveFd `onException` do
-            hClose readHandle
-            hClose writeHandle
-            closeFd slaveFd
-        pure (readHandle, writeHandle, slaveHandle)
 
 stopRunningClaude :: RunningClaude -> IO ()
 stopRunningClaude running = do
     terminateProcessGroup running.runningGroupId running.runningProcess
     closeHandleQuietly running.runningInput
     closeHandleQuietly running.runningOutput
-    cancel running.runningDrain
-    void (waitCatch running.runningDrain)
-    void (tryAny (waitForProcess running.runningProcess))
-
-interruptRunningClaude :: RunningClaude -> IO ()
-interruptRunningClaude running =
-    tryAny
-        (ByteString.hPut running.runningInput "\ETX" >> hFlush running.runningInput)
-        >>= \_ -> pure ()
+    closeHandleQuietly running.runningError
+    cancel running.runningErrorDrain
+    void (waitCatch running.runningErrorDrain)
+    waitForProcessQuietly running.runningProcess
 
 abortClaudeCodeTurn :: ClaudeCodeTurn -> IO ()
-abortClaudeCodeTurn turn = do
-    interruptRunningClaude turn.turnRunning
+abortClaudeCodeTurn turn =
     stopRunningClaude turn.turnRunning
 
-drainPty
+abortAndInvalidateClaudeCodeTurn
+    :: ClaudeCodeSession
+    -> ClaudeCodeTurn
+    -> IO ()
+abortAndInvalidateClaudeCodeTurn session turn = do
+    atomicModifyIORef' session.sessionState \state ->
+        let ownsTurn =
+                case state.stateRunning of
+                    Just running ->
+                        running.runningSessionId
+                            == turn.turnRunning.runningSessionId
+                    Nothing -> False
+        in
+            ( if ownsTurn
+                then state
+                    { stateHadCompletedTurn = False
+                    , stateNeedsFreshSession = True
+                    }
+                else state
+            , ()
+            )
+    abortClaudeCodeTurn turn
+    atomicModifyIORef' session.sessionState \state ->
+        let ownsTurn =
+                case state.stateRunning of
+                    Just running ->
+                        running.runningSessionId
+                            == turn.turnRunning.runningSessionId
+                    Nothing -> False
+        in
+            ( if ownsTurn
+                then state { stateRunning = Nothing }
+                else state
+            , ()
+            )
+
+drainDiagnostic
     :: Handle
     -> IORef ByteString.ByteString
-    -> IORef Int
     -> IO ()
-drainPty handle diagnosticRef readyPromptsRef =
-    go ByteString.empty
+drainDiagnostic handle diagnosticRef =
+    go
   where
-    go scanTail = do
+    go = do
         chunk <- ByteString.hGetSome handle 8192
         if ByteString.null chunk
             then pure ()
             else do
                 atomicModifyIORef' diagnosticRef \bytes ->
                     (appendDiagnostic bytes chunk, ())
-                let scanBytes = scanTail <> chunk
-                    promptCount =
-                        countOccurrences readyPromptMarker scanBytes
-                if promptCount == 0
-                    then pure ()
-                    else atomicModifyIORef' readyPromptsRef
-                        \count -> (count + promptCount, ())
-                go (readinessScanTail scanBytes)
-
--- Screen-reader mode renders an idle interactive prompt as @$@ followed by a
--- cursor-to-column-two escape. Matching the complete sequence avoids treating
--- ordinary tool or model output whose line starts with @$@ as readiness.
--- Waiting for that prompt prevents startup input from being discarded while
--- Claude initializes its terminal UI. Counting prompts also synchronizes
--- immediately consecutive turns without relying on arbitrary sleeps.
-awaitReadyPrompt :: RunningClaude -> IO ()
-awaitReadyPrompt running =
-    go readyPromptPollLimit
-  where
-    go remaining = do
-        ready <- readIORef running.runningReadyPrompts
-        claimed <- atomicModifyIORef' running.runningConsumedPrompts
-            \consumed ->
-                if consumed < ready
-                    then (consumed + 1, True)
-                    else (consumed, False)
-        if claimed
-            then pure ()
-            else do
-                processExit <- getProcessExitCode running.runningProcess
-                case processExit of
-                    Just exitCode ->
-                        failReady
-                            ( "Claude Code exited before its interactive prompt was ready ("
-                                <> Text.pack (show exitCode)
-                                <> ")."
-                            )
-                    Nothing
-                        | remaining <= 0 ->
-                            failReady
-                                "Timed out waiting for Claude Code's interactive prompt."
-                        | otherwise -> do
-                            threadDelay readyPromptPollMicros
-                            go (remaining - 1)
-    failReady prefix = do
-        diagnostic <-
-            TextEncoding.decodeUtf8With lenientDecode
-                <$> readIORef running.runningDiagnosticBytes
-        fail $
-            Text.unpack $
-                prefix
-                    <> if Text.null (Text.strip diagnostic)
-                        then ""
-                        else "\nTerminal output:\n" <> Text.takeEnd 2_000 diagnostic
-
-readyPromptMarker :: ByteString.ByteString
-readyPromptMarker = "\n$\ESC[2G"
-
-readyPromptPollMicros :: Int
-readyPromptPollMicros = 50_000
-
-readyPromptPollLimit :: Int
-readyPromptPollLimit = 600
-
-countOccurrences
-    :: ByteString.ByteString
-    -> ByteString.ByteString
-    -> Int
-countOccurrences needle haystack
-    | ByteString.null needle = 0
-    | otherwise =
-        case ByteString.breakSubstring needle haystack of
-            (_, suffix)
-                | ByteString.null suffix -> 0
-                | otherwise ->
-                    1
-                        + countOccurrences
-                            needle
-                            (ByteString.drop (ByteString.length needle) suffix)
-
-readinessScanTail :: ByteString.ByteString -> ByteString.ByteString
-readinessScanTail bytes =
-    ByteString.drop
-        (max 0 (ByteString.length bytes - ByteString.length readyPromptMarker + 1))
-        bytes
+                go
 
 appendDiagnostic
     :: ByteString.ByteString
@@ -707,7 +752,7 @@ permissionArguments = \case
     ClaudeCodeDontAsk ->
         ["--permission-mode", "dontAsk"]
     ClaudeCodeBypass ->
-        [ "--dangerously-skip-permissions"
+        [ "--allow-dangerously-skip-permissions"
         , "--permission-mode"
         , "bypassPermissions"
         ]
@@ -715,9 +760,8 @@ permissionArguments = \case
 toolArguments :: ClaudeCodeToolMode -> [String]
 toolArguments = \case
     ClaudeCodeDefaultTools ->
-        -- Claude's interactive AskUserQuestion card is hidden behind this
-        -- bridge's drained PTY. Force clarification to happen as ordinary
-        -- assistant text until the harness has an explicit relay.
+        -- AskUserQuestion has no host UI relay in this backend. Force
+        -- clarification to happen as ordinary assistant text.
         ["--disallowedTools", "AskUserQuestion"]
     ClaudeCodeNoTools ->
         [ "--tools"
@@ -725,6 +769,23 @@ toolArguments = \case
         , "--disallowedTools"
         , "AskUserQuestion"
         ]
+
+safeModeArguments :: Bool -> [String]
+safeModeArguments enabled =
+    [ "--setting-sources"
+    , ""
+    , "--strict-mcp-config"
+    , "--mcp-config"
+    , "{\"mcpServers\":{}}"
+    , "--no-chrome"
+    ]
+        <> if enabled
+            then
+                [ "--safe-mode"
+                , "--disable-slash-commands"
+                ]
+            else
+                []
 
 optionalArgument :: String -> Maybe Text -> [String]
 optionalArgument name = \case
@@ -737,6 +798,99 @@ optionalEffortArgument = \case
         | Text.toLower value /= "none" ->
             ["--effort", Text.unpack value]
     _ -> []
+
+usageDelta :: TokenUsage -> TokenUsage -> TokenUsage
+usageDelta previous current
+    | usageIsMonotonic previous current =
+        fromUsageComponents $
+            subtractUsageComponents
+                (toUsageComponents previous)
+                (toUsageComponents current)
+    | otherwise =
+        -- Claude resets the cumulative ledger on a new process epoch (for
+        -- example after resume or an internal conversation reset). Do not mix
+        -- components from different epochs.
+        current
+
+reconcileCumulativeUsage
+    :: UsageAccounting
+    -> TokenUsage
+    -> (TokenUsage, TokenUsage)
+reconcileCumulativeUsage accounting current =
+    case accounting.usageCumulativeBaseline of
+        Just previous
+            | not (usageIsMonotonic previous current) ->
+                (current, emptyTokenUsage)
+        previous ->
+            subtractReportedFallback
+                accounting.usagePendingFallback
+                (maybe current (`usageDelta` current) previous)
+
+usageIsMonotonic :: TokenUsage -> TokenUsage -> Bool
+usageIsMonotonic previous current =
+    let previousComponents = toUsageComponents previous
+        currentComponents = toUsageComponents current
+    in
+        currentComponents.usageUncachedInput
+            >= previousComponents.usageUncachedInput
+            && currentComponents.usageCachedInput
+                >= previousComponents.usageCachedInput
+            && currentComponents.usageOutput
+                >= previousComponents.usageOutput
+
+subtractReportedFallback
+    :: TokenUsage
+    -> TokenUsage
+    -> (TokenUsage, TokenUsage)
+subtractReportedFallback pending gross =
+    ( fromUsageComponents $
+        subtractUsageComponents
+            (toUsageComponents pending)
+            (toUsageComponents gross)
+    , fromUsageComponents $
+        subtractUsageComponents
+            (toUsageComponents gross)
+            (toUsageComponents pending)
+    )
+
+toUsageComponents :: TokenUsage -> UsageComponents
+toUsageComponents usage =
+    let cached = max 0 (min usage.inputTokens usage.cachedTokens)
+    in UsageComponents
+        { usageUncachedInput = max 0 (usage.inputTokens - cached)
+        , usageCachedInput = cached
+        , usageOutput = max 0 usage.outputTokens
+        }
+
+fromUsageComponents :: UsageComponents -> TokenUsage
+fromUsageComponents components =
+    TokenUsage
+        { inputTokens =
+            components.usageUncachedInput
+                + components.usageCachedInput
+        , outputTokens = components.usageOutput
+        , cachedTokens = components.usageCachedInput
+        }
+
+subtractUsageComponents
+    :: UsageComponents
+    -> UsageComponents
+    -> UsageComponents
+subtractUsageComponents subtrahend minuend =
+    UsageComponents
+        { usageUncachedInput =
+            max 0
+                ( minuend.usageUncachedInput
+                    - subtrahend.usageUncachedInput
+                )
+        , usageCachedInput =
+            max 0
+                ( minuend.usageCachedInput
+                    - subtrahend.usageCachedInput
+                )
+        , usageOutput =
+            max 0 (minuend.usageOutput - subtrahend.usageOutput)
+        }
 
 nonEmptyText :: Maybe Text -> Maybe Text
 nonEmptyText =
@@ -765,82 +919,18 @@ replaceAt index update values =
         (before, value : after) -> before <> (update value : after)
         _ -> values
 
-transcriptPathFor :: FilePath -> Text -> IO FilePath
-transcriptPathFor workingDirectory sessionId = do
-    configDirectory <- claudeConfigDirectory workingDirectory
-    let projectsDirectory = configDirectory </> "projects"
-        expected =
-            projectsDirectory
-                </> cwdSlug workingDirectory
-                </> Text.unpack sessionId <> ".jsonl"
-    expectedExists <- doesFileExist expected
-    if expectedExists
-        then pure expected
-        else do
-            matches <- findTranscript projectsDirectory (Text.unpack sessionId <> ".jsonl")
-            pure $ case matches of
-                first : _ -> first
-                [] -> expected
-
-claudeConfigDirectory :: FilePath -> IO FilePath
-claudeConfigDirectory workingDirectory = do
-    configured <- lookupEnv "CLAUDE_CONFIG_DIR"
-    case configured of
-        Just path
-            | not (null path) -> do
-                if isRelative path
-                    then canonicalizePath (workingDirectory </> path)
-                    else pure path
-        _ -> (</> ".claude") <$> getHomeDirectory
-
-cwdSlug :: FilePath -> FilePath
-cwdSlug =
-    map \character ->
-        if isAscii character && isAlphaNum character
-            then character
-            else '-'
-
-findTranscript :: FilePath -> FilePath -> IO [FilePath]
-findTranscript root target = do
-    rootExists <- doesDirectoryExist root
-    if not rootExists
-        then pure []
-        else go root
-  where
-    go directory = do
-        entriesResult <- tryAny (listDirectory directory)
-        case entriesResult of
-            Left _ -> pure []
-            Right entries -> do
-                let paths = map (directory </>) entries
-                    matching = filter ((== target) . takeFileName) paths
-                files <- filterM doesFileExist matching
-                directories <- filterM doesDirectoryExist paths
-                nested <- concat <$> mapM go directories
-                pure (files <> nested)
-
-transcriptSize :: FilePath -> IO Integer
-transcriptSize path = do
-    exists <- doesFileExist path
-    if exists
-        then getFileSize path
-        else pure 0
-
-prepareInteractiveEnvironment :: [(String, String)] -> [(String, String)]
-prepareInteractiveEnvironment environment =
+prepareStructuredEnvironment :: [(String, String)] -> [(String, String)]
+prepareStructuredEnvironment environment =
     setEnvironmentVariable
-        "CLAUDE_CODE_DISABLE_TERMINAL_TITLE"
-        "1"
-        (ensureEnvironmentVariable "TERM" "xterm-256color" environment)
-
-ensureEnvironmentVariable
-    :: String
-    -> String
-    -> [(String, String)]
-    -> [(String, String)]
-ensureEnvironmentVariable name value environment
-    | any ((== name) . fst) environment = environment
-    | otherwise = (name, value) : environment
+        "CLAUDE_CODE_ENTRYPOINT"
+        "sdk-cli"
+        (setEnvironmentVariable
+            "CLAUDE_AGENT_SDK_CLIENT_APP"
+            "haskell-agent"
+            (setEnvironmentVariable
+                "ENABLE_CLAUDEAI_MCP_SERVERS"
+                "0"
+                environment))
 
 setEnvironmentVariable
     :: String

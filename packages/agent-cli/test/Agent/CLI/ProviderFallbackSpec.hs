@@ -64,7 +64,7 @@ spec = do
                     , (OpenRouterProvider, "openai/gpt-5.1")
                     ]
 
-        it "never automatically enters or leaves the Claude Code bridge" do
+        it "never automatically enters or leaves the Claude Code provider" do
             fallbackCandidates [] ClaudeCodeProvider exhausted
                 `shouldBe` []
             map (.modelProvider)

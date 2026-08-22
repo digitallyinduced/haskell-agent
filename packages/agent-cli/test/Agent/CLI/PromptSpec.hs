@@ -43,6 +43,8 @@ spec = describe "systemPrompt" do
         openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
         let claude = systemPrompt ClaudeCodeProvider (fromFilePath "/tmp/repo") day False
         claude `shouldSatisfy` Text.isInfixOf "Claude Code's built-in tools"
+        claude `shouldSatisfy` Text.isInfixOf "validated structured output"
+        claude `shouldNotSatisfy` Text.isInfixOf "local Claude Code transcript"
         claude `shouldSatisfy` Text.isInfixOf "/tmp/repo"
         claude `shouldNotSatisfy` Text.isInfixOf "run_ghci"
 

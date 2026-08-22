@@ -1821,13 +1821,13 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     Just runtime ->
                                         emitUiEvent runtime
                                             (UiSystemMessage
-                                                "Claude Code bridge is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
+                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
                                     Nothing -> do
                                         color <- resolveColor stderr
                                         putTextLn stderr $
                                             roleWarn color $
                                                 glyphWarn
-                                                    <> "Claude Code bridge is restricted; restart with --yolo to bypass Claude Code permission checks."
+                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
                         writeIORef activeAccountRef claudeAuth.accountLabel
                         withClaudeCodeBackend
                             claudeOptions
@@ -2878,7 +2878,7 @@ replWithDraft env@SessionEnv
         ReplCycleMode keptDraft
             | provider == ClaudeCodeProvider -> do
                 let message =
-                        "Claude Code permissions are fixed when the bridge starts; restart with --yolo or --no-yolo to change them."
+                        "Claude Code permissions are fixed when the provider starts; restart with --yolo or --no-yolo to change them."
                 color <- resolveColor stderr
                 displayInfo message $
                     putTextLn stderr (roleMuted color message)
@@ -3244,7 +3244,7 @@ replWithDraft env@SessionEnv
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
-                                    "Claude Code permissions are fixed for this process; restart with --yolo or --no-yolo."
+                                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
                             color <- resolveColor stderr
                             displayInfo message $
                                 putTextLn stderr (roleMuted color message)

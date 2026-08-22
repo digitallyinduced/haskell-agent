@@ -85,8 +85,8 @@ claudeCodeSystemPrompt cwd today =
         , "Work in " <> toText cwd <> "."
         , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
         , ""
-        , "Use Claude Code's built-in tools directly. The outer harness renders your local"
-        , "Claude Code transcript and does not execute tool calls on your behalf."
+        , "Use Claude Code's built-in tools directly. The outer harness renders Claude Code's"
+        , "validated structured output and does not execute tool calls on your behalf."
         , "Follow any AGENTS.md instructions supplied in user context."
         , "Be concise in user-visible responses."
         ]

@@ -29,9 +29,9 @@ nix run github:digitallyinduced/haskell-agent
 - `agent-openrouter` provides OpenRouter static API-key auth, HTTP SSE
   transport, and a local-transcript loop backend under the
   `Agent.OpenRouter.*` module namespace.
-- `agent-claude-code` bridges the subscription-authenticated interactive
-  Claude Code CLI over a PTY and maps its local JSONL transcript into the
-  provider-neutral loop.
+- `agent-claude-code` runs a subscription-authenticated Claude Code CLI over
+  its Agent-SDK-compatible stream-json protocol and maps structured assistant
+  and tool events into the provider-neutral loop.
 
 ## Development
 
@@ -78,8 +78,9 @@ REPLs therefore keep independent reload state. `:q` exits the agent back to
 
 Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /
-`CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
-`--provider` overrides auto-detection.
+`CODEX_ACCESS_TOKEN` (OpenAI), `OPENROUTER_API_KEY` (OpenRouter), or a
+first-party `claude auth login` session (Claude Code). `--provider` overrides
+auto-detection; Claude Code is selected explicitly.
 
 ### Claude Code subscription
 
@@ -90,27 +91,35 @@ claude auth login
 nix run . -- --provider claude-code --model sonnet
 ```
 
-The bridge deliberately starts the interactive `claude` process rather than
-using `claude -p`. It keeps that process attached to a pseudo-terminal, sends
-each harness prompt to the same Claude Code session, and renders assistant and
-tool activity from Claude Code's local transcript.
+The provider keeps one `claude -p` process alive and sends each harness prompt
+through Claude Code's bidirectional `stream-json` protocol. Assistant and tool
+records, completion, usage, and the session UUID come directly from structured
+stdout; no terminal scraping or Claude transcript-file tailing is involved.
+Because Claude can supersede previously emitted records during refusal
+fallback, visible records are buffered until the matching result validates the
+turn, then rendered as one canonical batch.
+
+Anthropic's [June 15, 2026 subscription-policy
+update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+says that Claude Agent SDK, `claude -p`, and third-party app usage currently
+draw from Claude subscription usage limits. That policy may change; consult the
+linked notice for the current terms.
 
 Claude Code owns tool execution and context compaction in this mode. The
-default harness policy uses Claude Code's non-blocking restricted permission
-mode so a hidden permission prompt cannot stall the bridge; pass `--yolo` (or
-use saved project auto-approve) only when you want Claude Code to bypass its
-permission checks. The bridge does not turn a non-TTY one-shot into implicit
-Claude Code permission bypass. Permission mode is fixed when the child process
-starts, and the outer harness's dynamic auto-approve and plan-mode toggles are
-disabled for this provider. `/compact` is not available, and Claude Code is
-selected explicitly rather than by credential auto-detection.
+default harness policy uses Claude Code's non-blocking `dontAsk` permission
+mode so a hidden permission prompt cannot stall the provider; pass `--yolo`
+when you want Claude Code to bypass its permission checks. A non-TTY one-shot
+does not imply permission bypass.
+Permission mode is fixed when the child process starts, and the outer harness's
+dynamic auto-approve and plan-mode toggles are disabled for this provider.
+`/compact` is not available.
 
-For deterministic, non-blocking embedding, the bridge starts Claude Code with
-its screen-reader renderer and safe mode. Safe mode keeps subscription auth,
-model selection, permissions, and built-in tools, but disables Claude-specific
-customizations such as `CLAUDE.md`, skills, plugins, hooks, MCP servers, custom
-commands, and custom agents. The outer harness still injects discovered
-`AGENTS.md` instructions.
+For deterministic, non-blocking embedding, the provider starts Claude Code in
+safe mode with user/project setting sources and MCP servers disabled. Safe mode
+keeps subscription auth, model selection, permissions, and built-in tools, but
+disables Claude-specific customizations such as `CLAUDE.md`, skills, plugins,
+hooks, custom commands, and custom agents. The outer harness still injects
+discovered `AGENTS.md` instructions.
 
 OpenAI sessions compact automatically at the selected model's default context
 threshold. Pass `--compact-threshold N` to override it in estimated tokens, for
