@@ -13,6 +13,7 @@ import Agent.CLI.Input
     , isShiftEnterCsiBody
     , parseChoiceKey
     , replHistoryPath
+    , submissionPromptText
     , terminalTextWidth
     , truncateDisplayText
     , visibleEditorText
@@ -78,6 +79,21 @@ spec = do
         it "treats a 4-line burst as a paste" do
             let burst = Text.unlines ["one", "two", "three", "four"]
             classifyPastedText burst `shouldBe` (burst, True)
+
+    describe "submissionPromptText" do
+        it "keeps an empty composer inert without attachments" do
+            submissionPromptText 0 "" `shouldBe` Nothing
+            submissionPromptText 0 " \n " `shouldBe` Nothing
+
+        it "supplies fallback text for an image-only submission" do
+            submissionPromptText 1 ""
+                `shouldBe` Just "The user attached an image."
+            submissionPromptText 2 " \n "
+                `shouldBe` Just "The user attached an image."
+
+        it "preserves user text exactly when attachments are present" do
+            submissionPromptText 1 "  describe this  "
+                `shouldBe` Just "  describe this  "
 
     describe "formatPasteChip" do
         it "keeps short pastes inline and chips long ones" do

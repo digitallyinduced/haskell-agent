@@ -36,6 +36,7 @@ import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
     , displayEditorText
+    , submissionPromptText
     , terminalCharWidth
     , terminalTextWidth
     )
@@ -777,9 +778,11 @@ handleComposerKey
     submitDraft = do
         state <- get
         let draft = state.appUi.uiDraft
-        if Text.null (Text.strip draft)
-            then pure ()
-            else submitText state draft state.appPasted
+            attachmentCount =
+                state.appUi.uiPrompt.promptAttachments
+        case submissionPromptText attachmentCount draft of
+            Nothing -> pure ()
+            Just text -> submitText state text state.appPasted
 
     submitText state text pasted = do
         liftIO (appendReplHistory text)
