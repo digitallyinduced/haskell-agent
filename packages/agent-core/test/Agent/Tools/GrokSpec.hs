@@ -11,7 +11,13 @@ import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
-import Agent.Tools.Grok.Shell (GrokSession(..), PersistentShell(..), hasUnwaitedBackgroundOp)
+import Agent.Tools.Grok.Shell
+    ( GrokSession(..)
+    , PersistentShell(..)
+    , hasUnwaitedBackgroundOp
+    , readTaskOutput
+    , startBackground
+    )
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode (PlanModeEnv, activatePlanMode, newPlanModeEnv)
@@ -22,7 +28,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception (bracket, finally)
+import Control.Exception (bracket, bracket_, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -30,9 +36,12 @@ import System.Directory
     ( createDirectoryIfMissing
     , createDirectoryLink
     , doesFileExist
+    , findExecutable
     , getTemporaryDirectory
     )
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Posix.Files (setFileMode)
 import System.Posix.Temp (mkdtemp)
 import System.Directory (removeDirectoryRecursive)
 import Test.Hspec
@@ -244,6 +253,44 @@ spec = describe "Agent.Tools.Grok" do
                 "{\"command\":\"echo $GROK_SESSION_VAR\",\"description\":\"show env\"}"
             envOut `shouldSatisfy` Text.isInfixOf "persisted"
 
+    it "captures background environment at launch" do
+        withTempSession \(session, ghci) -> do
+            _ <- runTool session ghci "run_terminal_cmd"
+                "{\"command\":\"export GROK_SESSION_VAR=before\",\"description\":\"seed env\"}"
+            let cwd = toFilePath session.grokEnv.toolCwd
+                shimDir = cwd </> "shim-bin"
+                shimPath = shimDir </> "bash"
+                claimPath = cwd </> "bash-shim-claim"
+                startedPath = cwd </> "bash-shim-started"
+                releasePath = cwd </> "bash-shim-release"
+                observedPath = cwd </> "background-env"
+            bashPath <- requireExecutable "bash"
+            createDirectoryIfMissing True shimDir
+            writeFile shimPath $ unlines
+                [ "#!/bin/sh"
+                , "if mkdir " <> shellQuote claimPath <> " 2>/dev/null; then"
+                , "  touch " <> shellQuote startedPath
+                , "  while [ ! -e " <> shellQuote releasePath
+                    <> " ]; do sleep 0.01; done"
+                , "fi"
+                , "exec " <> shellQuote bashPath <> " \"$@\""
+                ]
+            setFileMode shimPath 0o700
+
+            withPathPrefix shimDir do
+                started <- startBackground session
+                    "printf '%s' \"$GROK_SESSION_VAR\" > background-env"
+                started `shouldSatisfy` either (const False) (Text.isInfixOf "task_id:")
+                let taskId = either (const "") taskIdFrom started
+                waitForFile startedPath
+                foreground <- runTool session ghci "run_terminal_cmd"
+                    "{\"command\":\"export GROK_SESSION_VAR=after\",\"description\":\"update env\"}"
+                    `finally` writeFile releasePath ""
+                foreground `shouldSatisfy` Text.isPrefixOf "exit: 0"
+                finished <- readTaskOutput session taskId (Just 5000)
+                finished `shouldSatisfy` Text.isPrefixOf "exit: 0"
+                Text.readFile observedPath `shouldReturn` "before"
+
     it "rejects an un-waited & in a foreground command" do
         withTempSession \(session, ghci) -> do
             output <- runTool session ghci "run_terminal_cmd"
@@ -362,11 +409,33 @@ waitForFile path = go (20 :: Int)
             True -> pure ()
             False -> threadDelay 50000 >> go (n - 1)
 
+requireExecutable :: String -> IO FilePath
+requireExecutable name =
+    findExecutable name >>= \case
+        Just path -> pure path
+        Nothing -> do
+            expectationFailure ("could not find executable: " <> name)
+            pure name
+
 taskIdFrom :: Text -> Text
 taskIdFrom output =
     case [tid | line <- Text.lines output, Just tid <- [Text.stripPrefix "task_id: " line]] of
         (tid : _) -> tid
         [] -> error ("missing task_id in:\n" <> Text.unpack output)
+
+withPathPrefix :: FilePath -> IO a -> IO a
+withPathPrefix prefix action = do
+    previous <- lookupEnv "PATH"
+    bracket_
+        (setEnv "PATH" (prefix <> maybe "" (":" <>) previous))
+        (maybe (unsetEnv "PATH") (setEnv "PATH") previous)
+        action
+
+shellQuote :: FilePath -> String
+shellQuote path = "'" <> concatMap escape path <> "'"
+  where
+    escape '\'' = "'\\''"
+    escape c = [c]
 
 withTempSession :: ((GrokSession, GhciSession) -> IO a) -> IO a
 withTempSession action = do

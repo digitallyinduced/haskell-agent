@@ -39,8 +39,9 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Monad (void)
+import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -81,7 +82,9 @@ newGrokSession :: ToolEnv -> IO GrokSession
 newGrokSession env = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
-        (_, envFile) <- allocateResource resources acquireEnvFile cleanupEnvFiles
+        (_, envFile) <- allocateResource resources
+            (acquirePrivateFile "agent-grok-env")
+            cleanupEnvFiles
         shell <- newMVar PersistentShell
             { shellCwd = env.toolCwd
             , shellEnvFile = envFile
@@ -95,25 +98,6 @@ newGrokSession env = do
             , grokNextId = nextId
             , grokResources = resources
             }
-  where
-    acquireEnvFile =
-        mask \restore -> do
-            tmp <- getTemporaryDirectory
-            (envFileRaw, handle) <- restore $
-                mkstemp (unsafeToFilePath (tmp </> unsafeEncodeUtf "agent-grok-env"))
-            let envFile = unsafeEncodeUtf envFileRaw
-            let rollback = do
-                    void $ tryAny (hClose handle)
-                    removeIfExists envFile
-            flip onException rollback do
-                hClose handle
-                setFileMode envFileRaw
-                    (unionFileModes ownerReadMode ownerWriteMode)
-                Text.writeFile envFileRaw ""
-                pure envFile
-    cleanupEnvFiles envFile = do
-        removeIfExists envFile
-        removeIfExists (envFile <.> unsafeEncodeUtf "cwd")
 
 -- | Delete the env/cwd dump and interrupt leftover background tasks.
 -- Call this when the CLI/session ends, including after exceptions.
@@ -144,19 +128,14 @@ runForegroundStreaming session command timeoutMs onSnapshot =
 
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
 startBackground session command = do
-    shell <- readMVar session.grokShell
-    -- Background wrappers source cwd/env but must not write them back;
-    -- a later foreground command owns the persistent session.
-    let wrapped = bashWrap (wrapScript shell False (Text.unpack command))
-    started <- tryAny $
+    started <- tryAny $ withMVar session.grokShell \shell ->
         allocateResource session.grokResources
-            (startShellCommand session.grokEnv session.grokEnv.toolCwd wrapped
-                >>= either (throwIO . userError . Text.unpack) pure)
-            stopShellCommand
+            (acquireBackground shell)
+            cleanupBackground
     case started of
         Left exception ->
             pure (Left (Text.pack (show exception)))
-        Right (resource, running) -> do
+        Right (resource, (running, _snapshotFile)) -> do
             taskId <- nextTaskId session
             let task = BackgroundTask
                     { backgroundId = taskId
@@ -170,6 +149,33 @@ startBackground session command = do
                 "Command moved to background.\n\
                 \task_id: " <> taskId <> "\n\
                 \Use get_task_output to read output. Do not poll in a loop."
+  where
+    -- The child may not source its environment until after
+    -- startShellCommand returns. Give it an immutable snapshot so a later
+    -- foreground command cannot change what this task observes.
+    acquireBackground shell =
+        mask \restore -> do
+            snapshotFile <- acquirePrivateFile "agent-grok-env-bg"
+            let cleanupSnapshot = cleanupEnvFiles snapshotFile
+            flip onException cleanupSnapshot do
+                restore $
+                    BS.readFile (unsafeToFilePath shell.shellEnvFile)
+                        >>= BS.writeFile (unsafeToFilePath snapshotFile)
+                let snapshotShell = shell { shellEnvFile = snapshotFile }
+                    wrapped =
+                        bashWrap
+                            (wrapScript snapshotShell False (Text.unpack command))
+                running <-
+                    startShellCommand
+                        session.grokEnv
+                        session.grokEnv.toolCwd
+                        wrapped
+                    >>= either (throwIO . userError . Text.unpack) pure
+                pure (running, snapshotFile)
+
+    cleanupBackground (running, snapshotFile) =
+        stopShellCommand running
+            `finally` cleanupEnvFiles snapshotFile
 
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
 readTaskOutput session taskId timeoutMs = do
@@ -266,6 +272,28 @@ removeIfExists path = do
     if exists
         then void $ tryAny (removeFile path)
         else pure ()
+
+acquirePrivateFile :: String -> IO OsPath
+acquirePrivateFile template =
+    mask \_ -> do
+        tmp <- getTemporaryDirectory
+        (pathRaw, handle) <-
+            mkstemp (unsafeToFilePath (tmp </> unsafeEncodeUtf template))
+        let path = unsafeEncodeUtf pathRaw
+            rollback = do
+                void $ tryAny (hClose handle)
+                removeIfExists path
+        flip onException rollback do
+            hClose handle
+            setFileMode pathRaw
+                (unionFileModes ownerReadMode ownerWriteMode)
+            Text.writeFile pathRaw ""
+            pure path
+
+cleanupEnvFiles :: OsPath -> IO ()
+cleanupEnvFiles envFile = do
+    removeIfExists envFile
+    removeIfExists (envFile <.> unsafeEncodeUtf "cwd")
 
 -- | True when a foreground command would background itself with @&@.
 hasUnwaitedBackgroundOp :: Text -> Bool
