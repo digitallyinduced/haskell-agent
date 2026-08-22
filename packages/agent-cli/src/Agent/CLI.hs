@@ -2,6 +2,7 @@
 module Agent.CLI
     ( DevResult(..)
     , afterDev
+    , accountSwitchTarget
     , applyReplMode
     , buildPromptState
     , cycleReplInteraction
@@ -34,6 +35,7 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
+    , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
     )
@@ -55,8 +57,9 @@ import Agent.CLI.AgentSessions
     , sessionProcessStatus
     )
 import Agent.CLI.Approval
-    ( approveToolDecision
-    , approveToolDecisionWith
+    ( ApprovalNotice(..)
+    , approveToolDecision
+    , approveToolDecisionWithReporter
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -186,8 +189,8 @@ import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
-    , installSkillCatalog
-    , loadSkillsCatalog
+    , installSkillCatalogWithOmissions
+    , loadSkillsCatalogQuiet
     , reservedSlashNames
     , skillInvocationCommand
     )
@@ -277,7 +280,6 @@ import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
     , formatUsageReport
-    , formatUsageSummary
     )
 import Agent.CLI.Worktree
     ( createWorktree
@@ -367,6 +369,7 @@ import Agent.Subagents
     )
 import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -477,8 +480,14 @@ data PendingTurnPresentation
     | ContinuePendingTurn
 
 data AccountPickerOption
-    = AccountPickerAccount !Text !Text !Text !Text
-    | AccountPickerConnect
+    = AccountPickerAccount
+        !Provider
+        !BillingMode
+        !Text
+        !Text
+        !Text
+        !Text
+    | AccountPickerConnect !Provider
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -877,15 +886,20 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     setCurrentDirectory cwd
 
     toolEnv <- defaultToolEnv cwd
+    uiRuntimeRef <- newIORef Nothing
     interrupt <- newInterruptState \msg -> do
-        -- Drop an in-place "Thinking…" status so the hint is its own line.
-        Text.hPutStr stderr "\r\ESC[K"
-        clearNativeProgress stderr
-        color <- resolveColor stderr
-        putTextLn stderr (roleMuted color msg)
+        readIORef uiRuntimeRef >>= \case
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSetNotice (Just (warningNotice msg)))
+            Nothing -> do
+                -- Drop an in-place "Thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                clearNativeProgress stderr
+                color <- resolveColor stderr
+                putTextLn stderr (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
-    uiRuntimeRef <- newIORef Nothing
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
     stdoutTty <- hIsTerminalDevice stdout
@@ -1458,7 +1472,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         progName <- getProgName
         markStartupStage startup "Connecting to provider…"
         withCtrlCHandler interrupt $
-            withInterruptResume progName persist RunQuit do
+            withInterruptResume fullscreen progName persist RunQuit do
                 let shouldProbeAtStartup =
                         isJust fullscreen
                             && isNothing transition
@@ -1948,12 +1962,13 @@ preparePersistence fullscreen options root provider model cwd effort prompt resu
 
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
-    :: String
+    :: Maybe FullscreenRuntime
+    -> String
     -> Persistence
     -> a
     -> IO a
     -> IO a
-withInterruptResume progName persist interrupted action =
+withInterruptResume fullscreen progName persist interrupted action =
     (action `catchAny` handleSyncException) `catchAsync` handleInterrupt
   where
     -- UserInterrupt can arrive asynchronously from the installed SIGINT
@@ -1967,7 +1982,11 @@ withInterruptResume progName persist interrupted action =
         | isWrappedUserInterrupt e = finishInterrupt
         | otherwise = throwIO e
     finishInterrupt = do
-        printResumeHint progName persist
+        case fullscreen of
+            Nothing -> printResumeHint progName persist
+            Just runtime ->
+                withFullscreenSuspended runtime
+                    (printResumeHint progName persist)
         -- The interrupt is the requested, graceful end of the CLI session.
         -- Returning lets the surrounding brackets restore the SIGINT handler
         -- and close tools without GHC's top-level exception handler printing
@@ -2075,12 +2094,11 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
-    textBuffer <- newIORef ""
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
-    reasoningBuffer <- newIORef ""
+    reasoningBuffer <- newIORef emptyTextBuffer
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
     toolCallsRef <- newIORef Map.empty
@@ -2131,14 +2149,19 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                 current
                     in (reconciled, reconciled)
             sessions <- readIORef subagentSessions
-            let previewCount target =
-                    if null agents
-                        then Nothing
-                        else if target == selected
-                            then Just 12
-                            else if includeSummaries
-                                then Just 0
-                                else Nothing
+            let transcriptLines target items
+                    | null agents = []
+                    | target == selected = case target of
+                        AgentRoot ->
+                            responseItemPreviewLines 12 items
+                        AgentChild _
+                            | includeSummaries ->
+                                responseItemPreviewLines 12 items
+                            | otherwise ->
+                                responseItemLines items
+                    | includeSummaries =
+                        responseItemPreviewLines 0 items
+                    | otherwise = []
             rootSteps <-
                 if null agents
                     then pure []
@@ -2152,17 +2175,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     , agentPath = "/root"
                     , agentStatus = "active"
                     , agentSteps = rootSteps
-                    , agentTranscript = case previewCount AgentRoot of
-                        Nothing -> []
-                        Just count ->
-                            responseItemPreviewLines count rootItems
+                    , agentTranscript =
+                        transcriptLines AgentRoot rootItems
                     }
             children <- mapM
-                (materializeChild previewCount sessions)
+                (materializeChild transcriptLines sessions)
                 agents
             pure (selected, rootEntry : children)
           where
-            materializeChild previewCount sessions (path, agentId, status) = do
+            materializeChild transcriptLines sessions (path, agentId, status) = do
                 let target = AgentChild agentId
                 items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
@@ -2172,20 +2193,16 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     (Just status)
                     items
                     (agentStepsForStatus 2 status)
-                let transcript = case previewCount target of
-                        Nothing -> []
-                        Just count ->
-                            compactAgentPreview count $
-                                (if null items
-                                    then ["(" <> formatAgentStatus status <> ")"]
-                                    else responseItemPreviewLines count items)
-                                    <> case status of
-                                        Completed (Just result)
-                                            | not (Text.null (Text.strip result)) ->
-                                                ["assistant: " <> Text.strip result]
-                                        Errored message ->
-                                            ["error: " <> Text.strip message]
-                                        _ -> []
+                let transcript =
+                        transcriptLines target items
+                            <> case status of
+                                Completed (Just result)
+                                    | null items
+                                    , not (Text.null (Text.strip result)) ->
+                                        ["assistant: " <> Text.strip result]
+                                Errored message ->
+                                    ["error: " <> Text.strip message]
+                                _ -> []
                 pure AgentEntry
                     { agentTarget = target
                     , agentPath = taskPathText path
@@ -2193,13 +2210,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     , agentSteps = steps
                     , agentTranscript = transcript
                     }
-            compactAgentPreview count rows
-                | length rows <= count = rows
-                | otherwise = case rows of
-                    [] -> []
-                    firstLine : _ ->
-                        firstLine
-                            : drop (max 0 (length rows - count)) rows
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
             , viewportEntries = snd <$> loadAgentSnapshot True
@@ -2220,18 +2230,72 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext fullscreen options provider home cwd [] Nothing
-            freshSkills <- loadSkillsCatalog options home projectRoot cwd True
-            installSkillCatalog
+            freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames True freshAgents
                 skillsRef skillInvocationsRef freshSkills
+            reportSkillCatalog True freshSkills omitted
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
-            refreshed <- loadSkillsCatalog
-                options home projectRoot cwd queueContext
-            installSkillCatalog
+            refreshed <- loadSkillsCatalogQuiet
+                options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames queueContext startupContext
                 skillsRef skillInvocationsRef refreshed
+            when queueContext $
+                reportSkillCatalog True refreshed omitted
+        formatSkillWarning warning =
+            "skill ignored: "
+                <> toText warning.skillWarningPath
+                <> ": "
+                <> warning.skillWarningMessage
+        formatSkillOmission omitted =
+            "skills: "
+                <> Text.pack (show omitted)
+                <> " omitted from model context due to the catalog budget"
+        reportSkillCatalog includeSummary catalog omitted =
+            case fullscreen of
+                Nothing -> do
+                    color <- resolveColor stderr
+                    when includeSummary do
+                        let count = length catalog.catalogSkills
+                        putTextLn stderr $
+                            roleMuted color
+                                (glyphSession
+                                    <> "skills: loaded "
+                                    <> Text.pack (show count)
+                                    <> if count == 1
+                                        then " skill"
+                                        else " skills")
+                    mapM_
+                        (putTextLn stderr
+                            . roleWarn color
+                            . (glyphWarn <>)
+                            . formatSkillWarning)
+                        catalog.catalogWarnings
+                    when (omitted > 0) $
+                        putTextLn stderr $
+                            roleWarn color
+                                (glyphWarn <> formatSkillOmission omitted)
+                Just runtime -> do
+                    when includeSummary do
+                        let count = length catalog.catalogSkills
+                        emitUiEvent runtime $
+                            UiSystemMessage
+                                ("skills: loaded "
+                                    <> Text.pack (show count)
+                                    <> if count == 1
+                                        then " skill"
+                                        else " skills")
+                    mapM_
+                        (emitUiEvent runtime
+                            . UiSystemMessage
+                            . formatSkillWarning)
+                        catalog.catalogWarnings
+                    when (omitted > 0) $
+                        emitUiEvent runtime
+                            (UiSystemMessage (formatSkillOmission omitted))
     policyRef <- newIORef policy
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
@@ -2247,7 +2311,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , renderReasoningBuffer = reasoningBuffer
             , renderColor = useColor
             , renderPrintedText = printed
-            , renderTextBuffer = textBuffer
             , renderMarkdownState = markdownState
             , renderLiveActive = liveActive
             , renderLock = ioLock
@@ -2294,8 +2357,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                 approveToolDecision
                                     policyRef allowedToolsRef toolRegistry planMode call
                         Just runtime ->
-                            approveToolDecisionWith
+                            approveToolDecisionWithReporter
                                 (requestFullscreenPermission runtime)
+                                (\case
+                                    ApprovalWarning _ -> pure ()
+                                    ApprovalSuccess message ->
+                                        emitUiEvent runtime
+                                            (UiSetNotice
+                                                (Just
+                                                    (successNotice message))))
                                 policyRef
                                 allowedToolsRef
                                 toolRegistry
@@ -2373,25 +2443,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
-    let formatSkillWarning warning =
-            "skill ignored: "
-                <> toText warning.skillWarningPath
-                <> ": "
-                <> warning.skillWarningMessage
-        initializeSkills = do
+    let initializeSkills = do
             markStartupStage startup "Loading skills…"
-            skills <- loadSkillsCatalog
-                options home projectRoot cwd (isNothing fullscreen)
-            installSkillCatalog
+            skills <- loadSkillsCatalogQuiet
+                options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames
                 (null initialTurns && not (isJust initialPrevious))
                 startupContext skillsRef skillInvocationsRef skills
-            case fullscreen of
-                Nothing -> pure ()
-                Just runtime -> do
-                    mapM_
-                        (emitUiEvent runtime . UiSystemMessage . formatSkillWarning)
-                        skills.catalogWarnings
+            reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
             initializeSkills
@@ -2422,7 +2482,7 @@ loadStartupAuth
     -> Maybe Provider
     -> IO LoadedAuth
 loadStartupAuth startup transition requestedProvider =
-    loadAuth requestedProvider >>= \case
+    loadTransitionAuth transition requestedProvider >>= \case
         Right loaded -> pure loaded
         Left err
             | isNothing transition
@@ -2433,6 +2493,48 @@ loadStartupAuth startup transition requestedProvider =
                         >>= either (startupDie startup . Text.unpack) pure
             | otherwise ->
                 startupDie startup (Text.unpack err)
+
+loadTransitionAuth
+    :: Maybe ProviderTransition
+    -> Maybe Provider
+    -> IO (Either Text LoadedAuth)
+loadTransitionAuth transition requestedProvider =
+    case transition of
+        Just active
+            | Just selectionId <- active.transitionAccountSelectionId ->
+                loadSelectedAccountAuth
+                    active.transitionTarget.modelProvider
+                    selectionId
+                    (fromMaybe selectionId active.transitionAccountId)
+        _ -> loadAuth requestedProvider
+
+loadSelectedAccountAuth
+    :: Provider
+    -> Text
+    -> Text
+    -> IO (Either Text LoadedAuth)
+loadSelectedAccountAuth provider selectionId accountId =
+    case provider of
+        OpenAIProvider ->
+            loadAuth (Just OpenAIProvider) >>= \case
+                Left err -> pure (Left err)
+                Right loaded -> case loaded.loadedOpenAiPool of
+                    Nothing ->
+                        pure (Left
+                            "OpenAI account selection requires a live account pool")
+                    Just pool -> do
+                        preferred <- newIORef (Just accountId)
+                        pure $ Right loaded
+                            { loadedTokenProvider =
+                                preferredOpenAiTokenProvider
+                                    preferred
+                                    pool
+                                    loaded.loadedTokenProvider
+                            , loadedSelectionId = Just accountId
+                            }
+        ClaudeCodeProvider ->
+            loadAuth (Just ClaudeCodeProvider)
+        _ -> loadAuthForAccount provider selectionId
 
 runCredentialOnboarding
     :: StartupRuntime
@@ -2746,8 +2848,8 @@ replWithDraft env@SessionEnv
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAccount = accountRef
+    , sessionAccountId = accountIdRef
     , sessionAccountSelectionId = selectionRef
-    , sessionAccountLabel = accountLabel
     , sessionSelectAccount = selectAccount
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
@@ -2869,7 +2971,8 @@ replWithDraft env@SessionEnv
   where
     handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
         ReplEof -> do
-            putStrLn ""
+            when (isNothing fullscreen) $
+                putStrLn ""
             pure RunQuit
         ReplQuitInterrupt ->
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
@@ -2956,7 +3059,7 @@ replWithDraft env@SessionEnv
                         Text.putStrLn (roleMuted color chip)
                 case parseReplLineWithSkills skillCommands promptLine of
                     ReplQuit -> pure RunQuit
-                    ReplReload -> requestReload persist
+                    ReplReload -> requestReload fullscreen persist
                     ReplPrompt text -> do
                         -- Native Cmd+V of a Finder image often pastes a path
                         -- rather than bitmap bytes. Treat a prompt that is
@@ -3711,106 +3814,168 @@ replWithDraft env@SessionEnv
                                     (roleError color err)
                             next
                         Right result -> pure result
-    chooseAccount _keptDraft next =
-        case (fullscreen, selectAccount) of
-            (Just runtime, Just select) -> do
+    chooseAccount keptDraft next =
+        case fullscreen of
+            Just runtime -> do
                 currentSelectionId <- readIORef selectionRef
+                currentAccountId <- readIORef accountIdRef
                 options <- withReplActivity
                     "Loading account usage…"
-                    (case openAiPool of
-                        Just pool ->
-                            loadAccountPickerOptions accountLabel pool
-                        Nothing -> case tokenProvider of
-                            Just active ->
-                                loadProviderAccountPickerOptions
-                                    provider
-                                    (tokenProviderBillingMode active)
-                                    currentSelectionId
-                            Nothing ->
-                                pure [AccountPickerConnect])
+                    (loadAllAccountPickerOptions provider)
                 let initial =
                         fromMaybe 0 $
                             findIndex
-                                (accountPickerMatches currentSelectionId)
+                                (accountPickerMatches
+                                    provider
+                                    currentSelectionId
+                                    currentAccountId)
                                 options
                 requestFullscreenChoiceWithBody
                     runtime
-                    "Account"
-                    ("Choose the "
-                        <> providerSlug provider
-                        <> " account for future requests.")
+                    "Accounts"
+                    "Choose any account. Switching provider also switches to its default model."
                     initial
-                    (map (accountPickerRow currentSelectionId) options)
+                    (map
+                        (accountPickerRow
+                            provider
+                            currentSelectionId
+                            currentAccountId)
+                        options)
                     >>= \case
                         Just index
                             | Just option <- atMay index options ->
                                 case option of
                                     AccountPickerAccount
+                                        selectedProvider
+                                        selectedBilling
                                         selectedSelectionId
-                                        _
+                                        selectedAccountId
                                         selectedLabel
                                         _
-                                            | selectedSelectionId
-                                                == currentSelectionId ->
+                                            -- Claude exposes display metadata,
+                                            -- not a stable account identity.
+                                            -- Revalidate and restart even when
+                                            -- the synthetic id still matches.
+                                            | selectedProvider == provider
+                                            , selectedProvider
+                                                /= ClaudeCodeProvider
+                                            , selectedAccountId
+                                                == currentAccountId ->
                                                 displayInfo
                                                     ("account: " <> selectedLabel)
                                                     (pure ())
                                                     >> next
                                             | otherwise ->
                                                 chooseSelectedAccount
+                                                    selectedProvider
+                                                    selectedBilling
                                                     selectedSelectionId
-                                    AccountPickerConnect -> do
+                                                    selectedAccountId
+                                                    selectedLabel
+                                    AccountPickerConnect selectedProvider -> do
                                         color <- resolveColor stderr
                                         connected <-
                                             withFullscreenSuspended runtime $
                                                 connectProviderAccount
                                                     color
-                                                    provider
+                                                    selectedProvider
                                         case connected of
                                             Nothing -> next
                                             Just selectedAccountId -> do
                                                 refreshed <-
-                                                    loadProviderAccountPickerOptions
+                                                    loadAllAccountPickerOptions
                                                         provider
-                                                        (maybe
-                                                            SubscriptionBilled
-                                                            tokenProviderBillingMode
-                                                            tokenProvider)
-                                                        currentSelectionId
-                                                let connectedSelection =
-                                                        [ selectionId
-                                                        | AccountPickerAccount
-                                                            selectionId
+                                                case listToMaybe
+                                                        [ account
+                                                        | account@(AccountPickerAccount
+                                                            accountProvider
+                                                            _
+                                                            _
                                                             accountId
                                                             _
-                                                            _ <- refreshed
+                                                            _) <- refreshed
+                                                        , accountProvider
+                                                            == selectedProvider
                                                         , accountId
                                                             == selectedAccountId
-                                                        ]
-                                                chooseSelectedAccount $
-                                                    fromMaybe
-                                                        selectedAccountId
-                                                        (listToMaybe
-                                                            connectedSelection)
+                                                        ] of
+                                                    Just
+                                                        (AccountPickerAccount
+                                                            accountProvider
+                                                            billing
+                                                            selectionId
+                                                            accountId
+                                                            label
+                                                            _) ->
+                                                        chooseSelectedAccount
+                                                            accountProvider
+                                                            billing
+                                                            selectionId
+                                                            accountId
+                                                            label
+                                                    _ -> do
+                                                        displayError
+                                                            "Connected account could not be loaded."
+                                                            (pure ())
+                                                        next
                         _ -> next
               where
-                chooseSelectedAccount selectedId =
-                    select selectedId >>= \case
-                        Left err -> do
-                            now <- getCurrentTime
-                            let message =
-                                    "could not select account: "
-                                        <> formatApiErrorInlineAt
-                                            now
-                                            err
-                            displayError message (pure ())
-                            next
-                        Right label -> do
-                            displayInfo
-                                ("account switched to " <> label)
-                                (pure ())
-                            next
-            _ -> do
+                currentBilling =
+                    tokenProviderBillingMode
+                        <$> tokenProvider
+                chooseSelectedAccount
+                    selectedProvider
+                    selectedBilling
+                    selectedSelectionId
+                    selectedAccountId
+                    selectedLabel
+                        | selectedProvider == provider
+                        , Just selectedBilling == currentBilling
+                        , Just select <- selectAccount =
+                            let liveSelectionId =
+                                    case selectedProvider of
+                                        OpenAIProvider -> selectedAccountId
+                                        _ -> selectedSelectionId
+                            in select liveSelectionId >>= \case
+                                Left err -> do
+                                    now <- getCurrentTime
+                                    let message =
+                                            "could not select account: "
+                                                <> formatApiErrorInlineAt
+                                                    now
+                                                    err
+                                    displayError message (pure ())
+                                    next
+                                Right label -> do
+                                    displayInfo
+                                        ("account switched to " <> label)
+                                        (pure ())
+                                    next
+                        | otherwise =
+                            readIORef paramsRef >>= \params ->
+                                requestAccountProviderSwitch
+                                    fullscreen
+                                    provider
+                                    (currentModel params)
+                                    selectedProvider
+                                    selectedSelectionId
+                                    selectedAccountId
+                                    keptDraft
+                                    persist >>= \case
+                                        Left err -> do
+                                            displayError err (pure ())
+                                            next
+                                        Right result -> do
+                                            displayInfo
+                                                ("switching to "
+                                                    <> selectedLabel
+                                                    <> " ("
+                                                    <> providerSlug
+                                                        selectedProvider
+                                                    <> ")")
+                                                (pure ())
+                                            pure result
+            Nothing -> do
                 displayError
                     "Account switching is unavailable for this session."
                     (pure ())
@@ -3888,65 +4053,81 @@ effortChoice fullscreen current = case fullscreen of
                         pure (Just (efforts !! index))
                 _ -> pure Nothing
 
-loadAccountPickerOptions
-    :: (Credential -> IO Text)
-    -> OpenAI.Pool
-    -> IO [AccountPickerOption]
-loadAccountPickerOptions resolveLabel pool = do
-    _ <- OpenAI.discoverAccounts pool
-    now <- getCurrentTime
-    snapshots <- OpenAI.snapshotAccounts pool
-    accounts <- mapConcurrently (loadAccount now) snapshots
-    pure (accounts <> [AccountPickerConnect])
-  where
-    loadAccount now snapshot = do
-        let auth = snapshot.snapshotAuth
-            credential = Credential
-                { accessToken = auth.accessToken
-                , accountId = auth.accountId
-                , leaseId = Nothing
-                , provider = OpenAIProvider
-                }
-        label <- resolveLabel credential
-        usage <- fetchUsage auth.accessToken auth.accountId
-        pure $
-            AccountPickerAccount
-                auth.accountId
-                auth.accountId
-                label
-                (formatUsageSummary
-                    now
-                    snapshot.snapshotCooldownUntil
-                    usage)
-
-loadProviderAccountPickerOptions
-    :: Provider
-    -> BillingMode
-    -> Text
-    -> IO [AccountPickerOption]
-loadProviderAccountPickerOptions provider billing _currentSelectionId = do
+loadAllAccountPickerOptions :: Provider -> IO [AccountPickerOption]
+loadAllAccountPickerOptions currentProvider = do
     discovered <- discoverSelectableLoginAccounts
-    refreshed <-
-        mapConcurrently refreshLoginAccount
-            [ account
-            | account <- discovered
-            , account.loginProvider == provider
-            , accountBillingMode provider account.loginBilling == billing
-            ]
+    refreshed <- mapConcurrently refreshLoginAccount discovered
+    claudeAuth <- loadClaudeCodeAuth
     now <- getCurrentTime
+    let providerAccounts =
+            [ AccountPickerAccount
+                account.loginProvider
+                (accountBillingMode account.loginProvider account.loginBilling)
+                (loginAccountSelectionId account)
+                account.loginAccountId
+                account.loginLabel
+                (formatLoginUsageSummary account.loginProvider now account)
+            | account <- deduplicateAccounts refreshed
+            , account.loginProvider /= ClaudeCodeProvider
+            ]
+        claudeAccounts = case claudeAuth of
+            Left _ -> []
+            Right auth ->
+                [ AccountPickerAccount
+                    ClaudeCodeProvider
+                    SubscriptionBilled
+                    "claude-code"
+                    "claude-code"
+                    auth.accountLabel
+                    (Text.intercalate " · " $
+                        ["subscription"]
+                            <> maybeToList auth.subscriptionType
+                            <> ["usage via `claude /status`"])
+                ]
+        ordered =
+            sortOn
+                (\case
+                    AccountPickerAccount optionProvider _ _ _ label _ ->
+                        ( optionProvider /= currentProvider
+                        , providerOrder optionProvider
+                        , Text.toLower label
+                        )
+                    AccountPickerConnect optionProvider ->
+                        ( True
+                        , providerOrder optionProvider
+                        , ""
+                        ))
+                (providerAccounts <> claudeAccounts)
     pure $
-        [ AccountPickerAccount
-            (loginAccountSelectionId account)
-            account.loginAccountId
-            account.loginLabel
-            (formatLoginUsageSummary provider now account)
-        | account <- refreshed
-        ]
-            <> [AccountPickerConnect]
+        ordered
+            <> map AccountPickerConnect
+                [ OpenAIProvider
+                , XAIProvider
+                , OpenRouterProvider
+                , ClaudeCodeProvider
+                ]
+  where
+    maybeToList = maybe [] pure
+    deduplicateAccounts = foldr addUnique []
+    addUnique account accounts
+        | any (samePickerAccount account) accounts = accounts
+        | otherwise = account : accounts
+    samePickerAccount left right
+        | left.loginProvider /= right.loginProvider = False
+        | left.loginProvider == OpenAIProvider =
+            left.loginAccountId == right.loginAccountId
+        | otherwise =
+            loginAccountSelectionId left == loginAccountSelectionId right
+    providerOrder = \case
+        OpenAIProvider -> 0 :: Int
+        XAIProvider -> 1
+        OpenRouterProvider -> 2
+        ClaudeCodeProvider -> 3
 
 accountBillingMode :: Provider -> AccountBilling -> BillingMode
 accountBillingMode provider = case provider of
     OpenRouterProvider -> const ApiBilled
+    ClaudeCodeProvider -> const SubscriptionBilled
     _ -> \case
         SubscriptionBilling _ -> SubscriptionBilled
         ApiCreditsBilling -> ApiBilled
@@ -3982,28 +4163,47 @@ formatLoginUsageSummary provider now account =
                 else ""
     maybeToList = maybe [] pure
 
-accountPickerMatches :: Text -> AccountPickerOption -> Bool
-accountPickerMatches currentSelectionId = \case
-    AccountPickerAccount selectionId _ _ _ ->
-        selectionId == currentSelectionId
-    AccountPickerConnect -> False
+accountPickerMatches
+    :: Provider
+    -> Text
+    -> Text
+    -> AccountPickerOption
+    -> Bool
+accountPickerMatches currentProvider currentSelectionId currentAccountId = \case
+    AccountPickerAccount optionProvider _ selectionId accountId _ _ ->
+        optionProvider == currentProvider
+            && ( selectionId == currentSelectionId
+                || accountId == currentAccountId
+               )
+    AccountPickerConnect _ -> False
 
 accountPickerRow
-    :: Text
+    :: Provider
+    -> Text
+    -> Text
     -> AccountPickerOption
     -> (Text, Text)
-accountPickerRow currentSelectionId = \case
+accountPickerRow currentProvider currentSelectionId currentAccountId = \case
     AccountPickerAccount
-        selectionId
+        optionProvider
         _
+        selectionId
+        accountId
         accountPickerLabel
         accountPickerUsage ->
-            ( (if selectionId == currentSelectionId then "✓ " else "")
+            ( (if optionProvider == currentProvider
+                    && ( selectionId == currentSelectionId
+                        || accountId == currentAccountId
+                       )
+                    then "✓ "
+                    else "")
+                <> providerSlug optionProvider
+                <> " · "
                 <> accountPickerLabel
             , accountPickerUsage
             )
-    AccountPickerConnect ->
-        ("＋ Connect new account", "")
+    AccountPickerConnect optionProvider ->
+        ("＋ Connect " <> providerSlug optionProvider <> " account", "")
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -4237,6 +4437,115 @@ requestModelProviderSwitch fullscreen choice draft persist =
                         emitUiEvent runtime (UiSystemMessage message)
                 pure (Right (RunSwitchProvider transition))
 
+requestAccountProviderSwitch
+    :: Maybe FullscreenRuntime
+    -> Provider
+    -> Text
+    -> Provider
+    -> Text
+    -> Text
+    -> Text
+    -> Persistence
+    -> IO (Either Text RunResult)
+requestAccountProviderSwitch
+    fullscreen
+    currentProvider
+    currentModelId
+    selectedProvider
+    selectionId
+    accountId
+    draft
+    persist = do
+        let choice =
+                accountSwitchTarget
+                    currentProvider
+                    currentModelId
+                    selectedProvider
+        validateSelectedAccountTarget
+            selectedProvider
+            selectionId
+            accountId >>= \case
+                Left err -> pure (Left err)
+                Right () -> do
+                    sessionId <- ensureTransitionSessionId persist
+                    let transition = ProviderTransition
+                            { transitionTarget = choice
+                            , transitionAccountSelectionId =
+                                Just selectionId
+                            , transitionAccountId = Just accountId
+                            , transitionSessionId = sessionId
+                            , transitionPendingTurn = Nothing
+                            , transitionDraft = draft
+                            , transitionUnavailableProviders = []
+                            , transitionCause = ManualTransition
+                            , transitionAutomaticBilling = Nothing
+                            }
+                        modelMessage
+                            | currentProvider == selectedProvider =
+                                providerSlug selectedProvider
+                                    <> "/"
+                                    <> choice.modelId
+                            | otherwise =
+                                providerSlug selectedProvider
+                                    <> "/"
+                                    <> choice.modelId
+                                    <> " (provider changed)"
+                    color <- resolveColor stdout
+                    case fullscreen of
+                        Nothing ->
+                            Text.putStrLn
+                                (roleMuted color
+                                    (glyphOk
+                                        <> "switching to "
+                                        <> modelMessage))
+                        Just runtime ->
+                            emitUiEvent runtime $
+                                UiSystemMessage
+                                    ("switching to " <> modelMessage)
+                    pure (Right (RunSwitchProvider transition))
+
+accountSwitchTarget :: Provider -> Text -> Provider -> ModelOption
+accountSwitchTarget currentProvider currentModelId selectedProvider =
+    ModelOption
+        { modelProvider = selectedProvider
+        , modelId =
+            if currentProvider == selectedProvider
+                then currentModelId
+                else defaultModelFor selectedProvider
+        , modelLabel = Nothing
+        }
+
+validateSelectedAccountTarget
+    :: Provider
+    -> Text
+    -> Text
+    -> IO (Either Text ())
+validateSelectedAccountTarget provider selectionId accountId =
+    loadSelectedAccountAuth provider selectionId accountId >>= \case
+        Left err ->
+            pure $ Left $
+                "cannot switch to "
+                    <> providerSlug provider
+                    <> " account: "
+                    <> err
+        Right loaded ->
+            probeLoadedAvailability loaded >>= \case
+                Left err -> do
+                    now <- getCurrentTime
+                    pure $ Left $
+                        "cannot switch to "
+                            <> providerSlug provider
+                            <> " account: "
+                            <> formatApiErrorInlineAt now err
+                Right usable
+                    | usable.loadedProvider /= provider ->
+                        pure $ Left $
+                            "cannot switch to "
+                                <> providerSlug provider
+                                <> " account: auth resolved "
+                                <> providerSlug usable.loadedProvider
+                    | otherwise -> pure (Right ())
+
 requestAutomaticProviderFallback
     :: SessionEnv
     -> ApiError
@@ -4347,6 +4656,8 @@ chooseAutomaticProviderTransition
                             emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice
+                        , transitionAccountSelectionId = Nothing
+                        , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionDraft = ""
@@ -4396,6 +4707,8 @@ chooseStartupProviderTransition
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice
+                        , transitionAccountSelectionId = Nothing
+                        , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionDraft = ""
@@ -4419,6 +4732,8 @@ prepareProviderTransition cause unavailable pending draft choice persist =
             sessionId <- ensureTransitionSessionId persist
             pure $ Right ProviderTransition
                 { transitionTarget = choice
+                , transitionAccountSelectionId = Nothing
+                , transitionAccountId = Nothing
                 , transitionSessionId = sessionId
                 , transitionPendingTurn = pending
                 , transitionDraft = draft
@@ -4602,20 +4917,31 @@ reloadAuth provider maybeTokenProvider =
 
 
 requestReload
-    :: Persistence
+    :: Maybe FullscreenRuntime
+    -> Persistence
     -> IO RunResult
-requestReload persist = do
+requestReload fullscreen persist = do
     color <- resolveColor stderr
+    let reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
     case persist of
         PersistenceDisabled -> do
-            putTextLn stderr
-                (roleError color ":reload needs a persisted REPL session")
+            reportError ":reload needs a persisted REPL session"
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
+            reportInfo ("reloading; session " <> handle.sessionMeta.metaId)
             pure (RunReload handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
@@ -4669,7 +4995,8 @@ enterPlanFromSlash env@SessionEnv
                             Just providerTransition ->
                                 pure (Just providerTransition)
                 _ -> do
-                    putTrailingNewline printed
+                    when (isNothing fullscreen) $
+                        putTrailingNewline printed
                     pure Nothing
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
@@ -4839,19 +5166,30 @@ handleResume
 handleResume fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
-    let root = sessionsRoot home
+    let reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+        root = sessionsRoot home
         resume sessionId = do
             currentId <- currentSessionId persist
             if Just sessionId == currentId
                 then do
-                    Text.hPutStrLn stderr
-                        (roleMuted color
-                            (glyphSession <> "already on session " <> sessionId))
+                    reportInfo ("already on session " <> sessionId)
                     pure Nothing
                 else
                     loadSession root sessionId >>= \case
                         Left err -> do
-                            Text.hPutStrLn stderr (roleError color err)
+                            reportError err
                             pure Nothing
                         Right _ -> pure (Just (RunResumeSession sessionId))
     case maybeId of

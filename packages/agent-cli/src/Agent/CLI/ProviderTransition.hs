@@ -32,6 +32,10 @@ data TransitionCause
 
 data ProviderTransition = ProviderTransition
     { transitionTarget :: !ModelOption
+    -- | Stable credential-source key to select after rebuilding the provider.
+    , transitionAccountSelectionId :: !(Maybe Text)
+    -- | Provider account id used by transports whose live pool selects by id.
+    , transitionAccountId :: !(Maybe Text)
     , transitionSessionId :: !(Maybe Text)
     , transitionPendingTurn :: !(Maybe PendingTurn)
     , transitionDraft :: !Text

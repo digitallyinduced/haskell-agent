@@ -377,7 +377,7 @@ loadClaudeCode = do
     let label = auth.accountLabel
         credential = Credential
             { accessToken = ""
-            , accountId = label
+            , accountId = "claude-code"
             , leaseId = Nothing
             , provider = ClaudeCodeProvider
             }
@@ -386,7 +386,7 @@ loadClaudeCode = do
         , loadedTokenProvider =
             staticCredentialProvider SubscriptionBilled credential
         , loadedAccountLabel = const (pure label)
-        , loadedSelectionId = Nothing
+        , loadedSelectionId = Just "claude-code"
         , loadedOpenAiPool = Nothing
         }
 

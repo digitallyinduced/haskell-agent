@@ -19,7 +19,9 @@ import Agent.Tools.IO
     , runShellCommandStreaming
     , runningLiveOutput
     , startShellCommand
+    , startShellCommandWithInput
     , stopShellCommand
+    , writeShellCommandInput
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
@@ -235,6 +237,25 @@ spec = describe "Agent.Tools.IO" do
 
     it "collects both output streams from a background shell command" do
         withTempDir checkBackgroundOutput
+
+    it "keeps ordinary background-command stdin closed" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            Right running <- startShellCommand env osDir
+                "if IFS= read -r line; then printf unexpected; else printf eof; fi"
+            result <- readMVar running.runningResult
+            result.commandStdout `shouldBe` "eof"
+
+    it "writes to retained background-command stdin" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            Right running <- startShellCommandWithInput env osDir
+                "IFS= read -r line; printf 'got:%s' \"$line\""
+            writeShellCommandInput running "hello\n" `shouldReturn` Right ()
+            result <- readMVar running.runningResult
+            result.commandStdout `shouldBe` "got:hello"
 
     it "caps live and final background output" do
         withTempDir checkBackgroundOutputCap

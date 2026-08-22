@@ -764,7 +764,7 @@ toggleSelected state =
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind name
-    | name `elem` ["run_terminal_cmd", "shell_command", "run_ghci"] =
+    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci"] =
         BlockShell
     | name `elem` ["search_replace", "apply_patch"] =
         BlockEdit

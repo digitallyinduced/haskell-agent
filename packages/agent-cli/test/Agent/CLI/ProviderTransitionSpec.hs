@@ -61,6 +61,8 @@ transition sessionId pending = ProviderTransition
         , modelId = "gpt-5.6-sol"
         , modelLabel = Nothing
         }
+    , transitionAccountSelectionId = Nothing
+    , transitionAccountId = Nothing
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
     , transitionDraft = ""

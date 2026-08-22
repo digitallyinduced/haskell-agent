@@ -15,6 +15,7 @@ import Agent.CLI.TUI.App
     , nextMotionSchedule
     , onboardingVisibleRowIndices
     , repositoryHeaderText
+    , selectedAgentConversation
     , uiEventRestartsMotionSchedule
     )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
@@ -131,9 +132,20 @@ spec = do
                 indicatorRows =
                     fromEnum (above > 0) + fromEnum (below > 0)
                 renderedRows =
-                    length shown + indicatorRows + 7
-            entryLimit `shouldBe` 6
+                    length shown + indicatorRows + 5
+            entryLimit `shouldBe` 8
             renderedRows `shouldSatisfy` (<= availableHeight)
+
+        it "uses a clicked child as the conversation view and root as the main view" do
+            let child =
+                    (childEntry 1)
+                        { agentTranscript =
+                            ["user: investigate", "assistant: finished"]
+                        }
+            selectedAgentConversation child.agentTarget [rootEntry, child]
+                `shouldBe` Just child
+            selectedAgentConversation AgentRoot [rootEntry, child]
+                `shouldBe` Nothing
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do

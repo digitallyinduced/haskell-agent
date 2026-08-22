@@ -94,6 +94,16 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
 
+    it "renders write_stdin as a shell block" do
+        let call = functionToolCall "c1" "write_stdin" "{\"session_id\":3}"
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+            blocks = Foldable.toList state.uiBlocks
+        case blocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "Continued session 3"
+            _ -> expectationFailure "expected one running shell block"
+
     it "applies tool output snapshots only to the matching running block" do
         let first = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"first\"}"
             second = functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"second\"}"

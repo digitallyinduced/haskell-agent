@@ -119,6 +119,79 @@ cabal run agent-cli -- +RTS -N8 -M16G -RTS
 Avoid large `-A` defaults: the allocation area is per capability, so
 `-N14 -A64m` consumes roughly 896 MiB before meaningful application data.
 
+## Nix package maintenance
+
+Each package has a checked-in `package.nix` generated with `cabal2nix`; the
+flake does not use import-from-derivation. After changing a package's Cabal
+file, regenerate its expression from the repository root, for example:
+
+```
+(cd packages/agent-claude-code && cabal2nix . > package.nix)
+```
+
+# performance
+
+Performance improvements must be supported by a benchmark that proves the
+claimed improvement before opening a PR.
+
+- Benchmark the old and new implementations with equivalent, representative
+  workloads. Keep a baseline workload in the benchmark so future changes can
+  be compared against the behavior being replaced.
+- Use an optimized build rather than interpreted GHCi timings. Run benchmarks
+  inside `nix develop`, force the result so GHC cannot optimize the work away,
+  and enable RTS statistics when measuring allocation.
+- Measure both elapsed/CPU time and allocated bytes when the change is intended
+  to reduce allocation or GC pressure. A speedup that shifts work or allocation
+  to another stage is not sufficient.
+- Run multiple samples and report a robust aggregate such as the median. Test
+  multiple input sizes to distinguish constant/linear behavior from quadratic
+  behavior, and repeat at least one representative case to check measurement
+  stability.
+- Record the benchmark command, GHC/build settings, workload dimensions, and
+  before/after results in the PR. Keep the benchmark in the repository when it
+  is useful for detecting regressions.
+- If benchmarking shows that part of the proposed optimization regresses, do
+  not ship that part. Revert it or redesign it, and document the remaining
+  performance boundary.
+
+## streaming text benchmark
+
+The streaming allocation benchmark is
+`packages/agent-core/benchmark/StreamingText.hs`. It is built with `-O2` and
+uses `GHC.Stats` with `+RTS -T` to measure allocated bytes. It constructs input
+outside the measured interval, forces a checksum of the output to prevent
+dead-code elimination, performs a GC before each sample, and reports the median
+CPU time and allocation across the requested sample count.
+
+Build and locate it with:
+
+```
+nix develop -c cabal build --offline agent-core:bench:streaming-text-bench
+bin=$(nix develop -c cabal list-bin agent-core:bench:streaming-text-bench)
+```
+
+Compare strict repeated append, chunked accumulation, removed-buffer overhead,
+the `text-builder` alternative, and the fullscreen baseline with:
+
+```
+"$bin" old-accumulate       10000 16 7 +RTS -T
+"$bin" new-accumulate       10000 16 7 +RTS -T
+"$bin" old-io-ref           10000 16 7 +RTS -T
+"$bin" new-io-ref           10000 16 7 +RTS -T
+"$bin" text-builder-io-ref   10000 16 7 +RTS -T
+"$bin" no-duplicate-buffer  10000 16 7 +RTS -T
+"$bin" fullscreen-baseline  10000 16 7 +RTS -T
+```
+
+The positional arguments are workload, chunk count, ASCII bytes per chunk, and
+sample count. Run several chunk counts and sizes; the benchmark used for the
+streaming-buffer change covered 1,000, 2,000, 5,000, and 10,000 16-byte chunks,
+plus fixed-total-size cases with larger chunks. Alternative-buffer comparisons
+also covered 20,000, 50,000, and 100,000 chunks. The `*-io-ref` workloads model
+the actual renderer update path; keep those when evaluating alternative buffer
+implementations. An attempted fullscreen chunk-buffer change was benchmarked
+separately and reverted because flattening the complete body for every Markdown
+render made it slower and allocated more than the strict-`Text` baseline.
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception

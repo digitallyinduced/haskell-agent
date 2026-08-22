@@ -50,6 +50,14 @@ spec = describe "ToolArgs" do
         decodeSearch "{\"query\":\"invoice\",\"limit\":\"5\"}"
             `shouldBe` Left "Expected integer for key: limit"
 
+    it "parses required exact integers" do
+        parseRequiredInt (Aeson.object ["session_id" .= (42 :: Int)])
+            `shouldBe` Right 42
+        parseRequiredInt (Aeson.object [])
+            `shouldBe` Left "Missing parameter: session_id"
+        parseRequiredInt (Aeson.object ["session_id" .= (1.5 :: Double)])
+            `shouldBe` Left "Expected integer for key: session_id"
+
     it "defaults integers only when absent or null" do
         decodeSearch "{\"query\":\"invoice\"}"
             `shouldBe` Right (SearchArgs "invoice" 10 Nothing)
@@ -130,6 +138,10 @@ parseOptionalInt =
 parseOptionalIntString :: Aeson.Value -> Either Text (Maybe Int)
 parseOptionalIntString =
     firstText . parseEither (objectArgs $ \o -> optIntOrString o "timeout")
+
+parseRequiredInt :: Aeson.Value -> Either Text Int
+parseRequiredInt =
+    firstText . parseEither (objectArgs $ \o -> reqInt o "session_id")
 
 firstText :: Either String a -> Either Text a
 firstText = either (Left . stripAesonPrefix . toText) Right
