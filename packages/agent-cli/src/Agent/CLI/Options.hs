@@ -259,7 +259,7 @@ usage = unlines
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
     , "      --provider NAME     openai, xai, or openrouter (default: detect from auth)"
-    , "      --model NAME        Override the provider default model"
+    , "      --model NAME        Override the project's saved/default model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
