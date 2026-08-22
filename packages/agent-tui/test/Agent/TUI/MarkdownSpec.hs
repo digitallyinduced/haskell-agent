@@ -29,9 +29,18 @@ spec = describe "fullscreen Markdown inline parsing" do
                 , InlineSpan InlinePlain ", "
                 , InlineSpan InlineCode "code"
                 , InlineSpan InlinePlain ", and "
-                , InlineSpan InlineLink "docs (https://example.com)"
+                , InlineSpan
+                    (InlineLink "https://example.com")
+                    "docs (https://example.com)"
                 , InlineSpan InlinePlain "."
                 ]
+
+    it "renders links with native terminal hyperlink metadata" do
+        let widget :: Widget ()
+            widget = markdownWidget "[docs](https://example.com)"
+            rendered = show (renderWidget Nothing [widget] (40, 3))
+        rendered `shouldSatisfy`
+            isInfixOf "attrURL = SetTo \"https://example.com\""
 
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"

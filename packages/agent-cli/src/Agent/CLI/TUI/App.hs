@@ -327,6 +327,10 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
+            -- Vty deliberately leaves OSC 8 output disabled by default even
+            -- when rendered attributes contain URLs.
+            when (V.supportsMode output V.Hyperlink) $
+                V.setMode output V.Hyperlink True
             wrapNativePreviewVty runtime vty
     initialVty <- buildVty
     let
