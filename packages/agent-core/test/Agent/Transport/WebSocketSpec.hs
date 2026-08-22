@@ -28,6 +28,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
 import System.Timeout (timeout)
@@ -38,6 +39,19 @@ spec = describe "Agent.Transport.WebSocket" do
     it "classifies websocket connection timeouts" do
         transientWsConnectFailureLabel (toException WS.ConnectionTimeout :: SomeException)
             `shouldBe` Just "WebSocket handshake timed out"
+
+    it "classifies connection resets wrapped by the TLS handshake" do
+        let exception = TLS.HandshakeFailed $ TLS.Error_Misc
+                "Network.Socket.recvBuf: resource vanished (Connection reset by peer)"
+        transientWsConnectFailureLabel (toException exception :: SomeException)
+            `shouldBe` Just
+                "TLS handshake failed: Network.Socket.recvBuf: resource vanished (Connection reset by peer)"
+
+    it "does not classify permanent TLS handshake failures as transient" do
+        let exception = TLS.HandshakeFailed $ TLS.Error_Certificate
+                "certificate validation failed"
+        transientWsConnectFailureLabel (toException exception :: SomeException)
+            `shouldBe` Nothing
 
     it "backs off transient handshake retries exponentially with a cap" do
         retryPolicyDelays 7 transientWsConnectRetryPolicy
@@ -68,7 +82,8 @@ spec = describe "Agent.Transport.WebSocket" do
 
     it "retries a transient handshake failure before the connection callback" do
         attempts <- newIORef (0 :: Int)
-        let exception = transientHandshakeException 503
+        let exception = TLS.HandshakeFailed $ TLS.Error_Misc
+                "Network.Socket.recvBuf: resource vanished (Connection reset by peer)"
         result <- retryTransientWsConnectWithPolicy
             (constantDelay 0 <> limitRetries 3)
             \connected -> do

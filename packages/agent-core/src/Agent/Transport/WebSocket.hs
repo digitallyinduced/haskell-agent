@@ -39,6 +39,7 @@ import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import Data.Word (Word64)
 import GHC.IO.Exception (IOErrorType(ResourceVanished))
+import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
 import System.IO.Error (ioeGetErrorType)
 
@@ -458,7 +459,15 @@ transientWsConnectFailureLabel exception = case Exception.fromException exceptio
     Just (WS.MalformedResponse responseHead _reason)
         | WS.responseCode responseHead `elem` retryableHandshakeStatusCodes ->
             Just ("WebSocket handshake returned HTTP " <> showText (WS.responseCode responseHead))
-    _ -> Nothing
+    _
+        | Just (TLS.HandshakeFailed (TLS.Error_Misc message)) <-
+            Exception.fromException exception
+        , isTransientNetworkErrorText (Text.pack message) ->
+            Just ("TLS handshake failed: " <> Text.pack message)
+        | Just (ioException :: IOError) <- Exception.fromException exception
+        , isTransientIOError ioException ->
+            Just ("WebSocket connect IO error: " <> showText ioException)
+        | otherwise -> Nothing
   where
     retryableHandshakeStatusCodes = [408, 425, 429, 500, 502, 503, 504]
 
@@ -490,20 +499,21 @@ transientWsMidRunFailureLabel exception
     , isTransientIOError ioException =
         Just ("WebSocket IO error: " <> showText ioException)
     | otherwise = Nothing
-  where
-    isTransientIOError :: IOError -> Bool
-    isTransientIOError ioException =
-        ioeGetErrorType ioException == ResourceVanished || matchesTransientMessage
-      where
-        matchesTransientMessage =
-            any (`Text.isInfixOf` message)
-                [ "connection reset"
-                , "broken pipe"
-                , "connection refused"
-                , "network is unreachable"
-                , "timed out"
-                ]
-        message = Text.toLower (showText ioException)
+
+isTransientIOError :: IOError -> Bool
+isTransientIOError ioException =
+    ioeGetErrorType ioException == ResourceVanished
+        || isTransientNetworkErrorText (showText ioException)
+
+isTransientNetworkErrorText :: Text -> Bool
+isTransientNetworkErrorText message =
+    any (`Text.isInfixOf` Text.toLower message)
+        [ "connection reset"
+        , "broken pipe"
+        , "connection refused"
+        , "network is unreachable"
+        , "timed out"
+        ]
 
 showText :: Show value => value -> Text
 showText = Text.pack . show

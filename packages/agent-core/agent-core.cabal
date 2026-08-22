@@ -93,6 +93,7 @@ library
                     , stm
                     , text
                     , time
+                    , tls
                     , transformers
                     , unix
                     , vector
@@ -141,6 +142,7 @@ test-suite agent-core-test
                     , stm
                     , text
                     , time
+                    , tls
                     , bytestring
                     , unix
                     , websockets
