@@ -171,6 +171,9 @@ summarizeLocal send provider params history before focus = do
             ResponseCreateParams
                 { tools = Nothing
                 , parallelToolCalls = Just False
+                -- The ChatGPT Codex REST endpoint only accepts streaming
+                -- Responses requests, and this client decodes its SSE result.
+                , stream = Just True
                 , ..
                 }
         request =

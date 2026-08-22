@@ -54,7 +54,7 @@ spec = do
             result <- runExceptT $
                 compactOpenAIWith send
                     (Just provider)
-                    defaultResponseCreateParams
+                    defaultResponseCreateParams { stream = Just False }
                     history
                     100
                     Nothing
@@ -68,6 +68,7 @@ spec = do
             length seen `shouldBe` 1
             map (.tools) seen `shouldBe` [Nothing]
             map (.parallelToolCalls) seen `shouldBe` [Just False]
+            map (.stream) seen `shouldBe` [Just True]
 
     describe "autoCompactOpenAiBackendWith" do
         it "compacts before the next request at the Codex token limit" do
