@@ -51,6 +51,17 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = do
+    describe "authErrorNeedsOnboarding" do
+        it "recognizes missing and invalid first-start credentials" do
+            authErrorNeedsOnboarding
+                "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+                `shouldBe` True
+            authErrorNeedsOnboarding
+                "no valid OpenAI credentials found: invalid auth JSON"
+                `shouldBe` True
+            authErrorNeedsOnboarding "credential store is unreadable"
+                `shouldBe` False
+
     describe "probeLoadedAuth" do
         it "rejects auth whose accounts are currently cooling down" do
             let retryAt = UTCTime (fromGregorian 2026 8 21) 3600

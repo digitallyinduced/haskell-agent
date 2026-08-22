@@ -576,7 +576,8 @@ handleEffortControlClick applyUiEvent = do
                 modify' \currentState ->
                     currentState
                         { appChoice = Just ChoiceOverlay
-                            { choiceTitle = "Reasoning effort"
+                            { choicePresentation = ChoiceDialog
+                            , choiceTitle = "Reasoning effort"
                             , choiceBody =
                                 "Changing effort will restart the current turn."
                             , choiceIndex = initial

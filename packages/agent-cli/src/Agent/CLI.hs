@@ -18,6 +18,7 @@ module Agent.CLI
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth
     ( LoadedAuth(..)
+    , authErrorNeedsOnboarding
     , loadAuth
     , preferredOpenAiTokenProvider
     , probeLoadedAuth
@@ -236,6 +237,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
@@ -488,6 +490,11 @@ newtype StartupFailure = StartupFailure String
     deriving (Show)
 
 instance Exception StartupFailure
+
+data StartupCancelled = StartupCancelled
+    deriving (Show)
+
+instance Exception StartupCancelled
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
 -- session. Keeping the id in the generated GHCi command avoids a shared
@@ -780,8 +787,11 @@ runAgent fullscreenInputs options transition = do
                         options
                         transition
                         prepared.preparedRun
-    outcome <- try @_ @StartupFailure runPrepared
-    result <- either (\(StartupFailure message) -> die message) pure outcome
+    outcome <- try @_ @StartupCancelled (try @_ @StartupFailure runPrepared)
+    result <- case outcome of
+        Left StartupCancelled -> pure RunQuit
+        Right startupOutcome ->
+            either (\(StartupFailure message) -> die message) pure startupOutcome
     case (prepared.preparedFullscreen, result) of
         -- The retained screen has been restored before this persistent final
         -- diagnostic is printed.
@@ -1038,9 +1048,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         | isNothing options.optModel ->
                             projectModelProvider projectSettings
                         | otherwise -> Nothing
-    loaded <-
-        loadAuth requestedProvider
-            >>= either (startupDie startup . Text.unpack) pure
+    loaded <- loadStartupAuth startup transition requestedProvider
     case (transitionTarget, resumed) of
         (Just target, _)
             | loaded.loadedProvider /= target.modelProvider ->
@@ -2134,6 +2142,63 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
+
+loadStartupAuth
+    :: StartupRuntime
+    -> Maybe ProviderTransition
+    -> Maybe Provider
+    -> IO LoadedAuth
+loadStartupAuth startup transition requestedProvider =
+    loadAuth requestedProvider >>= \case
+        Right loaded -> pure loaded
+        Left err
+            | isNothing transition
+            , authErrorNeedsOnboarding err
+            , Just runtime <- startup.startupFullscreen ->
+                runCredentialOnboarding startup runtime >>= \provider ->
+                    loadAuth (Just provider)
+                        >>= either (startupDie startup . Text.unpack) pure
+            | otherwise ->
+                startupDie startup (Text.unpack err)
+
+runCredentialOnboarding
+    :: StartupRuntime
+    -> FullscreenRuntime
+    -> IO Provider
+runCredentialOnboarding startup runtime = do
+    markStartupStage startup "Choose how to connect…"
+    loop
+  where
+    choices =
+        [ ( OpenAIProvider
+          , ("Sign in with ChatGPT", "Use an OpenAI subscription")
+          )
+        , ( XAIProvider
+          , ("Sign in with Grok", "Use an xAI subscription")
+          )
+        , ( OpenRouterProvider
+          , ("Add an OpenRouter API key", "Use API credits")
+          )
+        ]
+    loop =
+        requestFullscreenOnboarding
+            runtime
+            "Welcome to haskell-agent"
+            "haskell-agent can access AI models with a subscription or API key."
+            (map snd choices)
+            >>= \case
+                Nothing -> throwIO StartupCancelled
+                Just index ->
+                    case atMay index choices of
+                        Nothing -> loop
+                        Just (provider, _) -> do
+                            connected <-
+                                withFullscreenSuspended runtime $
+                                    resolveColor stderr >>= \color ->
+                                        connectProviderAccount color provider
+                            case connected of
+                                Nothing -> loop
+                                Just _ -> pure provider
 
 runPendingTurn
     :: PendingTurnPresentation

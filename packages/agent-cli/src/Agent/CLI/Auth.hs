@@ -1,6 +1,7 @@
 -- | Load ChatGPT, Grok, or OpenRouter credentials for the CLI process.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
+    , authErrorNeedsOnboarding
     , GrokAuthState(..)
     , credentialAccountLabel
     , grokCredentialFromAuthJson
@@ -1216,3 +1217,8 @@ noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
     \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+
+authErrorNeedsOnboarding :: Text -> Bool
+authErrorNeedsOnboarding message =
+    message == noAuthHint
+        || "no valid OpenAI credentials found:" `Text.isPrefixOf` message
