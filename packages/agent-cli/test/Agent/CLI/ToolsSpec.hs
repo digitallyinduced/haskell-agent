@@ -1,23 +1,34 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.Loop (LoopError(..))
 import Agent.Responses.Types
 import Agent.Provider (Provider(..))
+import Agent.Subagents
+    ( SubagentRegistry
+    , closeSubagentRegistry
+    , defaultSubagentConfig
+    , newSubagentRegistry
+    )
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
     )
+import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -75,25 +86,44 @@ spec = describe "schemasFromAppTools" do
                     `shouldBe` Just (Aeson.String "collaboration")
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
-    it "omits an empty required list from reserved collaboration schemas" do
-        let wait = jsonAppTool "wait_agent" "Wait."
-                [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
-                AlwaysReadOnly
-                (noArgsTool "wait_agent" (pure (Right "ok")))
-        case schemasFromAppTools OpenAIProvider [wait] of
-            [_, KnownResponseTool ToolNamespace tagged] ->
-                case KeyMap.lookup "tools" tagged.fields of
-                    Just (Aeson.Array tools) -> case toList tools of
-                        [Aeson.Object tool] -> do
-                            Just (Aeson.Object parameters) <-
-                                pure (KeyMap.lookup "parameters" tool)
-                            KeyMap.lookup "required" parameters `shouldBe` Nothing
+    it "preserves the configured schema for the reserved wait_agent tool" do
+        bracket newRegistry closeSubagentRegistry \registry -> do
+            let context = MultiAgentContext
+                    { multiRegistry = registry
+                    , multiSelfId = Nothing
+                    , multiDepth = 0
+                    , multiTaskPath = taskPathRoot
+                    , multiRootTurnId = pure Nothing
+                    , multiResumeFromDisk = Nothing
+                    , multiCreateWorktree = Nothing
+                    , multiPrepareSpawn = Nothing
+                    , multiSendToRoot = Nothing
+                    }
+                wait =
+                    filter
+                        (\tool -> tool.appToolName == ("wait_agent" :: Text))
+                        (multiAgentTools context)
+            case schemasFromAppTools OpenAIProvider wait of
+                [_, KnownResponseTool ToolNamespace tagged] ->
+                    case KeyMap.lookup "tools" tagged.fields of
+                        Just (Aeson.Array tools) -> case toList tools of
+                            [Aeson.Object tool] -> do
+                                Just (Aeson.Object parameters) <-
+                                    pure (KeyMap.lookup "parameters" tool)
+                                KeyMap.lookup "required" parameters
+                                    `shouldBe` Nothing
+                                Just (Aeson.Object properties) <-
+                                    pure (KeyMap.lookup "properties" parameters)
+                                Just (Aeson.Object timeout) <-
+                                    pure (KeyMap.lookup "timeout_ms" properties)
+                                KeyMap.lookup "type" timeout
+                                    `shouldBe` Just (Aeson.String "number")
+                            other -> expectationFailure
+                                ("expected one nested tool, got " <> show other)
                         other -> expectationFailure
-                            ("expected one nested tool, got " <> show other)
-                    other -> expectationFailure
-                        ("expected namespace tools, got " <> show other)
-            other -> expectationFailure
-                ("expected collaboration namespace, got " <> show other)
+                            ("expected namespace tools, got " <> show other)
+                other -> expectationFailure
+                    ("expected collaboration namespace, got " <> show other)
 
 jsonTool :: AppTool
 jsonTool = jsonAppTool "read_file" "Read a file."
@@ -120,3 +150,10 @@ offsetType tool = do
     Aeson.Object properties <- KeyMap.lookup "properties" parameters
     Aeson.Object offset <- KeyMap.lookup (Key.fromText "offset") properties
     KeyMap.lookup "type" offset
+
+newRegistry :: IO SubagentRegistry
+newRegistry = newSubagentRegistry
+    defaultSubagentConfig
+    (unsafeEncodeUtf "/tmp")
+    (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+    (\_ _ -> pure ())
