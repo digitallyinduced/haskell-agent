@@ -35,6 +35,7 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
+    , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
     )
@@ -2084,14 +2085,19 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                 current
                     in (reconciled, reconciled)
             sessions <- readIORef subagentSessions
-            let previewCount target =
-                    if null agents
-                        then Nothing
-                        else if target == selected
-                            then Just 12
-                            else if includeSummaries
-                                then Just 0
-                                else Nothing
+            let transcriptLines target items
+                    | null agents = []
+                    | target == selected = case target of
+                        AgentRoot ->
+                            responseItemPreviewLines 12 items
+                        AgentChild _
+                            | includeSummaries ->
+                                responseItemPreviewLines 12 items
+                            | otherwise ->
+                                responseItemLines items
+                    | includeSummaries =
+                        responseItemPreviewLines 0 items
+                    | otherwise = []
             rootSteps <-
                 if null agents
                     then pure []
@@ -2105,17 +2111,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     , agentPath = "/root"
                     , agentStatus = "active"
                     , agentSteps = rootSteps
-                    , agentTranscript = case previewCount AgentRoot of
-                        Nothing -> []
-                        Just count ->
-                            responseItemPreviewLines count rootItems
+                    , agentTranscript =
+                        transcriptLines AgentRoot rootItems
                     }
             children <- mapM
-                (materializeChild previewCount sessions)
+                (materializeChild transcriptLines sessions)
                 agents
             pure (selected, rootEntry : children)
           where
-            materializeChild previewCount sessions (path, agentId, status) = do
+            materializeChild transcriptLines sessions (path, agentId, status) = do
                 let target = AgentChild agentId
                 items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
@@ -2125,20 +2129,16 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     (Just status)
                     items
                     (agentStepsForStatus 2 status)
-                let transcript = case previewCount target of
-                        Nothing -> []
-                        Just count ->
-                            compactAgentPreview count $
-                                (if null items
-                                    then ["(" <> formatAgentStatus status <> ")"]
-                                    else responseItemPreviewLines count items)
-                                    <> case status of
-                                        Completed (Just result)
-                                            | not (Text.null (Text.strip result)) ->
-                                                ["assistant: " <> Text.strip result]
-                                        Errored message ->
-                                            ["error: " <> Text.strip message]
-                                        _ -> []
+                let transcript =
+                        transcriptLines target items
+                            <> case status of
+                                Completed (Just result)
+                                    | null items
+                                    , not (Text.null (Text.strip result)) ->
+                                        ["assistant: " <> Text.strip result]
+                                Errored message ->
+                                    ["error: " <> Text.strip message]
+                                _ -> []
                 pure AgentEntry
                     { agentTarget = target
                     , agentPath = taskPathText path
@@ -2146,13 +2146,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     , agentSteps = steps
                     , agentTranscript = transcript
                     }
-            compactAgentPreview count rows
-                | length rows <= count = rows
-                | otherwise = case rows of
-                    [] -> []
-                    firstLine : _ ->
-                        firstLine
-                            : drop (max 0 (length rows - count)) rows
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
             , viewportEntries = snd <$> loadAgentSnapshot True

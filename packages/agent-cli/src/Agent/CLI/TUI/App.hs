@@ -17,6 +17,7 @@ module Agent.CLI.TUI.App
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , newFullscreenRuntimeWithSyntaxLoader
+    , selectedAgentConversation
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
@@ -1561,18 +1562,75 @@ drawWorkspace state =
                                 ]
 
 drawConversationPane :: AppState -> Widget Name
-drawConversationPane state
-    | conversationIsEmpty state.appUi =
-        padLeftRight 2 $
-            vBox
-                [ drawTranscript state
-                , drawEmptyConversation state
-                ]
-    | otherwise =
-        withVScrollBarRenderer conversationScrollbarRenderer $
-            withVScrollBars OnRight $
-                viewport ConversationViewport Vertical $
-                    padLeftRight 2 (drawTranscript state)
+drawConversationPane state =
+    case selectedChildEntry state of
+        Just entry ->
+            withVScrollBarRenderer conversationScrollbarRenderer $
+                withVScrollBars OnRight $
+                    viewport ConversationViewport Vertical $
+                        padLeftRight 2 (drawAgentConversation entry)
+        Nothing
+            | conversationIsEmpty state.appUi ->
+                padLeftRight 2 $
+                    vBox
+                        [ drawTranscript state
+                        , drawEmptyConversation state
+                        ]
+            | otherwise ->
+                withVScrollBarRenderer conversationScrollbarRenderer $
+                    withVScrollBars OnRight $
+                        viewport ConversationViewport Vertical $
+                            padLeftRight 2 (drawTranscript state)
+
+selectedChildEntry :: AppState -> Maybe AgentEntry
+selectedChildEntry state =
+    selectedAgentConversation
+        state.appAgentSelected
+        state.appAgentEntries
+
+selectedAgentConversation
+    :: AgentTarget
+    -> [AgentEntry]
+    -> Maybe AgentEntry
+selectedAgentConversation selected entries = case selected of
+    AgentRoot -> Nothing
+    target ->
+        find ((== target) . (.agentTarget)) entries
+
+drawAgentConversation :: AgentEntry -> Widget Name
+drawAgentConversation entry =
+    vBox
+        [ withAttr Theme.headingAttr $
+            txt ("Viewing " <> entry.agentPath)
+        , withAttr Theme.mutedAttr $
+            txt
+                (entry.agentStatus
+                    <> " · input is sent to /root")
+        , padTop (Pad 1) $
+            case entry.agentTranscript of
+                [] ->
+                    withAttr Theme.mutedAttr $
+                        txt "(no transcript yet)"
+                rows ->
+                    vBox (map drawAgentTranscriptLine rows)
+        ]
+
+drawAgentTranscriptLine :: Text -> Widget Name
+drawAgentTranscriptLine line =
+    padBottom (Pad 1) $
+        case Text.breakOn ": " line of
+            ("user", body) ->
+                withAttr Theme.userAttr $
+                    padAll 1 (txtWrap (Text.drop 2 body))
+            ("assistant", body) ->
+                padLeft (Pad 3) $
+                    withAttr Theme.assistantAttr $
+                        txtWrap (Text.drop 2 body)
+            ("error", body) ->
+                withAttr Theme.errorAttr $
+                    txtWrap (Text.drop 2 body)
+            _ ->
+                withAttr Theme.mutedAttr (txtWrap line)
 
 -- Brick's default scrollbar uses a full block for the thumb and a blank
 -- space for the trough. During rapid viewport reflow, some terminals can
@@ -1608,9 +1666,9 @@ agentPaneVisible width height entries =
 
 agentPaneEntryLimit :: Int -> Int
 agentPaneEntryLimit availableHeight =
-    -- Reserve the outer top pad, six pane chrome rows (border, padding,
-    -- footer), and two possible truncation indicators above and below.
-    max 1 (min 12 (availableHeight - 9))
+    -- Reserve the outer top pad, four pane chrome rows (border and padding),
+    -- and two possible truncation indicators above and below.
+    max 1 (min 12 (availableHeight - 7))
 
 drawAgentPane
     :: AppState
@@ -1629,12 +1687,7 @@ drawAgentPane state entryLimit selected hovered entries =
                             <> Text.pack (show childCount)
                             <> " ")) $
                     padAll 1 $
-                        vBox
-                            [ vBox agentRows
-                            , padTop (Pad 1) $
-                                withAttr Theme.footerAttr $
-                                    txt "hover preview · /agents switch"
-                            ]
+                        vBox agentRows
   where
     ordered = sortOn (.agentPath) entries
     childCount =
@@ -1969,8 +2022,8 @@ drawTranscript state =
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
-    case state.appConversationAnchor of
-        Just anchor
+    case (state.appAgentSelected, state.appConversationAnchor) of
+        (AgentRoot, Just anchor)
             | Scroll.conversationAnchorSticky anchor ->
                 [ translateBy (Location (0, 2)) $
                     hLimitPercent conversationWidth $
