@@ -50,6 +50,7 @@ import Agent.CLI.Terminal
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , shiftEnterCsiBodies
+    , stripAnsi
     )
 import Agent.Loop (ImageAttachment)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
@@ -1093,18 +1094,6 @@ truncateDisplayText width text
 visibleWidth :: Text -> Int
 visibleWidth = terminalTextWidth . stripAnsi
 
-stripAnsi :: Text -> Text
-stripAnsi = Text.pack . goNormal . Text.unpack
-  where
-    goNormal = \case
-        [] -> []
-        '\ESC' : '[' : rest -> goCsi rest
-        char : rest -> char : goNormal rest
-    goCsi = \case
-        [] -> []
-        char : rest
-            | char >= '@' && char <= '~' -> goNormal rest
-            | otherwise -> goCsi rest
 -- | Read a one-shot approval answer. The question is always written to
 -- stderr (matching the historical behavior) so redirected stdout does
 -- not swallow the prompt. Does not touch REPL history.

@@ -43,6 +43,7 @@ import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
 import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
+import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
@@ -91,6 +92,7 @@ main = hspec do
     StyleSpec.spec
     TimestampSpec.spec
     TerminalSpec.spec
+    TextLayoutSpec.spec
     SessionSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec

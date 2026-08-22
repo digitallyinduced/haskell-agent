@@ -34,3 +34,15 @@ spec = do
         it "exposes Kitty keyboard push/pop sequences" do
             Text.null kittyKeyboardPush `shouldBe` False
             Text.null kittyKeyboardPop `shouldBe` False
+
+    describe "stripAnsi" do
+        it "leaves plain text unchanged" do
+            stripAnsi "selected" `shouldBe` "selected"
+
+        it "removes multiple complete CSI sequences" do
+            stripAnsi "\ESC[1;36mselected\ESC[0m plain \ESC[2mdim\ESC[0m"
+                `shouldBe` "selected plain dim"
+
+        it "drops an incomplete trailing CSI sequence" do
+            stripAnsi "ready\ESC[38;5"
+                `shouldBe` "ready"

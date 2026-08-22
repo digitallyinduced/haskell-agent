@@ -79,6 +79,7 @@ library
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
+                    , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
@@ -172,6 +173,7 @@ test-suite agent-cli-test
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
+                    , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec

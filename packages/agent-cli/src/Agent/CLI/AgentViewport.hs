@@ -29,6 +29,12 @@ module Agent.CLI.AgentViewport
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
+import Agent.CLI.TextLayout
+    ( clampSelectionIndex
+    , fitTextCell
+    , selectionWindow
+    , transcriptPreviewRows
+    )
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
 import Agent.ToolDispatch (customToolCall, functionToolCall)
@@ -117,7 +123,10 @@ initialAgentViewportState selected entries =
 selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
 selectedAgentEntry state = case state.viewportAll of
     [] -> Nothing
-    entries -> Just (entries !! clamp (length entries) state.viewportIndex)
+    entries ->
+        Just
+            (entries
+                !! clampSelectionIndex (length entries) state.viewportIndex)
 
 refreshAgentViewportState
     :: [AgentEntry]
@@ -154,7 +163,7 @@ applyAgentViewportKey key state = case key of
             then current { viewportIndex = 0 }
             else current
                 { viewportIndex =
-                    (clamp n current.viewportIndex + delta) `mod` n
+                    (clampSelectionIndex n current.viewportIndex + delta) `mod` n
                 }
 
 renderAgentTree :: Bool -> AgentTarget -> [AgentEntry] -> Text
@@ -238,27 +247,27 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
     rightWidth = max 1 (cols - leftWidth - 3)
     entries = state.viewportAll
     n = length entries
-    idx = clamp n state.viewportIndex
-    shown = entryWindow bodyRows idx entries
+    idx = clampSelectionIndex n state.viewportIndex
+    shown = selectionWindow bodyRows idx entries
     selected = selectedAgentEntry state
     header =
         rolePrompt color "agents"
             <> roleMuted color
-                (fitCell (max 0 (cols - 6))
+                (fitTextCell (max 0 (cols - 6))
                     (" · " <> Text.pack (show n)
                         <> if n == 1 then " agent" else " agents"))
     headings =
-        rolePrompt color (fitCell leftWidth "hierarchy")
+        rolePrompt color (fitTextCell leftWidth "hierarchy")
             <> divider
             <> rolePrompt color
-                (fitCell rightWidth
+                (fitTextCell rightWidth
                     ("transcript"
                         <> maybe "" (\entry -> " · " <> entry.agentPath) selected))
     leftRows =
         map
             (\(absoluteIndex, entry) ->
                 let prefix = if absoluteIndex == idx then "› " else "  "
-                    text = fitCell leftWidth
+                    text = fitTextCell leftWidth
                         (prefix
                             <> agentEntryTreeLabel
                                 entries absoluteIndex entry)
@@ -268,16 +277,21 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
             shown
             <> repeat (Text.replicate leftWidth " ")
     rightRows = case selected of
-        Nothing -> roleMuted color (fitCell rightWidth "(no agents)") : repeat ""
+        Nothing ->
+            roleMuted color (fitTextCell rightWidth "(no agents)") : repeat ""
         Just entry ->
-            let preview = previewRows rightWidth bodyRows entry.agentTranscript
-            in map (fitCell rightWidth) preview <> repeat ""
+            let preview =
+                    transcriptPreviewRows
+                        rightWidth
+                        bodyRows
+                        entry.agentTranscript
+            in map (fitTextCell rightWidth) preview <> repeat ""
     body =
         take bodyRows $
             zipWith (\left right -> left <> divider <> right) leftRows rightRows
     footer =
         roleMuted color $
-            fitCell cols footerText
+            fitTextCell cols footerText
 
 pickAgentViewport
     :: Bool
@@ -659,49 +673,3 @@ pathSegments path =
     case filter (not . Text.null) (Text.splitOn "/" path) of
         "root" : rest -> rest
         parts -> parts
-
-entryWindow :: Int -> Int -> [a] -> [(Int, a)]
-entryWindow count selected xs =
-    let total = length xs
-        start = max 0 (min selected (total - count))
-    in zip [start ..] (take count (drop start xs))
-
-previewRows :: Int -> Int -> [Text] -> [Text]
-previewRows width count logicalLines =
-    let wrapped = concatMap (hardWrap width) logicalLines
-        rows
-            | null wrapped = ["(empty transcript)"]
-            | otherwise = wrapped
-    in drop (max 0 (length rows - count)) rows
-
-hardWrap :: Int -> Text -> [Text]
-hardWrap width raw
-    | Text.null raw = [""]
-    | otherwise = go raw
-  where
-    width' = max 1 width
-    go text
-        | Text.null text = []
-        | otherwise =
-            let (line, rest) = Text.splitAt width' text
-            in line : go rest
-
-fitCell :: Int -> Text -> Text
-fitCell width raw
-    | width <= 0 = ""
-    | Text.length clean <= width =
-        clean <> Text.replicate (width - Text.length clean) " "
-    | width == 1 = "…"
-    | otherwise = Text.take (width - 1) clean <> "…"
-  where
-    clean =
-        Text.map
-            (\c -> if c == '\t' || c == '\r' || c == '\n' then ' ' else c)
-            raw
-
-clamp :: Int -> Int -> Int
-clamp n i
-    | n <= 0 = 0
-    | i < 0 = 0
-    | i >= n = n - 1
-    | otherwise = i
