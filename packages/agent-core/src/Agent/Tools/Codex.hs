@@ -11,7 +11,7 @@ module Agent.Tools.Codex
 import Agent.OsPath (fromText)
 import Agent.ToolArgs
     ( objectArgs
-    , optInt
+    , optIntOrString
     , optText
     , reqText
     )
@@ -44,9 +44,9 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     )
 import Control.Applicative ((<|>))
-import Data.Aeson (FromJSON(..), Object, Value(..), withObject)
+import Data.Aeson (FromJSON(..), Value(..), withObject)
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser, parseFail)
+import Data.Aeson.Types (parseFail)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -97,17 +97,7 @@ instance FromJSON ShellCommandArgs where
     parseJSON = objectArgs \object -> ShellCommandArgs
         <$> reqText object "command"
         <*> optText object "workdir"
-        <*> (optInt object "timeout_ms" <|> optionalIntString object "timeout_ms")
-
-optionalIntString :: Object -> Text -> Parser (Maybe Int)
-optionalIntString object key = do
-    value <- optText object key
-    pure (value >>= readInt)
-
-readInt :: Text -> Maybe Int
-readInt text = case reads (Text.unpack text) of
-    [(n, "")] -> Just n
-    _ -> Nothing
+        <*> optIntOrString object "timeout_ms"
 
 shellCommandTool :: ToolEnv -> AppTool
 shellCommandTool env = jsonTool "shell_command" shellDescription

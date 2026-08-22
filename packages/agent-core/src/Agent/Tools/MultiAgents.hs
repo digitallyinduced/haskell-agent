@@ -45,6 +45,7 @@ import Agent.ToolArgs
     ( objectArgs
     , optInt
     , optText
+    , readExactInt
     , reqText
     , reqTextList
     )
@@ -224,8 +225,8 @@ validForkTurns = \case
     Just turns ->
         let stripped = Text.toLower (Text.strip turns)
         in stripped `elem` ["none", "all", ""]
-            || case reads (Text.unpack stripped) of
-                [(turns :: Int, "")] -> turns > 0
+            || case readExactInt stripped of
+                Just count -> count > 0
                 _ -> False
 
 sanitizeOverride :: Maybe Text -> Maybe Text
@@ -259,7 +260,7 @@ instance FromJSON WaitAgentArgs where
 
 waitAgentTool :: MultiAgentContext -> AppTool
 waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
-    [ PropertySchema "timeout_ms" PropertyNumber False $ Just
+    [ PropertySchema "timeout_ms" PropertyInteger False $ Just
         "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True

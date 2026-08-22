@@ -5,7 +5,7 @@ module Agent.Tools.Grok.Common
     , stripAnsi
     ) where
 
-import Agent.ToolArgs (optInt, optText)
+import Agent.ToolArgs (optIntOrString)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolHandler)
 import Agent.OsPath (unsafeToFilePath)
@@ -15,7 +15,6 @@ import Agent.Tools.Types
     , ToolExecutionPolicy
     , jsonAppToolWithExecution
     )
-import Control.Applicative ((<|>))
 import Data.Aeson (Object)
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
@@ -47,16 +46,8 @@ isGitIgnored cwd path = findExecutable "git" >>= \case
         pure (code == ExitSuccess)
 
 optionalTimeout :: Object -> Parser (Maybe Int)
-optionalTimeout object = do
-    fromInt <- optInt object "timeout"
-    fromText <- optText object "timeout"
-    pure $ fromInt <|> (fromText >>= readTimeout)
-
-readTimeout :: Text -> Maybe Int
-readTimeout text =
-    case reads (Text.unpack text) of
-        [(n, "")] -> Just n
-        _ -> Nothing
+optionalTimeout object =
+    optIntOrString object "timeout"
 
 stripAnsi :: Text -> Text
 stripAnsi = Text.concat . go

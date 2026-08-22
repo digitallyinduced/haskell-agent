@@ -241,6 +241,7 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
+import Agent.TUI.Motion (nativeProgressAnimationEnabled)
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
@@ -776,11 +777,15 @@ runAgent fullscreenInputs options transition = do
             (copyTerminalClipboard terminal stdout)
             (setCliWindowTitle stdoutTty stdout)
             (\active ->
-                when terminal.terminalNativeProgress $
+                when
+                    (terminal.terminalNativeProgress
+                        && nativeProgressAnimationEnabled
+                            options.optMotionMode) $
                     setNativeProgress stderr active)
             (readIORef agentSnapshotRef >>= id)
             (\target -> readIORef agentSelectRef >>= ($ target))
             (recordStartupTiming startedAt startupTimingsRef "first frame")
+            options.optMotionMode
             useColor
             initialFullscreenState
         else pure Nothing
@@ -1544,7 +1549,11 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
             , renderNativeProgress =
-                stderrTty && terminal.terminalNativeProgress
+                stderrTty
+                    && terminal.terminalNativeProgress
+                    && nativeProgressAnimationEnabled
+                        options.optMotionMode
+            , renderMotionMode = options.optMotionMode
             }
         emitLoop event = case fullscreen of
             Nothing -> renderEvent render event
@@ -1984,7 +1993,14 @@ replWithDraft env@SessionEnv
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
             case fullscreen of
-                Just _ -> pure ()
+                Just runtime ->
+                    emitUiEvent runtime $
+                        UiSetNotice $
+                            Just $
+                                infoNotice
+                                    ("Switched to "
+                                        <> replModeLabel next
+                                        <> " mode.")
                 Nothing -> do
                     -- Minimal editor advanced a line; replace its old chrome.
                     putStr "\ESC[2A\r\ESC[J"

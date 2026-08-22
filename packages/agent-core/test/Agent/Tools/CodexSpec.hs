@@ -92,7 +92,7 @@ spec = describe "Agent.Tools.Codex" do
                 , "fork_turns"
                 ]
             map (.propertyType) (parameters "wait_agent") `shouldBe`
-                [PropertyNumber]
+                [PropertyInteger]
             case map (.propertyType) (parameters "spawn_agent") of
                 _ : PropertyRaw (Aeson.Object messageSchema) : _ ->
                     KeyMap.lookup "encrypted" messageSchema
@@ -271,7 +271,7 @@ spec = describe "Agent.Tools.Codex" do
             output `shouldSatisfy` Text.isInfixOf "Exit code: 0"
             output `shouldSatisfy` Text.isInfixOf "hi"
             timed <- runFn env "shell_command"
-                "{\"command\":\"sleep 5\",\"timeout_ms\":200}"
+                "{\"command\":\"sleep 5\",\"timeout_ms\":\"200\"}"
             timed `shouldSatisfy` Text.isInfixOf "timed out"
 
     it "stores an update_plan and rejects two in_progress steps" do
