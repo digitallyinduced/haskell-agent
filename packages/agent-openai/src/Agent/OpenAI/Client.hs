@@ -26,15 +26,13 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
+import Agent.Retry (handleSyncExceptions)
 import qualified Agent.Responses.Types as OpenAI
 import Control.Monad (forM_, when)
-import qualified Control.Exception.Safe as Exception
-import Control.Monad.Catch (Handler(..))
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
     , limitRetries
-    , recovering
     , retrying
     )
 import qualified Data.Aeson as Aeson
@@ -42,6 +40,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import qualified Network.URI as URI
 
 import OpenSSL
@@ -146,7 +145,11 @@ createCodexMessageWithProviderAtWithOptions options baseUrl provider request =
                 Nothing
             OpenAIProvider ->
                 retryTransientCodexResultWithPolicy transientResultPolicy $
-                    recovering exceptionPolicy handlers $ \_status ->
+                    handleSyncExceptions
+                        (ConnectionError
+                            . ("Codex request failed: " <>)
+                            . Text.pack
+                            . show) $
                         makeCodexRequest
                             options
                             baseUrl
@@ -154,13 +157,7 @@ createCodexMessageWithProviderAtWithOptions options baseUrl provider request =
                             credential.accountId
                             request
   where
-    exceptionPolicy = exponentialBackoff 1_000_000 <> limitRetries 3
     transientResultPolicy = exponentialBackoff 5_000_000 <> limitRetries 3
-    handlers = [\_status -> Handler handleException]
-    handleException :: Exception.SomeException -> IO Bool
-    handleException e
-        | Exception.isSyncException e = pure True
-        | otherwise = Exception.throwIO e
 
 -- | Retry short-lived provider and transport failures. Quota and rate-limit
 -- errors remain excluded by 'isInlineRetryableProviderError'.
@@ -214,7 +211,7 @@ responseHandler :: Response -> Streams.InputStream BS.ByteString -> IO (Either A
 responseHandler response stream = do
     let status = getStatusCode response
     bytes <- Streams.fold mappend mempty stream
-    let bodyText = Text.decodeUtf8 bytes
+    let bodyText = Text.decodeUtf8With Text.lenientDecode bytes
     if status >= 200 && status < 300
         then pure (decodeCodexHttpBody bodyText)
         else pure $ Left (classifyHttpFailure status bodyText)

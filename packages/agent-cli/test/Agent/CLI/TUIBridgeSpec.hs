@@ -4,18 +4,29 @@ import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( emitUiEvent
+    , loadSyntaxHighlighterForRuntime
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , newFullscreenRuntimeWithSyntaxLoader
     , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
-import Agent.CLI.TUI.Types (FullscreenRuntime(..))
+import Agent.CLI.TUI.Types
+    ( AppEvent(..)
+    , AppEventMailbox(..)
+    , FullscreenRuntime(..)
+    , PendingAppEvent(..)
+    )
 import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
+import Agent.TUI.Motion (MotionMode(..))
+import Control.Concurrent.STM (readTVarIO)
+import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Foldable (toList)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import System.Timeout (timeout)
 import qualified Graphics.Vty as V
 import Test.Hspec
@@ -27,9 +38,8 @@ spec = describe "fullscreen TUI bridge" do
         eventFollows (UiErrorMessage "failed") `shouldBe` True
         eventFollows (UiSetDraft "draft" 5) `shouldBe` False
 
-    it "starts, refreshes, and clears native terminal progress" do
+    it "starts and clears native terminal progress" do
         let running = reduceUi (UiLoop TurnStarted) initialUiState
-            refresh = running { uiFrame = 10 }
             toolCall =
                 functionToolCall
                     "tool-1"
@@ -47,19 +57,19 @@ spec = describe "fullscreen TUI bridge" do
                         (TurnFinished
                             (emptyTurnOutput "r2" [] Nothing)))
                     running
-        nativeProgressSignal (UiLoop TurnStarted) running
-            `shouldBe` Just True
-        nativeProgressSignal UiTick refresh
+        nativeProgressSignal False (UiLoop TurnStarted) running
             `shouldBe` Just True
         nativeProgressSignal
+            False
             (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing)))
             finished
             `shouldBe` Just False
         nativeProgressSignal
+            False
             (UiLoop (TurnFinished (emptyTurnOutput "r1" [toolCall] Nothing)))
             continuing
             `shouldBe` Just True
-        nativeProgressSignal (UiTurnEnded BlockCancelled) running
+        nativeProgressSignal False (UiTurnEnded BlockCancelled) running
             `shouldBe` Just False
 
     it "coalesces adjacent streaming updates without merging boundaries" do
@@ -75,7 +85,6 @@ spec = describe "fullscreen TUI bridge" do
             (UiLoop (ActivityUpdated "connecting"))
             (UiLoop (ActivityUpdated "streaming"))
             `shouldBe` Just (UiLoop (ActivityUpdated "streaming"))
-        mergeUiEvents UiTick UiTick `shouldBe` Just UiTick
         mergeUiEvents
             (UiLoop (TextDelta "answer"))
             (UiLoop
@@ -100,6 +109,8 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (pure ()))
             (pure ())
+            (const (throwString "syntax timing failed"))
+            MotionFull
             False
             initialUiState
         completed <- timeout 2000000 $
@@ -122,6 +133,8 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (pure ()))
             (pure ())
+            (const (pure ()))
+            MotionFull
             False
             initialUiState
         runtime.runtimeCancel
@@ -139,6 +152,53 @@ spec = describe "fullscreen TUI bridge" do
         readIORef calls `shouldReturn`
             ["old cancel", "new cancel", "new effort", "new agent"]
         decision `shouldBe` SoftCancel
+
+    it "defers syntax loading until the runtime starts it" do
+        input <- newFullscreenInputBuffer
+        loaderCalled <- newIORef False
+        durationRef <- newIORef Nothing
+        runtime <- newFullscreenRuntimeWithSyntaxLoader
+            (writeIORef loaderCalled True >> pure (Left "unavailable"))
+            input
+            (pure ())
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            (writeIORef durationRef . Just)
+            MotionFull
+            False
+            initialUiState
+        readIORef loaderCalled `shouldReturn` False
+        loadSyntaxHighlighterForRuntime runtime
+        readIORef loaderCalled `shouldReturn` True
+        readIORef durationRef >>= (`shouldSatisfy` maybe False (>= 0))
+        hasPendingUnavailableSyntax runtime `shouldReturn` True
+
+    it "contains unexpected syntax loader and timing failures" do
+        input <- newFullscreenInputBuffer
+        runtime <- newFullscreenRuntimeWithSyntaxLoader
+            (throwString "syntax loader failed")
+            input
+            (pure ())
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            (const (pure ()))
+            MotionFull
+            False
+            initialUiState
+        loadSyntaxHighlighterForRuntime runtime
+        hasPendingUnavailableSyntax runtime `shouldReturn` True
 
     it "moves through history and restores the original draft" do
         historyMove 1 ["new", "old"] Nothing "draft" ""
@@ -168,3 +228,11 @@ spec = describe "fullscreen TUI bridge" do
             `shouldBe` AgentRoot
         reconcileAgentSelection [AgentRoot, other] other
             `shouldBe` other
+
+hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
+hasPendingUnavailableSyntax runtime = do
+    let AppEventMailbox pendingRef = runtime.runtimeMailbox
+    pending <- readTVarIO pendingRef
+    pure case toList pending of
+        [PendingEvent (AppSyntaxHighlighterLoaded Nothing)] -> True
+        _ -> False

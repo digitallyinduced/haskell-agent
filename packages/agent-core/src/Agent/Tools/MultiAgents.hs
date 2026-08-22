@@ -45,6 +45,7 @@ import Agent.ToolArgs
     ( objectArgs
     , optInt
     , optText
+    , readExactInt
     , reqText
     , reqTextList
     )
@@ -224,8 +225,8 @@ validForkTurns = \case
     Just turns ->
         let stripped = Text.toLower (Text.strip turns)
         in stripped `elem` ["none", "all", ""]
-            || case reads (Text.unpack stripped) of
-                [(turns :: Int, "")] -> turns > 0
+            || case readExactInt stripped of
+                Just count -> count > 0
                 _ -> False
 
 sanitizeOverride :: Maybe Text -> Maybe Text

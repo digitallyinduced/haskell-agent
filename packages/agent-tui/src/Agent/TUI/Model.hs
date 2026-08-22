@@ -26,14 +26,20 @@ module Agent.TUI.Model
     , selectedBlockIndex
     , progressNotice
     , successNotice
+    , uiNextDeadlineMillis
     , uiNeedsTick
     , warningNotice
+    , advanceUiTime
     ) where
 
 import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
     , summarizeToolCall
+    )
+import Agent.TUI.Motion
+    ( completionStatusDurationMillis
+    , transientNoticeDurationMillis
     )
 import Agent.Loop
     ( LoopEvent(..)
@@ -116,6 +122,7 @@ data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
     , promptMode :: !Text
+    , promptAccount :: !Text
     , promptUsage :: !TokenUsage
     , promptAttachments :: !Int
     }
@@ -138,10 +145,9 @@ data UiState = UiState
     , uiCwd :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
-    , uiNoticeTicks :: !Int
-    , uiFrame :: !Int
-    , uiElapsedTenths :: !Int
-    , uiCompletionTicks :: !Int
+    , uiNoticeElapsedMillis :: !Int
+    , uiElapsedMillis :: !Int
+    , uiCompletionRemainingMillis :: !Int
     , uiTurnStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text ToolCall)
     }
@@ -175,7 +181,6 @@ data UiEvent
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
     | UiTurnRestarted
-    | UiTick
     deriving (Eq, Show)
 
 initialUiState :: UiState
@@ -195,6 +200,7 @@ initialUiState = UiState
         { promptModel = ""
         , promptEffort = ""
         , promptMode = "ask"
+        , promptAccount = ""
         , promptUsage = emptyTokenUsage
         , promptAttachments = 0
         }
@@ -202,10 +208,9 @@ initialUiState = UiState
     , uiCwd = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
-    , uiNoticeTicks = 0
-    , uiFrame = 0
-    , uiElapsedTenths = 0
-    , uiCompletionTicks = 0
+    , uiNoticeElapsedMillis = 0
+    , uiElapsedMillis = 0
+    , uiCompletionRemainingMillis = 0
     , uiTurnStartBlock = 0
     , uiToolCalls = Map.empty
     }
@@ -229,6 +234,7 @@ reduceUi event state = case event of
                 { uiAwaitingInput = False
                 , uiFollow = True
                 , uiNotice = Nothing
+                , uiNoticeElapsedMillis = 0
                 }
     UiDraftSubmitted ->
         state
@@ -236,6 +242,7 @@ reduceUi event state = case event of
             , uiCursor = 0
             , uiAwaitingInput = False
             , uiNotice = Nothing
+            , uiNoticeElapsedMillis = 0
             }
     UiInputQueued text ->
         state
@@ -243,6 +250,7 @@ reduceUi event state = case event of
             , uiCursor = 0
             , uiQueuedInputs = state.uiQueuedInputs Seq.|> text
             , uiNotice = Nothing
+            , uiNoticeElapsedMillis = 0
             }
     UiInputPromoted text ->
         state
@@ -253,12 +261,14 @@ reduceUi event state = case event of
                 Just $
                     warningNotice
                         "Cancelling the current turn; sending this prompt next…"
+            , uiNoticeElapsedMillis = 0
             }
     UiQueuedInputStarted ->
         state
             { uiQueuedInputs = Seq.drop 1 state.uiQueuedInputs
             , uiAwaitingInput = False
             , uiNotice = Nothing
+            , uiNoticeElapsedMillis = 0
             }
     UiSetDraft text cursor ->
         state
@@ -276,14 +286,14 @@ reduceUi event state = case event of
             { uiAwaitingInput = awaiting
             , uiRunning = if awaiting then False else state.uiRunning
             , uiActivity =
-                if awaiting && state.uiCompletionTicks == 0
+                if awaiting && state.uiCompletionRemainingMillis == 0
                     then "Ready"
                     else state.uiActivity
             }
     UiSetRepository branch cwd ->
         state { uiBranch = branch, uiCwd = cwd }
     UiSetNotice notice ->
-        state { uiNotice = notice, uiNoticeTicks = 0 }
+        state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
     UiMoveSelection delta ->
         moveSelection delta state
     UiSelectBlock ident ->
@@ -352,52 +362,75 @@ reduceUi event state = case event of
             , uiActivity = "Restarting…"
             , uiNotice =
                 Just (progressNotice "Restarting current turn…")
-            , uiNoticeTicks = 0
-            , uiCompletionTicks = 0
+            , uiNoticeElapsedMillis = 0
+            , uiCompletionRemainingMillis = 0
             , uiToolCalls = Map.empty
             }
-    UiTick ->
-        if not (uiNeedsTick state)
-            then state
-            else
-                let completionTicks =
-                        max 0 (state.uiCompletionTicks - 1)
-                    noticeTicks = state.uiNoticeTicks + 1
-                    notice
-                        | noticeTicks >= 30
-                        , maybe False (.noticeTransient) state.uiNotice =
-                            Nothing
-                        | otherwise = state.uiNotice
-                in state
-                    { uiFrame = nextUiFrame state.uiFrame
-                    , uiElapsedTenths =
-                        if state.uiRunning
-                            then state.uiElapsedTenths + 1
-                            else state.uiElapsedTenths
-                    , uiActivity =
-                        if state.uiCompletionTicks == 1
-                            then "Ready"
-                            else state.uiActivity
-                    , uiCompletionTicks = completionTicks
-                    , uiNotice = notice
-                    , uiNoticeTicks =
-                        if notice == Nothing then 0 else noticeTicks
-                    }
+
+advanceUiTime :: Int -> UiState -> UiState
+advanceUiTime rawElapsedMillis state =
+    let
+        elapsedMillis = max 0 rawElapsedMillis
+        completionRemainingMillis =
+            max 0
+                (state.uiCompletionRemainingMillis - elapsedMillis)
+        noticeElapsedMillis =
+            case state.uiNotice of
+                Just notice
+                    | notice.noticeTransient ->
+                        state.uiNoticeElapsedMillis + elapsedMillis
+                _ ->
+                    0
+        notice
+            | noticeElapsedMillis >= transientNoticeDurationMillis
+            , maybe False (.noticeTransient) state.uiNotice =
+                Nothing
+            | otherwise = state.uiNotice
+    in state
+        { uiElapsedMillis =
+            if state.uiRunning
+                then state.uiElapsedMillis + elapsedMillis
+                else state.uiElapsedMillis
+        , uiActivity =
+            if state.uiCompletionRemainingMillis > 0
+                && completionRemainingMillis == 0
+                then "Ready"
+                else state.uiActivity
+        , uiCompletionRemainingMillis = completionRemainingMillis
+        , uiNotice = notice
+        , uiNoticeElapsedMillis =
+            if notice == Nothing then 0 else noticeElapsedMillis
+        }
 
 uiNeedsTick :: UiState -> Bool
 uiNeedsTick state =
     state.uiRunning
-        || state.uiCompletionTicks > 0
-        || conversationIsEmpty state
+        || state.uiCompletionRemainingMillis > 0
         || maybe False noticeNeedsTick state.uiNotice
   where
     noticeNeedsTick notice =
         notice.noticeTransient
-            || notice.noticeKind == NoticeProgress
 
-nextUiFrame :: Int -> Int
-nextUiFrame frame =
-    (frame + 1) `mod` 120
+uiNextDeadlineMillis :: UiState -> Maybe Int
+uiNextDeadlineMillis state =
+    minimumMaybe $
+        completionDeadline <> noticeDeadline
+  where
+    completionDeadline =
+        [state.uiCompletionRemainingMillis
+        | state.uiCompletionRemainingMillis > 0]
+    noticeDeadline =
+        case state.uiNotice of
+            Just notice
+                | notice.noticeTransient ->
+                    [ max 0
+                        (transientNoticeDurationMillis
+                            - state.uiNoticeElapsedMillis)
+                    ]
+            _ ->
+                []
+    minimumMaybe [] = Nothing
+    minimumMaybe values = Just (minimum values)
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -407,8 +440,9 @@ reduceLoop event state = case event of
             , uiAwaitingInput = False
             , uiActivity = "Thinking…"
             , uiNotice = Nothing
-            , uiElapsedTenths = 0
-            , uiCompletionTicks = 0
+            , uiNoticeElapsedMillis = 0
+            , uiElapsedMillis = 0
+            , uiCompletionRemainingMillis = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
             , uiToolCalls = Map.empty
             }
@@ -468,8 +502,8 @@ reduceLoop event state = case event of
                 if continuing
                     then "Running tools…"
                     else "Finished"
-            , uiCompletionTicks =
-                if continuing then 0 else 10
+            , uiCompletionRemainingMillis =
+                if continuing then 0 else completionStatusDurationMillis
             }
 
 appendOrExtend
@@ -565,8 +599,10 @@ finalizeTurn terminalState state =
             if terminalState == BlockComplete
                 then "Finished"
                 else "Ready"
-        , uiCompletionTicks =
-            if terminalState == BlockComplete then 10 else 0
+        , uiCompletionRemainingMillis =
+            if terminalState == BlockComplete
+                then completionStatusDurationMillis
+                else 0
         }
 
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice

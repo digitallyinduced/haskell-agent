@@ -1,6 +1,7 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
+import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
@@ -51,6 +52,68 @@ spec = describe "Agent.CLI.Project" do
                 saveProjectAutoApprove root False
                 settings' <- loadProjectSettings root
                 settings'.settingsAutoApprove `shouldBe` False
+
+        it "round-trips the last provider/model and preserves other settings" $
+            withTempDir "agent-project-" \root -> do
+                saveProjectAutoApprove root True
+                saveProjectModel root OpenAIProvider "gpt-project"
+
+                let path = projectSettingsPath root
+                modeOf path `shouldReturn` 0o600
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsLastModel `shouldBe` Just ProjectModel
+                    { projectModelProvider = OpenAIProvider
+                    , projectModelName = "gpt-project"
+                    }
+                projectModelProvider settings `shouldBe` Just OpenAIProvider
+                projectModelFor OpenAIProvider settings
+                    `shouldBe` Just "gpt-project"
+                projectModelFor XAIProvider settings `shouldBe` Nothing
+
+                saveProjectAutoApprove root False
+                updated <- loadProjectSettings root
+                updated.settingsAutoApprove `shouldBe` False
+                projectModelFor OpenAIProvider updated
+                    `shouldBe` Just "gpt-project"
+
+        it "replaces the remembered provider/model without resetting approval" $
+            withTempDir "agent-project-" \root -> do
+                saveProjectAutoApprove root True
+                saveProjectModel root OpenAIProvider "gpt-old"
+                saveProjectModel root XAIProvider "grok-new"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                projectModelProvider settings `shouldBe` Just XAIProvider
+                projectModelFor XAIProvider settings `shouldBe` Just "grok-new"
+                projectModelFor OpenAIProvider settings `shouldBe` Nothing
+
+        it "loads legacy settings without a remembered model" $
+            withTempDir "agent-project-" \root -> do
+                let dir = root </> fromFilePath ".haskell-agent"
+                    path = projectSettingsPath root
+                createDirectoryIfMissing True dir
+                LBS.writeFile
+                    (toFilePath path)
+                    "{\"version\":1,\"autoApprove\":true}"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsLastModel `shouldBe` Nothing
+
+        it "ignores only a malformed remembered model" $
+            withTempDir "agent-project-" \root -> do
+                let dir = root </> fromFilePath ".haskell-agent"
+                    path = projectSettingsPath root
+                createDirectoryIfMissing True dir
+                LBS.writeFile
+                    (toFilePath path)
+                    "{\"version\":1,\"autoApprove\":true,\"lastModel\":{\"provider\":\"retired\",\"model\":\"old\"}}"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsLastModel `shouldBe` Nothing
 
         it "ignores corrupt settings files" $
             withTempDir "agent-project-" \root -> do

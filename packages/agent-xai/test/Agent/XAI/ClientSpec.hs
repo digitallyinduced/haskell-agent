@@ -6,9 +6,14 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import Control.Concurrent.Async (cancel, withAsync)
+import Control.Concurrent.MVar
+import Control.Exception.Safe (finally)
+import Control.Monad (void, when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
 import Data.IORef
@@ -18,6 +23,7 @@ import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -43,6 +49,40 @@ spec = do
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]
+
+        it "streams callbacks before the response completes" do
+            recorded <- newIORef []
+            callbackSeen <- newEmptyMVar
+            serverSawCallback <- newIORef False
+            let handler _ = pure $
+                    streamingResponse callbackSeen serverSawCallback
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWithEvents options
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                    (recordOutputItem callbackSeen)
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-stream"
+            readIORef serverSawCallback `shouldReturn` True
+
+        it "propagates cancellation promptly while a streamed response remains open" do
+            recorded <- newIORef []
+            callbackSeen <- newEmptyMVar
+            serverRelease <- newEmptyMVar
+            let handler _ = pure $
+                    cancellableStreamingResponse callbackSeen serverRelease
+            withMockGrok recorded handler \options ->
+                flip finally (void (tryPutMVar serverRelease ())) $
+                    withAsync
+                        (createResponseWithEvents options
+                            (xaiCredential "token-a")
+                            (helloRequest "hi")
+                            (recordOutputItem callbackSeen))
+                        \worker -> do
+                            seen <- timeout 2_000_000 (readMVar callbackSeen)
+                            seen `shouldBe` Just ()
+                            stopped <- timeout 2_000_000 (cancel worker)
+                            stopped `shouldBe` Just ()
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -70,25 +110,15 @@ spec = do
             requests <- readIORef recorded
             length requests `shouldBe` 1
 
-        it "retries capacity stream errors before returning success" do
+        it "retries a transient HTTP failure before streaming starts" do
             recorded <- newIORef []
             attempts <- newIORef (0 :: Int)
-            let capacityMessage :: Text
-                capacityMessage =
-                    "The model is currently at capacity due to high demand. \
-                    \Please try again in a few minutes, or use a higher service \
-                    \tier for priority processing"
-                handler _request = do
+            let handler _request = do
                     n <- atomicModifyIORef' attempts \i -> (i + 1, i + 1)
                     pure $ if n == 1
-                        then sseResponse
-                            [ sseEvent "error" $ Aeson.object
-                                [ "type" Aeson..= ("error" :: Text)
-                                , "error" Aeson..= Aeson.object
-                                    [ "message" Aeson..= capacityMessage
-                                    ]
-                                ]
-                            ]
+                        then Wai.responseLBS HTTP.status503
+                            [("Content-Type", "text/plain")]
+                            "temporarily unavailable"
                         else sseResponse
                             [ outputItemDone (assistantMessage "hello after capacity")
                             , completedEvent "resp-retry" []
@@ -105,6 +135,93 @@ spec = do
 
             requests <- readIORef recorded
             length requests `shouldBe` 2
+
+        it "retries capacity stream errors when callbacks are disabled" do
+            recorded <- newIORef []
+            attempts <- newIORef (0 :: Int)
+            let capacityMessage :: Text
+                capacityMessage =
+                    "The model is currently at capacity due to high demand. \
+                    \Please try again in a few minutes, or use a higher service \
+                    \tier for priority processing"
+                handler _request = do
+                    attempt <- atomicModifyIORef' attempts \current ->
+                        let next = current + 1
+                        in (next, next)
+                    pure $ if attempt == 1
+                        then sseResponse
+                            [ sseEvent "error" $ Aeson.object
+                                [ "type" Aeson..= ("error" :: Text)
+                                , "error" Aeson..= Aeson.object
+                                    [ "message" Aeson..= capacityMessage
+                                    ]
+                                ]
+                            ]
+                        else sseResponse
+                            [ outputItemDone (assistantMessage "after retry")
+                            , completedEvent "resp-stream-retry" []
+                            ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWithPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    options
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                response <- expectRight result
+                response.responseId `shouldBe` "resp-stream-retry"
+            length <$> readIORef recorded `shouldReturn` 2
+
+        it "does not retry a capacity stream error after a callback" do
+            recorded <- newIORef []
+            callbacks <- newIORef (0 :: Int)
+            let capacityMessage :: Text
+                capacityMessage =
+                    "The model is currently at capacity due to high demand"
+                handler _request = pure $ sseResponse
+                    [ sseEvent "error" $ Aeson.object
+                        [ "type" Aeson..= ("error" :: Text)
+                        , "error" Aeson..= Aeson.object
+                            [ "message" Aeson..= capacityMessage
+                            ]
+                        ]
+                    ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWithEventsPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    options
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                    (const (modifyIORef' callbacks (+ 1)))
+                result `shouldBe`
+                    Left
+                        (ProviderError
+                            OverloadedError
+                            capacityMessage
+                            (Just 30))
+            length <$> readIORef recorded `shouldReturn` 1
+            readIORef callbacks `shouldReturn` 1
+
+        it "does not retry when the stream callback throws" do
+            recorded <- newIORef []
+            callbacks <- newIORef (0 :: Int)
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "hello")
+                    , completedEvent "resp-callback" []
+                    ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWithEventsPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    options
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                    (\_ -> modifyIORef' callbacks (+ 1)
+                        >> ioError (userError "callback failed"))
+                case result of
+                    Left ConnectionError{} -> pure ()
+                    other -> expectationFailure
+                        ("expected callback ConnectionError, got " <> show other)
+            length <$> readIORef recorded `shouldReturn` 1
+            readIORef callbacks `shouldReturn` 1
 
         it "retries capacity Left values under a zero-delay policy" do
             let capacity = ProviderError OverloadedError
@@ -172,6 +289,37 @@ sseResponse :: [Text] -> Wai.Response
 sseResponse events = Wai.responseLBS HTTP.status200
     [("Content-Type", "text/event-stream")]
     (LBS.fromStrict (Text.encodeUtf8 (Text.concat events)))
+
+recordOutputItem :: MVar () -> ResponseStreamEvent -> IO ()
+recordOutputItem callbackSeen event =
+    when (responseStreamEventType event == EventOutputItemDone) do
+        tryPutMVar callbackSeen ()
+        pure ()
+
+streamingResponse :: MVar () -> IORef Bool -> Wai.Response
+streamingResponse callbackSeen serverSawCallback =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \write flush -> do
+            writeSse write (outputItemDone (assistantMessage "hello"))
+            flush
+            seen <- timeout 2_000_000 (readMVar callbackSeen)
+            writeIORef serverSawCallback (maybe False (const True) seen)
+            writeSse write (completedEvent "resp-stream" [])
+            flush
+
+cancellableStreamingResponse :: MVar () -> MVar () -> Wai.Response
+cancellableStreamingResponse callbackSeen serverRelease =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \write flush -> do
+            writeSse write (outputItemDone (assistantMessage "hello"))
+            flush
+            readMVar callbackSeen
+            readMVar serverRelease
+
+writeSse :: (Builder.Builder -> IO ()) -> Text -> IO ()
+writeSse write = write . Builder.byteString . Text.encodeUtf8
 
 outputItemDone :: Aeson.Value -> Text
 outputItemDone item = sseEvent "response.output_item.done" $ Aeson.object

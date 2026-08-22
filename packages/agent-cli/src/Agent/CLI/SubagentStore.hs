@@ -21,6 +21,7 @@ import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
+import Agent.ToolArgs (readExactInt)
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
@@ -30,7 +31,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Text.Read (readMaybe)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
@@ -135,7 +135,7 @@ forkSubagentTranscript forkTurns items =
     in case normalized of
         Just "none" -> []
         Just turns
-            | Just count <- readMaybe (Text.unpack turns)
+            | Just count <- readExactInt turns
             , count > 0 -> takeRecentTurns count completeItems
         _ -> completeItems
 

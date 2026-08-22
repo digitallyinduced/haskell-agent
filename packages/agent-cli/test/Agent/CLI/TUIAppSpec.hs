@@ -2,13 +2,21 @@ module Agent.CLI.TUIAppSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.TUI.App
-    ( agentEntryWindow
+    ( advanceCompletionFlashes
+    , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , completionFlashTransitions
     , conversationScrollbarRenderer
+    , elapsedMillisSince
     , fullscreenVtyConfig
+    , motionDemandFor
+    , nativeProgressKeepaliveDue
+    , nextMotionSchedule
     , repositoryHeaderText
+    , uiEventRestartsMotionSchedule
     )
+import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
     ( VScrollbarRenderer(..)
     , hLimit
@@ -16,6 +24,14 @@ import Brick
     , vLimit
     )
 import Agent.Subagents (SubagentId(..))
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , functionToolCall
+    )
+import Agent.TUI.Model
+import Agent.TUI.Motion
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as V
@@ -101,6 +117,219 @@ spec = do
             renderCell
                 (conversationScrollbarRenderer @()).renderVScrollbar
                 `shouldBe` V.char V.defAttr '┃'
+
+    describe "motion demand" do
+        it "distinguishes foreground, waiting, background, and static modes" do
+            let idle =
+                    reduceUi
+                        (UiUserSubmitted "done")
+                        initialUiState
+                running =
+                    reduceUi (UiLoop TurnStarted) idle
+            motionDemandFor MotionFull False False False running
+                `shouldBe` MotionFast
+            motionDemandFor MotionFull True False False running
+                `shouldBe` MotionSlow
+            motionDemandFor MotionFull False True False idle
+                `shouldBe` MotionSlow
+            motionDemandFor MotionFull False False False idle
+                `shouldBe` MotionNone
+            motionDemandFor MotionFull False False False initialUiState
+                `shouldBe` MotionSlow
+            motionDemandFor MotionReduced False False False initialUiState
+                `shouldBe` MotionNone
+            motionDemandFor MotionReduced False False False running
+                `shouldBe` MotionSlow
+            motionDemandFor MotionOff False False False running
+                `shouldBe` MotionSlow
+
+        it "bumps the scheduler generation on demand or timer boundaries" do
+            nextMotionSchedule
+                False
+                MotionSlow
+                160000
+                (MotionSlow, 160000, 4)
+                `shouldBe` (MotionSlow, 160000, 4)
+            nextMotionSchedule
+                True
+                MotionSlow
+                160000
+                (MotionSlow, 160000, 4)
+                `shouldBe` (MotionSlow, 160000, 5)
+            nextMotionSchedule
+                False
+                MotionFast
+                80000
+                (MotionSlow, 160000, 4)
+                `shouldBe` (MotionFast, 80000, 5)
+            nextMotionSchedule
+                False
+                MotionSlow
+                400000
+                (MotionSlow, 500000, 4)
+                `shouldBe` (MotionSlow, 400000, 5)
+
+        it "retains sub-millisecond time across clock samples" do
+            elapsedMillisSince 1000000 1499999
+                `shouldBe` (0, 1000000)
+            elapsedMillisSince 1234567 3234999
+                `shouldBe` (2, 3234567)
+            elapsedMillisSince 4000000 3000000
+                `shouldBe` (0, 4000000)
+
+        it "restarts cadence when turn, notice, and promoted-input timers start" do
+            let idle =
+                    reduceUi
+                        (UiUserSubmitted "done")
+                        initialUiState
+                turnStarted =
+                    reduceUi (UiLoop TurnStarted) idle
+                turnFinished =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    []
+                                    Nothing)))
+                        turnStarted
+                notice =
+                    reduceUi
+                        (UiSetNotice
+                            (Just (successNotice "saved")))
+                        idle
+                promoted =
+                    reduceUi (UiInputPromoted "urgent") turnStarted
+            uiEventRestartsMotionSchedule
+                (UiLoop TurnStarted)
+                idle
+                turnStarted
+                Map.empty
+                `shouldBe` True
+            uiEventRestartsMotionSchedule
+                (UiLoop
+                    (TurnFinished
+                        (emptyTurnOutput "response-1" [] Nothing)))
+                turnStarted
+                turnFinished
+                Map.empty
+                `shouldBe` True
+            uiEventRestartsMotionSchedule
+                (UiSetNotice (Just (successNotice "saved")))
+                idle
+                notice
+                Map.empty
+                `shouldBe` True
+            uiEventRestartsMotionSchedule
+                (UiInputPromoted "urgent")
+                turnStarted
+                promoted
+                Map.empty
+                `shouldBe` True
+            uiEventRestartsMotionSchedule
+                (UiLoop (ActivityUpdated "still working"))
+                turnStarted
+                (reduceUi
+                    (UiLoop (ActivityUpdated "still working"))
+                    turnStarted)
+                Map.empty
+                `shouldBe` False
+
+        it "refreshes native progress only after each five-second bucket" do
+            let running =
+                    advanceUiTime 5000 $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+            nativeProgressKeepaliveDue False 0 running
+                `shouldBe` True
+            nativeProgressKeepaliveDue False 1 running
+                `shouldBe` False
+            nativeProgressKeepaliveDue True 0 running
+                `shouldBe` False
+
+        it "self-schedules completion flashes but disables them in off mode" do
+            let idle =
+                    reduceUi
+                        (UiUserSubmitted "done")
+                        initialUiState
+            motionDemandFor MotionFull False False True idle
+                `shouldBe` MotionFast
+            motionDemandFor MotionReduced False False True idle
+                `shouldBe` MotionSlow
+            motionDemandFor MotionOff False False True idle
+                `shouldBe` MotionNone
+
+    describe "completion flashes" do
+        it "detects only live-to-terminal block transitions" do
+            let call =
+                    functionToolCall
+                        "tool-1"
+                        "run_terminal_cmd"
+                        "{\"command\":\"true\"}"
+                running =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        (reduceUi (UiLoop TurnStarted) initialUiState)
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                ToolCallResult
+                                    { callId = "tool-1"
+                                    , output = "exit: 0"
+                                    , callKind = FunctionCallKind
+                                    }))
+                        running
+            completionFlashTransitions running completed
+                `shouldBe` [BlockId 1]
+            completionFlashTransitions completed completed
+                `shouldBe` []
+
+        it "ignores assistant streams and unsuccessful terminal states" do
+            let assistantRunning =
+                    reduceUi
+                        (UiLoop (TextDelta "answer"))
+                        (reduceUi (UiLoop TurnStarted) initialUiState)
+                assistantComplete =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    []
+                                    (Just "answer"))))
+                        assistantRunning
+                call =
+                    functionToolCall
+                        "tool-2"
+                        "run_terminal_cmd"
+                        "{\"command\":\"false\"}"
+                toolRunning =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        (reduceUi (UiLoop TurnStarted) initialUiState)
+                toolFailed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                ToolCallResult
+                                    { callId = "tool-2"
+                                    , output = "Error: failed"
+                                    , callKind = FunctionCallKind
+                                    }))
+                        toolRunning
+            completionFlashTransitions
+                assistantRunning
+                assistantComplete
+                `shouldBe` []
+            completionFlashTransitions toolRunning toolFailed
+                `shouldBe` []
+
+        it "expires completion flashes from elapsed milliseconds" do
+            let active = Map.singleton (BlockId 7) 400
+            advanceCompletionFlashes 399 active
+                `shouldBe` Map.singleton (BlockId 7) 1
+            advanceCompletionFlashes 400 active
+                `shouldBe` Map.empty
 
 rootEntry :: AgentEntry
 rootEntry = AgentEntry

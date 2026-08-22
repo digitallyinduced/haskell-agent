@@ -56,6 +56,7 @@ data SessionEnv = SessionEnv
     , sessionRestartEffort :: !(IORef (Maybe Text))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
+    , sessionAccount :: !(IORef Text)
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)

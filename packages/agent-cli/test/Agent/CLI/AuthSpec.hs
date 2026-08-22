@@ -55,12 +55,45 @@ spec = do
                     { loadedProvider = XAIProvider
                     , loadedTokenProvider = TokenProvider \_ ->
                         pure (Left (CredentialsExhausted retryAt))
+                    , loadedAccountLabel = pure . credentialAccountLabel
                     , loadedOpenAiPool = Nothing
                     }
             result <- probeLoadedAuth exhausted
             case result of
                 Left err -> err `shouldBe` CredentialsExhausted retryAt
                 Right _ -> expectationFailure "expected exhausted auth"
+
+    describe "credentialAccountLabel" do
+        it "prefers an email claim over the provider account id" do
+            let token =
+                    "e30.eyJlbWFpbCI6InBlcnNvbkBleGFtcGxlLmNvbSJ9."
+            credentialAccountLabel
+                Credential
+                    { accessToken = token
+                    , accountId = "acc-1234567890"
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+                `shouldBe` "person@example.com"
+
+        it "shortens opaque account ids and names key-only providers" do
+            credentialAccountLabel staleGrok `shouldBe` "acc-stale"
+            credentialAccountLabel
+                Credential
+                    { accessToken = "key"
+                    , accountId = "account-1234567890"
+                    , leaseId = Nothing
+                    , provider = OpenRouterProvider
+                    }
+                `shouldBe` "account-…"
+            credentialAccountLabel
+                Credential
+                    { accessToken = "key"
+                    , accountId = ""
+                    , leaseId = Nothing
+                    , provider = OpenRouterProvider
+                    }
+                `shouldBe` "OpenRouter"
 
     describe "OpenAI account pools" do
         it "loads every enabled managed account into one pool" $
@@ -73,6 +106,8 @@ spec = do
             withTempHome openAiDeduplicationTest
         it "does not let a disabled managed source shadow ~/.codex" $
             withTempHome openAiDisabledSourceTest
+        it "uses the login email as the active account label" $
+            withTempHome openAiAccountLabelTest
 
     describe "openAIOAuthClientId" do
         it "uses the Codex public client id by default" do
@@ -353,6 +388,37 @@ openAiDisabledSourceTest home =
         pool <- expectOpenAiPool loaded
         snapshots <- OpenAI.snapshotAccounts pool
         map ((.accessToken) . (.snapshotAuth)) snapshots `shouldBe` ["file-token"]
+
+openAiAccountLabelTest :: OsPath -> IO ()
+openAiAccountLabelTest home =
+    withCleanOpenAiEnv do
+        let codexDirectory = toFilePath home </> ".codex"
+            accessToken :: Text
+            accessToken = "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
+            idToken :: Text
+            idToken =
+                "e30.eyJlbWFpbCI6InBlcnNvbkBleGFtcGxlLmNvbSJ9."
+        createDirectoryIfMissing True codexDirectory
+        LBS.writeFile
+            (codexDirectory </> "auth.json")
+            (Aeson.encode $ Aeson.object
+                [ "tokens" .= Aeson.object
+                    [ "access_token" .= accessToken
+                    , "refresh_token" .= ("refresh" :: Text)
+                    , "account_id" .= ("acc-email" :: Text)
+                    , "id_token" .= idToken
+                    ]
+                ])
+        loadAuth (Just OpenAIProvider) >>= \case
+            Left err -> expectationFailure (Text.unpack err)
+            Right loaded ->
+                getNextToken loaded.loadedTokenProvider Nothing >>= \case
+                    Left err ->
+                        expectationFailure
+                            ("expected credential, got " <> show err)
+                    Right credential ->
+                        loaded.loadedAccountLabel credential
+                            `shouldReturn` "person@example.com"
 
 expectOpenAiPool :: Either Text LoadedAuth -> IO OpenAI.Pool
 expectOpenAiPool = \case

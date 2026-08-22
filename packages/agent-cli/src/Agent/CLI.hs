@@ -16,7 +16,11 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
-import Agent.CLI.Auth (LoadedAuth(..), loadAuth, probeLoadedAuth)
+import Agent.CLI.Auth
+    ( LoadedAuth(..)
+    , loadAuth
+    , probeLoadedAuth
+    )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentStep
@@ -115,7 +119,13 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Resume (pickResumeSession)
+import Agent.CLI.Resume
+    ( ResumeEntry(..)
+    , initialResumeBrowser
+    , loadResumeEntry
+    , pickResumeSession
+    , resumeEntryFromMeta
+    )
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
@@ -125,7 +135,10 @@ import Agent.CLI.Progress
 import Agent.CLI.Project
     ( ProjectSettings(..)
     , loadProjectSettings
+    , projectModelFor
+    , projectModelProvider
     , resolveProjectRoot
+    , saveProjectModel
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Request (requestParams)
@@ -217,6 +230,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
@@ -236,6 +250,7 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
+import Agent.TUI.Motion (nativeProgressAnimationEnabled)
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
@@ -293,7 +308,7 @@ import Agent.Provider
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider
+    , TokenProvider(..)
     , getNextToken
     , providerSlug
     )
@@ -434,6 +449,7 @@ data StartupRuntime = StartupRuntime
     , startupRestartEffort :: !(IORef (Text -> IO ()))
     , startupStartedAt :: !UTCTime
     , startupTimings :: !(IORef [(Text, NominalDiffTime)])
+    , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
     }
 
 newtype StartupFailure = StartupFailure String
@@ -651,7 +667,17 @@ finishStartup startup = do
             emitUiEvent runtime (UiSetNotice Nothing)
     lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
         Just "1" -> do
-            message <- formatStartupTimings <$> readIORef startup.startupTimings
+            timings <- readIORef startup.startupTimings
+            syntaxLoadDuration <-
+                readIORef startup.startupSyntaxLoadDuration
+            let message =
+                    formatStartupTimings timings
+                        <> maybe
+                            ""
+                            (\duration ->
+                                " · syntax highlighting "
+                                    <> formatStartupDuration duration)
+                            syntaxLoadDuration
             case startup.startupFullscreen of
                 Nothing -> putTextLn stderr message
                 Just runtime -> emitUiEvent runtime (UiSystemMessage message)
@@ -750,6 +776,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
                 Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
+    syntaxLoadDurationRef <- newIORef Nothing
     home <- getHomeDirectory
     let root = sessionsRoot home
     resumed <- case options.optResume of
@@ -826,12 +853,17 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
                     (copyTerminalClipboard terminal stdout)
                     (setCliWindowTitle stdoutTty stdout)
                     (\active ->
-                        when terminal.terminalNativeProgress $
+                        when
+                            (terminal.terminalNativeProgress
+                                && nativeProgressAnimationEnabled
+                                    options.optMotionMode) $
                             setNativeProgress stderr active)
                     (readIORef agentSnapshotRef >>= id)
                     (\target -> readIORef agentSelectRef >>= ($ target))
                     (recordStartupTiming
                         startedAt startupTimingsRef "first frame")
+                    (writeIORef syntaxLoadDurationRef . Just)
+                    options.optMotionMode
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
@@ -861,6 +893,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
             , startupRestartEffort = restartEffortActionRef
             , startupStartedAt = startedAt
             , startupTimings = startupTimingsRef
+            , startupSyntaxLoadDuration = syntaxLoadDurationRef
             }
         action =
             runAgentInitialized
@@ -967,7 +1000,12 @@ runAgentInitialized options transition home root resumed cwd startup = do
             Just target -> Just target.modelProvider
             Nothing -> case resumed of
                 Just (meta, _) -> Just meta.metaProvider
-                Nothing -> options.optProvider
+                Nothing -> case options.optProvider of
+                    Just requested -> Just requested
+                    Nothing
+                        | isNothing options.optModel ->
+                            projectModelProvider projectSettings
+                        | otherwise -> Nothing
     loaded <-
         loadAuth requestedProvider
             >>= either (startupDie startup . Text.unpack) pure
@@ -985,6 +1023,12 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         _ -> pure ()
+    activeAccountRef <- newIORef ""
+    let tokenProvider =
+            trackCredentialAccount
+                activeAccountRef
+                loaded.loadedAccountLabel
+                loaded.loadedTokenProvider
 
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
@@ -995,13 +1039,22 @@ runAgentInitialized options transition home root resumed cwd startup = do
             (case transitionTarget of
                 Just target -> target.modelId
                 Nothing ->
-                    maybe (defaultModelFor provider) (.metaModel) (fst <$> resumed))
+                    case fst <$> resumed of
+                        Just meta -> meta.metaModel
+                        Nothing ->
+                            fromMaybe
+                                (defaultModelFor provider)
+                                (projectModelFor provider projectSettings))
             options.optModel
         effort = fromMaybe
             (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
             options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
+    -- Provider transitions commit their selection separately: manual switches
+    -- immediately, automatic fallbacks only after the replacement succeeds.
+    when (isNothing transition) $
+        saveProjectModel projectRoot provider model
     sessionProcessManager <- newSessionProcessManager root
     managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
     activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
@@ -1178,7 +1231,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                 case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
-                            (withCodexWsWithProvider loaded.loadedTokenProvider \conn credential -> do
+                            (withCodexWsWithProvider tokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
                                 wsHealthy <- newIORef True
                                 case multiCtx of
@@ -1193,7 +1246,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         lockedOpenAiSession
                                             options.optCompactThreshold
                                             wsLock
-                                            loaded.loadedTokenProvider
+                                            tokenProvider
                                             credential
                                             wsHealthy
                                             conn
@@ -1206,7 +1259,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
-                                            loaded.loadedTokenProvider
+                                            tokenProvider
                                             (readIORef privateParams)
                                             privateTranscript
                                     compactRunner focus =
@@ -1219,15 +1272,16 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                     (Just compactSender)
                                                     recordCompactionUsage
                                                     provider
-                                                    (Just loaded.loadedTokenProvider)
+                                                    (Just tokenProvider)
                                                     paramsRef
                                                     transcriptRef)
                                                 focus
                                 activeBackend <-
-                                    prepareTransitionBackend transition persist noticingBackend
+                                    prepareTransitionBackend
+                                        projectRoot transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                                    previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend)
+                                    previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1249,16 +1303,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         subagentRuntime
                                         XAIProvider
                                         (\childParamsRef childTranscript ->
-                                            xaiBackend xaiOptions loaded.loadedTokenProvider
+                                            xaiBackend xaiOptions
+                                                loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        xaiBackend xaiOptions loaded.loadedTokenProvider
+                                        xaiBackend xaiOptions tokenProvider
                                             (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
-                                xaiBackend xaiOptions loaded.loadedTokenProvider
+                                xaiBackend xaiOptions tokenProvider
                                     (readIORef privateParams) privateTranscript
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
@@ -1266,14 +1321,15 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Nothing
                                         recordCompactionUsage
                                         provider
-                                        (Just loaded.loadedTokenProvider)
+                                        (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
-                            prepareTransitionBackend transition persist backend
+                            prepareTransitionBackend
+                                projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1283,16 +1339,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         subagentRuntime
                                         OpenRouterProvider
                                         (\childParamsRef childTranscript ->
-                                            openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                            openRouterBackend openRouterOptions
+                                                loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                        openRouterBackend openRouterOptions tokenProvider
                                             (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
-                                openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                openRouterBackend openRouterOptions tokenProvider
                                     (readIORef privateParams) privateTranscript
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
@@ -1300,14 +1357,28 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Nothing
                                         recordCompactionUsage
                                         provider
-                                        (Just loaded.loadedTokenProvider)
+                                        (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
                         activeBackend <-
-                            prepareTransitionBackend transition persist backend
+                            prepareTransitionBackend
+                                projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
+
+trackCredentialAccount
+    :: IORef Text
+    -> (Credential -> IO Text)
+    -> TokenProvider
+    -> TokenProvider
+trackCredentialAccount accountRef resolveLabel provider =
+    TokenProvider \failed ->
+        getNextToken provider failed >>= \case
+            Left err -> pure (Left err)
+            Right credential -> do
+                resolveLabel credential >>= writeIORef accountRef
+                pure (Right credential)
 
 preparePersistence
     :: Maybe FullscreenRuntime
@@ -1443,12 +1514,13 @@ runSession
     -> IORef [TurnInput]
     -> SubagentStoreRoot
     -> IORef TokenUsage
+    -> IORef Text
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -1663,7 +1735,11 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
             , renderNativeProgress =
-                stderrTty && terminal.terminalNativeProgress
+                stderrTty
+                    && terminal.terminalNativeProgress
+                    && nativeProgressAnimationEnabled
+                        options.optMotionMode
+            , renderMotionMode = options.optMotionMode
             }
         emitLoop event = case fullscreen of
             Nothing -> renderEvent render event
@@ -1750,6 +1826,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionRestartEffort = restartEffortRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
+            , sessionAccount = accountRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
@@ -2035,6 +2112,7 @@ replWithDraft env@SessionEnv
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
+    , sessionAccount = accountRef
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
@@ -2056,6 +2134,7 @@ replWithDraft env@SessionEnv
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
+    account <- readIORef accountRef
     mline <- case fullscreen of
         Just runtime -> do
             setFullscreenImagePreviews runtime pendingAttachments
@@ -2064,6 +2143,7 @@ replWithDraft env@SessionEnv
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
                     , promptMode = replModeLabel idleMode
+                    , promptAccount = account
                     , promptUsage = usage
                     , promptAttachments = length pendingAttachments
                     }
@@ -2093,6 +2173,7 @@ replWithDraft env@SessionEnv
                     (currentModel params)
                     (currentEffort params)
                     idleMode
+                    account
                     usage
                 hFlush stdout
             let modeTag
@@ -2131,7 +2212,14 @@ replWithDraft env@SessionEnv
             let next = cycleReplInteraction planState policy
             applyReplMode planMode policyRef projectRoot next
             case fullscreen of
-                Just _ -> pure ()
+                Just runtime ->
+                    emitUiEvent runtime $
+                        UiSetNotice $
+                            Just $
+                                infoNotice
+                                    ("Switched to "
+                                        <> replModeLabel next
+                                        <> " mode.")
                 Nothing -> do
                     -- Minimal editor advanced a line; replace its old chrome.
                     putStr "\ESC[2A\r\ESC[J"
@@ -2471,7 +2559,7 @@ replWithDraft env@SessionEnv
                     ReplSetModel name -> do
                         color <- resolveColor stdout
                         message <- applyModelChange
-                            provider name paramsRef render previous persist
+                            projectRoot provider name paramsRef render previous persist
                         displayInfo message $
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
@@ -2915,7 +3003,7 @@ replWithDraft env@SessionEnv
                     next
                 | choice.modelProvider == provider -> do
                     message <- applyModelChange
-                        provider choice.modelId paramsRef render previous persist
+                        projectRoot provider choice.modelId paramsRef render previous persist
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -3160,16 +3248,18 @@ fetchSnapshot snapshot = do
         , usageResult = result
         }
 applyModelChange
-    :: Provider
+    :: OsPath
+    -> Provider
     -> Text
     -> IORef ResponseCreateParams
     -> RenderConfig
     -> IORef (Maybe Text)
     -> Persistence
     -> IO Text
-applyModelChange provider name paramsRef render previous persist = do
+applyModelChange projectRoot provider name paramsRef render previous persist = do
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
+    saveProjectModel projectRoot provider name
     clearedChain <- case provider of
         OpenAIProvider ->
             atomicModifyIORef' previous \prev ->
@@ -3368,51 +3458,63 @@ ensureTransitionSessionId (PersistenceEnabled slotRef) = do
     pure (Just handle.sessionMeta.metaId)
 
 commitProviderTransition
-    :: Maybe ProviderTransition
+    :: OsPath
+    -> Maybe ProviderTransition
     -> Persistence
     -> IO ()
-commitProviderTransition Nothing _ = pure ()
-commitProviderTransition _ PersistenceDisabled = pure ()
-commitProviderTransition (Just transition) (PersistenceEnabled slotRef) = do
-    slot <- readIORef slotRef
-    case slot of
-        PersistencePending pending ->
-            writeIORef slotRef $ PersistencePending pending
-                { createProvider = transition.transitionTarget.modelProvider
-                , createModel = transition.transitionTarget.modelId
-                }
-        PersistenceActive handle -> do
-            now <- getCurrentTime
-            let meta = handle.sessionMeta
-                    { metaProvider = transition.transitionTarget.modelProvider
-                    , metaModel = transition.transitionTarget.modelId
-                    , metaLastResponseId = Nothing
-                    , metaUpdatedAt = now
-                    }
-            writeSessionMeta handle.sessionMetaPath meta
-            writeIORef slotRef (PersistenceActive handle { sessionMeta = meta })
+commitProviderTransition _ Nothing _ = pure ()
+commitProviderTransition projectRoot (Just transition) persist = do
+    saveProjectModel
+        projectRoot
+        transition.transitionTarget.modelProvider
+        transition.transitionTarget.modelId
+    case persist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                PersistencePending pending ->
+                    writeIORef slotRef $ PersistencePending pending
+                        { createProvider = transition.transitionTarget.modelProvider
+                        , createModel = transition.transitionTarget.modelId
+                        }
+                PersistenceActive handle -> do
+                    now <- getCurrentTime
+                    let meta = handle.sessionMeta
+                            { metaProvider = transition.transitionTarget.modelProvider
+                            , metaModel = transition.transitionTarget.modelId
+                            , metaLastResponseId = Nothing
+                            , metaUpdatedAt = now
+                            }
+                    writeSessionMeta handle.sessionMetaPath meta
+                    writeIORef slotRef
+                        (PersistenceActive handle { sessionMeta = meta })
 
 prepareTransitionBackend
-    :: Maybe ProviderTransition
+    :: OsPath
+    -> Maybe ProviderTransition
     -> Persistence
     -> Backend
     -> IO Backend
-prepareTransitionBackend Nothing _ backend = pure backend
-prepareTransitionBackend (Just transition) persist backend
+prepareTransitionBackend _ Nothing _ backend = pure backend
+prepareTransitionBackend projectRoot (Just transition) persist backend
     | transition.transitionCause == ManualTransition = do
-        commitProviderTransition (Just transition) persist
+        commitProviderTransition projectRoot (Just transition) persist
         pure backend
     | otherwise = do
         committed <- newIORef False
-        pure $ commitBackendOnSuccess committed transition persist backend
+        pure $
+            commitBackendOnSuccess
+                projectRoot committed transition persist backend
 
 commitBackendOnSuccess
-    :: IORef Bool
+    :: OsPath
+    -> IORef Bool
     -> ProviderTransition
     -> Persistence
     -> Backend
     -> Backend
-commitBackendOnSuccess committed transition persist (Backend submit) =
+commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
     Backend \previous inputs onEvent -> do
         result <- submit previous inputs onEvent
         case result of
@@ -3420,7 +3522,7 @@ commitBackendOnSuccess committed transition persist (Backend submit) =
                 shouldCommit <- atomicModifyIORef' committed \done ->
                     (True, not done)
                 when shouldCommit $
-                    commitProviderTransition (Just transition) persist
+                    commitProviderTransition projectRoot (Just transition) persist
             Left _ -> pure ()
         pure result
 
@@ -3718,7 +3820,8 @@ handleResume fullscreen maybeId persist = do
         Just sessionId -> resume sessionId
         Nothing -> do
             sessions <- listSessions root
-            pickResumeChoice fullscreen color root sessions >>= \case
+            currentId <- currentSessionId persist
+            pickResumeChoice fullscreen color root currentId sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
@@ -3726,25 +3829,26 @@ pickResumeChoice
     :: Maybe FullscreenRuntime
     -> Bool
     -> OsPath
+    -> Maybe Text
     -> [SessionMeta]
     -> IO (Maybe Text)
-pickResumeChoice fullscreen color root sessions = case fullscreen of
+pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
     Nothing -> pickResumeSession color root sessions
-    Just runtime ->
-        requestFullscreenChoice
-            runtime
-            "Resume session"
-            0
-            [ ( meta.metaTitle
-              , providerSlug meta.metaProvider
-                    <> "/"
-                    <> meta.metaModel
-                    <> " · "
-                    <> toText meta.metaCwd
-              )
-            | meta <- sessions
-            ]
-            >>= pure . (>>= (`atMay` map (.metaId) sessions))
+    Just runtime -> do
+        now <- getCurrentTime
+        let browser =
+                initialResumeBrowser now (map resumeEntryFromMeta sessions)
+            deleteEntry sessionId
+                | currentId == Just sessionId =
+                    pure (Left "cannot delete the current session")
+                | otherwise =
+                    deleteSession root sessionId
+        fmap (.resumeId)
+            <$> requestFullscreenResume
+                runtime
+                browser
+                (loadResumeEntry root)
+                deleteEntry
 
 pickAgentChoice
     :: Maybe FullscreenRuntime

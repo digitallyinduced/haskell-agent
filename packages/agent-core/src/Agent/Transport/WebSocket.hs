@@ -20,6 +20,10 @@ module Agent.Transport.WebSocket
     ) where
 
 import Agent.Error (ApiError(..))
+import Agent.Retry
+    ( ExceptionRetry(..)
+    , retryingBeforeCommit
+    )
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
@@ -28,10 +32,8 @@ import Control.Retry
     ( RetryPolicyM
     , capDelay
     , exponentialBackoff
-    , retrying
     )
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -39,6 +41,8 @@ import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import Data.Word (Word64)
 import GHC.IO.Exception (IOErrorType(ResourceVanished))
+import qualified Network.Connection as Connection
+import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
 import System.IO.Error (ioeGetErrorType)
 
@@ -424,43 +428,93 @@ transientWsConnectRetryPolicy :: RetryPolicyM IO
 transientWsConnectRetryPolicy =
     capDelay 15000000 (exponentialBackoff 1000000)
 
--- | Retry transient WebSocket connection / handshake failures until the
+-- | Normalize and retry WebSocket connection / handshake failures until the
 -- connection callback begins. Once the callback has started, retrying the
 -- enclosing action could replay visible effects from an active session, so
--- every exception is propagated unchanged.
+-- later exceptions are propagated unchanged.
 --
 -- The policy is injectable so tests can retry without sleeping.
 retryTransientWsConnectWithPolicy
     :: RetryPolicyM IO
-    -> (IO () -> IO value)
-    -> IO value
-retryTransientWsConnectWithPolicy policy connect = do
-    callbackStarted <- newIORef False
-    result <- retrying policy (shouldRetry callbackStarted) \_retryStatus -> do
-        writeIORef callbackStarted False
-        Safe.tryAny (connect (writeIORef callbackStarted True))
-    either Exception.throwIO pure result
-  where
-    shouldRetry callbackStarted _retryStatus = \case
-        Left exception -> do
-            started <- readIORef callbackStarted
-            pure $
-                not started
-                    && isJust (transientWsConnectFailureLabel exception)
-        Right _ -> pure False
+    -> (IO () -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+retryTransientWsConnectWithPolicy policy =
+    retryingBeforeCommit policy wsConnectExceptionRetry
 
 -- | Classify transient failures that happen before a WebSocket session is
 -- established.
 transientWsConnectFailureLabel :: Exception.SomeException -> Maybe Text
-transientWsConnectFailureLabel exception = case Exception.fromException exception of
-    Just WS.ConnectionTimeout ->
-        Just "WebSocket handshake timed out"
-    Just (WS.MalformedResponse responseHead _reason)
-        | WS.responseCode responseHead `elem` retryableHandshakeStatusCodes ->
-            Just ("WebSocket handshake returned HTTP " <> showText (WS.responseCode responseHead))
-    _ -> Nothing
+transientWsConnectFailureLabel exception =
+    case wsConnectExceptionRetry exception of
+        RetryException (ConnectionError message) -> Just message
+        RetryException (HttpError _ message) -> Just message
+        _ -> Nothing
+
+wsConnectExceptionRetry
+    :: Exception.SomeException
+    -> ExceptionRetry ApiError
+wsConnectExceptionRetry exception
+    | Just authError <- wsHandshakeAuthFailure exception =
+        StopException authError
+    | Just (WS.MalformedResponse responseHead _reason) <-
+        Exception.fromException exception =
+            let status = WS.responseCode responseHead
+                apiError = HttpError status
+                    ("WebSocket handshake returned HTTP " <> showText status)
+            in if status `elem` retryableHandshakeStatusCodes
+                then RetryException apiError
+                else StopException apiError
+    | Just WS.ConnectionTimeout <- Exception.fromException exception =
+        retryConnection "WebSocket handshake timed out"
+    | Just (Connection.HostNotResolved host) <-
+        Exception.fromException exception =
+            retryConnection
+                ("WebSocket host could not be resolved: " <> Text.pack host)
+    | Just (Connection.HostCannotConnect host failures) <-
+        Exception.fromException exception =
+            retryConnection
+                ("WebSocket host could not be reached: "
+                    <> Text.pack host
+                    <> formatNestedFailures failures)
+    | Just tlsException <- Exception.fromException exception =
+        classifyTlsException tlsException
+    | Just (ioException :: IOError) <- Exception.fromException exception =
+        retryConnection ("WebSocket connect IO error: " <> showText ioException)
+    | otherwise =
+        StopException $ ConnectionError
+            ("WebSocket connection failed: " <> showText exception)
   where
     retryableHandshakeStatusCodes = [408, 425, 429, 500, 502, 503, 504]
+    retryConnection = RetryException . ConnectionError
+    formatNestedFailures [] = ""
+    formatNestedFailures failures = " (" <> showText failures <> ")"
+
+classifyTlsException :: TLS.TLSException -> ExceptionRetry ApiError
+classifyTlsException tlsException =
+    let message = tlsExceptionMessage tlsException
+        transient = RetryException (ConnectionError message)
+        permanent = StopException (ConnectionError message)
+    in case tlsException of
+        TLS.HandshakeFailed TLS.Error_EOF -> transient
+        TLS.HandshakeFailed TLS.Error_TCP_Terminate -> transient
+        TLS.HandshakeFailed (TLS.Error_Misc detail)
+            | isTransientNetworkErrorText (Text.pack detail) -> transient
+        TLS.Terminated _ _ TLS.Error_EOF -> transient
+        TLS.Terminated _ _ TLS.Error_TCP_Terminate -> transient
+        TLS.Terminated _ _ (TLS.Error_Misc detail)
+            | isTransientNetworkErrorText (Text.pack detail) -> transient
+        _ -> permanent
+
+tlsExceptionMessage :: TLS.TLSException -> Text
+tlsExceptionMessage = \case
+    TLS.HandshakeFailed (TLS.Error_Misc detail) ->
+        "TLS handshake failed: " <> Text.pack detail
+    TLS.HandshakeFailed TLS.Error_EOF ->
+        "TLS handshake failed: unexpected EOF"
+    TLS.HandshakeFailed TLS.Error_TCP_Terminate ->
+        "TLS handshake failed: TCP connection terminated"
+    tlsException ->
+        "TLS handshake failed: " <> showText tlsException
 
 -- | Extract an authentication status from a rejected WebSocket handshake.
 wsHandshakeAuthFailureStatus :: Exception.SomeException -> Maybe Int
@@ -490,20 +544,21 @@ transientWsMidRunFailureLabel exception
     , isTransientIOError ioException =
         Just ("WebSocket IO error: " <> showText ioException)
     | otherwise = Nothing
-  where
-    isTransientIOError :: IOError -> Bool
-    isTransientIOError ioException =
-        ioeGetErrorType ioException == ResourceVanished || matchesTransientMessage
-      where
-        matchesTransientMessage =
-            any (`Text.isInfixOf` message)
-                [ "connection reset"
-                , "broken pipe"
-                , "connection refused"
-                , "network is unreachable"
-                , "timed out"
-                ]
-        message = Text.toLower (showText ioException)
+
+isTransientIOError :: IOError -> Bool
+isTransientIOError ioException =
+    ioeGetErrorType ioException == ResourceVanished
+        || isTransientNetworkErrorText (showText ioException)
+
+isTransientNetworkErrorText :: Text -> Bool
+isTransientNetworkErrorText message =
+    any (`Text.isInfixOf` Text.toLower message)
+        [ "connection reset"
+        , "broken pipe"
+        , "connection refused"
+        , "network is unreachable"
+        , "timed out"
+        ]
 
 showText :: Show value => value -> Text
 showText = Text.pack . show

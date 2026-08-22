@@ -13,6 +13,7 @@ module Agent.CLI.Session
     , appendTurnWithMetaUpdate
     , appendTurnKeepTitle
     , addSessionUsage
+    , deleteSession
     , loadSession
     , isValidSessionId
     , listSessions
@@ -39,8 +40,8 @@ import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (tryIO)
-import Control.Monad (unless)
+import Control.Exception.Safe (displayException, tryIO)
+import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -69,6 +70,7 @@ import System.Directory.OsPath
     , doesDirectoryExist
     , doesFileExist
     , listDirectory
+    , removePathForcibly
     )
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
@@ -377,6 +379,24 @@ loadSession root sessionId = runExceptT do
                 <> ")"
     turns <- loadTranscript transcriptPath
     pure (meta, turns)
+
+deleteSession :: OsPath -> Text -> IO (Either Text ())
+deleteSession root sessionId = runExceptT do
+    unless (isValidSessionId sessionId) $
+        throwE "invalid session id"
+    let dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
+        runningPath = dir </> unsafeEncodeUtf ".agent-running"
+    exists <- lift (doesDirectoryExist dir)
+    unless exists $
+        throwE ("session not found: " <> sessionId)
+    running <- lift (doesDirectoryExist runningPath)
+    when running $
+        throwE "cannot delete a running session"
+    removed <- lift (tryIO (removePathForcibly dir))
+    case removed of
+        Left err ->
+            throwE ("could not delete session: " <> Text.pack (displayException err))
+        Right () -> pure ()
 
 -- | Session ids are single path components. Keep this deliberately broader
 -- than the current date-plus-hex allocator so older ids remain resumable.
