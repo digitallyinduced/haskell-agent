@@ -144,6 +144,7 @@ data AppState = AppState
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
     , appConversationReflowQueued :: !Bool
+    , appWindowTitle :: !(Maybe Text)
     }
 
 data AgentHover = AgentHover

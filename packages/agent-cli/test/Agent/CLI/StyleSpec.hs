@@ -62,9 +62,9 @@ spec = do
             spinnerFrames `shouldSatisfy` (not . null)
 
     describe "cliWindowTitle" do
-        it "uses the cwd basename when no session title is set" do
+        it "uses a stable placeholder when no session title is set" do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") Nothing
-                `shouldBe` "haskell-agent"
+                `shouldBe` "New session"
 
         it "prefers a real session title over cwd" do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "fix the title")
@@ -72,4 +72,4 @@ spec = do
 
         it "ignores untitled placeholders" do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "untitled")
-                `shouldBe` "haskell-agent"
+                `shouldBe` "New session"
