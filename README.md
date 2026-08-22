@@ -5,6 +5,8 @@ A universal coding-agent harness written in Haskell.
 ## Packages
 
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
+- `agent-tui` provides retained fullscreen presentation state, Markdown
+  rendering, themes, and syntax highlighting.
 - `agent-core` provides provider-neutral credentials, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
 - `agent-responses` provides the canonical Responses wire model, codecs, error
@@ -30,6 +32,7 @@ After changing a `.cabal` file, regenerate that package's Nix expression:
 (cd packages/agent-openai && cabal2nix . > package.nix)
 (cd packages/agent-xai && cabal2nix . > package.nix)
 (cd packages/agent-openrouter && cabal2nix . > package.nix)
+(cd packages/agent-tui && cabal2nix . > package.nix)
 (cd packages/agent-cli && cabal2nix . > package.nix)
 ```
 

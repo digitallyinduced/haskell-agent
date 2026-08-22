@@ -23,6 +23,7 @@ import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
+import Agent.TUI.Syntax (SyntaxHighlighter)
 import Brick (Location)
 import Brick.BChan (BChan)
 import Control.Concurrent.STM (TMVar, TVar)
@@ -42,6 +43,7 @@ data Name
         !Bool
         !Bool
         !(Maybe (Int, Bool))
+    | CodeBlockCache !BlockId !Int
     | CodeCopy !BlockId !Int
     | ComposerArea
     | ComposerCursor
@@ -116,6 +118,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeFirstFrame :: !(IO ())
     , runtimeRunning :: !(IORef Bool)
     , runtimeColor :: !Bool
+    , runtimeSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     , runtimeInitial :: !UiState
     }
 

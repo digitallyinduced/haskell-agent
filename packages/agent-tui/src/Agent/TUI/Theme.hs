@@ -24,6 +24,20 @@ module Agent.TUI.Theme
     , selectedAttr
     , strongAttr
     , successAttr
+    , syntaxAnnotationAttr
+    , syntaxCommentAttr
+    , syntaxErrorAttr
+    , syntaxFunctionAttr
+    , syntaxKeywordAttr
+    , syntaxNormalAttr
+    , syntaxNumberAttr
+    , syntaxOperatorAttr
+    , syntaxPreprocessorAttr
+    , syntaxStringAttr
+    , syntaxTypeAttr
+    , syntaxVariableAttr
+    , syntaxWarningAttr
+    , syntaxClassAttr
     , thinkingAttr
     , toolAttr
     , userAttr
@@ -31,6 +45,7 @@ module Agent.TUI.Theme
     , solarizedDark
     ) where
 
+import Agent.TUI.Syntax (SyntaxClass(..))
 import Brick (AttrMap, AttrName, attrMap, attrName)
 import Data.Bits ((.|.))
 import qualified Graphics.Vty as V
@@ -41,6 +56,10 @@ errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
 lambdaDimAttr, lambdaTrailAttr, lambdaGlowAttr, lambdaSparkAttr :: AttrName
+syntaxNormalAttr, syntaxKeywordAttr, syntaxTypeAttr, syntaxFunctionAttr :: AttrName
+syntaxVariableAttr, syntaxStringAttr, syntaxNumberAttr, syntaxCommentAttr :: AttrName
+syntaxOperatorAttr, syntaxAnnotationAttr, syntaxPreprocessorAttr :: AttrName
+syntaxWarningAttr, syntaxErrorAttr :: AttrName
 baseAttr = attrName "base"
 headerAttr = attrName "header"
 footerAttr = attrName "footer"
@@ -68,6 +87,35 @@ strongAttr = attrName "markdown-strong"
 controlLinkAttr = attrName "control-link"
 controlLinkHoverAttr = attrName "control-link-hover"
 controlLinkActiveAttr = attrName "control-link-active"
+syntaxNormalAttr = attrName "syntax-normal"
+syntaxKeywordAttr = attrName "syntax-keyword"
+syntaxTypeAttr = attrName "syntax-type"
+syntaxFunctionAttr = attrName "syntax-function"
+syntaxVariableAttr = attrName "syntax-variable"
+syntaxStringAttr = attrName "syntax-string"
+syntaxNumberAttr = attrName "syntax-number"
+syntaxCommentAttr = attrName "syntax-comment"
+syntaxOperatorAttr = attrName "syntax-operator"
+syntaxAnnotationAttr = attrName "syntax-annotation"
+syntaxPreprocessorAttr = attrName "syntax-preprocessor"
+syntaxWarningAttr = attrName "syntax-warning"
+syntaxErrorAttr = attrName "syntax-error"
+
+syntaxClassAttr :: SyntaxClass -> AttrName
+syntaxClassAttr = \case
+    SyntaxNormal -> syntaxNormalAttr
+    SyntaxKeyword -> syntaxKeywordAttr
+    SyntaxType -> syntaxTypeAttr
+    SyntaxFunction -> syntaxFunctionAttr
+    SyntaxVariable -> syntaxVariableAttr
+    SyntaxString -> syntaxStringAttr
+    SyntaxNumber -> syntaxNumberAttr
+    SyntaxComment -> syntaxCommentAttr
+    SyntaxOperator -> syntaxOperatorAttr
+    SyntaxAnnotation -> syntaxAnnotationAttr
+    SyntaxPreprocessor -> syntaxPreprocessorAttr
+    SyntaxWarning -> syntaxWarningAttr
+    SyntaxError -> syntaxErrorAttr
 
 solarizedDark :: AttrMap
 solarizedDark =
@@ -165,6 +213,22 @@ solarizedDark =
             `V.withForeColor` rgb 0 43 54
             `V.withBackColor` rgb 38 139 210
             `V.withStyle` V.bold)
+        , (syntaxNormalAttr, codeColor 42 161 152)
+        , (syntaxKeywordAttr, codeColor 211 54 130)
+        , (syntaxTypeAttr, codeColor 181 137 0)
+        , (syntaxFunctionAttr, codeColor 38 139 210)
+        , (syntaxVariableAttr, codeColor 42 161 152)
+        , (syntaxStringAttr, codeColor 42 161 152)
+        , (syntaxNumberAttr, codeColor 108 113 196)
+        , (syntaxCommentAttr,
+            codeColor 88 110 117 `V.withStyle` V.italic)
+        , (syntaxOperatorAttr, codeColor 203 75 22)
+        , (syntaxAnnotationAttr, codeColor 133 153 0)
+        , (syntaxPreprocessorAttr, codeColor 203 75 22)
+        , (syntaxWarningAttr,
+            codeColor 181 137 0 `V.withStyle` V.bold)
+        , (syntaxErrorAttr,
+            codeColor 220 50 47 `V.withStyle` V.bold)
         ]
 
 monochrome :: AttrMap
@@ -199,7 +263,27 @@ monochrome =
         , (controlLinkHoverAttr, V.defAttr
             `V.withStyle` (V.underline .|. V.bold))
         , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (syntaxNormalAttr, V.defAttr)
+        , (syntaxKeywordAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxTypeAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxFunctionAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxVariableAttr, V.defAttr)
+        , (syntaxStringAttr, V.defAttr)
+        , (syntaxNumberAttr, V.defAttr)
+        , (syntaxCommentAttr, V.defAttr `V.withStyle` V.italic)
+        , (syntaxOperatorAttr, V.defAttr)
+        , (syntaxAnnotationAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxPreprocessorAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxWarningAttr, V.defAttr `V.withStyle` V.bold)
+        , (syntaxErrorAttr, V.defAttr
+            `V.withStyle` (V.bold .|. V.reverseVideo))
         ]
+
+codeColor :: Int -> Int -> Int -> V.Attr
+codeColor r g b =
+    V.defAttr
+        `V.withForeColor` rgb r g b
+        `V.withBackColor` rgb 7 54 66
 
 rgb :: Int -> Int -> Int -> V.Color
 rgb r g b =

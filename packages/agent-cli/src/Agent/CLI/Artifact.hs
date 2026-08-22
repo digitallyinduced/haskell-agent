@@ -5,40 +5,19 @@ module Agent.CLI.Artifact
     , lastDiffBlock
     ) where
 
+import qualified Agent.TUI.FencedCode as FencedCode
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Markdown fenced blocks as @(language, body)@ pairs.
 fencedBlocks :: Text -> [(Text, Text)]
-fencedBlocks = go . Text.lines
-  where
-    go [] = []
-    go (line:rest) =
-        case fenceStart line of
-            Nothing -> go rest
-            Just (marker, language) ->
-                let (body, remaining) = break (isFenceEnd marker) rest
-                    after = case remaining of
-                        [] -> []
-                        (_:xs) -> xs
-                in (language, Text.unlines body) : go after
-
-    fenceStart line =
-        let stripped = Text.stripStart line
-            opening marker =
-                Just
-                    ( marker
-                    , Text.toLower (Text.strip (Text.drop 3 stripped))
-                    )
-        in if "```" `Text.isPrefixOf` stripped
-            then opening '`'
-            else if "~~~" `Text.isPrefixOf` stripped
-                then opening '~'
-                else Nothing
-
-    isFenceEnd marker line =
-        Text.replicate 3 (Text.singleton marker)
-            `Text.isPrefixOf` Text.stripStart line
+fencedBlocks input =
+    map
+        (\block ->
+            ( Text.toLower (Text.strip block.fencedInfo)
+            , block.fencedBody
+            ))
+        (FencedCode.fencedBlocks input)
 
 fencedCodeBlock :: Int -> Text -> Maybe Text
 fencedCodeBlock index text

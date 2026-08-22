@@ -10,6 +10,10 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+extra-source-files: README.md
+data-files:         THIRD_PARTY_NOTICES.md
+                  , data/syntax/MANIFEST.md
+                  , data/syntax/*.xml
 
 common common-options
     default-language: GHC2021
@@ -32,15 +36,19 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
-    exposed-modules:  Agent.TUI.Markdown
+    exposed-modules:  Agent.TUI.FencedCode
+                    , Agent.TUI.Markdown
                     , Agent.TUI.Model
                     , Agent.TUI.Presentation
+                    , Agent.TUI.Syntax
                     , Agent.TUI.Theme
     build-depends:    agent-core >= 0.1 && < 0.2
                     , aeson >= 2.0 && < 3
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , containers >= 0.6 && < 0.8
+                    , filepath >= 1.4 && < 1.6
+                    , skylighting-core >= 0.14.7 && < 0.15
                     , text >= 2.0 && < 2.2
                     , vty >= 6.4 && < 7
 
@@ -49,11 +57,16 @@ test-suite agent-tui-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.TUI.MarkdownSpec
+    other-modules:    Agent.TUI.FencedCodeSpec
+                    , Agent.TUI.MarkdownSpec
                     , Agent.TUI.ModelSpec
+                    , Agent.TUI.SyntaxSpec
+                    , Agent.TUI.ThemeSpec
     build-depends:    agent-tui
                     , agent-core
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
+                    , directory >= 1.3 && < 1.4
                     , hspec >= 2.11 && < 2.12
                     , text
+                    , vty

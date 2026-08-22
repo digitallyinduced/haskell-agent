@@ -53,7 +53,25 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nix-filter": "nix-filter",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "skylighting": "skylighting"
+      }
+    },
+    "skylighting": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785853199,
+        "narHash": "sha256-Ii7ky4AYyv89yliYSVMYDznP9yjx6bbHXVLMFHaFw/M=",
+        "owner": "jgm",
+        "repo": "skylighting",
+        "rev": "e432d65743ecef9475816b2cc074d34833837ced",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jgm",
+        "repo": "skylighting",
+        "rev": "e432d65743ecef9475816b2cc074d34833837ced",
+        "type": "github"
       }
     },
     "systems": {

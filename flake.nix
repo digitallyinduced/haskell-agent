@@ -5,6 +5,10 @@
         nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
         flake-utils.url = "github:numtide/flake-utils";
         nix-filter.url = "github:numtide/nix-filter";
+        skylighting = {
+            url = "github:jgm/skylighting/e432d65743ecef9475816b2cc074d34833837ced";
+            flake = false;
+        };
     };
 
     outputs =
@@ -13,6 +17,7 @@
             nixpkgs,
             flake-utils,
             nix-filter,
+            skylighting,
             ...
         }:
         flake-utils.lib.eachDefaultSystem (
@@ -39,9 +44,11 @@
                     include = [
                         "src"
                         "test"
+                        "data"
                         "agent-tui.cabal"
                         "LICENSE"
                         "README.md"
+                        "THIRD_PARTY_NOTICES.md"
                     ];
                 };
 
@@ -105,6 +112,10 @@
                         vty-unix = pkgs.haskell.lib.appendPatch
                             previous.vty-unix
                             ./patches/vty-unix-all-motion.patch;
+                        skylighting-core = final.callCabal2nix
+                            "skylighting-core"
+                            "${skylighting}/skylighting-core"
+                            { };
                         agent-core = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
@@ -143,7 +154,28 @@
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
-                agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
+                agentTuiData = pkgs.lib.getOutput "data" agentTuiPackage;
+                agentCliExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    syntax_dir="$(${pkgs.findutils}/bin/find \
+                                        ${agentTuiData} \
+                                        -type d -path '*/data/syntax' \
+                                        -print -quit)"
+                                    if [ -z "$syntax_dir" ]; then
+                                        echo "agent-tui syntax data was not installed" >&2
+                                        exit 1
+                                    fi
+                                    wrapProgram "$out/bin/agent-cli" \
+                                        --set AGENT_TUI_SYNTAX_DIR "$syntax_dir"
+                                '';
+                        });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
 
                 # Opens cabal repl on the agent-cli library and enters the
@@ -247,6 +279,9 @@
                         packages.agent-openrouter
                     ];
                     withHoogle = false;
+                    shellHook = ''
+                        export AGENT_TUI_SYNTAX_DIR=${agentTuiSource}/data/syntax
+                    '';
                     nativeBuildInputs =
                         (with haskellPackages; [
                             cabal-install
