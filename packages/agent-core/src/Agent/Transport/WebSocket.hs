@@ -11,7 +11,8 @@ module Agent.Transport.WebSocket
     , invalidateWebSocketRequest
     , sendWebSocketText
     , receiveWebSocketData
-    , transientWsRetryDelayMicros
+    , transientWsConnectRetryPolicy
+    , retryTransientWsConnectWithPolicy
     , transientWsConnectFailureLabel
     , transientWsMidRunFailureLabel
     , wsHandshakeAuthFailure
@@ -23,7 +24,14 @@ import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
 import qualified Control.Exception.Safe as Safe
+import Control.Retry
+    ( RetryPolicyM
+    , capDelay
+    , exponentialBackoff
+    , retrying
+    )
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -409,10 +417,37 @@ isAsyncException :: Exception.SomeException -> Bool
 isAsyncException exception =
     isJust (Exception.fromException exception :: Maybe Exception.SomeAsyncException)
 
--- | Small fixed backoff before retrying a transient WebSocket connect /
--- handshake failure.
-transientWsRetryDelayMicros :: Int
-transientWsRetryDelayMicros = 3000000
+-- | Capped exponential backoff for transient WebSocket connection / handshake
+-- failures: 1s, 2s, 4s, 8s, then 15s until the connection succeeds or the
+-- caller cancels the operation.
+transientWsConnectRetryPolicy :: RetryPolicyM IO
+transientWsConnectRetryPolicy =
+    capDelay 15000000 (exponentialBackoff 1000000)
+
+-- | Retry transient WebSocket connection / handshake failures until the
+-- connection callback begins. Once the callback has started, retrying the
+-- enclosing action could replay visible effects from an active session, so
+-- every exception is propagated unchanged.
+--
+-- The policy is injectable so tests can retry without sleeping.
+retryTransientWsConnectWithPolicy
+    :: RetryPolicyM IO
+    -> (IO () -> IO value)
+    -> IO value
+retryTransientWsConnectWithPolicy policy connect = do
+    callbackStarted <- newIORef False
+    result <- retrying policy (shouldRetry callbackStarted) \_retryStatus -> do
+        writeIORef callbackStarted False
+        Safe.tryAny (connect (writeIORef callbackStarted True))
+    either Exception.throwIO pure result
+  where
+    shouldRetry callbackStarted _retryStatus = \case
+        Left exception -> do
+            started <- readIORef callbackStarted
+            pure $
+                not started
+                    && isJust (transientWsConnectFailureLabel exception)
+        Right _ -> pure False
 
 -- | Classify transient failures that happen before a WebSocket session is
 -- established.
