@@ -20,7 +20,7 @@ module Agent.ProjectInstructions
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Provider (Provider(..))
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as BS
 import Data.Maybe (mapMaybe)
@@ -103,14 +103,6 @@ findProjectRoot markers start = go start
                 if parent == dir
                     then pure start
                     else go parent
-
-directoryChain :: OsPath -> OsPath -> [OsPath]
-directoryChain root cwd = reverse (go cwd)
-  where
-    go dir
-        | dir == root = [dir]
-        | takeDirectory dir == dir = [dir]
-        | otherwise = dir : go (takeDirectory dir)
 
 -- | Prefer @AGENTS.override.md@ over @AGENTS.md@ in a directory.
 readPreferredAgentsMd :: OsPath -> IO (Maybe InstructionFile)

@@ -37,6 +37,8 @@ import Agent.InterAgentMessage
 import Agent.Loop
     ( Backend(..)
     , LoopConfig(..)
+    , LoopError
+    , LoopEvent
     , LoopResult(..)
     , TurnInput(..)
     , defaultLoopDispatch
@@ -97,7 +99,11 @@ import Agent.Tools.MultiAgents
     , MultiAgentContext(..)
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
-import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
+import Agent.Tools.Types
+    ( ToolEnv(..)
+    , ToolRegistry
+    , defaultToolEnv
+    )
 import Control.Exception.Safe (finally)
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -124,6 +130,13 @@ data SubagentRuntime = SubagentRuntime
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
     , subagentStoreRoot :: !SubagentStoreRoot
     , subagentTypes :: !GrokSubagentSpecs
+    }
+
+data PreparedChild = PreparedChild
+    { preparedParentParams :: !ResponseCreateParams
+    , preparedSession :: !SubagentSession
+    , preparedToolEnv :: !ToolEnv
+    , preparedMultiContext :: !MultiAgentContext
     }
 
 -- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
@@ -319,57 +332,28 @@ runCodexSubagent
     -> RunSubagent
 runCodexSubagent runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
-        parentParams <- readIORef runtime.subagentParams
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <-
-            fromMaybe taskPathRoot
-                <$> getTaskPath runtime.subagentRegistry env.subId
-        session <-
-            lookupOrCreateSubagentSession
-                runtime.subagentSessions
-                runtime.subagentStoreRoot
-                runtime.subagentTypes
-                env.subId
-        nestedForkSource <- newIORef (Just session.subSessionTranscript)
+        prepared <- prepareChild runtime env sendToRoot
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = runtime.subagentRegistry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiPrepareSpawn = Just
-                    (prepareCollaborationSpawn
-                        runtime.subagentSessions
-                        runtime.subagentStoreRoot
-                        runtime.subagentTypes
-                        nestedForkSource)
-                , multiSendToRoot = sendToRoot
-                }
         coding <-
             codingToolsFor
                 OpenAIProvider
-                childToolEnv
+                prepared.preparedToolEnv
                 (Just runtime.subagentPlanHooks)
-                (Just childCtx)
+                (Just prepared.preparedMultiContext)
         syncStoreRootFromPlan runtime.subagentStoreRoot coding.codingPlanMode
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
-            let model = fromMaybe
-                    (fromMaybe (defaultModelFor OpenAIProvider) parentParams.model)
-                    childModel
-                inheritedEffort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor OpenAIProvider) cfg.effort
-                    Nothing -> defaultEffortFor OpenAIProvider
-                effort = fromMaybe inheritedEffort childEffort
+            let (model, effort) =
+                    resolveChildModelAndEffort
+                        OpenAIProvider
+                        prepared.preparedParentParams
+                        childModel
+                        childEffort
                 baseInstructions =
                     fromMaybe
                         (systemPrompt OpenAIProvider env.subCwd today True)
-                        parentParams.instructions
+                        prepared.preparedParentParams.instructions
                 instructions =
                     baseInstructions
                         <> "\n\nYou are a Codex subagent. Complete the assigned task and "
@@ -384,13 +368,14 @@ runCodexSubagent runtime tokenProvider sendToRoot =
             httpFallbackActive <- newIORef False
             let websocketBackend =
                     freshOpenAiBackend tokenProvider
-                        (readIORef childParamsRef) session.subSessionTranscript
+                        (readIORef childParamsRef)
+                        prepared.preparedSession.subSessionTranscript
                 httpBackend =
                     statelessResponsesBackend
                         (\request _onEvent ->
                             OpenAI.createCodexMessageWithProvider tokenProvider request)
                         (readIORef childParamsRef)
-                        session.subSessionTranscript
+                        prepared.preparedSession.subSessionTranscript
                 baseBackend =
                     openAiBackendWithTransportFallback
                         httpFallbackActive
@@ -402,37 +387,13 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                             runtime.subagentOptions.optCompactThreshold
                             tokenProvider
                             (readIORef childParamsRef)
-                            session.subSessionTranscript
-                            session.subSessionContextTokens
+                            prepared.preparedSession.subSessionTranscript
+                            prepared.preparedSession.subSessionContextTokens
                             baseBackend
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = runtime.subagentOptions.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove =
-                        \call ->
-                            childApprove runtime.subagentPolicy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            result <- runLoopInputs config previous [AgentMessage prompt]
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId
-                        runtime.subagentRegistry
-                        env.subId
-                        loopResult.finalResponseId
-                Left _ ->
-                    modifyIORef' session.subSessionTranscript
-                        trimDanglingToolSuffix
-            persistSubagentSnapshot
-                runtime.subagentStoreRoot
-                runtime.subagentRegistry
-                runtime.subagentTypes
-                env.subId
-                session.subSessionTranscript
-            pure result
+            runPreparedChild
+                runtime env prepared.preparedSession toolRegistry backend onEvent
+                (\config ->
+                    runLoopInputs config previous [AgentMessage prompt])
 
 -- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
 runHttpSubagent
@@ -442,35 +403,7 @@ runHttpSubagent
     -> RunSubagent
 runHttpSubagent runtime provider mkBackend =
     \env previous prompt onEvent -> do
-        parentParams <- readIORef runtime.subagentParams
-        childEnv <- defaultToolEnv env.subCwd
-        childPath <-
-            fromMaybe taskPathRoot
-                <$> getTaskPath runtime.subagentRegistry env.subId
-        session <-
-            lookupOrCreateSubagentSession
-                runtime.subagentSessions
-                runtime.subagentStoreRoot
-                runtime.subagentTypes
-                env.subId
-        nestedForkSource <- newIORef (Just session.subSessionTranscript)
-        let childToolEnv = childEnv { toolCancel = env.subCancel }
-            childCtx = MultiAgentContext
-                { multiRegistry = runtime.subagentRegistry
-                , multiSelfId = Just env.subId
-                , multiDepth = env.subDepth
-                , multiTaskPath = childPath
-                , multiRootTurnId = pure env.subRootTurnId
-                , multiResumeFromDisk = Nothing
-                , multiCreateWorktree = Nothing
-                , multiPrepareSpawn = Just
-                    (prepareCollaborationSpawn
-                        runtime.subagentSessions
-                        runtime.subagentStoreRoot
-                        runtime.subagentTypes
-                        nestedForkSource)
-                , multiSendToRoot = Nothing
-                }
+        prepared <- prepareChild runtime env Nothing
         agentType <-
             fromMaybe defaultSubagentType
                 <$> lookupAgentType runtime.subagentTypes env.subId
@@ -480,18 +413,17 @@ runHttpSubagent runtime provider mkBackend =
         coding <-
             codingToolsFor
                 provider
-                childToolEnv
+                prepared.preparedToolEnv
                 (Just runtime.subagentPlanHooks)
-                (Just childCtx)
+                (Just prepared.preparedMultiContext)
         flip finally coding.codingClose do
             today <- utctDay <$> getCurrentTime
-            let model = fromMaybe
-                    (fromMaybe (defaultModelFor provider) parentParams.model)
-                    childModel
-                inheritedEffort = case parentParams.reasoning of
-                    Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
-                    Nothing -> defaultEffortFor provider
-                effort = fromMaybe inheritedEffort childEffort
+            let (model, effort) =
+                    resolveChildModelAndEffort
+                        provider
+                        prepared.preparedParentParams
+                        childModel
+                        childEffort
                 baseInstructions = systemPrompt provider env.subCwd today True
                 instructions =
                     baseInstructions
@@ -504,35 +436,111 @@ runHttpSubagent runtime provider mkBackend =
             childParamsRef <- newIORef childParams
             let backend =
                     withConnectionRecovery $
-                        mkBackend childParamsRef session.subSessionTranscript
-                config = LoopConfig
-                    { loopBackend = backend
-                    , loopTools = toolRegistry
-                    , loopDispatch = defaultLoopDispatch
-                    , loopMaxTurns = runtime.subagentOptions.optMaxTurns
-                    , loopOnEvent = onEvent
-                    , loopApprove =
-                        \call ->
-                            childApprove runtime.subagentPolicy toolRegistry call
-                    , loopCancel = env.subCancel
-                    }
-            result <- runLoop config previous (interAgentMessagePayload prompt)
-            case result of
-                Right loopResult ->
-                    setPreviousResponseId
-                        runtime.subagentRegistry
-                        env.subId
-                        loopResult.finalResponseId
-                Left _ ->
-                    modifyIORef' session.subSessionTranscript
-                        trimDanglingToolSuffix
-            persistSubagentSnapshot
-                runtime.subagentStoreRoot
+                        mkBackend
+                            childParamsRef
+                            prepared.preparedSession.subSessionTranscript
+            runPreparedChild
+                runtime env prepared.preparedSession toolRegistry backend onEvent
+                (\config ->
+                    runLoop config previous (interAgentMessagePayload prompt))
+
+prepareChild
+    :: SubagentRuntime
+    -> SubagentSpawnEnv
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> IO PreparedChild
+prepareChild runtime env sendToRoot = do
+    parentParams <- readIORef runtime.subagentParams
+    childEnv <- defaultToolEnv env.subCwd
+    childPath <-
+        fromMaybe taskPathRoot
+            <$> getTaskPath runtime.subagentRegistry env.subId
+    session <-
+        lookupOrCreateSubagentSession
+            runtime.subagentSessions
+            runtime.subagentStoreRoot
+            runtime.subagentTypes
+            env.subId
+    nestedForkSource <- newIORef (Just session.subSessionTranscript)
+    let childToolEnv = childEnv { toolCancel = env.subCancel }
+        childCtx = MultiAgentContext
+            { multiRegistry = runtime.subagentRegistry
+            , multiSelfId = Just env.subId
+            , multiDepth = env.subDepth
+            , multiTaskPath = childPath
+            , multiRootTurnId = pure env.subRootTurnId
+            , multiResumeFromDisk = Nothing
+            , multiCreateWorktree = Nothing
+            , multiPrepareSpawn = Just
+                (prepareCollaborationSpawn
+                    runtime.subagentSessions
+                    runtime.subagentStoreRoot
+                    runtime.subagentTypes
+                    nestedForkSource)
+            , multiSendToRoot = sendToRoot
+            }
+    pure PreparedChild
+        { preparedParentParams = parentParams
+        , preparedSession = session
+        , preparedToolEnv = childToolEnv
+        , preparedMultiContext = childCtx
+        }
+
+resolveChildModelAndEffort
+    :: Provider
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> Maybe Text
+    -> (Text, Text)
+resolveChildModelAndEffort provider parentParams childModel childEffort =
+    ( model
+    , fromMaybe inheritedEffort childEffort
+    )
+  where
+    model = fromMaybe
+        (fromMaybe (defaultModelFor provider) parentParams.model)
+        childModel
+    inheritedEffort = case parentParams.reasoning of
+        Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
+        Nothing -> defaultEffortFor provider
+
+runPreparedChild
+    :: SubagentRuntime
+    -> SubagentSpawnEnv
+    -> SubagentSession
+    -> ToolRegistry
+    -> Backend
+    -> (LoopEvent -> IO ())
+    -> (LoopConfig -> IO (Either LoopError LoopResult))
+    -> IO (Either LoopError LoopResult)
+runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
+    let config = LoopConfig
+            { loopBackend = backend
+            , loopTools = toolRegistry
+            , loopDispatch = defaultLoopDispatch
+            , loopMaxTurns = runtime.subagentOptions.optMaxTurns
+            , loopOnEvent = onEvent
+            , loopApprove =
+                \call ->
+                    childApprove runtime.subagentPolicy toolRegistry call
+            , loopCancel = env.subCancel
+            }
+    result <- runChild config
+    case result of
+        Right loopResult ->
+            setPreviousResponseId
                 runtime.subagentRegistry
-                runtime.subagentTypes
                 env.subId
-                session.subSessionTranscript
-            pure result
+                loopResult.finalResponseId
+        Left _ ->
+            modifyIORef' session.subSessionTranscript trimDanglingToolSuffix
+    persistSubagentSnapshot
+        runtime.subagentStoreRoot
+        runtime.subagentRegistry
+        runtime.subagentTypes
+        env.subId
+        session.subSessionTranscript
+    pure result
 
 grokSubagentSuffix :: Text -> SubagentId -> Text
 grokSubagentSuffix agentType agentId =

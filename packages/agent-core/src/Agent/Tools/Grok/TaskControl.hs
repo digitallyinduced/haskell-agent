@@ -10,6 +10,7 @@ import Agent.Subagents
     , getStatus
     , waitSubagents
     )
+import Agent.Subagents.Format (isFinalStatus)
 import Agent.ToolArgs (objectArgs, optInt, reqText, reqTextList)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -135,7 +136,7 @@ runOneTaskOutput session multi timeout taskId = case multi of
         pure TaskOutputEntry
             { taskOutputId = taskId
             , output = formatAgentWait taskId timedOut (Just status)
-            , terminal = isTerminalAgentStatus status
+            , terminal = isFinalStatus status
             }
     _ -> do
         text <- stripAnsi <$> readTaskOutput session taskId timeout
@@ -144,14 +145,6 @@ runOneTaskOutput session multi timeout taskId = case multi of
             , output = text
             , terminal = terminalCommandOutput text
             }
-
-isTerminalAgentStatus :: SubagentStatus -> Bool
-isTerminalAgentStatus = \case
-    Completed {} -> True
-    Errored {} -> True
-    Interrupted -> True
-    Closed -> True
-    _ -> False
 
 terminalCommandOutput :: Text -> Bool
 terminalCommandOutput text =

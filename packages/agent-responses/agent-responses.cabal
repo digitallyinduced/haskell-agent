@@ -46,8 +46,10 @@ library
     exposed-modules:  Agent.Responses.Types
                     , Agent.Responses.Codec
                     , Agent.Responses.Error
+                    , Agent.Responses.HttpSSE
                     , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
+                    , Agent.Responses.StreamAssembly
                     , Agent.Responses.LoopBackend
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
@@ -56,6 +58,10 @@ library
                     , base64-bytestring
                     , bytestring
                     , containers
+                    , http-client
+                    , http-client-tls
+                    , http-conduit
+                    , safe-exceptions
                     , scientific
                     , text
                     , vector
@@ -68,6 +74,7 @@ test-suite agent-responses-test
     other-modules:    Agent.Responses.LoopBackendSpec
                     , Agent.Responses.ResponseMergeSpec
                     , Agent.Responses.SSESpec
+                    , Agent.Responses.StreamAssemblySpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-responses

@@ -78,7 +78,6 @@ library
                     , network-uri
                     , websockets
                     , wuss
-                    , base64-bytestring
                     , retry >= 0.9.3.1 && < 0.10
                     , exceptions
                     , safe-exceptions

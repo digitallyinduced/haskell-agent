@@ -18,7 +18,7 @@ module Agent.Skills
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
@@ -224,7 +224,9 @@ skillRoots options = do
     projectRoot <- canonicalizePath (unsafeToFilePath options.skillsProjectRoot)
     cwd <- canonicalizePath (unsafeToFilePath options.skillsCwd)
     home <- canonicalizePath (unsafeToFilePath options.skillsHome)
-    let dirs = directoryChain projectRoot cwd
+    let dirs =
+            map unsafeToFilePath $
+                directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
         projectRoots =
             [ ( RepositorySkill depth (dir == cwd)
               , origin
@@ -248,14 +250,6 @@ skillRoots options = do
         AgentSkills -> ".agents" </> "skills"
         GrokSkills -> ".grok" </> "skills"
         CodexSkills -> ".codex" </> "skills"
-
-directoryChain :: FilePath -> FilePath -> [FilePath]
-directoryChain root cwd = reverse (go cwd)
-  where
-    go dir
-        | dir == root = [dir]
-        | takeDirectory dir == dir = [cwd]
-        | otherwise = dir : go (takeDirectory dir)
 
 findSkillFiles :: Int -> FilePath -> IO [FilePath]
 findSkillFiles maxDepth root = go Set.empty 0 root

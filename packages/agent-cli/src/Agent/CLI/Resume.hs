@@ -40,10 +40,9 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
-    ( clampSelectionIndex
-    , fitTextCell
-    , selectionWindow
-    , transcriptPreviewRows
+    ( SplitPaneFrame(..)
+    , clampSelectionIndex
+    , renderSplitPaneFrame
     )
 import Agent.OsPath (toText)
 import Agent.Provider (providerSlug)
@@ -456,64 +455,37 @@ renderResumeFrame color = renderResumeFrameFor color 24 100
 -- tail of that selected session's transcript.
 renderResumeFrameFor :: Bool -> Int -> Int -> ResumeState -> Text
 renderResumeFrameFor color terminalRows terminalCols state =
-    Text.intercalate "\n" (header : headings : body <> [footer])
+    renderSplitPaneFrame SplitPaneFrame
+        { splitPaneMinColumns = 12
+        , splitPaneColumns = terminalCols
+        -- Leave the final terminal row unused. Redrawing a frame that exactly
+        -- fills the viewport would scroll its first line and duplicate the header.
+        , splitPaneBodyRows = max 1 (terminalRows - 4)
+        , splitPaneLeftMinWidth = 8
+        , splitPaneLeftMaxWidth = 34
+        , splitPaneDivider = " │ "
+        , splitPaneTitle = "resume"
+        , splitPaneHeaderDetail = const filterText
+        , splitPaneLeftHeading = "sessions"
+        , splitPaneRightHeading =
+            \selected ->
+                "transcript"
+                    <> maybe "" (\entry -> " · " <> entry.resumeTitle) selected
+        , splitPaneItems = visibleResume state
+        , splitPaneSelectedIndex = state.resumeIndex
+        , splitPaneLeftLabel = \_ entry -> entry.resumeTitle
+        , splitPaneTranscript = (.resumeTranscript)
+        , splitPaneEmptyTranscript = "(no sessions)"
+        , splitPaneFooter =
+            "↑↓/jk or scroll · click/enter resume · esc/q cancel · type to filter"
+        , splitPanePromptStyle = rolePrompt color
+        , splitPaneMutedStyle = roleMuted color
+        , splitPaneSelectedStyle = roleSuccess color
+        }
   where
-    cols = max 12 terminalCols
-    -- Leave the final terminal row unused. Redrawing a frame that exactly
-    -- fills the viewport would scroll its first line and duplicate the header.
-    bodyRows = max 1 (terminalRows - 4)
-    divider = roleMuted color " │ "
-    leftWidth = max 8 (min 34 ((cols - 3) * 2 `div` 5))
-    rightWidth = max 1 (cols - leftWidth - 3)
-    visible = visibleResume state
-    n = length visible
-    idx = clampSelectionIndex n state.resumeIndex
-    shown = selectionWindow bodyRows idx visible
-    selected = selectedResume state
     filterText
         | Text.null state.resumeFilter = "type to filter"
         | otherwise = "filter: " <> state.resumeFilter
-    header =
-        rolePrompt color "resume"
-            <> roleMuted color
-                (fitTextCell (max 0 (cols - 6)) (" · " <> filterText))
-    headings =
-        rolePrompt color (fitTextCell leftWidth "sessions")
-            <> divider
-            <> rolePrompt color
-                (fitTextCell rightWidth
-                    ("transcript"
-                        <> maybe "" (\entry -> " · " <> entry.resumeTitle) selected))
-    leftRows =
-        map
-            (\(absoluteIndex, entry) ->
-                let prefix = if absoluteIndex == idx then "› " else "  "
-                    text = fitTextCell leftWidth (prefix <> entry.resumeTitle)
-                in if absoluteIndex == idx
-                    then roleSuccess color text
-                    else text)
-            shown
-            <> repeat (Text.replicate leftWidth " ")
-    rightRows = case selected of
-        Nothing ->
-            roleMuted color (fitTextCell rightWidth "(no sessions)") : repeat ""
-        Just entry ->
-            let preview =
-                    transcriptPreviewRows
-                        rightWidth
-                        bodyRows
-                        entry.resumeTranscript
-            in map (fitTextCell rightWidth) preview <> repeat ""
-    body =
-        take bodyRows $
-            zipWith
-                (\left right -> left <> divider <> right)
-                leftRows
-                rightRows
-    footer =
-        roleMuted color $
-            fitTextCell cols
-                "↑↓/jk or scroll · click/enter resume · esc/q cancel · type to filter"
 
 transcriptLines :: [SessionTurn] -> [Text]
 transcriptLines = concatMap turnLines

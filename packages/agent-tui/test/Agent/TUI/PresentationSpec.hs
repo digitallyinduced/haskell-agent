@@ -1,0 +1,45 @@
+module Agent.TUI.PresentationSpec (spec) where
+
+import Agent.TUI.Presentation
+import Agent.ToolDispatch
+    ( customToolCall
+    , functionToolCall
+    )
+import qualified Data.Text as Text
+import Test.Hspec
+
+spec :: Spec
+spec = describe "tool presentation" do
+    it "extracts tool details from function and custom calls" do
+        toolDetail
+            (functionToolCall "read" "read_file"
+                "{\"target_file\":\"src/Main.hs\"}")
+            `shouldBe` "src/Main.hs"
+        toolDetail
+            (customToolCall "patch" "apply_patch"
+                "*** Begin Patch\n*** Update File: src/Main.hs\n*** End Patch")
+            `shouldBe` "src/Main.hs"
+
+    it "parses and truncates search-replace diffs once for all renderers" do
+        let oldText = Text.intercalate "\\n"
+                ["old" <> Text.pack (show n) | n <- [1 :: Int .. 15]]
+            newText = Text.intercalate "\\n"
+                ["new" <> Text.pack (show n) | n <- [1 :: Int .. 15]]
+            arguments =
+                "{\"file_path\":\"src/Main.hs\",\"old_string\":\""
+                    <> oldText
+                    <> "\",\"new_string\":\""
+                    <> newText
+                    <> "\"}"
+            parsed = parseSearchReplaceDiff arguments
+        parsed.diffPath `shouldBe` "src/Main.hs"
+        parsed.diffAction `shouldBe` Nothing
+        length parsed.diffLines `shouldBe` 20
+        parsed.diffHiddenLines `shouldBe` 10
+
+    it "formats structured collaboration output" do
+        formatToolOutput
+            (functionToolCall "agents" "collaboration.list_agents" "{}")
+            "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\
+            \\"agent_status\":\"running\"}]}"
+            `shouldBe` "/root/reviewer · running"
