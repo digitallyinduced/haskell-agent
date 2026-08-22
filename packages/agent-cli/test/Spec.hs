@@ -12,6 +12,7 @@ import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
+import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -43,6 +44,7 @@ import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
+import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
 import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
@@ -61,6 +63,7 @@ main = hspec do
     ClipboardSpec.spec
     CommandSpec.spec
     CompactionSpec.spec
+    ConnectivitySpec.spec
     CredentialStoreSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
@@ -92,6 +95,7 @@ main = hspec do
     SkillsSpec.spec
     SubagentStoreSpec.spec
     ToolsSpec.spec
+    TUIAppSpec.spec
     TUIBridgeSpec.spec
     TUIImagePreviewSpec.spec
     TUIScrollSpec.spec

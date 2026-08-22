@@ -18,6 +18,7 @@ module Agent.CLI.Input
     , formatPasteChip
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
+    , isShiftEnterCsiBody
     , appendReplHistory
     , readReplHistory
     , replHistoryPath
@@ -48,6 +49,7 @@ import Agent.CLI.Terminal
     , emitTerminalSequence
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
+    , shiftEnterCsiBodies
     )
 import Agent.Loop (ImageAttachment)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
@@ -790,6 +792,9 @@ isClipboardPasteCsiBody body =
                         || hasModifier kittySuper kittyModifiers)
         _ -> False
 
+isShiftEnterCsiBody :: String -> Bool
+isShiftEnterCsiBody body = body `elem` shiftEnterCsiBodies
+
 readEscapeKey :: IO EditorKey
 readEscapeKey = do
     ready <- hWaitForInput stdin 25
@@ -823,6 +828,7 @@ readCsiKey =
     readCsiBody >>= \case
         Left err -> pure (EditorInputError err)
         Right body
+            | isShiftEnterCsiBody body -> pure (EditorChar '\n')
             | Just key <- decodeKittyEditorKey body -> pure key
             | otherwise -> case body of
                 "A" -> pure EditorUp

@@ -66,6 +66,7 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackend
     , runProviderCompact
     )
+import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.ImagePreview
     ( detectImagePreviewProtocol
     , previewColumnsFor
@@ -1019,7 +1020,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             transcriptRef
                                             contextTokensRef
                                     noticingBackend =
-                                        withPendingInputs pendingNotices lockedBackend
+                                        withPendingInputs pendingNotices $
+                                            withConnectionRecovery lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
                                             loaded.loadedTokenProvider
@@ -1054,8 +1056,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
-                                    xaiBackend xaiOptions loaded.loadedTokenProvider
-                                        (readIORef paramsRef) transcriptRef
+                                    withConnectionRecovery $
+                                        xaiBackend xaiOptions loaded.loadedTokenProvider
+                                            (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
                                 xaiBackend xaiOptions loaded.loadedTokenProvider
                                     (readIORef privateParams) privateTranscript
@@ -1078,8 +1081,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
-                                    openRouterBackend openRouterOptions loaded.loadedTokenProvider
-                                        (readIORef paramsRef) transcriptRef
+                                    withConnectionRecovery $
+                                        openRouterBackend openRouterOptions loaded.loadedTokenProvider
+                                            (readIORef paramsRef) transcriptRef
                             btwBackend privateParams privateTranscript =
                                 openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                     (readIORef privateParams) privateTranscript

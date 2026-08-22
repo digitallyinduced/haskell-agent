@@ -45,6 +45,7 @@ library
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
+                    , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.ImagePreview
@@ -140,6 +141,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -171,6 +173,7 @@ test-suite agent-cli-test
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.TUIAppSpec
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIScrollSpec
