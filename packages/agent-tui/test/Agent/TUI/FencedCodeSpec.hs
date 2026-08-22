@@ -51,6 +51,49 @@ spec = describe "fencedBlocks" do
         map (.fencedInfo) blocks `shouldBe` ["diff"]
         map (.fencedBody) blocks `shouldBe` ["-old\n+new\n"]
 
+    it "recognizes and deindents fences nested under a list item" do
+        let blocks =
+                fencedBlocks
+                    "- Changed embedded RTS defaults from:\n\
+                    \    ```text\n\
+                    \    -N -M8G -A64m\n\
+                    \    ```\n\
+                    \\n\
+                    \    to:\n\
+                    \    ```text\n\
+                    \    -N4 -M8G\n\
+                    \    ```\n"
+        map (.fencedInfo) blocks `shouldBe` ["text", "text"]
+        map (.fencedBody) blocks
+            `shouldBe` ["-N -M8G -A64m\n", "-N4 -M8G\n"]
+        map (.fencedClosed) blocks `shouldBe` [True, True]
+
+    it "recognizes fences nested under ordered and nested list items" do
+        let ordered =
+                fencedBlocks
+                    "10. item\n    ```hs\n    main = pure ()\n    ```\n"
+            nested =
+                fencedBlocks
+                    "- outer\n  - inner\n      ```hs\n      main = pure ()\n      ```\n"
+        map (.fencedBody) ordered `shouldBe` ["main = pure ()\n"]
+        map (.fencedBody) nested `shouldBe` ["main = pure ()\n"]
+
+    it "does not reuse a list container after dedented prose" do
+        fencedBlocks
+            "- item\noutside\n    ```text\n    not a fence\n    ```\n"
+            `shouldBe` []
+
+    it "requires nested fence closers to remain inside the list container" do
+        let check source = case fencedBlocks source of
+                [block] -> do
+                    block.fencedBody `shouldBe` "one\n```\ntwo\n"
+                    block.fencedClosed `shouldBe` True
+                blocks ->
+                    expectationFailure
+                        ("expected one nested block, got " <> show blocks)
+        check "- item\n    ```text\n    one\n```\n    two\n    ```\n"
+        check "- item\n  ```text\n  one\n```\n  two\n  ```\n"
+
     it "preserves an unterminated body and its final newline state" do
         case
             ( fencedBlocks "```text\none"

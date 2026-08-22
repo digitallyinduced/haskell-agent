@@ -67,6 +67,21 @@ spec = describe "fullscreen Markdown inline parsing" do
         rendered `shouldSatisfy` isInfixOf "1:bash"
         rendered `shouldSatisfy` isInfixOf "2:haskell"
 
+    it "renders a four-space fence nested under a list as a code block" do
+        let widget :: Widget ()
+            widget =
+                markdownWidgetWithCodeControls
+                    (\index language ->
+                        txt (Text.pack (show index) <> ":" <> language))
+                    "- Changed from:\n\
+                    \    ```text\n\
+                    \    -N -M8G -A64m\n\
+                    \    ```"
+            rendered = show (renderWidget Nothing [widget] (40, 8))
+        rendered `shouldSatisfy` isInfixOf "1:text"
+        rendered `shouldSatisfy` isInfixOf "-N -M8G -A64m"
+        rendered `shouldSatisfy` (not . isInfixOf "```text")
+
     it "caches closed fence bodies but leaves open streaming fences uncached" do
         let render input =
                 let widget :: Widget ()

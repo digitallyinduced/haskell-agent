@@ -47,6 +47,14 @@ spec = do
                     , Nothing
                     ]
 
+        it "copies deindented fenced code nested under a list item" do
+            let text =
+                    "- Changed from:\n\
+                    \    ```text\n\
+                    \    -N -M8G -A64m\n\
+                    \    ```\n"
+            fencedCodeBlock 1 text `shouldBe` Just "-N -M8G -A64m\n"
+
     describe "lastDiffBlock" do
         it "selects the last diff-like fence" do
             let text = "```diff\n-old\n+new\n```\n```patch\n-a\n+b\n```\n"
