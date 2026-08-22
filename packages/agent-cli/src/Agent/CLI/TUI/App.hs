@@ -20,6 +20,7 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineOr
     , repositoryHeaderText
     , requestFullscreenPermission
     , requestFullscreenChoice
@@ -365,6 +366,23 @@ readFullscreenLine
     -> Text
     -> IO ReplLine
 readFullscreenLine runtime skills prompt initial = do
+    result <- readFullscreenLineOr runtime skills prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
+-- | Wait for either user input or a session-level wakeup. The input branch is
+-- deliberately left-biased: once Enter has queued a prompt, provider startup
+-- fallback must let that prompt run instead of consuming and losing it during
+-- a backend restart.
+readFullscreenLineOr
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOr runtime skills prompt initial wake = do
     enqueueAppEvent runtime (AppSetSkillCommands skills)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
@@ -373,13 +391,17 @@ readFullscreenLine runtime skills prompt initial = do
     when (not (Text.null initial)) $
         emitUiEvent runtime (UiSetDraft initial (Text.length initial))
     emitUiEvent runtime (UiSetAwaitingInput True)
-    input <- atomically (Composer.takeFullscreenInput runtime.runtimeInput)
-    when input.fullscreenInputQueued $
-        emitUiEvent runtime $
-            case input.fullscreenInputDisplay of
-                Just _ -> UiQueuedInputStarted
-                Nothing -> UiSetAwaitingInput False
-    pure input.fullscreenInputLine
+    result <- atomically $
+        Composer.takeFullscreenInputOr runtime.runtimeInput wake
+    case result of
+        Left signal -> pure (Left signal)
+        Right input -> do
+            when input.fullscreenInputQueued $
+                emitUiEvent runtime $
+                    case input.fullscreenInputDisplay of
+                        Just _ -> UiQueuedInputStarted
+                        Nothing -> UiSetAwaitingInput False
+            pure (Right input.fullscreenInputLine)
 
 -- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
 -- are not present in the default terminfo input table. Without these entries,

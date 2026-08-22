@@ -39,6 +39,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "prompt model refresh" do
+        it "preserves the live draft and cursor across a provider restart" do
+            let before =
+                    reduceUi
+                        (UiSetDraft "half typed prompt" 7)
+                        initialUiState
+                after =
+                    reduceUi
+                        (UiSetPrompt
+                            before.uiPrompt
+                                { promptModel = "gpt-5.6-sol"
+                                })
+                        before
+            after.uiDraft `shouldBe` "half typed prompt"
+            after.uiCursor `shouldBe` 7
+            after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
+
     describe "fullscreenVtyConfig" do
         it "maps enhanced-keyboard Shift+Enter sequences before Vty decodes them" do
             V.configInputMap fullscreenVtyConfig

@@ -20,6 +20,7 @@ module Agent.CLI.TUI.Composer
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , takeFullscreenInput
+    , takeFullscreenInputOr
     , wrapDraft
     ) where
 
@@ -55,6 +56,7 @@ import Control.Concurrent.STM
     , newTVarIO
     , readTVar
     , retry
+    , orElse
     , writeTVar
     )
 import Control.Monad (void, when)
@@ -150,6 +152,16 @@ takeFullscreenInput (FullscreenInputBuffer inputs) = do
         input :< rest -> do
             writeTVar inputs rest
             pure input
+
+-- | Prefer a prompt that has already been queued over a simultaneous
+-- session-level wakeup, so provider restarts cannot consume and lose Enter.
+takeFullscreenInputOr
+    :: FullscreenInputBuffer
+    -> STM wake
+    -> STM (Either wake FullscreenInput)
+takeFullscreenInputOr inputBuffer wake =
+    (Right <$> takeFullscreenInput inputBuffer)
+        `orElse` (Left <$> wake)
 
 drawSlashMenu :: AppState -> Widget Name
 drawSlashMenu state = case currentSlashMenu state of

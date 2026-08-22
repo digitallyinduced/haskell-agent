@@ -13,6 +13,7 @@ import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.TUI.App (FullscreenRuntime)
+import Agent.Error (ApiError)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
@@ -23,6 +24,7 @@ import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Data.IORef (IORef)
 import Data.Text (Text)
+import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
@@ -31,6 +33,7 @@ data SessionEnv = SessionEnv
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
     , sessionUnavailableProviders :: !(IORef [Provider])
+    , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionPrevious :: !(IORef (Maybe Text))
     , sessionPrinted :: !(IORef Bool)
     , sessionParams :: !(IORef ResponseCreateParams)

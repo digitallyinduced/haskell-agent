@@ -70,6 +70,7 @@ library
                     , Agent.CLI.Prompt
                     , Agent.CLI.Request
                     , Agent.CLI.ProviderFallback
+                    , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
@@ -173,6 +174,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
                     , Agent.CLI.ProviderFallbackSpec
+                    , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RequestSpec
                     , Agent.CLI.RenderSpec
@@ -198,6 +200,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-tui
                     , agent-openai
+                    , agent-openrouter
                     , agent-responses
                     , agent-xai
                     , aeson
