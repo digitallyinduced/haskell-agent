@@ -135,6 +135,8 @@ data ReplLine
     -- ^ Fullscreen status click: open the model selector and keep the draft.
     | ReplChooseEffort Text
     -- ^ Fullscreen status click: open the effort selector and keep the draft.
+    | ReplChooseAccount Text
+    -- ^ Fullscreen status click: open the account selector and keep the draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
 

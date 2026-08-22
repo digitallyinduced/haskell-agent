@@ -58,6 +58,25 @@ spec = do
             formatUsageReport False epoch []
                 `shouldBe` "usage: no ChatGPT accounts in the current pool"
 
+    describe "formatUsageSummary" do
+        it "compacts plan, windows, and pacing for account picker rows" do
+            let rendered =
+                    formatUsageSummary
+                        epoch
+                        (Just (addUTCTime 90 epoch))
+                        (Right sampleSnapshot)
+            rendered `shouldSatisfy` ("pacing 1m" `Text.isInfixOf`)
+            rendered `shouldSatisfy` ("plus" `Text.isInfixOf`)
+            rendered `shouldSatisfy` ("5h 69% left" `Text.isInfixOf`)
+            rendered `shouldSatisfy` ("7d 28% left" `Text.isInfixOf`)
+
+        it "keeps accounts visible when usage cannot be loaded" do
+            formatUsageSummary
+                epoch
+                Nothing
+                (Left (ConnectionError "offline"))
+                `shouldBe` "usage unavailable"
+
 sampleWindow :: UsageWindow
 sampleWindow = UsageWindow
     { usedPercent = 31

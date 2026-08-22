@@ -12,6 +12,7 @@ module Agent.CLI.Auth
     , openAIOAuthClientId
     , openAiAuthStateChanged
     , openaiAuthStateFromJson
+    , preferredOpenAiTokenProvider
     , probeLoadedAuth
     , reloadableFileCredentialProvider
     , staticCredentialProvider
@@ -43,6 +44,7 @@ import Agent.Provider
     , providerSlug
     , seedTokenProvider
     , tokenProvider
+    , tokenProviderBillingMode
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
 import Agent.OsPath (unsafeToFilePath)
@@ -190,6 +192,53 @@ probeLoadedAuth loaded = do
                 tokenProvider <-
                     seedTokenProvider loaded.loadedTokenProvider credential
                 pure $ Right loaded { loadedTokenProvider = tokenProvider }
+
+-- | Pin normal checkouts to one OpenAI pool account until that credential is
+-- reported as failed. A failure for the selected credential clears the pin
+-- and delegates to the pool's normal cooldown and failover behavior; failures
+-- from older in-flight credentials leave the newer selection intact.
+preferredOpenAiTokenProvider
+    :: IORef (Maybe Text)
+    -> OpenAI.Pool
+    -> TokenProvider
+    -> TokenProvider
+preferredOpenAiTokenProvider preferredAccount pool fallback =
+    tokenProvider (tokenProviderBillingMode fallback) \failed ->
+        case failed of
+            Just reportedFailure -> do
+                fallbackResult <-
+                    getNextToken fallback (Just reportedFailure)
+                let failedAccountId =
+                        reportedFailure.credential.accountId
+                cleared <- atomicModifyIORef' preferredAccount \current ->
+                    if current == Just failedAccountId
+                        then (Nothing, True)
+                        else (current, False)
+                if cleared
+                    then pure fallbackResult
+                    else readIORef preferredAccount >>= \case
+                        Just accountId ->
+                            selectedCredential accountId
+                        Nothing ->
+                            pure fallbackResult
+            Nothing ->
+                readIORef preferredAccount >>= \case
+                    Nothing ->
+                        getNextToken fallback Nothing
+                    Just accountId ->
+                        selectedCredential accountId
+  where
+    selectedCredential accountId =
+        OpenAI.getAccessTokenForAccount pool accountId >>= \case
+            Right (accessToken, selectedAccountId) ->
+                pure $ Right Credential
+                    { accessToken
+                    , accountId = selectedAccountId
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+            Left err ->
+                pure (Left err)
 
 detectProvider :: Maybe Provider -> ExceptT Text IO Provider
 detectProvider (Just provider) = pure provider

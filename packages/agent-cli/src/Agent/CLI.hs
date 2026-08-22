@@ -19,6 +19,7 @@ import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , loadAuth
+    , preferredOpenAiTokenProvider
     , probeLoadedAuth
     )
 import Agent.CLI.AgentViewport
@@ -107,7 +108,10 @@ import Agent.CLI.Interrupt
     , withCtrlCHandler
     , withTurnCancel
     )
-import Agent.CLI.Login (runLoginManager)
+import Agent.CLI.Login
+    ( connectProviderAccount
+    , runLoginManager
+    )
 import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -258,6 +262,7 @@ import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
     , formatUsageReport
+    , formatUsageSummary
     )
 import Agent.CLI.Worktree
     ( createWorktree
@@ -303,6 +308,8 @@ import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
+    , closeCodexConn
+    , withCodexWsCredential
     , withCodexWsWithProvider
     )
 import Agent.Provider
@@ -358,7 +365,17 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.Async (link, mapConcurrently, withAsync)
+import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import Control.Concurrent.MVar
+    ( MVar
+    , newEmptyMVar
+    , newMVar
+    , putMVar
+    , takeMVar
+    , tryPutMVar
+    , withMVar
+    )
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe
     ( Exception
@@ -430,6 +447,16 @@ data PendingTurnPresentation
     = SubmitPendingTurn
     | RestartPendingTurn
     | ContinuePendingTurn
+
+data AccountPickerOption
+    = AccountPickerAccount !Text !Text !Text
+    | AccountPickerConnect
+
+data OpenAiPersistentConnection
+    = OpenAiPersistentConnection !Credential !(IORef Bool) !CodexConn
+
+data AccountSwitchRequest
+    = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
 
 data AgentStepCache = AgentStepCache
     { cachedTranscript :: !(StableName [ResponseItem])
@@ -1039,11 +1066,23 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     \billing to API-credit billing"
         _ -> pure ()
     activeAccountRef <- newIORef ""
-    let tokenProvider =
+    activeAccountIdRef <- newIORef ""
+    preferredOpenAiAccountRef <- newIORef Nothing
+    let selectableTokenProvider =
+            case loaded.loadedOpenAiPool of
+                Just pool ->
+                    preferredOpenAiTokenProvider
+                        preferredOpenAiAccountRef
+                        pool
+                        loaded.loadedTokenProvider
+                Nothing ->
+                    loaded.loadedTokenProvider
+        tokenProvider =
             trackCredentialAccount
                 activeAccountRef
+                activeAccountIdRef
                 loaded.loadedAccountLabel
-                loaded.loadedTokenProvider
+                selectableTokenProvider
 
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
@@ -1248,13 +1287,201 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProvider tokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
-                                wsHealthy <- newIORef True
+                                initialWsHealthy <- newIORef True
+                                activeConnectionRef <- newIORef $
+                                    OpenAiPersistentConnection
+                                        credential
+                                        initialWsHealthy
+                                        conn
+                                switchRequests <-
+                                    newChan :: IO (Chan AccountSwitchRequest)
+                                let selectAccount = case loaded.loadedOpenAiPool of
+                                        Nothing -> Nothing
+                                        Just pool ->
+                                            Just \selectedAccountId -> do
+                                                    _ <- OpenAI.discoverAccounts pool
+                                                    OpenAI.getAccessTokenForAccount
+                                                        pool
+                                                        selectedAccountId
+                                                        >>= \case
+                                                            Left err ->
+                                                                pure (Left err)
+                                                            Right
+                                                                ( accessToken
+                                                                , accountId
+                                                                ) -> do
+                                                                reply <- newEmptyMVar
+                                                                writeChan
+                                                                    switchRequests
+                                                                    (AccountSwitchRequest
+                                                                        Credential
+                                                                            { accessToken
+                                                                            , accountId
+                                                                            , leaseId = Nothing
+                                                                            , provider =
+                                                                                OpenAIProvider
+                                                                            }
+                                                                        reply)
+                                                                takeMVar reply
+                                    switchLoop = case loaded.loadedOpenAiPool of
+                                        Nothing -> pure ()
+                                        Just pool ->
+                                            readChan switchRequests
+                                                >>= switchTo pool
+                                    switchTo pool request =
+                                        runSwitch pool request >>= \case
+                                            Nothing -> switchLoop
+                                            Just next -> switchTo pool next
+                                    runSwitch
+                                        pool
+                                        (AccountSwitchRequest
+                                            selectedCredential
+                                            reply) = do
+                                                takeMVar wsLock
+                                                lockHeld <- newIORef True
+                                                let releaseLock = do
+                                                        held <-
+                                                            atomicModifyIORef'
+                                                                lockHeld
+                                                                (\held ->
+                                                                    (False, held))
+                                                        when held $
+                                                            putMVar wsLock ()
+                                                    failSwitch err = do
+                                                        releaseLock
+                                                        _ <- tryPutMVar
+                                                            reply
+                                                            (Left err)
+                                                        pure Nothing
+                                                    installConnection
+                                                        newCredential
+                                                        newConn = do
+                                                            newHealthy <-
+                                                                newIORef True
+                                                            label <-
+                                                                loaded.loadedAccountLabel
+                                                                    newCredential
+                                                            writeIORef
+                                                                activeConnectionRef $
+                                                                OpenAiPersistentConnection
+                                                                    newCredential
+                                                                    newHealthy
+                                                                    newConn
+                                                            writeIORef
+                                                                activeAccountIdRef
+                                                                newCredential.accountId
+                                                            writeIORef
+                                                                activeAccountRef
+                                                                label
+                                                            pure (newHealthy, label)
+                                                    awaitNext newHealthy =
+                                                        readChan switchRequests
+                                                            `finally`
+                                                                writeIORef
+                                                                    newHealthy
+                                                                    False
+                                                oldConnection <-
+                                                    readIORef activeConnectionRef
+                                                previousAccountId <-
+                                                    readIORef activeAccountIdRef
+                                                let OpenAiPersistentConnection
+                                                        _
+                                                        oldHealthy
+                                                        oldConn =
+                                                            oldConnection
+                                                writeIORef oldHealthy False
+                                                closeCodexConn oldConn
+                                                writeIORef
+                                                    preferredOpenAiAccountRef
+                                                    (Just
+                                                        selectedCredential.accountId)
+                                                let connectSelected =
+                                                        withCodexWsCredential
+                                                            selectedCredential
+                                                            \newConn
+                                                                newCredential -> do
+                                                                    (newHealthy, label) <-
+                                                                        installConnection
+                                                                            newCredential
+                                                                            newConn
+                                                                    releaseLock
+                                                                    _ <- tryPutMVar
+                                                                        reply
+                                                                        (Right label)
+                                                                    awaitNext
+                                                                        newHealthy
+                                                    restorePrevious
+                                                        selectedError
+                                                        | Text.null
+                                                            previousAccountId =
+                                                            failSwitch
+                                                                selectedError
+                                                        | otherwise = do
+                                                            writeIORef
+                                                                preferredOpenAiAccountRef
+                                                                (Just
+                                                                    previousAccountId)
+                                                            OpenAI.getAccessTokenForAccount
+                                                                pool
+                                                                previousAccountId
+                                                                >>= \case
+                                                                    Left _ ->
+                                                                        failSwitch
+                                                                            selectedError
+                                                                    Right
+                                                                        ( previousToken
+                                                                        , restoredId
+                                                                        ) -> do
+                                                                            let restoredCredential =
+                                                                                    Credential
+                                                                                        { accessToken =
+                                                                                            previousToken
+                                                                                        , accountId =
+                                                                                            restoredId
+                                                                                        , leaseId =
+                                                                                            Nothing
+                                                                                        , provider =
+                                                                                            OpenAIProvider
+                                                                                        }
+                                                                            (withCodexWsCredential
+                                                                                restoredCredential
+                                                                                \newConn
+                                                                                    newCredential -> do
+                                                                                        (newHealthy, _) <-
+                                                                                            installConnection
+                                                                                                newCredential
+                                                                                                newConn
+                                                                                        releaseLock
+                                                                                        _ <- tryPutMVar
+                                                                                            reply
+                                                                                            (Left
+                                                                                                selectedError)
+                                                                                        awaitNext
+                                                                                            newHealthy)
+                                                                                >>= \case
+                                                                                    Left _ ->
+                                                                                        failSwitch
+                                                                                            selectedError
+                                                                                    Right next ->
+                                                                                        pure
+                                                                                            (Just
+                                                                                                next)
+                                                (connectSelected >>= \case
+                                                    Left selectedError ->
+                                                        restorePrevious
+                                                            selectedError
+                                                    Right next ->
+                                                        pure (Just next))
+                                                    `catchAny` \_ ->
+                                                        failSwitch $
+                                                            ConnectionError
+                                                                "account switch failed"
                                 case multiCtx of
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
                                             runCodexSubagent
                                                 subagentRuntime
-                                                loaded.loadedTokenProvider
+                                                selectableTokenProvider
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
@@ -1262,9 +1489,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             options.optCompactThreshold
                                             wsLock
                                             tokenProvider
-                                            credential
-                                            wsHealthy
-                                            conn
+                                            activeConnectionRef
                                             (readIORef paramsRef)
                                             transcriptRef
                                             contextTokensRef
@@ -1294,9 +1519,11 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist noticingBackend
-                                runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                                    previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend)
+                                withAsync switchLoop \switchWorker -> do
+                                    link switchWorker
+                                    runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
+                                        previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1344,7 +1571,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1380,18 +1607,20 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
 
 trackCredentialAccount
     :: IORef Text
+    -> IORef Text
     -> (Credential -> IO Text)
     -> TokenProvider
     -> TokenProvider
-trackCredentialAccount accountRef resolveLabel provider =
+trackCredentialAccount accountRef accountIdRef resolveLabel provider =
     tokenProvider (tokenProviderBillingMode provider) \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
+                writeIORef accountIdRef credential.accountId
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
 
@@ -1530,12 +1759,15 @@ runSession
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> IORef Text
+    -> IORef Text
+    -> (Credential -> IO Text)
+    -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -1842,6 +2074,9 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAccount = accountRef
+            , sessionAccountId = accountIdRef
+            , sessionAccountLabel = accountLabel
+            , sessionSelectAccount = selectAccount
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
@@ -2128,6 +2363,9 @@ replWithDraft env@SessionEnv
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAccount = accountRef
+    , sessionAccountId = accountIdRef
+    , sessionAccountLabel = accountLabel
+    , sessionSelectAccount = selectAccount
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
@@ -2159,6 +2397,7 @@ replWithDraft env@SessionEnv
                     , promptEffort = currentEffort params
                     , promptMode = replModeLabel idleMode
                     , promptAccount = account
+                    , promptAccountSelectable = isJust selectAccount
                     , promptUsage = usage
                     , promptAttachments = length pendingAttachments
                     }
@@ -2276,6 +2515,8 @@ replWithDraft env@SessionEnv
             chooseModel keptDraft (continueWith keptDraft)
         ReplChooseEffort keptDraft ->
             chooseEffort (continueWith keptDraft)
+        ReplChooseAccount keptDraft ->
+            chooseAccount keptDraft (continueWith keptDraft)
         ReplPasted pasted ->
             submitLine skillCommands skillInvocations
                 continue stdoutColor True pasted
@@ -3034,6 +3275,78 @@ replWithDraft env@SessionEnv
                                     (roleError color err)
                             next
                         Right result -> pure result
+    chooseAccount _keptDraft next =
+        case (fullscreen, openAiPool) of
+            (Just runtime, Just pool) -> do
+                currentAccountId <- readIORef accountIdRef
+                options <- withReplActivity
+                    "Loading account usage…"
+                    (loadAccountPickerOptions accountLabel pool)
+                let initial =
+                        fromMaybe 0 $
+                            findIndex
+                                (accountPickerMatches currentAccountId)
+                                options
+                requestFullscreenChoiceWithBody
+                    runtime
+                    "Account"
+                    "Choose the ChatGPT subscription account for future requests."
+                    initial
+                    (map (accountPickerRow currentAccountId) options)
+                    >>= \case
+                        Just index
+                            | Just option <- atMay index options ->
+                                case option of
+                                    AccountPickerAccount
+                                        selectedId
+                                        selectedLabel
+                                        _
+                                            | selectedId == currentAccountId ->
+                                                displayInfo
+                                                    ("account: " <> selectedLabel)
+                                                    (pure ())
+                                                    >> next
+                                            | otherwise ->
+                                                chooseSelectedAccount
+                                                    selectedId
+                                    AccountPickerConnect -> do
+                                        color <- resolveColor stderr
+                                        connected <-
+                                            withFullscreenSuspended runtime $
+                                                connectProviderAccount
+                                                    color
+                                                    OpenAIProvider
+                                        case connected of
+                                            Nothing -> next
+                                            Just selectedId ->
+                                                chooseSelectedAccount
+                                                    selectedId
+                        _ -> next
+              where
+                chooseSelectedAccount selectedId =
+                    case selectAccount of
+                        Nothing -> next
+                        Just select -> do
+                            select selectedId >>= \case
+                                Left err -> do
+                                    now <- getCurrentTime
+                                    let message =
+                                            "could not select account: "
+                                                <> formatApiErrorInlineAt
+                                                    now
+                                                    err
+                                    displayError message (pure ())
+                                    next
+                                Right label -> do
+                                    displayInfo
+                                        ("account switched to " <> label)
+                                        (pure ())
+                                    next
+            _ -> do
+                displayError
+                    "Account switching is only available for ChatGPT subscription accounts."
+                    (pure ())
+                next
     copyCommand label missing payload = case payload of
         Nothing ->
             displayError missing do
@@ -3106,6 +3419,58 @@ effortChoice fullscreen current = case fullscreen of
                     , index < length efforts ->
                         pure (Just (efforts !! index))
                 _ -> pure Nothing
+
+loadAccountPickerOptions
+    :: (Credential -> IO Text)
+    -> OpenAI.Pool
+    -> IO [AccountPickerOption]
+loadAccountPickerOptions resolveLabel pool = do
+    _ <- OpenAI.discoverAccounts pool
+    now <- getCurrentTime
+    snapshots <- OpenAI.snapshotAccounts pool
+    accounts <- mapConcurrently (loadAccount now) snapshots
+    pure (accounts <> [AccountPickerConnect])
+  where
+    loadAccount now snapshot = do
+        let auth = snapshot.snapshotAuth
+            credential = Credential
+                { accessToken = auth.accessToken
+                , accountId = auth.accountId
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+        label <- resolveLabel credential
+        usage <- fetchUsage auth.accessToken auth.accountId
+        pure $
+            AccountPickerAccount
+                auth.accountId
+                label
+                (formatUsageSummary
+                    now
+                    snapshot.snapshotCooldownUntil
+                    usage)
+
+accountPickerMatches :: Text -> AccountPickerOption -> Bool
+accountPickerMatches currentAccountId = \case
+    AccountPickerAccount accountPickerId _ _ ->
+        accountPickerId == currentAccountId
+    AccountPickerConnect -> False
+
+accountPickerRow
+    :: Text
+    -> AccountPickerOption
+    -> (Text, Text)
+accountPickerRow currentAccountId = \case
+    AccountPickerAccount
+        accountPickerId
+        accountPickerLabel
+        accountPickerUsage ->
+            ( (if accountPickerId == currentAccountId then "✓ " else "")
+                <> accountPickerLabel
+            , accountPickerUsage
+            )
+    AccountPickerConnect ->
+        ("＋ Connect new account", "")
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -3945,29 +4310,43 @@ lockedOpenAiSession
     :: Maybe Int
     -> MVar ()
     -> TokenProvider
-    -> Credential
-    -> IORef Bool
-    -> CodexConn
+    -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold wsLock provider credential
-        connectionHealthy conn getParams transcript contextTokens
+lockedOpenAiSession compactThreshold wsLock provider activeConnection
+        getParams transcript contextTokens
         recordCompactionUsage =
-    let sendResponse =
+    let sendResponse request previousResponseId onEvent = do
+            OpenAiPersistentConnection
+                credential
+                connectionHealthy
+                conn <-
+                    readIORef activeConnection
             openAiResponseSenderReconnecting
                 provider
                 credential
                 connectionHealthy
                 conn
-        sendAuxiliary =
+                request
+                previousResponseId
+                onEvent
+        sendAuxiliary request previousResponseId onEvent = do
+            OpenAiPersistentConnection
+                credential
+                connectionHealthy
+                conn <-
+                    readIORef activeConnection
             openAiAuxiliaryResponseSenderReconnecting
                 provider
                 credential
                 connectionHealthy
                 conn
+                request
+                previousResponseId
+                onEvent
         baseBackend =
             withConnectionRecovery $
                 openAiBackendWith sendResponse getParams transcript

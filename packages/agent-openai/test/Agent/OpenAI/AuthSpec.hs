@@ -187,6 +187,39 @@ spec = do
                     a `shouldBe` c
                 _ -> expectationFailure "expected three round-robin samples"
 
+        it "checks out a requested account without depending on round-robin" $ do
+            let states = [ mkFreshAuth "acc-1", mkFreshAuth "acc-2" ]
+            pool <- newPool states neverRefresh
+
+            getAccessTokenForAccount pool "acc-2"
+                `shouldReturn`
+                    Right
+                        ( (mkFreshAuth "acc-2").accessToken
+                        , "acc-2"
+                        )
+
+        it "respects cooldown for a requested account" $ do
+            pool <- newPool
+                [mkFreshAuth "paced", mkFreshAuth "healthy"]
+                neverRefresh
+            reportRateLimit pool "paced" (Just 60)
+
+            getAccessTokenForAccount pool "paced" >>= \case
+                Left CredentialsExhausted{} -> pure ()
+                other ->
+                    expectationFailure
+                        ("expected requested account cooldown, got "
+                            <> show other)
+
+        it "reports an unknown requested account" $ do
+            pool <- newPool [mkFreshAuth "known"] neverRefresh
+            getAccessTokenForAccount pool "missing" >>= \case
+                Left CredentialError{} -> pure ()
+                other ->
+                    expectationFailure
+                        ("expected unknown-account credential error, got "
+                            <> show other)
+
         it "fails over when the selected account cannot refresh" $ do
             attempts <- newIORef ([] :: [Text])
             let states = [ mkExpiredAuth "acc-broken", mkExpiredAuth "acc-ok" ]
@@ -267,6 +300,23 @@ spec = do
             accountIdOf result `shouldBe` "newly-healthy"
             readIORef discoveryCalls `shouldReturn` [["initial-account"]]
             allAccountIds pool `shouldReturn` ["initial-account", "newly-healthy"]
+
+        it "explicitly discovers a connected account while existing capacity is healthy" $ do
+            discoveryCalls <- newIORef (0 :: Int)
+            let discover excluded = do
+                    excluded `shouldBe` ["initial-account"]
+                    modifyIORef' discoveryCalls (+ 1)
+                    pure (Right [mkFreshAuth "new-account"])
+            pool <- newDiscoveringPool
+                [mkFreshAuth "initial-account"]
+                neverRefresh
+                discover
+
+            discoverAccounts pool `shouldReturn` True
+
+            readIORef discoveryCalls `shouldReturn` 1
+            allAccountIds pool
+                `shouldReturn` ["initial-account", "new-account"]
 
         it "keeps the precise local reset when broker discovery is unavailable" $ do
             let brokerUnavailable _ =

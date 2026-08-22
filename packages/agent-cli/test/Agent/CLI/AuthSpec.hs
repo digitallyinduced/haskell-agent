@@ -6,13 +6,13 @@ import Agent.Error (ApiError(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
+import qualified Agent.OpenAI.Credential as OpenAICredential
 import Agent.Provider
     ( AccountFailure(..)
     , BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider
     , getNextToken
     , tokenProvider
     , tokenProviderBillingMode
@@ -97,6 +97,87 @@ spec = do
                     , provider = OpenRouterProvider
                     }
                 `shouldBe` "OpenRouter"
+
+    describe "preferredOpenAiTokenProvider" do
+        it "keeps using the selected account until it fails" do
+            pool <- OpenAI.newPool
+                [ testAuthStateFor "acc-1"
+                , testAuthStateFor "acc-2"
+                ]
+                (pure . Right)
+            fallback <- OpenAICredential.poolTokenProvider pool
+            preferred <- newIORef (Just "acc-2")
+            let provider =
+                    preferredOpenAiTokenProvider
+                        preferred
+                        pool
+                        fallback
+
+            first <- getNextToken provider Nothing
+            second <- getNextToken provider Nothing
+
+            fmap (.accountId) first `shouldBe` Right "acc-2"
+            fmap (.accountId) second `shouldBe` Right "acc-2"
+
+            getNextToken provider
+                (Just
+                    FailedCredential
+                        { credential =
+                            Credential
+                                { accessToken = "token-acc-2"
+                                , accountId = "acc-2"
+                                , leaseId = Nothing
+                                , provider = OpenAIProvider
+                                }
+                        , failure =
+                            AccountRateLimited
+                                { retryAfterSeconds = Just 60
+                                }
+                        })
+                >>= \case
+                    Right credential ->
+                        credential.accountId `shouldBe` "acc-1"
+                    Left err ->
+                        expectationFailure
+                            ("expected fallback account, got " <> show err)
+            readIORef preferred `shouldReturn` Nothing
+
+        it "keeps the selection when another credential reports failure" do
+            pool <- OpenAI.newPool
+                [ testAuthStateFor "acc-1"
+                , testAuthStateFor "acc-2"
+                ]
+                (pure . Right)
+            fallback <- OpenAICredential.poolTokenProvider pool
+            preferred <- newIORef (Just "acc-2")
+            let provider =
+                    preferredOpenAiTokenProvider
+                        preferred
+                        pool
+                        fallback
+
+            getNextToken provider
+                (Just
+                    FailedCredential
+                        { credential =
+                            Credential
+                                { accessToken = "token-acc-1"
+                                , accountId = "acc-1"
+                                , leaseId = Nothing
+                                , provider = OpenAIProvider
+                                }
+                        , failure =
+                            AccountRateLimited
+                                { retryAfterSeconds = Just 60
+                                }
+                        })
+                >>= \case
+                    Right credential ->
+                        credential.accountId `shouldBe` "acc-2"
+                    Left err ->
+                        expectationFailure
+                            ("expected selected account, got " <> show err)
+            readIORef preferred `shouldReturn` Just "acc-2"
 
     describe "OpenAI account pools" do
         it "loads every enabled managed account into one pool" $
@@ -652,6 +733,15 @@ freshManagedGrok =
 testAuthState :: Text -> Text -> AuthState
 testAuthState access refresh =
     AuthState access refresh "acc-test" Nothing epoch
+
+testAuthStateFor :: Text -> AuthState
+testAuthStateFor accountId =
+    AuthState
+        ("token-" <> accountId)
+        ("refresh-" <> accountId)
+        accountId
+        Nothing
+        epoch
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) 0

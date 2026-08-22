@@ -486,7 +486,9 @@ drawComposerStatus state =
                 <> [ modeControl
                    | not (Text.null mode)
                    ]
-                <> [ withAttr Theme.mutedAttr (txt account)
+                <> [ if prompt.promptAccountSelectable
+                        then accountControl
+                        else withAttr Theme.mutedAttr (txt account)
                    | not (Text.null account)
                    ]
   where
@@ -512,6 +514,11 @@ drawComposerStatus state =
             forceAttr
                 (controlAttr state ComposerMode (modeAttr mode))
                 (txt mode)
+    accountControl =
+        clickable ComposerAccount $
+            forceAttr
+                (controlAttr state ComposerAccount Theme.controlLinkAttr)
+                (txt account)
 
 handlePromptControlClick
     :: ApplyLocalUiEvent
