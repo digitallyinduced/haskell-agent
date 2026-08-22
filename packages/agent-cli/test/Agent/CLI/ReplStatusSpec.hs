@@ -2,6 +2,7 @@ module Agent.CLI.ReplStatusSpec (spec) where
 
 import Agent.CLI
     ( DevResult(..)
+    , accountSwitchTarget
     , afterDev
     , applyReplMode
     , buildPromptState
@@ -15,6 +16,7 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -23,6 +25,7 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.Loop (LoopEvent(..), TokenUsage(..), emptyTokenUsage)
+import Agent.Provider (Provider(..))
 import Agent.Responses.Types (defaultResponseCreateParams)
 import System.OsPath (unsafeEncodeUtf)
 import Agent.TUI.Model
@@ -48,6 +51,25 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "accountSwitchTarget" do
+        it "uses the destination provider default when changing provider" do
+            let target =
+                    accountSwitchTarget
+                        OpenAIProvider
+                        "gpt-5.6-sol"
+                        XAIProvider
+            target.modelProvider `shouldBe` XAIProvider
+            target.modelId `shouldBe` "grok-4.6"
+
+        it "keeps the current model when only the account backend restarts" do
+            let target =
+                    accountSwitchTarget
+                        OpenAIProvider
+                        "gpt-5.6-sol"
+                        OpenAIProvider
+            target.modelProvider `shouldBe` OpenAIProvider
+            target.modelId `shouldBe` "gpt-5.6-sol"
+
     describe "devArgs" do
         it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do
             devArgs Nothing False
