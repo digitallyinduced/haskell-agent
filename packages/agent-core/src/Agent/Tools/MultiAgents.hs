@@ -260,7 +260,7 @@ instance FromJSON WaitAgentArgs where
 
 waitAgentTool :: MultiAgentContext -> AppTool
 waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
-    [ PropertySchema "timeout_ms" PropertyInteger False $ Just
+    [ PropertySchema "timeout_ms" PropertyNumber False $ Just
         "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True

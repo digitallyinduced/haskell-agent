@@ -92,7 +92,7 @@ spec = describe "Agent.Tools.Codex" do
                 , "fork_turns"
                 ]
             map (.propertyType) (parameters "wait_agent") `shouldBe`
-                [PropertyInteger]
+                [PropertyNumber]
             case map (.propertyType) (parameters "spawn_agent") of
                 _ : PropertyRaw (Aeson.Object messageSchema) : _ ->
                     KeyMap.lookup "encrypted" messageSchema
