@@ -6,14 +6,9 @@ module Agent.Tools.Grok.Common
     ) where
 
 import Agent.ToolArgs (optIntOrString)
-import Agent.ToolDSL (PropertySchema)
-import Agent.ToolDispatch (ToolHandler)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Tools.Types
-    ( AppTool
-    , ApprovalRule(..)
-    , ToolExecutionPolicy
-    , jsonAppToolWithExecution
+    ( jsonTool
     )
 import Data.Aeson (Object)
 import Data.Aeson.Types (Parser)
@@ -23,19 +18,6 @@ import System.Directory (findExecutable)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
 import System.OsPath (OsPath)
-
-jsonTool
-    :: Text
-    -> Text
-    -> [PropertySchema]
-    -> Bool
-    -> ToolExecutionPolicy
-    -> ToolHandler
-    -> AppTool
-jsonTool name description parameters readOnly execution =
-    jsonAppToolWithExecution name description parameters
-        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
-        execution
 
 isGitIgnored :: OsPath -> OsPath -> IO Bool
 isGitIgnored cwd path = findExecutable "git" >>= \case

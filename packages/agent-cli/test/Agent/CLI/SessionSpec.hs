@@ -157,6 +157,38 @@ spec = describe "Agent.CLI.Session" do
                         meta `shouldBe` handle'.sessionMeta
                         turns `shouldBe` [turn]
 
+        it "keeps synthetic turns out of title and usage metadata" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                let turn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "/clear"
+                        , turnAssistantText = Just "Started a new conversation."
+                        , turnError = Nothing
+                        , turnResponseId = Just "resp-marker"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 11
+                            , outputTokens = 5
+                            , cachedTokens = 3
+                            }
+                        }
+                handle' <- appendTurnKeepTitle handle turn
+
+                handle'.sessionMeta.metaTitle `shouldBe` "untitled"
+                handle'.sessionMeta.metaLastResponseId
+                    `shouldBe` Just "resp-marker"
+                handle'.sessionMeta.metaInputTokens `shouldBe` 0
+                handle'.sessionMeta.metaOutputTokens `shouldBe` 0
+                handle'.sessionMeta.metaCachedTokens `shouldBe` 0
+                modeOf handle.sessionTranscriptPath `shouldReturn` 0o600
+
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta `shouldBe` handle'.sessionMeta
+                        turns `shouldBe` [turn]
+
         it "commits a compact marker with a cleared response id" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)

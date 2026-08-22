@@ -28,12 +28,11 @@ import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
     ( AppTool
-    , ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , jsonAppToolWithExecution
+    , jsonTool
     )
 import Control.Concurrent.MVar
     ( MVar
@@ -295,22 +294,6 @@ agentSessionTools env =
     , readAgentSessionTool env
     , sendAgentSessionMessageTool env
     ]
-
-jsonTool
-    :: Text
-    -> Text
-    -> [PropertySchema]
-    -> Bool
-    -> ToolExecutionPolicy
-    -> ToolHandler
-    -> AppTool
-jsonTool name description parameters readOnly execution handler =
-    jsonAppToolWithExecution
-        name description parameters approval execution handler
-  where
-    approval
-        | readOnly = AlwaysReadOnly
-        | otherwise = AlwaysPrompt
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text

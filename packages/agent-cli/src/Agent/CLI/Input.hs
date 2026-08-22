@@ -54,6 +54,7 @@ import Agent.CLI.Terminal
     , stripAnsi
     )
 import Agent.Loop (ImageAttachment)
+import Agent.TUI.TextWidth (charCellWidth)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
 import Data.Bits ((.&.))
@@ -349,31 +350,7 @@ textColumns :: Text -> Int
 textColumns = sum . map charColumns . Text.unpack
 
 charColumns :: Char -> Int
-charColumns char
-    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
-    | category `elem` [Control, Surrogate, NotAssigned] = 0
-    | isWideCharacter char = 2
-    | otherwise = 1
-  where
-    category = generalCategory char
-
-isWideCharacter :: Char -> Bool
-isWideCharacter char =
-    let code = ord char
-    in code >= 0x1100
-        && ( code <= 0x115f
-            || code == 0x2329
-            || code == 0x232a
-            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
-            || (code >= 0xac00 && code <= 0xd7a3)
-            || (code >= 0xf900 && code <= 0xfaff)
-            || (code >= 0xfe10 && code <= 0xfe19)
-            || (code >= 0xfe30 && code <= 0xfe6f)
-            || (code >= 0xff00 && code <= 0xff60)
-            || (code >= 0xffe0 && code <= 0xffe6)
-            || (code >= 0x1f300 && code <= 0x1faff)
-            || (code >= 0x20000 && code <= 0x3fffd)
-           )
+charColumns = charCellWidth
 
 cellsWidth :: [DisplayCell] -> Int
 cellsWidth = sum . map (.displayCellWidth)

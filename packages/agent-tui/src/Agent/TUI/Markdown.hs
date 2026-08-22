@@ -20,15 +20,13 @@ import Agent.Syntax
     , SyntaxSpan(..)
     , highlightCode
     )
+import Agent.TUI.TextWidth (displayCharCellWidth)
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
 import Data.Char
-    ( GeneralCategory(..)
-    , generalCategory
-    , isDigit
+    ( isDigit
     , isSpace
-    , ord
     )
 import Data.List (transpose)
 import qualified Data.List as List
@@ -39,36 +37,7 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
 
 terminalCharWidth :: Char -> Int
-terminalCharWidth char
-    | char == '\n' || char == '\r' || char == '\t' = 1
-    | code <= 0x1f || code == 0x7f = 1
-    | code >= 0x80 && code <= 0x9f = 1
-    | category == Format = 1
-    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
-    | category `elem` [Control, Surrogate, NotAssigned] = 0
-    | isWideCharacter char = 2
-    | otherwise = 1
-  where
-    code = ord char
-    category = generalCategory char
-
-isWideCharacter :: Char -> Bool
-isWideCharacter char =
-    let code = ord char
-    in code >= 0x1100
-        && ( code <= 0x115f
-            || code == 0x2329
-            || code == 0x232a
-            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
-            || (code >= 0xac00 && code <= 0xd7a3)
-            || (code >= 0xf900 && code <= 0xfaff)
-            || (code >= 0xfe10 && code <= 0xfe19)
-            || (code >= 0xfe30 && code <= 0xfe6f)
-            || (code >= 0xff00 && code <= 0xff60)
-            || (code >= 0xffe0 && code <= 0xffe6)
-            || (code >= 0x1f300 && code <= 0x1faff)
-            || (code >= 0x20000 && code <= 0x3fffd)
-           )
+terminalCharWidth = displayCharCellWidth
 
 data InlineStyle
     = InlinePlain

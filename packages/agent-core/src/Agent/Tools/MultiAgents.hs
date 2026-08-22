@@ -53,12 +53,11 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCall)
+import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
 import Agent.Tools.Types
     ( AppTool
-    , ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , jsonAppToolWithExecution
+    , jsonTool
     )
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -125,19 +124,6 @@ multiAgentTools ctx =
     , listAgentsTool ctx
     , interruptAgentTool ctx
     ]
-
-jsonTool
-    :: Text
-    -> Text
-    -> [PropertySchema]
-    -> Bool
-    -> ToolExecutionPolicy
-    -> ToolHandler
-    -> AppTool
-jsonTool name description parameters readOnly execution =
-    jsonAppToolWithExecution name description parameters
-        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
-        execution
 
 --------------------------------------------------------------------------------
 -- spawn_agent

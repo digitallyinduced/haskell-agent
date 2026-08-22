@@ -31,10 +31,9 @@ import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
-    ( clampSelectionIndex
-    , fitTextCell
-    , selectionWindow
-    , transcriptPreviewRows
+    ( SplitPaneFrame(..)
+    , clampSelectionIndex
+    , renderSplitPaneFrame
     )
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -240,59 +239,35 @@ renderAgentViewportFor
     -> AgentViewportState
     -> Text
 renderAgentViewportFor color bodyRows terminalCols footerText state =
-    Text.intercalate "\n" (header : headings : body <> [footer])
+    renderSplitPaneFrame SplitPaneFrame
+        { splitPaneMinColumns = 20
+        , splitPaneColumns = terminalCols
+        , splitPaneBodyRows = bodyRows
+        , splitPaneLeftMinWidth = 12
+        , splitPaneLeftMaxWidth = 38
+        , splitPaneDivider = " │ "
+        , splitPaneTitle = "agents"
+        , splitPaneHeaderDetail =
+            \count ->
+                Text.pack (show count)
+                    <> if count == 1 then " agent" else " agents"
+        , splitPaneLeftHeading = "hierarchy"
+        , splitPaneRightHeading =
+            \selected ->
+                "transcript"
+                    <> maybe "" (\entry -> " · " <> entry.agentPath) selected
+        , splitPaneItems = entries
+        , splitPaneSelectedIndex = state.viewportIndex
+        , splitPaneLeftLabel = agentEntryTreeLabel entries
+        , splitPaneTranscript = (.agentTranscript)
+        , splitPaneEmptyTranscript = "(no agents)"
+        , splitPaneFooter = footerText
+        , splitPanePromptStyle = rolePrompt color
+        , splitPaneMutedStyle = roleMuted color
+        , splitPaneSelectedStyle = roleSuccess color
+        }
   where
-    cols = max 20 terminalCols
-    divider = roleMuted color " │ "
-    leftWidth = max 12 (min 38 ((cols - 3) * 2 `div` 5))
-    rightWidth = max 1 (cols - leftWidth - 3)
     entries = state.viewportAll
-    n = length entries
-    idx = clampSelectionIndex n state.viewportIndex
-    shown = selectionWindow bodyRows idx entries
-    selected = selectedAgentEntry state
-    header =
-        rolePrompt color "agents"
-            <> roleMuted color
-                (fitTextCell (max 0 (cols - 6))
-                    (" · " <> Text.pack (show n)
-                        <> if n == 1 then " agent" else " agents"))
-    headings =
-        rolePrompt color (fitTextCell leftWidth "hierarchy")
-            <> divider
-            <> rolePrompt color
-                (fitTextCell rightWidth
-                    ("transcript"
-                        <> maybe "" (\entry -> " · " <> entry.agentPath) selected))
-    leftRows =
-        map
-            (\(absoluteIndex, entry) ->
-                let prefix = if absoluteIndex == idx then "› " else "  "
-                    text = fitTextCell leftWidth
-                        (prefix
-                            <> agentEntryTreeLabel
-                                entries absoluteIndex entry)
-                in if absoluteIndex == idx
-                    then roleSuccess color text
-                    else text)
-            shown
-            <> repeat (Text.replicate leftWidth " ")
-    rightRows = case selected of
-        Nothing ->
-            roleMuted color (fitTextCell rightWidth "(no agents)") : repeat ""
-        Just entry ->
-            let preview =
-                    transcriptPreviewRows
-                        rightWidth
-                        bodyRows
-                        entry.agentTranscript
-            in map (fitTextCell rightWidth) preview <> repeat ""
-    body =
-        take bodyRows $
-            zipWith (\left right -> left <> divider <> right) leftRows rightRows
-    footer =
-        roleMuted color $
-            fitTextCell cols footerText
 
 pickAgentViewport
     :: Bool

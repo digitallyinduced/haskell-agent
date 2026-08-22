@@ -37,7 +37,8 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.Cancel
+    exposed-modules:  Agent.Auth.JWT
+                    , Agent.Cancel
                     , Agent.Error
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
@@ -89,6 +90,7 @@ library
     build-depends:    base >= 4.14 && < 5
                     , aeson >= 2.0
                     , async
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , crypton-connection
@@ -114,7 +116,8 @@ test-suite agent-core-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.CancelSpec
+    other-modules:    Agent.Auth.JWTSpec
+                    , Agent.CancelSpec
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
@@ -143,6 +146,7 @@ test-suite agent-core-test
                     , agent-core
                     , aeson
                     , async
+                    , base64-bytestring
                     , directory
                     , filepath
                     , containers

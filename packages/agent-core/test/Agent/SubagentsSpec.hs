@@ -77,6 +77,20 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Subagents" do
+    describe "isFinalStatus" do
+        it "treats missing agents as final, matching waitSubagents" do
+            map isFinalStatus
+                [ Completed Nothing
+                , Errored "failed"
+                , Interrupted
+                , Closed
+                , NotFound
+                ]
+                `shouldBe` replicate 5 True
+
+        it "keeps pending and running agents non-final" do
+            map isFinalStatus [Pending, Running] `shouldBe` [False, False]
+
     it "spawns a child, waits for completion, and returns final text" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult

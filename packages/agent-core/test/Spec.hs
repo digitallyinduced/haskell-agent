@@ -1,5 +1,6 @@
 module Main (main) where
 
+import qualified Agent.Auth.JWTSpec as JWTSpec
 import qualified Agent.CancelSpec as CancelSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
@@ -29,6 +30,7 @@ import Test.Hspec (hspec)
 
 main :: IO ()
 main = hspec do
+    JWTSpec.spec
     CancelSpec.spec
     ErrorSpec.spec
     HttpHeaderSpec.spec

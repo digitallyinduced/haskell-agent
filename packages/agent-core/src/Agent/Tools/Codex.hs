@@ -19,7 +19,7 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedStreamingTool, typedTool)
+import Agent.ToolDispatch (typedStreamingTool, typedTool)
 import Agent.Tools.ApplyPatch (applyPatch)
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Dangerous (forbiddenRmRfReason, commandLooksLikeRmRf)
@@ -41,7 +41,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
     , freeformApplyPatchAppToolWithExecution
-    , jsonAppToolWithExecution
+    , jsonTool
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Value(..), withObject)
@@ -69,19 +69,6 @@ codexTools env ghci planMode multi = do
         , askUserQuestionTool planMode
         ]
         ++ maybe [] multiAgentTools multi
-
-jsonTool
-    :: Text
-    -> Text
-    -> [PropertySchema]
-    -> Bool
-    -> ToolExecutionPolicy
-    -> ToolHandler
-    -> AppTool
-jsonTool name description parameters readOnly execution =
-    jsonAppToolWithExecution name description parameters
-        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
-        execution
 
 --------------------------------------------------------------------------------
 -- shell_command

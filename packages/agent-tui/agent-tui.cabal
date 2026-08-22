@@ -40,6 +40,7 @@ library
                     , Agent.TUI.Motion
                     , Agent.TUI.Model
                     , Agent.TUI.Presentation
+                    , Agent.TUI.TextWidth
                     , Agent.TUI.Theme
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-syntax >= 0.1 && < 0.2
@@ -59,7 +60,9 @@ test-suite agent-tui-test
                     , Agent.TUI.MarkdownSpec
                     , Agent.TUI.MotionSpec
                     , Agent.TUI.ModelSpec
+                    , Agent.TUI.PresentationSpec
                     , Agent.TUI.ThemeSpec
+                    , Agent.TUI.TextWidthSpec
     build-depends:    agent-tui
                     , agent-core
                     , agent-syntax

@@ -1,8 +1,13 @@
 -- | Presentation-neutral formatting shared by retained UI state.
 module Agent.TUI.Presentation
-    ( formatSearchReplaceDiff
+    ( SearchReplaceAction(..)
+    , SearchReplaceDiff(..)
+    , SearchReplaceLine(..)
+    , formatSearchReplaceDiff
     , formatToolOutput
+    , parseSearchReplaceDiff
     , summarizeToolCall
+    , toolDetail
     ) where
 
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
@@ -25,25 +30,62 @@ summarizeToolCall call =
         detail = toolDetail call
     in if Text.null detail then verb else verb <> " " <> detail
 
-formatSearchReplaceDiff :: Text -> Text
-formatSearchReplaceDiff arguments =
+data SearchReplaceAction
+    = SearchReplaceCreate
+    | SearchReplaceDelete
+    deriving (Eq, Show)
+
+data SearchReplaceLine
+    = SearchReplaceRemoved !Text
+    | SearchReplaceAdded !Text
+    deriving (Eq, Show)
+
+data SearchReplaceDiff = SearchReplaceDiff
+    { diffPath :: !Text
+    , diffAction :: !(Maybe SearchReplaceAction)
+    , diffLines :: ![SearchReplaceLine]
+    , diffHiddenLines :: !Int
+    }
+    deriving (Eq, Show)
+
+parseSearchReplaceDiff :: Text -> SearchReplaceDiff
+parseSearchReplaceDiff arguments =
     let path = jsonTextFieldDefault "file_path" arguments
         oldText = jsonTextFieldDefault "old_string" arguments
         newText = jsonTextFieldDefault "new_string" arguments
-        header = case (Text.null oldText, Text.null newText) of
-            (True, False) -> "  create " <> path
-            (False, True) -> "  delete " <> path
-            _ -> ""
+        action = case (Text.null oldText, Text.null newText) of
+            (True, False) -> Just SearchReplaceCreate
+            (False, True) -> Just SearchReplaceDelete
+            _ -> Nothing
         raw =
-            map ("  -" <>) (Text.lines oldText)
-                <> map ("  +" <>) (Text.lines newText)
-        (shown, hidden)
-            | length raw <= 20 = (raw, 0)
-            | otherwise = (take 20 raw, length raw - 20)
+            map SearchReplaceRemoved (Text.lines oldText)
+                <> map SearchReplaceAdded (Text.lines newText)
+        shown = take 20 raw
+    in SearchReplaceDiff
+        { diffPath = path
+        , diffAction = action
+        , diffLines = shown
+        , diffHiddenLines = length raw - length shown
+        }
+
+formatSearchReplaceDiff :: Text -> Text
+formatSearchReplaceDiff arguments =
+    let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
+            parseSearchReplaceDiff arguments
+        header = case diffAction of
+            Just SearchReplaceCreate -> "  create " <> diffPath
+            Just SearchReplaceDelete -> "  delete " <> diffPath
+            _ -> ""
+        shown = map formatLine diffLines
         more
-            | hidden == 0 = []
-            | otherwise = ["  … " <> Text.pack (show hidden) <> " more"]
+            | diffHiddenLines == 0 = []
+            | otherwise =
+                ["  … " <> Text.pack (show diffHiddenLines) <> " more"]
     in Text.intercalate "\n" (filter (not . Text.null) (header : shown <> more))
+  where
+    formatLine = \case
+        SearchReplaceRemoved line -> "  -" <> line
+        SearchReplaceAdded line -> "  +" <> line
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of

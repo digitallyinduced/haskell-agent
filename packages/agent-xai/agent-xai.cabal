@@ -56,7 +56,6 @@ library
                     , http-client
                     , http-client-tls
                     , http-conduit
-                    , base64-bytestring
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , scientific
