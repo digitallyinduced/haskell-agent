@@ -5,9 +5,21 @@ module Agent.TUI.Markdown
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithCodeControls
+    , markdownWidgetWithSyntaxHighlighting
     , parseInline
     ) where
 
+import Agent.TUI.FencedCode
+    ( FenceChunk(..)
+    , FencedBlock(..)
+    , fenceChunks
+    )
+import Agent.Syntax
+    ( HighlightedLine
+    , SyntaxHighlighter
+    , SyntaxSpan(..)
+    , highlightCode
+    )
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
@@ -86,66 +98,147 @@ markdownWidgetWithCodeControls
     -> Text
     -> Widget n
 markdownWidgetWithCodeControls codeHeader input =
-    vBox (renderLines codeHeader 1 False (Text.lines input))
+    markdownWidgetWithSyntaxHighlighting
+        Nothing
+        (\_ widget -> widget)
+        codeHeader
+        input
+
+-- | Render Markdown with optional token-level highlighting for closed fenced
+-- code blocks. The cache callback receives the stable one-based fence index;
+-- callers can use it to retain completed code bodies while later prose
+-- continues streaming.
+markdownWidgetWithSyntaxHighlighting
+    :: Maybe SyntaxHighlighter
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithSyntaxHighlighting syntaxHighlighter cacheCode codeHeader input =
+    vBox $
+        concatMap
+            (renderChunk syntaxHighlighter cacheCode codeHeader)
+            (fenceChunks input)
+
+renderChunk
+    :: Maybe SyntaxHighlighter
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> FenceChunk
+    -> [Widget n]
+renderChunk _ _ _ (FenceText prose) =
+    renderLines (Text.lines prose)
+renderChunk syntaxHighlighter cacheCode codeHeader (FenceBlock block) =
+    [ codeHeader block.fencedIndex block.fencedInfo
+    , if block.fencedClosed
+        then cacheCode block.fencedIndex bodyWidget
+        else bodyWidget
+    ]
+  where
+    bodyWidget =
+        renderCodeBody
+            (if block.fencedClosed then syntaxHighlighter else Nothing)
+            block.fencedInfo
+            (codeBodyLines block.fencedBody)
 
 renderLines
-    :: (Int -> Text -> Widget n)
-    -> Int
-    -> Bool
-    -> [Text]
+    :: [Text]
     -> [Widget n]
-renderLines _ _ _ [] = []
-renderLines codeHeader codeIndex False lines_
+renderLines [] = []
+renderLines lines_
     | Just (table, rest) <- takeTable lines_ =
-        table : renderLines codeHeader codeIndex False rest
-renderLines codeHeader codeIndex inFence (line : rest)
-    | isFence line =
-        let language = Text.strip (Text.drop 3 (Text.stripStart line))
-        in if inFence
-            then renderLines codeHeader codeIndex False rest
-            else
-                codeHeader codeIndex language
-                    : renderLines codeHeader (codeIndex + 1) True rest
-    | inFence =
-        withAttr Theme.codeAttr
-            (padLeftRight 1 (txt line))
-            : renderLines codeHeader codeIndex True rest
+        table : renderLines rest
+renderLines (line : rest)
     | Just heading <- stripHeading line =
         withAttr Theme.headingAttr
             (padTop (Pad 1) (inlineWidget (parseInline heading)))
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
     | Just item <- stripBullet line =
         hBox
             [ withAttr Theme.headingAttr (txt "• ")
             , inlineWidget (parseInline item)
             ]
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
     | Just (number, item) <- stripOrdered line =
         hBox
             [ withAttr Theme.headingAttr (txt (number <> ". "))
             , inlineWidget (parseInline item)
             ]
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
     | Just quote <- Text.stripPrefix "> " (Text.stripStart line) =
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
             , withAttr Theme.mutedAttr (inlineWidget (parseInline quote))
             ]
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
     | Text.null (Text.strip line) =
-        txt " " : renderLines codeHeader codeIndex False rest
+        txt " " : renderLines rest
     | isThematicBreak line =
         withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
     | otherwise =
         inlineWidget (parseInline line)
-            : renderLines codeHeader codeIndex False rest
+            : renderLines rest
 
-isFence :: Text -> Bool
-isFence line =
-    let stripped = Text.stripStart line
-    in "```" `Text.isPrefixOf` stripped
-        || "~~~" `Text.isPrefixOf` stripped
+codeBodyLines :: Text -> [Text]
+codeBodyLines body
+    | Text.null body = []
+    | Text.isSuffixOf "\n" body =
+        dropLast (Text.splitOn "\n" body)
+    | otherwise =
+        Text.splitOn "\n" body
+  where
+    dropLast = reverse . drop 1 . reverse
+
+renderCodeBody
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> [Text]
+    -> Widget n
+renderCodeBody syntaxHighlighter language bodyLines =
+    -- Keep tokenization inside the render action. Brick's 'cached' inspects a
+    -- widget's size policy before consulting its cache; returning a concrete
+    -- vBox here would therefore force tokenization on every streamed redraw.
+    B.Widget B.Fixed B.Fixed $
+        B.render (buildCodeBody syntaxHighlighter language bodyLines)
+
+buildCodeBody
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> [Text]
+    -> Widget n
+buildCodeBody syntaxHighlighter language bodyLines =
+    vBox $
+        case syntaxHighlighter >>= highlighted of
+            Just highlightedLines
+                | length highlightedLines == length bodyLines ->
+                    map renderHighlightedCodeLine highlightedLines
+            _ -> map renderFlatCodeLine bodyLines
+  where
+    highlighted highlighter =
+        either (const Nothing) Just $
+            highlightCode
+                highlighter
+                language
+                (Text.intercalate "\n" bodyLines)
+
+renderFlatCodeLine :: Text -> Widget n
+renderFlatCodeLine =
+    withAttr Theme.codeAttr . padLeftRight 1 . txt
+
+renderHighlightedCodeLine :: HighlightedLine -> Widget n
+renderHighlightedCodeLine spans =
+    withAttr Theme.codeAttr $
+        padLeftRight 1 $
+            case spans of
+                [] -> txt ""
+                _ ->
+                    hBox
+                        [ withAttr
+                            (Theme.syntaxClassAttr span_.syntaxClass)
+                            (txt span_.syntaxText)
+                        | span_ <- spans
+                        ]
 
 stripHeading :: Text -> Maybe Text
 stripHeading line =

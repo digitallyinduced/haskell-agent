@@ -69,7 +69,10 @@ import Agent.CLI.TUI.ImagePreview
     )
 import Agent.TUI.Markdown
     ( markdownWidget
-    , markdownWidgetWithCodeControls
+    , markdownWidgetWithSyntaxHighlighting
+    )
+import Agent.Syntax
+    ( loadSyntaxHighlighter
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types
@@ -165,6 +168,8 @@ newFullscreenRuntime
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        syntaxHighlighter <-
+            either (const Nothing) Just <$> loadSyntaxHighlighter
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
@@ -187,6 +192,7 @@ newFullscreenRuntime
                 imagePreviewProtocol == PreviewKitty
                     && not imagePreviewInTmux
             , runtimeColor = color
+            , runtimeSyntaxHighlighter = syntaxHighlighter
             , runtimeInitial = initial
             }
 
@@ -1625,7 +1631,13 @@ drawBlock state block =
             BlockAssistant ->
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
-                        (markdownWidgetWithCodeControls
+                        (markdownWidgetWithSyntaxHighlighting
+                            state.appRuntime.runtimeSyntaxHighlighter
+                            (\codeIndex ->
+                                cached
+                                    (CodeBlockCache
+                                        block.blockId
+                                        codeIndex))
                             (codeBlockHeader state block.blockId)
                             block.blockBody)
             BlockThinking ->

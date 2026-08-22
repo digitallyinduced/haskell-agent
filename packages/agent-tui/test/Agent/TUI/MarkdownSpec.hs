@@ -1,8 +1,11 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
 import Agent.TUI.Markdown
+import Agent.Syntax (loadSyntaxHighlighterFrom)
+import qualified Agent.TUI.Theme as Theme
 import Brick
-    ( ViewportType(..)
+    ( (<=>)
+    , ViewportType(..)
     , Widget
     , renderWidget
     , txt
@@ -10,6 +13,7 @@ import Brick
     )
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
+import System.Environment (lookupEnv)
 import Test.Hspec
 
 spec :: Spec
@@ -54,6 +58,60 @@ spec = describe "fullscreen Markdown inline parsing" do
         rendered `shouldSatisfy` isInfixOf "1:bash"
         rendered `shouldSatisfy` isInfixOf "2:haskell"
 
+    it "caches closed fence bodies but leaves open streaming fences uncached" do
+        let render input =
+                let widget :: Widget ()
+                    widget =
+                        markdownWidgetWithSyntaxHighlighting
+                            Nothing
+                            (\index widget ->
+                                txt ("cached-" <> Text.pack (show index))
+                                    <=> widget)
+                            (\index language ->
+                                txt (Text.pack (show index) <> ":" <> language))
+                            input
+                in show (renderWidget Nothing [widget] (40, 12))
+            closed = render "```haskell\nmain = pure ()\n```"
+            open = render "```haskell\nmain = pure ()"
+        closed `shouldSatisfy` isInfixOf "cached-1"
+        open `shouldSatisfy` (not . isInfixOf "cached-1")
+
+    it "keeps shorter nested markers inside a longer fence" do
+        let widget :: Widget ()
+            widget =
+                markdownWidgetWithCodeControls
+                    (\index language ->
+                        txt (Text.pack (show index) <> ":" <> language))
+                    "````markdown\n```haskell\nmain = pure ()\n```\n````"
+            rendered = show (renderWidget Nothing [widget] (40, 12))
+        rendered `shouldSatisfy` isInfixOf "1:markdown"
+        rendered `shouldSatisfy` (not . isInfixOf "2:haskell")
+
+    it "applies semantic syntax attributes only after a fence closes" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let render input =
+                        let widget :: Widget ()
+                            widget =
+                                markdownWidgetWithSyntaxHighlighting
+                                    (Just highlighter)
+                                    (\_ body -> body)
+                                    (\_ _ -> txt "")
+                                    input
+                        in show $
+                            renderWidget
+                                (Just Theme.solarizedDark)
+                                [widget]
+                                (80, 8)
+                    closed =
+                        render "```haskell\nmain = putStrLn \"hello\"\n```"
+                    open =
+                        render "```haskell\nmain = putStrLn \"hello\""
+                closed `shouldSatisfy` isInfixOf "RGBColor 38 139 210"
+                open `shouldSatisfy` (not . isInfixOf "RGBColor 38 139 210")
+
     it "renders thematic breaks inside a vertical viewport" do
         let widget :: Widget ()
             widget =
@@ -61,3 +119,13 @@ spec = describe "fullscreen Markdown inline parsing" do
                     markdownWidget "---\n\n***\n\n___"
             rendered = show (renderWidget Nothing [widget] (40, 12))
         rendered `shouldSatisfy` (not . null)
+
+sourceSyntaxDirectory :: IO FilePath
+sourceSyntaxDirectory =
+    lookupEnv "AGENT_SYNTAX_DIR" >>= \case
+        Nothing -> do
+            expectationFailure
+                "AGENT_SYNTAX_DIR is not set; run tests from nix develop"
+            fail "unreachable"
+        Just syntaxDirectory ->
+            pure syntaxDirectory
