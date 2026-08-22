@@ -3588,20 +3588,21 @@ detectGitBranch cwd = do
 
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
-foldSessionItems = go []
+foldSessionItems =
+    concat . reverse . foldl' addTurn []
   where
-    go acc [] = acc
-    go acc (turn:rest)
+    addTurn chunks turn
         | isTranscriptResetTurn turn.turnUserText =
             -- /clear and /new store an empty snapshot; /compact stores the
             -- rebuilt history. Either way, turnItems replaces prior history.
-            go turn.turnItems rest
+            [turn.turnItems]
         | hasCompactionCheckpoint turn.turnItems =
-            go turn.turnItems rest
-        | otherwise = go (acc <> turn.turnItems) rest
+            [turn.turnItems]
+        | otherwise =
+            turn.turnItems : chunks
 
 hydrateUiHistory :: [SessionTurn] -> UiState
-hydrateUiHistory = foldl addTurn initialUiState
+hydrateUiHistory = foldl' addTurn initialUiState
   where
     addTurn state turn
         | isTranscriptResetTurn turn.turnUserText =

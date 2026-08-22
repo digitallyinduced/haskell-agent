@@ -37,11 +37,11 @@ import Agent.CLI.Session
     , Persistence(..)
     , PersistenceState(..)
     , appendTurn
+    , appendTurnWithMetaUpdate
     , ensureSession
     , loadSession
     , sessionConversationText
     , setGeneratedSessionTitle
-    , writeSessionMeta
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.SessionTitle
@@ -363,13 +363,11 @@ runOneTurn env@SessionEnv
                             , turnItems = newItems
                             , turnUsage = Just loopResult.tokenUsage
                             }
-                    handle' <- appendTurn handle turn
-                    titleTurns <- atomicModifyIORef' env.sessionTitleTurnCount \n ->
-                        let next = n + 1 in (next, next)
-                    let countedMeta = handle'.sessionMeta
-                            { metaTitleUserTurns = titleTurns }
-                        countedHandle = handle' { sessionMeta = countedMeta }
-                    writeSessionMeta countedHandle.sessionMetaPath countedMeta
+                    titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
+                    countedHandle <- appendTurnWithMetaUpdate handle turn \meta ->
+                        meta { metaTitleUserTurns = titleTurns }
+                    writeIORef env.sessionTitleTurnCount titleTurns
+                    let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
                     when
                         ( titleTurns `elem` [3, 6]

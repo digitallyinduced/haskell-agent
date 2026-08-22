@@ -123,6 +123,40 @@ spec = describe "Agent.CLI.Session" do
                 listed <- listSessions root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
 
+        it "combines append metadata and a caller transition in one result" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                let turn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "count this turn"
+                        , turnAssistantText = Just "done"
+                        , turnError = Nothing
+                        , turnResponseId = Just "resp-counted"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 7
+                            , outputTokens = 3
+                            , cachedTokens = 1
+                            }
+                        }
+                handle' <- appendTurnWithMetaUpdate handle turn \meta ->
+                    meta { metaTitleUserTurns = 1 }
+
+                handle'.sessionMeta.metaTitle `shouldBe` "count this turn"
+                handle'.sessionMeta.metaLastResponseId
+                    `shouldBe` Just "resp-counted"
+                handle'.sessionMeta.metaInputTokens `shouldBe` 7
+                handle'.sessionMeta.metaOutputTokens `shouldBe` 3
+                handle'.sessionMeta.metaCachedTokens `shouldBe` 1
+                handle'.sessionMeta.metaTitleUserTurns `shouldBe` 1
+
+                loaded <- loadSession root handle.sessionMeta.metaId
+                case loaded of
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta `shouldBe` handle'.sessionMeta
+                        turns `shouldBe` [turn]
+
         it "rejects unsupported schema versions" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)

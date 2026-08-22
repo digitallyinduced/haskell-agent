@@ -6,6 +6,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
@@ -61,6 +62,29 @@ spec = do
                 `shouldSatisfy` isLeft
 
     describe "canonical Responses items and tools" do
+        it "redacts encrypted reasoning content from Show output" do
+            let secret = "encrypted-reasoning-secret"
+                item = Responses.ReasoningItem
+                    { itemId = Just "reasoning_1"
+                    , summary =
+                        [ Responses.ReasoningSummaryPart
+                            { partType = "summary_text"
+                            , text = Just "safe summary"
+                            , extraFields = mempty
+                            }
+                        ]
+                    , content = Nothing
+                    , encryptedContent = Just secret
+                    , status = Just Responses.ItemCompleted
+                    , extraFields = KeyMap.singleton "safe_extension" (Aeson.String "visible")
+                    }
+                rendered = show item
+            rendered `shouldNotContain` T.unpack secret
+            rendered `shouldContain` "encryptedContent = Just <redacted>"
+            rendered `shouldContain` "reasoning_1"
+            rendered `shouldContain` "safe_extension"
+            rendered `shouldContain` "ItemCompleted"
+
         it "builds strict function tools in the canonical tool union" do
             case buildTool "lookup" "Look something up"
                     [PropertySchema "query" PropertyString True Nothing] of
