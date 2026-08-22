@@ -4,16 +4,28 @@ import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( emitUiEvent
+    , loadSyntaxHighlighterForRuntime
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , newFullscreenRuntimeWithSyntaxLoader
     )
 import Agent.CLI.TUI.Bridge
+import Agent.CLI.TUI.Types
+    ( AppEvent(..)
+    , AppEventMailbox(..)
+    , FullscreenRuntime(..)
+    , PendingAppEvent(..)
+    )
 import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
+import Control.Concurrent.STM (readTVarIO)
+import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
+import Data.Foldable (toList)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import System.Timeout (timeout)
 import qualified Graphics.Vty as V
 import Test.Hspec
@@ -96,6 +108,7 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (pure ()))
             (pure ())
+            (const (throwString "syntax timing failed"))
             MotionFull
             False
             initialUiState
@@ -104,6 +117,53 @@ spec = describe "fullscreen TUI bridge" do
                 emitUiEvent runtime (UiLoop (TextDelta "x"))
                 emitUiEvent runtime (UiLoop TurnStarted)
         completed `shouldBe` Just ()
+
+    it "defers syntax loading until the runtime starts it" do
+        input <- newFullscreenInputBuffer
+        loaderCalled <- newIORef False
+        durationRef <- newIORef Nothing
+        runtime <- newFullscreenRuntimeWithSyntaxLoader
+            (writeIORef loaderCalled True >> pure (Left "unavailable"))
+            input
+            (pure ())
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            (writeIORef durationRef . Just)
+            MotionFull
+            False
+            initialUiState
+        readIORef loaderCalled `shouldReturn` False
+        loadSyntaxHighlighterForRuntime runtime
+        readIORef loaderCalled `shouldReturn` True
+        readIORef durationRef >>= (`shouldSatisfy` maybe False (>= 0))
+        hasPendingUnavailableSyntax runtime `shouldReturn` True
+
+    it "contains unexpected syntax loader and timing failures" do
+        input <- newFullscreenInputBuffer
+        runtime <- newFullscreenRuntimeWithSyntaxLoader
+            (throwString "syntax loader failed")
+            input
+            (pure ())
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            (const (pure ()))
+            MotionFull
+            False
+            initialUiState
+        loadSyntaxHighlighterForRuntime runtime
+        hasPendingUnavailableSyntax runtime `shouldReturn` True
 
     it "moves through history and restores the original draft" do
         historyMove 1 ["new", "old"] Nothing "draft" ""
@@ -133,3 +193,11 @@ spec = describe "fullscreen TUI bridge" do
             `shouldBe` AgentRoot
         reconcileAgentSelection [AgentRoot, other] other
             `shouldBe` other
+
+hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
+hasPendingUnavailableSyntax runtime = do
+    let AppEventMailbox pendingRef = runtime.runtimeMailbox
+    pending <- readTVarIO pendingRef
+    pure case toList pending of
+        [PendingEvent (AppSyntaxHighlighterLoaded Nothing)] -> True
+        _ -> False

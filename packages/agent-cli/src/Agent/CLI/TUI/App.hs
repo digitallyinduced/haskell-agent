@@ -16,6 +16,8 @@ module Agent.CLI.TUI.App
     , nextMotionSchedule
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , newFullscreenRuntimeWithSyntaxLoader
+    , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
     , repositoryHeaderText
@@ -101,7 +103,8 @@ import Agent.TUI.Markdown
     , markdownWidgetWithSyntaxHighlighting
     )
 import Agent.Syntax
-    ( loadSyntaxHighlighter
+    ( SyntaxHighlighter
+    , loadSyntaxHighlighter
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types
@@ -166,7 +169,7 @@ import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (NominalDiffTime, UTCTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word64)
@@ -191,11 +194,33 @@ newFullscreenRuntime
     -> IO (AgentTarget, [AgentEntry])
     -> (AgentTarget -> IO ())
     -> IO ()
+    -> (NominalDiffTime -> IO ())
     -> MotionMode
     -> Bool
     -> UiState
     -> IO FullscreenRuntime
-newFullscreenRuntime
+newFullscreenRuntime =
+    newFullscreenRuntimeWithSyntaxLoader loadSyntaxHighlighter
+
+newFullscreenRuntimeWithSyntaxLoader
+    :: IO (Either Text SyntaxHighlighter)
+    -> FullscreenInputBuffer
+    -> IO ()
+    -> (Text -> IO ())
+    -> IO CtrlCDecision
+    -> (Text -> IO Bool)
+    -> (Text -> IO ())
+    -> (Bool -> IO ())
+    -> IO (AgentTarget, [AgentEntry])
+    -> (AgentTarget -> IO ())
+    -> IO ()
+    -> (NominalDiffTime -> IO ())
+    -> MotionMode
+    -> Bool
+    -> UiState
+    -> IO FullscreenRuntime
+newFullscreenRuntimeWithSyntaxLoader
+    syntaxLoader
     inputBuffer
     cancelAction
     restartEffortAction
@@ -206,6 +231,7 @@ newFullscreenRuntime
     agentSnapshot
     agentSelect
     firstFrame
+    syntaxLoadFinished
     motionMode
     color
     initial = do
@@ -219,8 +245,6 @@ newFullscreenRuntime
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
-        syntaxHighlighter <-
-            either (const Nothing) Just <$> loadSyntaxHighlighter
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
@@ -245,9 +269,28 @@ newFullscreenRuntime
                 imagePreviewProtocol == PreviewKitty
                     && not imagePreviewInTmux
             , runtimeColor = color
-            , runtimeSyntaxHighlighter = syntaxHighlighter
+            , runtimeLoadSyntaxHighlighter = syntaxLoader
+            , runtimeSyntaxLoadFinished = syntaxLoadFinished
             , runtimeInitial = initial
             }
+
+loadSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+loadSyntaxHighlighterForRuntime runtime = do
+    startedAt <- getMonotonicTimeNSec
+    result <- tryAny runtime.runtimeLoadSyntaxHighlighter
+    finishedAt <- getMonotonicTimeNSec
+    let highlighter = case result of
+            Left _ -> Nothing
+            Right loaded -> either (const Nothing) Just loaded
+    enqueueAppEvent runtime (AppSyntaxHighlighterLoaded highlighter)
+    void $
+        tryAny $
+            runtime.runtimeSyntaxLoadFinished
+                (nanosecondsToNominalDiffTime (finishedAt - startedAt))
+
+nanosecondsToNominalDiffTime :: Word64 -> NominalDiffTime
+nanosecondsToNominalDiffTime nanoseconds =
+    realToFrac nanoseconds / 1_000_000_000
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
 emitUiEvent runtime event =
@@ -435,6 +478,7 @@ runFullscreen runtime workerAction = do
             , appMotionScheduleReset = False
             , appClockNanos = initialClock
             , appNativeProgressKeepaliveBucket = 0
+            , appSyntaxHighlighter = Nothing
             }
         (initialDemand, initialDelay) =
             appMotionTiming initialState
@@ -447,27 +491,34 @@ runFullscreen runtime workerAction = do
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
                 withAsync (eventPump runtime) \_eventPump ->
                     withAsync
-                        (void (waitCatch worker)
-                            >> enqueueAppEvent runtime AppStop)
-                        \_notifier -> do
-                            finalState <-
-                                customMain
-                                    initialVty
-                                    buildVty
-                                    (Just runtime.runtimeEvents)
-                                    fullscreenApp
-                                    initialState
-                                `finally` runtime.runtimeNativeProgress False
-                            when (not finalState.appWorkerStopped) $
-                                atomically $
-                                    Composer.appendFullscreenInput
-                                        runtime.runtimeInput
-                                        FullscreenInput
-                                            { fullscreenInputLine = ReplEof
-                                            , fullscreenInputQueued = False
-                                            , fullscreenInputDisplay = Nothing
-                                            }
-                            wait worker
+                        (loadSyntaxHighlighterForRuntime runtime)
+                        \_syntaxLoader ->
+                            withAsync
+                                (void (waitCatch worker)
+                                    >> enqueueAppEvent runtime AppStop)
+                                \_notifier -> do
+                                    finalState <-
+                                        customMain
+                                            initialVty
+                                            buildVty
+                                            (Just runtime.runtimeEvents)
+                                            fullscreenApp
+                                            initialState
+                                        `finally`
+                                            runtime.runtimeNativeProgress False
+                                    when (not finalState.appWorkerStopped) $
+                                        atomically $
+                                            Composer.appendFullscreenInput
+                                                runtime.runtimeInput
+                                                FullscreenInput
+                                                    { fullscreenInputLine =
+                                                        ReplEof
+                                                    , fullscreenInputQueued =
+                                                        False
+                                                    , fullscreenInputDisplay =
+                                                        Nothing
+                                                    }
+                                    wait worker
   where
     uiTicker = waitForDemand
       where
@@ -2151,7 +2202,7 @@ drawBlock state block =
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
                         (markdownWidgetWithSyntaxHighlighting
-                            state.appRuntime.runtimeSyntaxHighlighter
+                            state.appSyntaxHighlighter
                             (\codeIndex ->
                                 cached
                                     (CodeBlockCache
@@ -3019,6 +3070,13 @@ handleEventInner event = case event of
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
         modify' \current -> current { appWindowTitle = Just title }
+    AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
+        case highlighter of
+            Nothing -> pure ()
+            Just loaded -> do
+                modify' \current ->
+                    current { appSyntaxHighlighter = Just loaded }
+                invalidateCache
     AppEvent (AppAgentSnapshot selected entries) -> do
         state <- get
         let normalized =
