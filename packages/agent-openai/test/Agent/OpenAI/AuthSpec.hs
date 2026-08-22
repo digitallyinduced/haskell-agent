@@ -2,6 +2,12 @@ module Agent.OpenAI.AuthSpec (spec) where
 
 import Agent.OpenAI.Auth
 import Agent.Error (ApiError(..), ErrorType(..))
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified "base64-bytestring" Data.ByteString.Base64 as B64
@@ -13,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime, getCurrentTime)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -127,6 +134,45 @@ spec = do
             result <- getAccessToken pool
             result `shouldSatisfy` isRight
             readIORef callCounter `shouldReturn` 0
+
+        it "shares one successful refresh across concurrent expired checkouts" do
+            refreshCalls <- newIORef (0 :: Int)
+            firstRefreshStarted <- newEmptyMVar
+            laterRefreshStarted <- newEmptyMVar
+            releaseFirstRefresh <- newEmptyMVar
+            secondCheckoutStarted <- newEmptyMVar
+            let refreshed = (mkFreshAuth "acc")
+                    { refreshToken = "rotated-refresh" }
+                refresh _ = do
+                    callNumber <- atomicModifyIORef' refreshCalls \n ->
+                        let next = n + 1
+                        in (next, next)
+                    if callNumber == 1
+                        then do
+                            putMVar firstRefreshStarted ()
+                            takeMVar releaseFirstRefresh
+                        else putMVar laterRefreshStarted ()
+                    pure (Right refreshed)
+            pool <- newPool [mkExpiredAuth "acc"] refresh
+
+            withAsync (getAccessToken pool) \firstCheckout -> do
+                takeMVar firstRefreshStarted
+                withAsync
+                    (putMVar secondCheckoutStarted () >> getAccessToken pool)
+                    \secondCheckout -> do
+                        takeMVar secondCheckoutStarted
+                        overlappingRefresh <- timeout concurrencyProbeMicros
+                            (takeMVar laterRefreshStarted)
+                        putMVar releaseFirstRefresh ()
+                        firstResult <- wait firstCheckout
+                        secondResult <- wait secondCheckout
+
+                        overlappingRefresh `shouldBe` Nothing
+                        readIORef refreshCalls `shouldReturn` 1
+                        firstResult `shouldBe`
+                            Right (refreshed.accessToken, refreshed.accountId)
+                        secondResult `shouldBe`
+                            Right (refreshed.accessToken, refreshed.accountId)
 
         it "alternates between accounts on consecutive calls (round-robin)" $ do
             callCounter <- newIORef (0 :: Int)
@@ -282,6 +328,39 @@ spec = do
             mAfter <- readAccountState pool "acc"
             fmap (.refreshToken) mAfter `shouldBe` Just "rotated-refresh"
 
+        it "blocks checkouts until the forced replacement is committed" do
+            refreshStarted <- newEmptyMVar
+            releaseRefresh <- newEmptyMVar
+            checkoutStarted <- newEmptyMVar
+            let startState = mkFreshAuth "acc"
+                rotated = startState
+                    { accessToken = (mkFreshAuth "rotated").accessToken
+                    , refreshToken = "rotated-refresh"
+                    }
+                refresh _ = do
+                    putMVar refreshStarted ()
+                    takeMVar releaseRefresh
+                    pure (Right rotated)
+            pool <- newPool [startState] refresh
+
+            withAsync (forceRefresh pool "acc") \forcedRefresh -> do
+                takeMVar refreshStarted
+                withAsync
+                    (putMVar checkoutStarted () >> getAccessToken pool)
+                    \checkout -> do
+                        takeMVar checkoutStarted
+                        earlyCheckout <- timeout concurrencyProbeMicros
+                            (wait checkout)
+                        putMVar releaseRefresh ()
+                        forcedResult <- wait forcedRefresh
+                        checkoutResult <- wait checkout
+
+                        earlyCheckout `shouldBe` Nothing
+                        fmap (.accessToken) forcedResult
+                            `shouldBe` Right rotated.accessToken
+                        checkoutResult `shouldBe`
+                            Right (rotated.accessToken, rotated.accountId)
+
         it "returns Left with an AuthenticationError when the accountId is unknown" $ do
             pool <- newPool [mkFreshAuth "acc"] neverRefresh
             outcome <- forceRefresh pool "does-not-exist"
@@ -349,6 +428,9 @@ spec = do
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 1970 1 1) 0
+
+concurrencyProbeMicros :: Int
+concurrencyProbeMicros = 250_000
 
 -- | Build an 'AuthState' with a JWT whose exp is the year 2100 — well past
 -- the refresh-margin threshold, so 'needsRefresh' returns False.

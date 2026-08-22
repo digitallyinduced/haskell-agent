@@ -70,6 +70,7 @@ data AccountEntry = AccountEntry
     { entryAccountId     :: !Text
     , entryAuthRef       :: !(IORef AuthState)
     , entryCooldownUntil :: !(IORef (Maybe UTCTime))
+    , entryRefreshLock   :: !(MVar ())
     }
 
 -- | Optional source of newly available accounts. The callback receives every
@@ -199,10 +200,12 @@ mkEntry :: AuthState -> IO AccountEntry
 mkEntry state = do
     authRef <- newIORef state
     cooldownRef <- newIORef Nothing
+    refreshLock <- newMVar ()
     pure AccountEntry
         { entryAccountId = state.accountId
         , entryAuthRef = authRef
         , entryCooldownUntil = cooldownRef
+        , entryRefreshLock = refreshLock
         }
 
 --------------------------------------------------------------------------------
@@ -254,22 +257,46 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
             picked <- pickAccount pool
             case picked of
                 Left earliest -> pure $ Left (CredentialsExhausted earliest)
-                Right entry -> do
-                    state <- readIORef entry.entryAuthRef
-                    now <- getCurrentTime
-                    if needsRefresh state now
-                        then do
-                            result <- pool.poolRefresh state
-                            case result of
-                                Right new -> do
-                                    writeIORef entry.entryAuthRef new
-                                    pure $ Right (new.accessToken, new.accountId)
-                                Left err
-                                    | isAuthError err -> do
-                                        reportAuthBroken pool state.accountId
-                                        go (attemptsLeft - 1)
-                                    | otherwise -> pure $ Left err
-                        else pure $ Right (state.accessToken, state.accountId)
+                Right entry ->
+                    currentAuthState pool entry >>= \case
+                        Right state ->
+                            pure $ Right (state.accessToken, state.accountId)
+                        Left err
+                            | isAuthError err -> do
+                                reportAuthBroken pool entry.entryAccountId
+                                go (attemptsLeft - 1)
+                            | otherwise -> pure $ Left err
+
+-- | Read a checkout state while serialized with every refresh for this
+-- account. Always taking the lock prevents an in-flight forced refresh from
+-- handing another caller the rejected token it is replacing. Re-checking
+-- expiry after acquiring it makes concurrent expiry-driven checkouts share
+-- the first successful refresh.
+currentAuthState
+    :: Pool
+    -> AccountEntry
+    -> IO (Either ApiError AuthState)
+currentAuthState pool entry =
+    withMVar entry.entryRefreshLock \_ -> do
+        state <- readIORef entry.entryAuthRef
+        now <- getCurrentTime
+        if needsRefresh state now
+            then refreshEntry pool entry state
+            else pure (Right state)
+
+-- | Invoke the refresh callback and commit its result. The caller must hold
+-- 'entryRefreshLock'.
+refreshEntry
+    :: Pool
+    -> AccountEntry
+    -> AuthState
+    -> IO (Either ApiError AuthState)
+refreshEntry pool entry state =
+    pool.poolRefresh state >>= \case
+        Right new -> do
+            writeIORef entry.entryAuthRef new
+            pure (Right new)
+        Left err -> pure (Left err)
 
 -- | Ask the dynamic source only for accounts this process has never seen.
 -- Broker outages do not replace a precise local 'CredentialsExhausted' reset time
@@ -454,8 +481,8 @@ snapshotAccounts pool = do
 -- | Force a refresh of the given account, regardless of JWT expiry. Useful
 -- for scheduled refresh jobs that rotate ahead of the natural expiry window.
 --
--- Invokes the pool's refresh callback — serialisation against concurrent
--- in-path refreshes is the callback's responsibility (e.g. via a Postgres
+-- Refreshes for the same account are serialized within this pool. The callback
+-- remains responsible for cross-process serialization (e.g. via a Postgres
 -- row-level lock). On success the new state is written back to the pool's
 -- in-memory cache.
 forceRefresh :: Pool -> Text -> IO (Either ApiError AuthState)
@@ -465,12 +492,9 @@ forceRefresh pool targetAccountId = do
         Nothing ->
             pure $ Left (ProviderError AuthenticationError
                 ("Agent.OpenAI.Auth.forceRefresh: unknown accountId " <> targetAccountId) Nothing)
-        Just entry -> do
+        Just entry -> withMVar entry.entryRefreshLock \_ -> do
             state <- readIORef entry.entryAuthRef
-            result <- pool.poolRefresh state
-            case result of
-                Right new -> writeIORef entry.entryAuthRef new >> pure (Right new)
-                Left err  -> pure (Left err)
+            refreshEntry pool entry state
 
 findEntry :: Pool -> Text -> IO (Maybe AccountEntry)
 findEntry pool targetAccountId = do
