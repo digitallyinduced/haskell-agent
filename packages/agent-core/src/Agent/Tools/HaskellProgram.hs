@@ -12,6 +12,10 @@ import Agent.ToolArgs
     , optIntOrString
     , reqText
     )
+import Agent.Responses.Types
+    ( Response
+    , ResponseCreateParams
+    )
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -26,6 +30,8 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Ghci.Runtime
     ( GhciOutcome(..)
+    , GhciProgramRequest(..)
+    , GhciProgramResponse(..)
     , GhciResult(..)
     , GhciSession
     , evalGhciProgram
@@ -40,9 +46,15 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
     )
+import Control.Concurrent.Async (concurrently)
 import Data.Aeson (FromJSON(..), Value)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -55,6 +67,7 @@ haskellProgramToolName = "run_haskell_program"
 data HaskellProgramArgs = HaskellProgramArgs
     { source :: !Text
     , timeout :: !(Maybe Int)
+    , maxLlmCalls :: !(Maybe Int)
     , description :: !Text
     }
 
@@ -62,6 +75,7 @@ instance FromJSON HaskellProgramArgs where
     parseJSON = objectArgs \object -> HaskellProgramArgs
         <$> reqText object "source"
         <*> optIntOrString object "timeout"
+        <*> optIntOrString object "max_llm_calls"
         <*> reqText object "description"
 
 haskellProgramTool :: GhciSession -> PlanModeEnv -> AppTool
@@ -73,6 +87,8 @@ haskellProgramTool session planMode =
             "Complete Haskell expression or statement, usually a do block."
         , PropertySchema "timeout" PropertyInteger False $ Just
             "Optional overall timeout in milliseconds (max 300000). Default: 30000."
+        , PropertySchema "max_llm_calls" PropertyInteger False $ Just
+            "Maximum callLLM invocations in this program (0-64). Default: 16."
         , PropertySchema "description" PropertyString True $ Just
             "One sentence explaining what the program will orchestrate."
         ]
@@ -88,7 +104,9 @@ haskellProgramDescription =
     "Run a Haskell program in a fresh dedicated GHCi process.\n\
     \Use this to orchestrate multiple tool calls, filter large results, and return only a compact answer.\n\
     \Inside the program, call `callTool \"tool_name\" (object [\"key\" .= value]) :: IO Text`.\n\
-    \For independent calls, `Concurrently(..)` and `runConcurrently` are preimported; combine `Concurrently (callTool ...)` actions applicatively to fan out.\n\
+    \Use `callLLM request :: IO Response` for an isolated raw Responses API call. `ResponseCreateParams`, `Response`, their related canonical types, and `defaultResponseCreateParams` are preimported from `Agent.Responses.Types`. Provider transports may enforce required wire settings; the OpenAI Codex transport sends streaming, non-stored responses.\n\
+    \callLLM returns the complete lossless response, including output items, usage, response ids, unknown fields, and raw tool calls; it does not run an automatic nested agent loop.\n\
+    \For independent calls, `Concurrently(..)` and `runConcurrently` are preimported; combine `Concurrently (callTool ...)` or `Concurrently (callLLM ...)` actions applicatively to fan out.\n\
     \Only tools registered as parallel-safe overlap. Stateful tools remain serialized, and concurrently submitted stateful calls have no defined order.\n\
     \`Text`, qualified `Text`, qualified `T`, `Value`, `object`, and `(.=)` are also imported.\n\
     \Use only tools and argument schemas advertised for the current provider. callTool returns the same formatted Text a direct tool call would return, including status metadata such as shell exit lines.\n\
@@ -118,11 +136,17 @@ runHaskellProgram session planMode runtime outerCall args
                 "run_haskell_program is unavailable in Plan Mode because \
                 \unrestricted Haskell IO could modify files outside plan.md."
             else do
+                llmCallCount <- newIORef (0 :: Int)
                 result <- evalGhciProgram
                     session
                     (discardProgramResult args.source)
                     (normalizeTimeout (fromMaybe 30000 args.timeout))
-                    (invokeProgramTools runtime outerCall)
+                    (invokeProgramRequests
+                        runtime
+                        outerCall
+                        llmCallCount
+                        (normalizeMaxLlmCalls
+                            (fromMaybe 16 args.maxLlmCalls)))
                 pure (Right (formatProgramResult result))
 
 -- GHCi prints the value returned by a top-level @IO a@ action. Discard that
@@ -137,19 +161,39 @@ discardProgramResult source =
             ]
         <> ") >> pure ()"
 
-invokeProgramTools
+data PreparedProgramRequest
+    = PreparedTool !(Either Text ToolCall)
+    | PreparedLlm !Bool !ResponseCreateParams
+
+invokeProgramRequests
     :: ToolRuntime
     -> ToolCall
-    -> [(Text, Value)]
-    -> IO [Text]
-invokeProgramTools runtime outerCall requests = do
-    prepared <- traverse prepare requests
-    let calls = [call | Right call <- prepared]
-    results <-
-        if null calls
-            then pure []
-            else runtime.invokeNestedTools calls
-    pure (restore prepared results)
+    -> IORef Int
+    -> Int
+    -> [GhciProgramRequest]
+    -> IO [GhciProgramResponse]
+invokeProgramRequests runtime outerCall llmCallCount maxCalls requests = do
+    allowedLlmCalls <- reserveLlmCalls
+        llmCallCount
+        maxCalls
+        (length [() | GhciLlmRequest{} <- requests])
+    prepared <- prepareRequests allowedLlmCalls requests
+    let toolCalls =
+            [ call
+            | PreparedTool (Right call) <- prepared
+            ]
+        llmRequests =
+            [ request
+            | PreparedLlm True request <- prepared
+            ]
+        invokeTools
+            | null toolCalls = pure []
+            | otherwise = runtime.invokeNestedTools toolCalls
+        invokeLlms
+            | null llmRequests = pure []
+            | otherwise = runtime.invokeNestedResponses llmRequests
+    (toolResults, llmResults) <- concurrently invokeTools invokeLlms
+    pure (restore prepared toolResults llmResults)
   where
     blockedTools =
         [ haskellProgramToolName
@@ -157,7 +201,7 @@ invokeProgramTools runtime outerCall requests = do
         , "enter_plan_mode"
         , "exit_plan_mode"
         ]
-    prepare (requestedName, arguments)
+    prepareTool requestedName arguments
         | Text.null toolName =
             pure (Left "Error: nested tool name must not be empty")
         | toolName `elem` blockedTools =
@@ -176,18 +220,48 @@ invokeProgramTools runtime outerCall requests = do
       where
         toolName = canonicalToolName requestedName
 
+    prepareRequests _ [] = pure []
+    prepareRequests allowed (request : rest) = case request of
+        GhciToolRequest requestedName arguments -> do
+            prepared <- PreparedTool <$> prepareTool requestedName arguments
+            (prepared :) <$> prepareRequests allowed rest
+        GhciLlmRequest llmRequest ->
+            let permitted = allowed > 0
+            in (PreparedLlm permitted llmRequest :)
+                <$> prepareRequests
+                    (if permitted then allowed - 1 else 0)
+                    rest
+
     restore
-        :: [Either Text ToolCall]
+        :: [PreparedProgramRequest]
         -> [ToolCallResult]
-        -> [Text]
-    restore [] [] = []
-    restore (Left output : rest) results =
-        output : restore rest results
-    restore (Right _ : rest) (result : results) =
-        result.output : restore rest results
-    restore (Right _ : rest) [] =
-        "Nested tool bridge failed: missing result" : restore rest []
-    restore [] _ = []
+        -> [Either Text Response]
+        -> [GhciProgramResponse]
+    restore [] _ _ = []
+    restore (PreparedTool (Left output) : rest) toolResults llmResults =
+        GhciToolResponse output : restore rest toolResults llmResults
+    restore (PreparedTool (Right _) : rest)
+            (result : toolResults) llmResults =
+        GhciToolResponse result.output
+            : restore rest toolResults llmResults
+    restore (PreparedTool (Right _) : rest) [] llmResults =
+        GhciToolResponse "Nested tool bridge failed: missing result"
+            : restore rest [] llmResults
+    restore (PreparedLlm False _ : rest) toolResults llmResults =
+        GhciLlmResponse
+            (Left
+                ("callLLM limit exceeded: this run_haskell_program call allows "
+                    <> Text.pack (show maxCalls)
+                    <> " LLM calls"))
+            : restore rest toolResults llmResults
+    restore (PreparedLlm True _ : rest) toolResults
+            (result : llmResults) =
+        GhciLlmResponse result
+            : restore rest toolResults llmResults
+    restore (PreparedLlm True _ : rest) toolResults [] =
+        GhciLlmResponse
+            (Left "Nested LLM bridge failed: missing result")
+            : restore rest toolResults []
 
 encodeArguments :: Value -> Text
 encodeArguments =
@@ -221,3 +295,13 @@ formatProgramResult result =
 
 normalizeTimeout :: Int -> Int
 normalizeTimeout = min 300000 . max 1
+
+normalizeMaxLlmCalls :: Int -> Int
+normalizeMaxLlmCalls = min 64 . max 0
+
+reserveLlmCalls :: IORef Int -> Int -> Int -> IO Int
+reserveLlmCalls countRef maximum requested =
+    atomicModifyIORef' countRef \used ->
+        let available = max 0 (maximum - used)
+            accepted = min available requested
+        in (used + accepted, accepted)

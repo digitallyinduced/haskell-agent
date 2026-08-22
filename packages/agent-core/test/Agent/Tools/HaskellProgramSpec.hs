@@ -10,6 +10,12 @@ import Agent.Loop
     , defaultLoopDispatch
     , runLoop
     )
+import Agent.Responses.Types
+    ( Response
+    , ResponseCreateParams(..)
+    , ResponseInput(..)
+    , defaultResponseCreateParams
+    )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -19,7 +25,9 @@ import Agent.ToolDispatch
     , noArgsTool
     )
 import Agent.Tools.Ghci
-    ( GhciResult(..)
+    ( GhciProgramRequest(..)
+    , GhciProgramResponse(..)
+    , GhciResult(..)
     , GhciSession
     , closeGhciSession
     , evalGhciProgram
@@ -141,16 +149,98 @@ spec = describe "Agent.Tools.HaskellProgram" do
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "OK"
 
+    it "round-trips raw callLLM requests and lossless responses" do
+        withTempProgramGhci \(ghci, _planMode) -> do
+            seen <- newIORef []
+            let expectedRequest = defaultResponseCreateParams
+                    { model = Just "nested-model"
+                    , input = Just (ResponseInputText "classify")
+                    , previousResponseId = Just "resp-parent"
+                    }
+                invoke = traverse \case
+                    GhciToolRequest name _ ->
+                        pure (GhciToolResponse
+                            ("unexpected nested tool call: " <> name))
+                    GhciLlmRequest request -> do
+                        modifyIORef' seen (<> [request])
+                        pure (GhciLlmResponse
+                            (Right (testResponse "resp-nested")))
+            result <- evalGhciProgram ghci callLlmProgramSource 10000 invoke
+            result.ghciOk `shouldBe` True
+            result.ghciOutput
+                `shouldSatisfy` Text.isInfixOf
+                    "resp-nested|test-model|future_item"
+            readIORef seen `shouldReturn` [expectedRequest]
+
+    it "batches concurrent callLLM actions and preserves response order" do
+        withTempProgramGhci \(ghci, _planMode) -> do
+            batchSizes <- newIORef []
+            result <- evalGhciProgram ghci concurrentLlmProgramSource 10000
+                \requests -> do
+                    modifyIORef' batchSizes (<> [length requests])
+                    pure
+                        [ case request of
+                            GhciLlmRequest llmRequest ->
+                                GhciLlmResponse (Right
+                                    (testResponse
+                                        (if llmRequest.model == Just "a"
+                                            then "resp-a"
+                                            else "resp-b")))
+                            GhciToolRequest name _ ->
+                                GhciToolResponse
+                                    ("unexpected nested tool call: " <> name)
+                        | request <- requests
+                        ]
+            result.ghciOk `shouldBe` True
+            result.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "resp-a|resp-b"
+            readIORef batchSizes `shouldReturn` [2]
+
+    it "enforces the per-program callLLM budget before provider dispatch" do
+        withTempProgramGhci \(ghci, planMode) -> do
+            invoked <- newIORef (0 :: Int)
+            let runtime = (singleToolRuntime \call ->
+                        pure ToolCallResult
+                            { callId = call.callId
+                            , output = "unexpected nested tool call"
+                            , callKind = call.callKind
+                            })
+                    { invokeNestedResponses = \requests -> do
+                        modifyIORef' invoked (+ length requests)
+                        pure
+                            [ Right (testResponse ("resp-" <> Text.pack (show n)))
+                            | n <- [1 .. length requests]
+                            ]
+                    }
+                dispatchConfig = defaultLoopDispatch
+                    { toolDispatchRuntime = Just runtime
+                    }
+                registry =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry [haskellProgramTool ghci planMode]
+            result <- dispatchRegisteredToolCall
+                dispatchConfig
+                registry
+                (functionToolCall
+                    "outer-call"
+                    haskellProgramToolName
+                    (encodeJson (Aeson.object
+                        [ "source" Aeson..= concurrentLlmProgramSource
+                        , "max_llm_calls" Aeson..= (1 :: Int)
+                        , "description" Aeson..=
+                            ("cap nested LLM fan-out" :: Text)
+                        ])))
+            readIORef invoked `shouldReturn` 1
+            result.output
+                `shouldSatisfy` Text.isInfixOf "callLLM limit exceeded"
+
     it "batches applicative Concurrently callTool actions and preserves results" do
         withTempProgramGhci \(ghci, _planMode) -> do
             batchSizes <- newIORef []
             result <- evalGhciProgram ghci concurrentProgramSource 10000
                 \requests -> do
                     modifyIORef' batchSizes (<> [length requests])
-                    pure
-                        [ "result-" <> name
-                        | (name, _arguments) <- requests
-                        ]
+                    pure (map resultFor requests)
             result.ghciOk `shouldBe` True
             result.ghciOutput
                 `shouldSatisfy` Text.isInfixOf
@@ -403,6 +493,32 @@ programSource = Text.unlines
     , "  pure ()"
     ]
 
+callLlmProgramSource :: Text
+callLlmProgramSource = Text.unlines
+    [ "do"
+    , "  let request = defaultResponseCreateParams"
+    , "        { model = Just \"nested-model\""
+    , "        , input = Just (ResponseInputText \"classify\")"
+    , "        , previousResponseId = Just \"resp-parent\""
+    , "        }"
+    , "  response <- callLLM request"
+    , "  case response.output of"
+    , "    [UnknownResponseItem TaggedObject{tag}] ->"
+    , "      emitText (response.responseId <> \"|\" <> response.model <> \"|\" <> tag)"
+    , "    _ -> emitText \"unexpected-output\""
+    ]
+
+concurrentLlmProgramSource :: Text
+concurrentLlmProgramSource = Text.unlines
+    [ "do"
+    , "  let request :: Text -> ResponseCreateParams"
+    , "      request name = defaultResponseCreateParams { model = Just name }"
+    , "  (first, second) <- runConcurrently $ (,)"
+    , "    <$> Concurrently (callLLM (request \"a\"))"
+    , "    <*> Concurrently (callLLM (request \"b\"))"
+    , "  emitText (first.responseId <> \"|\" <> second.responseId)"
+    ]
+
 concurrentProgramSource :: Text
 concurrentProgramSource = Text.unlines
     [ "do"
@@ -436,20 +552,55 @@ backgroundProgram = Text.unlines
 
 batchTool
     :: (Text -> Aeson.Value -> IO Text)
-    -> [(Text, Aeson.Value)]
-    -> IO [Text]
+    -> [GhciProgramRequest]
+    -> IO [GhciProgramResponse]
 batchTool invoke =
-    traverse \(name, arguments) -> invoke name arguments
+    traverse \case
+        GhciToolRequest name arguments ->
+            GhciToolResponse <$> invoke name arguments
+        GhciLlmRequest _ ->
+            pure (GhciLlmResponse (Left "unexpected nested LLM call"))
 
-unusedTool :: [(Text, Aeson.Value)] -> IO [Text]
-unusedTool =
-    batchTool \name _arguments ->
-        pure ("unexpected nested tool call: " <> name)
+unusedTool :: [GhciProgramRequest] -> IO [GhciProgramResponse]
+unusedTool = batchTool \name _arguments ->
+    pure ("unexpected nested tool call: " <> name)
+
+resultFor :: GhciProgramRequest -> GhciProgramResponse
+resultFor = \case
+    GhciToolRequest name _ -> GhciToolResponse ("result-" <> name)
+    GhciLlmRequest _ ->
+        GhciLlmResponse (Left "unexpected nested LLM call")
+
+testResponse :: Text -> Response
+testResponse responseId =
+    case Aeson.fromJSON (Aeson.object
+        [ "id" Aeson..= responseId
+        , "created_at" Aeson..= (0 :: Int)
+        , "model" Aeson..= ("test-model" :: Text)
+        , "status" Aeson..= ("completed" :: Text)
+        , "output" Aeson..=
+            [ Aeson.object
+                [ "type" Aeson..= ("future_item" :: Text)
+                , "future_payload" Aeson..= ("opaque" :: Text)
+                ]
+            ]
+        , "usage" Aeson..= Aeson.object
+            [ "input_tokens" Aeson..= (3 :: Int)
+            , "output_tokens" Aeson..= (2 :: Int)
+            , "total_tokens" Aeson..= (5 :: Int)
+            ]
+        , "future_response_field" Aeson..= ("preserved" :: Text)
+        ]) of
+        Aeson.Success response -> response
+        Aeson.Error err -> error err
 
 singleToolRuntime :: (ToolCall -> IO ToolCallResult) -> ToolRuntime
 singleToolRuntime invoke = ToolRuntime
     { invokeNestedTool = invoke
     , invokeNestedTools = traverse invoke
+    , invokeNestedResponses = \requests ->
+        pure (replicate (length requests)
+            (Left "unexpected nested LLM call"))
     }
 
 encodeJson :: Aeson.Value -> Text

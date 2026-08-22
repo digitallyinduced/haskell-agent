@@ -205,9 +205,20 @@
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
+                agentProgramGhci = haskellPackages.ghcWithPackages (packages: [
+                    packages.aeson
+                    packages.async
+                    packages.bytestring
+                    packages.scientific
+                    packages.text
+                ]);
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
+                            # The CLI intentionally carries a GHCi runtime for
+                            # run_haskell_program, so its wrapper must retain a
+                            # reference to the compiler closure.
+                            disallowedRequisites = [ ];
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ [ pkgs.makeWrapper ];
@@ -216,7 +227,9 @@
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
-                                            "${skylightingSyntaxDirectory}"
+                                            "${skylightingSyntaxDirectory}" \
+                                        --set-default AGENT_GHCI \
+                                            "${agentProgramGhci}/bin/ghci"
                                 '';
                         });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
@@ -327,6 +340,7 @@
                     withHoogle = false;
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                        export AGENT_GHCI=${agentProgramGhci}/bin/ghci
                     '';
                     nativeBuildInputs =
                         (with haskellPackages; [

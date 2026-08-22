@@ -22,6 +22,7 @@ module Agent.ToolDispatch
     , decodeToolArguments
     ) where
 
+import Agent.Responses.Types (Response, ResponseCreateParams)
 import Agent.ToolArgs (stripAesonPrefix)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, tryAny)
@@ -94,6 +95,9 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchOnException :: Text -> SomeException -> IO ()
     , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
     , toolDispatchRuntime :: !(Maybe ToolRuntime)
+    , toolDispatchCallResponses
+        :: !(Maybe
+            ([ResponseCreateParams] -> IO [Either Text Response]))
     }
 
 -- | Capabilities supplied by the active agent loop to a tool handler.
@@ -103,6 +107,8 @@ data ToolDispatchConfig = ToolDispatchConfig
 data ToolRuntime = ToolRuntime
     { invokeNestedTool :: ToolCall -> IO ToolCallResult
     , invokeNestedTools :: [ToolCall] -> IO [ToolCallResult]
+    , invokeNestedResponses
+        :: [ResponseCreateParams] -> IO [Either Text Response]
     }
 
 data ToolHandler

@@ -196,6 +196,7 @@ defaultLoopDispatch = ToolDispatchConfig
     , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
     , toolDispatchOnOutput = \_call _output -> pure ()
     , toolDispatchRuntime = Nothing
+    , toolDispatchCallResponses = Nothing
     }
 
 runLoop
@@ -352,6 +353,13 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                     , toolDispatchRuntime = Just ToolRuntime
                         { invokeNestedTool = runOne config
                         , invokeNestedTools = runToolCalls config
+                        , invokeNestedResponses =
+                            case config.loopDispatch.toolDispatchCallResponses of
+                                Just invoke -> invoke
+                                Nothing -> \requests ->
+                                    pure (replicate (length requests)
+                                        (Left
+                                            "callLLM is unavailable in this agent runtime"))
                         }
                     }
                 config.loopTools

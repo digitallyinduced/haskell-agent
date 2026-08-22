@@ -16,6 +16,7 @@ import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction (autoCompactOpenAiBackendWithThreshold)
 import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.CLI.Error (formatApiErrorInlineAt)
 import Agent.CLI.Options
     ( ApprovalPolicy
     , CliOptions(..)
@@ -37,12 +38,15 @@ import Agent.InterAgentMessage
     ( InterAgentMessage
     , interAgentMessagePayload
     )
+import Agent.Cancel (CancelFlag, waitCancel)
+import Agent.Error (ApiError)
 import Agent.Loop
     ( Backend(..)
     , LoopConfig(..)
     , LoopError
     , LoopEvent
     , LoopResult(..)
+    , TokenUsage
     , TurnInput(..)
     , defaultLoopDispatch
     , runLoop
@@ -57,8 +61,10 @@ import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider)
+import Agent.Responses.LoopBackend (responseTokenUsage)
 import Agent.Responses.Types
     ( ReasoningConfig(..)
+    , Response
     , ResponseCreateParams(..)
     , ResponseItem
     )
@@ -107,6 +113,8 @@ import Agent.Tools.Types
     , ToolRegistry
     , defaultToolEnv
     )
+import Agent.ToolDispatch (ToolDispatchConfig(..))
+import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Exception.Safe (finally)
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -331,9 +339,10 @@ freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEv
 runCodexSubagent
     :: SubagentRuntime
     -> TokenProvider
+    -> (TokenUsage -> IO ())
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> RunSubagent
-runCodexSubagent runtime tokenProvider sendToRoot =
+runCodexSubagent runtime tokenProvider recordUsage sendToRoot =
     \env previous prompt onEvent -> do
         prepared <- prepareChild runtime env sendToRoot
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
@@ -399,8 +408,17 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                             prepared.preparedSession.subSessionTranscript
                             prepared.preparedSession.subSessionContextTokens
                             baseBackend
+                programResponseCaller =
+                    batchedSubagentResponses
+                        env.subCancel
+                        recordUsage
+                        (\request ->
+                            OpenAI.createCodexMessageWithProvider
+                                tokenProvider
+                                request { store = Just False })
             runPreparedChild
-                runtime env prepared.preparedSession toolRegistry backend onEvent
+                runtime env prepared.preparedSession toolRegistry
+                programResponseCaller backend onEvent
                 (\config ->
                     runLoopInputs config previous [AgentMessage prompt])
 
@@ -409,8 +427,10 @@ runHttpSubagent
     :: SubagentRuntime
     -> Provider
     -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
     -> RunSubagent
-runHttpSubagent runtime provider mkBackend =
+runHttpSubagent runtime provider mkBackend rawResponseCaller recordUsage =
     \env previous prompt onEvent -> do
         prepared <- prepareChild runtime env Nothing
         agentType <-
@@ -454,8 +474,14 @@ runHttpSubagent runtime provider mkBackend =
                         mkBackend
                             childParamsRef
                             prepared.preparedSession.subSessionTranscript
+                programResponseCaller =
+                    batchedSubagentResponses
+                        env.subCancel
+                        recordUsage
+                        rawResponseCaller
             runPreparedChild
-                runtime env prepared.preparedSession toolRegistry backend onEvent
+                runtime env prepared.preparedSession toolRegistry
+                programResponseCaller backend onEvent
                 (\config ->
                     runLoop config previous (interAgentMessagePayload prompt))
 
@@ -524,15 +550,18 @@ runPreparedChild
     -> SubagentSpawnEnv
     -> SubagentSession
     -> ToolRegistry
+    -> ([ResponseCreateParams] -> IO [Either Text Response])
     -> Backend
     -> (LoopEvent -> IO ())
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
-runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
+runPreparedChild runtime env session toolRegistry programResponseCaller
+        backend onEvent runChild = do
     let config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
+                { toolDispatchCallResponses = Just programResponseCaller }
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent
             , loopApprove =
@@ -556,6 +585,30 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
         env.subId
         session.subSessionTranscript
     pure result
+
+batchedSubagentResponses
+    :: CancelFlag
+    -> (TokenUsage -> IO ())
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> [ResponseCreateParams]
+    -> IO [Either Text Response]
+batchedSubagentResponses cancel recordUsage send =
+    fmap concat . traverse (mapConcurrently callOne) . chunksOf 4
+  where
+    callOne request =
+        race (waitCancel cancel) (send request) >>= \case
+            Left () -> pure (Left "callLLM cancelled")
+            Right (Left apiError) -> do
+                now <- getCurrentTime
+                pure (Left (formatApiErrorInlineAt now apiError))
+            Right (Right response) -> do
+                recordUsage (responseTokenUsage response)
+                pure (Right response)
+
+    chunksOf _ [] = []
+    chunksOf size values =
+        let (chunk, rest) = splitAt size values
+        in chunk : chunksOf size rest
 
 grokSubagentSuffix :: Text -> SubagentId -> Text
 grokSubagentSuffix agentType agentId =

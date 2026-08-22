@@ -76,6 +76,9 @@ spec = do
             runtime = ToolRuntime
                 { invokeNestedTool = invoke
                 , invokeNestedTools = traverse invoke
+                , invokeNestedResponses = \requests ->
+                    pure (replicate (length requests)
+                        (Left "unexpected nested LLM call"))
                 }
             config = testConfig { toolDispatchRuntime = Just runtime }
         result <- dispatchToolCall config
@@ -154,6 +157,7 @@ testConfig = ToolDispatchConfig
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
     , toolDispatchRuntime = Nothing
+    , toolDispatchCallResponses = Nothing
     }
 
 functionResult :: Text -> Text -> ToolCallResult

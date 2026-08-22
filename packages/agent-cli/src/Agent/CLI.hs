@@ -273,7 +273,7 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Cancel (CancelFlag, requestCancel, resetCancel, waitCancel)
 import Agent.Loop
 import Agent.Error (ApiError(..))
 import Agent.ProjectInstructions
@@ -301,11 +301,13 @@ import Agent.OpenAI.Compaction
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
+import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
     ( openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWith
     , openAiResponseSenderReconnecting
     )
+import Agent.Responses.LoopBackend (responseTokenUsage)
 import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
@@ -324,6 +326,7 @@ import Agent.Provider
     , TokenProvider
     , getNextToken
     , providerSlug
+    , runWithTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
     )
@@ -366,15 +369,17 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , defaultToolEnv
     )
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.ToolDispatch (ToolCall(..), ToolDispatchConfig(..))
+import qualified Agent.OpenRouter.Client as OpenRouterClient
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString.Lazy as LBS
+import qualified Agent.XAI.Client as XAIClient
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.Async (link, mapConcurrently, withAsync)
+import Control.Concurrent.Async (link, mapConcurrently, race, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -1278,17 +1283,19 @@ runAgentInitialized options transition home root resumed cwd startup = do
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        usageLock <- newMVar ()
         let recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
-                    mask_ do
-                        case persist of
-                            PersistenceDisabled -> pure ()
-                            PersistenceEnabled slotRef -> do
-                                handle <- ensureSession slotRef
-                                claimCurrentSession handle
-                                updated <- addSessionUsage usage handle
-                                writeIORef slotRef (PersistenceActive updated)
-                        modifyIORef' usageRef (`addTokenUsage` usage)
+                    withMVar usageLock \_ ->
+                        mask_ do
+                            case persist of
+                                PersistenceDisabled -> pure ()
+                                PersistenceEnabled slotRef -> do
+                                    handle <- ensureSession slotRef
+                                    claimCurrentSession handle
+                                    updated <- addSessionUsage usage handle
+                                    writeIORef slotRef (PersistenceActive updated)
+                            modifyIORef' usageRef (`addTokenUsage` usage)
         case persist of
             PersistenceEnabled slotRef -> do
                 slot <- readIORef slotRef
@@ -1502,6 +1509,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             runCodexSubagent
                                                 subagentRuntime
                                                 selectableTokenProvider
+                                                recordCompactionUsage
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
@@ -1514,6 +1522,20 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             transcriptRef
                                             contextTokensRef
                                             recordCompactionUsage
+                                    -- Use independent REST connections here
+                                    -- rather than the session WebSocket so
+                                    -- Concurrently callLLM actions actually
+                                    -- overlap. The Codex transport requires
+                                    -- streaming and non-stored responses.
+                                    rawResponseCaller request =
+                                        OpenAIClient.createCodexMessageWithProvider
+                                            tokenProvider
+                                            request { store = Just False }
+                                    programResponseCaller =
+                                        batchedProgramResponses
+                                            toolEnv.toolCancel
+                                            recordCompactionUsage
+                                            rawResponseCaller
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -1543,7 +1565,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     link switchWorker
                                     runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel selectAccount claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1568,6 +1590,15 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             xaiBackend xaiOptions
                                                 loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
+                                        (\request ->
+                                            runWithTokenProvider
+                                                loaded.loadedTokenProvider
+                                                \credential ->
+                                                    XAIClient.createResponseWith
+                                                        xaiOptions
+                                                        credential
+                                                        request)
+                                        recordCompactionUsage
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -1586,12 +1617,21 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
+                            rawResponseCaller request =
+                                runWithTokenProvider tokenProvider \credential ->
+                                    XAIClient.createResponseWith
+                                        xaiOptions credential request
+                            programResponseCaller =
+                                batchedProgramResponses
+                                    toolEnv.toolCancel
+                                    recordCompactionUsage
+                                    rawResponseCaller
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1604,6 +1644,15 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             openRouterBackend openRouterOptions
                                                 loaded.loadedTokenProvider
                                                 (readIORef childParamsRef) childTranscript)
+                                        (\request ->
+                                            runWithTokenProvider
+                                                loaded.loadedTokenProvider
+                                                \credential ->
+                                                    OpenRouterClient.createResponseWith
+                                                        openRouterOptions
+                                                        credential
+                                                        request)
+                                        recordCompactionUsage
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -1622,12 +1671,21 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
+                            rawResponseCaller request =
+                                runWithTokenProvider tokenProvider \credential ->
+                                    OpenRouterClient.createResponseWith
+                                        openRouterOptions credential request
+                            programResponseCaller =
+                                batchedProgramResponses
+                                    toolEnv.toolCancel
+                                    recordCompactionUsage
+                                    rawResponseCaller
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef loaded.loadedAccountLabel Nothing claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend
 
 trackCredentialAccount
     :: IORef Text
@@ -1762,6 +1820,35 @@ appendToolEvent (Just path) event = case event of
             )
     _ -> pure ()
 
+type RawResponseCaller =
+    ResponseCreateParams -> IO (Either ApiError Response)
+
+type ProgramResponseCaller =
+    [ResponseCreateParams] -> IO [Either Text Response]
+
+batchedProgramResponses
+    :: CancelFlag
+    -> (TokenUsage -> IO ())
+    -> RawResponseCaller
+    -> ProgramResponseCaller
+batchedProgramResponses cancel recordUsage send =
+    fmap concat . traverse (mapConcurrently callOne) . chunksOf 4
+  where
+    callOne request =
+        race (waitCancel cancel) (send request) >>= \case
+            Left () -> pure (Left "callLLM cancelled")
+            Right (Left apiError) -> do
+                now <- getCurrentTime
+                pure (Left (formatApiErrorInlineAt now apiError))
+            Right (Right response) -> do
+                recordUsage (responseTokenUsage response)
+                pure (Right response)
+
+    chunksOf _ [] = []
+    chunksOf size values =
+        let (chunk, rest) = splitAt size values
+        in chunk : chunksOf size rest
+
 runSession
     :: CliOptions
     -> Provider
@@ -1801,10 +1888,11 @@ runSession
     -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> ProgramResponseCaller
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef accountLabel selectAccount onPersisted compactRunner programResponseCaller backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2044,6 +2132,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             { loopBackend = backend
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
+                { toolDispatchCallResponses = Just programResponseCaller }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
