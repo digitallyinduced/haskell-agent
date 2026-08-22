@@ -18,6 +18,8 @@ import Agent.Provider
     , tokenProviderBillingMode
     )
 import qualified Agent.XAI.Auth as XAIAuth
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -461,6 +463,51 @@ spec = do
             reloaded `shouldBe` Right freshGrok
             getNextToken provider Nothing `shouldReturn` Right freshGrok
             readIORef loads `shouldReturn` 1
+
+        it "does not reload for a delayed rejection of the replaced credential" do
+            loads <- newIORef (0 :: Int)
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok
+                (modifyIORef' loads (+ 1) >> pure (Just freshGrok))
+            let rejected = Just FailedCredential
+                    { credential = staleGrok
+                    , failure = AccountAuthenticationRejected
+                    }
+            getNextToken provider rejected `shouldReturn` Right freshGrok
+            getNextToken provider rejected `shouldReturn` Right freshGrok
+            readIORef loads `shouldReturn` 1
+
+        it "reloads a concurrently rejected credential only once" do
+            loads <- newIORef (0 :: Int)
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok do
+                atomicModifyIORef' loads \count -> (count + 1, ())
+                threadDelay 50000
+                pure (Just freshGrok)
+            let rejected = Just FailedCredential
+                    { credential = staleGrok
+                    , failure = AccountAuthenticationRejected
+                    }
+            results <- mapConcurrently
+                (const (getNextToken provider rejected))
+                ([1 .. 16] :: [Int])
+            results `shouldBe` replicate 16 (Right freshGrok)
+            readIORef loads `shouldReturn` 1
+
+        it "honors the explicit reload request sentinel" do
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok
+                (pure (Just freshGrok))
+            getNextToken provider (Just FailedCredential
+                { credential = Credential
+                    { accessToken = ""
+                    , accountId = ""
+                    , leaseId = Nothing
+                    , provider = XAIProvider
+                    }
+                , failure = AccountAuthenticationRejected
+                })
+                `shouldReturn` Right freshGrok
 
         it "rejects an unchanged reload after authentication failure" do
             provider <- reloadableFileCredentialProvider
