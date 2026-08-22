@@ -65,7 +65,7 @@ import Agent.CLI.Style
     , roleToolPath
     , solarizedGreen
     , solarizedRed
-    , spinnerFrames
+    , motionGlyphSet
     , style
     )
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
@@ -91,6 +91,15 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
+import Agent.TUI.Motion
+    ( MotionDemand(..)
+    , MotionMode
+    , foregroundIndicator
+    , motionIntervalMicros
+    , nativeProgressAnimationEnabled
+    )
 import System.Console.ANSI (ConsoleLayer(..), SGR(..))
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
@@ -115,6 +124,7 @@ data RenderConfig = RenderConfig
     , renderStartedAt :: !(IORef (Maybe UTCTime))
     , renderToolCalls :: !(IORef (Map.Map Text ToolCall))
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
+    , renderMotionMode :: !MotionMode
     }
 
 data MarkdownStreamState = MarkdownStreamState
@@ -151,7 +161,7 @@ renderEventUnlocked config = \case
         writeIORef config.renderActivityRef activity
         visible <- readIORef config.renderThinkingVisible
         if visible
-            then paintThinkingFrame config 0
+            then paintThinkingFrame config
             else if config.renderShowThinking
                 then startThinkingSpinnerUnlocked config
                 else putTextLn config.renderStderr (roleMuted config.renderColor activity)
@@ -185,7 +195,7 @@ renderEventUnlocked config = \case
         when config.renderShowThinking do
             visible <- readIORef config.renderThinkingVisible
             if visible
-                then paintThinkingFrame config 0
+                then paintThinkingFrame config
                 else startThinkingSpinnerUnlocked config
     -- The append-only renderer cannot safely repaint accumulated snapshots
     -- without duplicating output in terminal scrollback. The retained TUI
@@ -288,11 +298,12 @@ startThinkingSpinnerUnlocked config
         emitNativeProgress config True
         visible <- readIORef config.renderThinkingVisible
         if visible
-            then paintThinkingFrame config 0
+            then paintThinkingFrame config
             else do
                 writeIORef config.renderThinkingVisible True
-                paintThinkingFrame config 0
-                tid <- forkIO (spinnerLoop config 0)
+                paintThinkingFrame config
+                started <- getMonotonicTimeNSec
+                tid <- forkIO (spinnerLoop config started 0)
                 writeIORef config.renderThinkingSpinner (Just tid)
 
 -- | Stop the spinner and erase its in-place status line. Does not commit a
@@ -314,7 +325,9 @@ stopThinkingSpinnerUnlocked config = do
 -- Harmless no-op on terminals that do not implement OSC 9;4.
 emitNativeProgress :: RenderConfig -> Bool -> IO ()
 emitNativeProgress config active
-    | not config.renderNativeProgress = pure ()
+    | not config.renderNativeProgress
+        || not (nativeProgressAnimationEnabled config.renderMotionMode) =
+        pure ()
     | otherwise = do
         inTmux <- isJust <$> lookupEnv "TMUX"
         let seq_ =
@@ -324,27 +337,39 @@ emitNativeProgress config active
             Text.hPutStr config.renderStderr seq_
             hFlush config.renderStderr
 
-spinnerLoop :: RenderConfig -> Int -> IO ()
-spinnerLoop config frame = do
-    threadDelay 80000
+spinnerLoop :: RenderConfig -> Word64 -> Int -> IO ()
+spinnerLoop config startedAt lastKeepaliveBucket = do
+    threadDelay
+        (motionIntervalMicros config.renderMotionMode MotionFast)
     visible <- readIORef config.renderThinkingVisible
     when visible do
-        let frames = spinnerFrames
-            next = (frame + 1) `mod` length frames
+        now <- getMonotonicTimeNSec
+        let elapsedMillis =
+                fromIntegral ((now - startedAt) `div` 1000000)
+            keepaliveBucket = elapsedMillis `div` 5000
         withMVar config.renderLock \_ -> do
             still <- readIORef config.renderThinkingVisible
             when still do
                 -- Ghostty hides OSC 9;4 after ~15s without an update.
-                when (next == 0) (emitNativeProgress config True)
-                paintThinkingFrame config next
-        spinnerLoop config next
+                when (keepaliveBucket > lastKeepaliveBucket) $
+                    emitNativeProgress config True
+                paintThinkingFrameAt config (monotonicMillis now)
+        spinnerLoop config startedAt keepaliveBucket
 
-paintThinkingFrame :: RenderConfig -> Int -> IO ()
-paintThinkingFrame config frame = do
+paintThinkingFrame :: RenderConfig -> IO ()
+paintThinkingFrame config = do
+    now <- getMonotonicTimeNSec
+    paintThinkingFrameAt config (monotonicMillis now)
+
+paintThinkingFrameAt :: RenderConfig -> Int -> IO ()
+paintThinkingFrameAt config motionMillis = do
     activity <- readIORef config.renderActivityRef
     elapsed <- thinkingElapsed config
-    let frames = spinnerFrames
-        glyph = frames !! (frame `mod` length frames)
+    let glyph =
+            foregroundIndicator
+                motionGlyphSet
+                config.renderMotionMode
+                motionMillis
         line =
             formatActivityLine
                 config.renderColor
@@ -354,6 +379,10 @@ paintThinkingFrame config frame = do
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
+
+monotonicMillis :: Word64 -> Int
+monotonicMillis now =
+    fromIntegral (now `div` 1000000)
 
 thinkingElapsed :: RenderConfig -> IO Double
 thinkingElapsed config = do

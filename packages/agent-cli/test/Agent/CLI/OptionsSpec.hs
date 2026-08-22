@@ -3,6 +3,7 @@ module Agent.CLI.OptionsSpec (spec) where
 import Agent.CLI.Options
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
+import Agent.TUI.Motion (MotionMode(..))
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -122,6 +123,18 @@ spec = do
             parseArgs ["--fullscreen", "--minimal"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optScreenMode = ScreenMinimal })
+
+        it "parses full, reduced, and disabled motion policies" do
+            parseArgs ["--motion", "full"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optMotionMode = MotionFull })
+            parseArgs ["--motion", "REDUCED"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optMotionMode = MotionReduced })
+            parseArgs ["--motion", "off"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optMotionMode = MotionOff })
+            parseArgs ["--motion", "fast"] `shouldSatisfy` isLeft
 
         it "parses --skills and --no-skills" do
             parseArgs ["--no-skills", "-p", "hi"]

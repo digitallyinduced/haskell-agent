@@ -81,6 +81,12 @@ OpenAI sessions compact automatically at the selected model's default context
 threshold. Pass `--compact-threshold N` to override it in estimated tokens, for
 example `--model gpt-5.6-luna --compact-threshold 120000`.
 
+Terminal animation is controlled independently of color with
+`--motion full|reduced|off`. `reduced` keeps stable semantic glyphs with
+coarser elapsed-time updates; `off` removes cosmetic animation and retains only
+one-second semantic timer refreshes. Terminal-native indeterminate progress is
+also disabled outside full-motion mode.
+
 Ghostty receives native progress, notifications, semantic turn boundaries,
 working-directory updates, inline images, synchronized picker redraws, and
 terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the

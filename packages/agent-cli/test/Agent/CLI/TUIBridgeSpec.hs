@@ -12,6 +12,7 @@ import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
+import Agent.TUI.Motion (MotionMode(..))
 import Control.Monad (replicateM_)
 import System.Timeout (timeout)
 import qualified Graphics.Vty as V
@@ -24,9 +25,8 @@ spec = describe "fullscreen TUI bridge" do
         eventFollows (UiErrorMessage "failed") `shouldBe` True
         eventFollows (UiSetDraft "draft" 5) `shouldBe` False
 
-    it "starts, refreshes, and clears native terminal progress" do
+    it "starts and clears native terminal progress" do
         let running = reduceUi (UiLoop TurnStarted) initialUiState
-            refresh = running { uiFrame = 10 }
             toolCall =
                 functionToolCall
                     "tool-1"
@@ -44,19 +44,19 @@ spec = describe "fullscreen TUI bridge" do
                         (TurnFinished
                             (emptyTurnOutput "r2" [] Nothing)))
                     running
-        nativeProgressSignal (UiLoop TurnStarted) running
-            `shouldBe` Just True
-        nativeProgressSignal UiTick refresh
+        nativeProgressSignal False (UiLoop TurnStarted) running
             `shouldBe` Just True
         nativeProgressSignal
+            False
             (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing)))
             finished
             `shouldBe` Just False
         nativeProgressSignal
+            False
             (UiLoop (TurnFinished (emptyTurnOutput "r1" [toolCall] Nothing)))
             continuing
             `shouldBe` Just True
-        nativeProgressSignal (UiTurnEnded BlockCancelled) running
+        nativeProgressSignal False (UiTurnEnded BlockCancelled) running
             `shouldBe` Just False
 
     it "coalesces adjacent streaming updates without merging boundaries" do
@@ -72,7 +72,6 @@ spec = describe "fullscreen TUI bridge" do
             (UiLoop (ActivityUpdated "connecting"))
             (UiLoop (ActivityUpdated "streaming"))
             `shouldBe` Just (UiLoop (ActivityUpdated "streaming"))
-        mergeUiEvents UiTick UiTick `shouldBe` Just UiTick
         mergeUiEvents
             (UiLoop (TextDelta "answer"))
             (UiLoop
@@ -97,6 +96,7 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (pure ()))
             (pure ())
+            MotionFull
             False
             initialUiState
         completed <- timeout 2000000 $

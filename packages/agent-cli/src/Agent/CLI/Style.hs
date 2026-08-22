@@ -32,6 +32,7 @@ module Agent.CLI.Style
     , glyphCancel
     , glyphSession
     , glyphThink
+    , motionGlyphSet
     , spinnerFrames
     , ColorLevel(..)
     , detectColorLevel
@@ -50,6 +51,10 @@ module Agent.CLI.Style
     , setCliWindowTitle
     ) where
 
+import Agent.TUI.Motion
+    ( MotionGlyphSet(..)
+    , foregroundSpinnerFrames
+    )
 import Data.Colour (Colour)
 import Data.Colour.SRGB (RGB(..), sRGB24, toSRGB24)
 import Data.Text (Text)
@@ -244,11 +249,12 @@ glyphSession = pickGlyph "⧉ " "# "
 glyphThink = pickGlyph "◆ " "* "
 
 spinnerFrames :: [Text]
-spinnerFrames
-    | supportsUnicodeChrome =
-        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    | otherwise =
-        ["|", "/", "-", "\\"]
+spinnerFrames = foregroundSpinnerFrames motionGlyphSet
+
+motionGlyphSet :: MotionGlyphSet
+motionGlyphSet
+    | supportsUnicodeChrome = MotionUnicode
+    | otherwise = MotionAscii
 
 data ColorLevel = ColorNone | ColorBasic | Color256 | ColorTrue
     deriving (Eq, Ord, Show)

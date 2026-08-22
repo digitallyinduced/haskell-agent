@@ -2,12 +2,18 @@
 module Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
+    , advanceCompletionFlashes
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , completionFlashTransitions
     , conversationScrollbarRenderer
+    , elapsedMillisSince
     , emitUiEvent
     , hasQueuedFullscreenInput
+    , motionDemandFor
+    , nativeProgressKeepaliveDue
+    , nextMotionSchedule
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
@@ -21,6 +27,7 @@ module Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , uiEventRestartsMotionSchedule
     , withFullscreenSuspended
     ) where
 
@@ -39,7 +46,8 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     , agentDisplayName
-    , agentEntryTreeLabel
+    , agentEntryTreeLabelWithGlyph
+    , agentStatusGlyph
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview
@@ -54,6 +62,7 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
+import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Terminal (shiftEnterCsiBodies)
 import qualified Agent.TUI.Theme as Theme
@@ -77,6 +86,16 @@ import Agent.Syntax
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
+import Agent.TUI.Motion
+    ( MotionDemand(..)
+    , MotionMode(..)
+    , backgroundIndicator
+    , completionFlashDurationMillis
+    , foregroundIndicator
+    , motionDelayMicros
+    , quietIndicator
+    , waitingIndicator
+    )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -94,11 +113,14 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
     ( STM
     , atomically
+    , check
     , newEmptyTMVarIO
     , newTVarIO
+    , orElse
     , putTMVar
     , readTVar
     , readTMVar
+    , registerDelay
     , retry
     , writeTVar
     )
@@ -116,6 +138,7 @@ import Data.IORef
     )
 import Data.List (find, findIndex, intersperse, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
@@ -123,6 +146,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
@@ -143,6 +168,7 @@ newFullscreenRuntime
     -> IO (AgentTarget, [AgentEntry])
     -> (AgentTarget -> IO ())
     -> IO ()
+    -> MotionMode
     -> Bool
     -> UiState
     -> IO FullscreenRuntime
@@ -157,11 +183,13 @@ newFullscreenRuntime
     agentSnapshot
     agentSelect
     firstFrame
+    motionMode
     color
     initial = do
         events <- newBChan 512
         mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
-        running <- newIORef (uiNeedsTick initial)
+        motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
+        motionTickQueued <- newTVarIO False
         imagePreviews <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -183,7 +211,9 @@ newFullscreenRuntime
             , runtimeAgentSnapshot = agentSnapshot
             , runtimeAgentSelect = agentSelect
             , runtimeFirstFrame = firstFrame
-            , runtimeRunning = running
+            , runtimeMotionSchedule = motionSchedule
+            , runtimeMotionTickQueued = motionTickQueued
+            , runtimeMotionMode = motionMode
             , runtimeImagePreviews = imagePreviews
             , runtimeImagePreviewRevision = imagePreviewRevision
             , runtimeImagePreviewVisible = imagePreviewVisible
@@ -316,6 +346,7 @@ runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
+    initialClock <- getMonotonicTimeNSec
     let buildVty = do
             vty <- Vty.mkVty fullscreenVtyConfig
             let output = V.outputIface vty
@@ -360,7 +391,18 @@ runFullscreen runtime workerAction = do
             , appConversationAnchor = Nothing
             , appConversationReflowQueued = False
             , appWindowTitle = Nothing
+            , appMotionElapsedMillis = 0
+            , appCompletionFlashes = Map.empty
+            , appMotionScheduleReset = False
+            , appClockNanos = initialClock
+            , appNativeProgressKeepaliveBucket = 0
             }
+        (initialDemand, initialDelay) =
+            appMotionTiming initialState
+    atomically $
+        writeTVar
+            runtime.runtimeMotionSchedule
+            (initialDemand, initialDelay, 0)
     withAsync workerAction \worker ->
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
@@ -388,17 +430,39 @@ runFullscreen runtime workerAction = do
                                             }
                             wait worker
   where
-    uiTicker = loop (0 :: Int)
+    uiTicker = waitForDemand
       where
-        loop tick = do
-            threadDelay 50000
-            needsTick <- readIORef runtime.runtimeRunning
-            -- Model ticks remain at 10 Hz for elapsed time, completion
-            -- settling, and notice expiry. The empty-state renderer samples
-            -- every second frame for a calmer 5 FPS animation.
-            when (needsTick && tick `mod` 2 == 0) $
-                enqueueAppEvent runtime (AppUi UiTick)
-            loop ((tick + 1) `mod` 20)
+        waitForDemand = do
+            (demand, delayMicros, generation) <- atomically do
+                schedule@(current, _, _) <-
+                    readTVar runtime.runtimeMotionSchedule
+                if current == MotionNone then retry else pure schedule
+            tickActive demand delayMicros generation
+
+        tickActive demand delayMicros generation = do
+            timer <- registerDelay delayMicros
+            outcome <- atomically $
+                (do
+                    current <-
+                        readTVar runtime.runtimeMotionSchedule
+                    check (current /= (demand, delayMicros, generation))
+                    pure (Left current))
+                    `orElse`
+                (do
+                    ready <- readTVar timer
+                    check ready
+                    Right
+                        <$> readTVar runtime.runtimeMotionSchedule)
+            case outcome of
+                Left (MotionNone, _, _) ->
+                    waitForDemand
+                Left (active, nextDelay, nextGeneration) ->
+                    tickActive active nextDelay nextGeneration
+                Right (MotionNone, _, _) ->
+                    waitForDemand
+                Right (active, nextDelay, nextGeneration) -> do
+                    enqueueMotionTick runtime
+                    tickActive active nextDelay nextGeneration
 
     agentTicker previous = do
         threadDelay 500000
@@ -532,12 +596,144 @@ uiFrameDelayMicros = 16000
 uiFrameBatchLimit :: Int
 uiFrameBatchLimit = 256
 
+motionDemandFor
+    :: MotionMode
+    -> Bool
+    -- ^ A permission, question, or approval is waiting on the user.
+    -> Bool
+    -- ^ Background child-agent work remains.
+    -> Bool
+    -- ^ At least one completed block is still flashing.
+    -> UiState
+    -> MotionDemand
+motionDemandFor mode waitingForUser backgroundActive completionFlashing ui =
+    case mode of
+        MotionFull ->
+            maximum
+                [ semanticDemand
+                , if not waitingForUser && ui.uiRunning
+                    then MotionFast
+                    else MotionNone
+                , if waitingForUser
+                    then MotionSlow
+                    else MotionNone
+                , if not waitingForUser && progressNoticeActive ui
+                    then MotionFast
+                    else MotionNone
+                , if completionFlashing
+                    then MotionFast
+                    else MotionNone
+                , if backgroundActive
+                    || conversationIsEmpty ui
+                    then MotionSlow
+                    else MotionNone
+                ]
+        MotionReduced ->
+            maximum
+                [ semanticDemand
+                , if completionFlashing
+                    then MotionSlow
+                    else MotionNone
+                ]
+        MotionOff ->
+            semanticDemand
+  where
+    semanticDemand =
+        if uiNeedsTick ui then MotionSlow else MotionNone
+
+appMotionDemand :: AppState -> MotionDemand
+appMotionDemand state =
+    motionDemandFor
+        state.appRuntime.runtimeMotionMode
+        (userActionPending state)
+        (hasBackgroundActivity state.appAgentEntries)
+        (not (Map.null state.appCompletionFlashes))
+        state.appUi
+
+appMotionTiming :: AppState -> (MotionDemand, Int)
+appMotionTiming state =
+    ( demand
+    , motionDelayMicros
+        state.appRuntime.runtimeMotionMode
+        demand
+        (appNextDeadlineMillis state)
+    )
+  where
+    demand = appMotionDemand state
+
+appNextDeadlineMillis :: AppState -> Maybe Int
+appNextDeadlineMillis state =
+    minimumMaybe $
+        maybeToList (uiNextDeadlineMillis state.appUi)
+            <> Map.elems state.appCompletionFlashes
+  where
+    maybeToList = maybe [] pure
+    minimumMaybe [] = Nothing
+    minimumMaybe values = Just (minimum values)
+
+userActionPending :: AppState -> Bool
+userActionPending state =
+    isJust state.appTextPrompt
+        || isJust state.appChoice
+        || isJust state.appUi.uiPermission
+
+progressNoticeActive :: UiState -> Bool
+progressNoticeActive ui =
+    maybe False ((== NoticeProgress) . (.noticeKind)) ui.uiNotice
+
+hasBackgroundActivity :: [AgentEntry] -> Bool
+hasBackgroundActivity =
+    any isBackgroundAgentActive
+
+isBackgroundAgentActive :: AgentEntry -> Bool
+isBackgroundAgentActive entry =
+    entry.agentTarget /= AgentRoot
+        && Text.toLower entry.agentStatus `elem` ["pending", "running"]
+
+completionFlashTransitions :: UiState -> UiState -> [BlockId]
+completionFlashTransitions previous next =
+    [ block.blockId
+    | block <- toList next.uiBlocks
+    , Just oldBlock <- [Map.lookup block.blockId previousById]
+    , blockWasLive oldBlock.blockState
+    , block.blockState == BlockComplete
+    , block.blockKind
+        `elem` [BlockThinking, BlockTool, BlockShell, BlockEdit]
+    ]
+  where
+    previousById =
+        Map.fromList
+            [ (block.blockId, block)
+            | block <- toList previous.uiBlocks
+            ]
+    blockWasLive blockState =
+        blockState `elem` [BlockRunning, BlockStreaming]
+
+advanceCompletionFlashes
+    :: Int
+    -> Map.Map BlockId Int
+    -> Map.Map BlockId Int
+advanceCompletionFlashes rawElapsedMillis =
+    Map.mapMaybe \remaining ->
+        let next = remaining - max 0 rawElapsedMillis
+        in if next <= 0 then Nothing else Just next
+
 enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
 enqueueAppEvent runtime event =
     atomically do
         let AppEventMailbox pendingRef = runtime.runtimeMailbox
         pending <- readTVar pendingRef
         writeTVar pendingRef (appendAppEvent event pending)
+
+enqueueMotionTick :: FullscreenRuntime -> IO ()
+enqueueMotionTick runtime =
+    atomically do
+        queued <- readTVar runtime.runtimeMotionTickQueued
+        unless queued do
+            writeTVar runtime.runtimeMotionTickQueued True
+            let AppEventMailbox pendingRef = runtime.runtimeMailbox
+            pending <- readTVar pendingRef
+            writeTVar pendingRef (appendAppEvent AppMotionTick pending)
 
 appendAppEvent :: AppEvent -> Seq PendingAppEvent -> Seq PendingAppEvent
 appendAppEvent event pending = case event of
@@ -577,6 +773,13 @@ appendExactAppEvent
     :: AppEvent
     -> Seq PendingAppEvent
     -> Seq PendingAppEvent
+appendExactAppEvent AppMotionTick pending
+    | any isPendingMotionTick pending =
+        pending
+  where
+    isPendingMotionTick = \case
+        PendingEvent AppMotionTick -> True
+        _ -> False
 appendExactAppEvent event pending =
     case (Seq.viewr pending, event) of
         ( rest :> PendingEvent (AppAgentSnapshot _ _)
@@ -677,11 +880,15 @@ confirmChoiceAt index = do
 activateControl :: Name -> EventM Name AppState ()
 activateControl = \case
     ComposerModel ->
-        Composer.handlePromptControlClick ReplChooseModel
+        Composer.handlePromptControlClick
+            applyLocalUiEventWith
+            ReplChooseModel
     ComposerEffort ->
-        Composer.handleEffortControlClick
+        Composer.handleEffortControlClick applyLocalUiEventWith
     ComposerMode ->
-        Composer.handlePromptControlClick ReplCycleMode
+        Composer.handlePromptControlClick
+            applyLocalUiEventWith
+            ReplCycleMode
     ChoiceRow index ->
         confirmChoiceAt index
     CodeCopy blockId codeIndex ->
@@ -706,31 +913,20 @@ copyCodeBlock blockId codeIndex = do
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
         Nothing ->
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetNotice
-                                (Just
-                                    (warningNotice
-                                        "Code block is no longer available.")))
-                            current.appUi
-                    }
+            applyLocalUiEvent $
+                UiSetNotice $
+                    Just $
+                        warningNotice
+                            "Code block is no longer available."
         Just payload -> do
             copied <- liftIO (state.appRuntime.runtimeCopy payload)
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetNotice
-                                (Just
-                                    (if copied
-                                        then successNotice
-                                            "Copied code block."
-                                        else warningNotice
-                                            "Terminal clipboard is unavailable.")))
-                            current.appUi
-                    }
+            applyLocalUiEvent $
+                UiSetNotice $
+                    Just $
+                        if copied
+                            then successNotice "Copied code block."
+                            else warningNotice
+                                "Terminal clipboard is unavailable."
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -747,6 +943,7 @@ resolveChoice confirmed = do
             { appChoice = Nothing
             , appChoiceReply = Nothing
             }
+    resumeNativeProgressIfRunning
 
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
@@ -834,6 +1031,7 @@ resolveTextPrompt confirmed = do
             { appTextPrompt = Nothing
             , appTextReply = Nothing
             }
+    resumeNativeProgressIfRunning
 
 fullscreenApp :: App AppState AppEvent Name
 fullscreenApp = App
@@ -863,20 +1061,20 @@ drawApp state =
     in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
         (Just prompt, _, _) ->
-            drawTextPrompt prompt : dimmedMainLayers
+            drawTextPrompt state prompt : dimmedMainLayers
         (Nothing, Just choice, _) ->
             drawChoice state choice : dimmedMainLayers
         (Nothing, Nothing, Just permission) ->
-            drawPermission permission : dimmedMainLayers
+            drawPermission state permission : dimmedMainLayers
         (Nothing, Nothing, Nothing) -> interactiveLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
     withAttr Theme.baseAttr $
         vBox
-            [ drawHeader state.appUi
+            [ drawHeader state
             , drawWorkspace state
-            , drawNotice state.appUi
+            , drawNotice state
             , Composer.drawQueuedInputs state.appUi
             , Composer.drawSlashMenu state
             , drawFollowStatus state.appUi
@@ -964,6 +1162,7 @@ drawWorkspace state =
                                     hLimit agentPaneWidth $
                                         padLeft (Pad 1) $
                                             drawAgentPane
+                                                state
                                                 (agentPaneEntryLimit
                                                     context.availHeight)
                                                 state.appAgentSelected
@@ -978,7 +1177,7 @@ drawConversationPane state
         padLeftRight 2 $
             vBox
                 [ drawTranscript state
-                , drawEmptyConversation (state.appUi.uiFrame `div` 2)
+                , drawEmptyConversation state
                 ]
     | otherwise =
         withVScrollBarRenderer conversationScrollbarRenderer $
@@ -1025,12 +1224,13 @@ agentPaneEntryLimit availableHeight =
     max 1 (min 12 (availableHeight - 9))
 
 drawAgentPane
-    :: Int
+    :: AppState
+    -> Int
     -> AgentTarget
     -> Maybe AgentTarget
     -> [AgentEntry]
     -> Widget Name
-drawAgentPane entryLimit selected hovered entries =
+drawAgentPane state entryLimit selected hovered entries =
     clickable AgentPane $
         withAttr Theme.borderAttr $
             withBorderStyle unicodeRounded $
@@ -1078,8 +1278,22 @@ drawAgentPane entryLimit selected hovered entries =
                     findIndex ((== entry.agentTarget) . (.agentTarget)) ordered
             marker =
                 if entry.agentTarget == selected then "› " else "  "
+            statusGlyph
+                | isBackgroundAgentActive entry =
+                    quietIndicator
+                        motionGlyphSet
+                        state.appRuntime.runtimeMotionMode
+                        state.appMotionElapsedMillis
+                | otherwise =
+                    agentStatusGlyph entry.agentStatus
             row = hBox
-                [ txt (marker <> agentEntryTreeLabel ordered index entry)
+                [ txt
+                    (marker
+                        <> agentEntryTreeLabelWithGlyph
+                            statusGlyph
+                            ordered
+                            index
+                            entry)
                 , fill ' '
                 ]
             styled =
@@ -1100,7 +1314,7 @@ agentPopoverLayers state =
                 ((== hover.agentHoverTarget) . (.agentTarget))
                 state.appAgentEntries of
                 Nothing -> []
-                Just entry -> [positionAgentPopover hover entry]
+                Just entry -> [positionAgentPopover state hover entry]
 
 agentPopoverPreferredWidth :: Int
 agentPopoverPreferredWidth = 40
@@ -1114,8 +1328,8 @@ agentPopoverHeight = 9
 agentPopoverGap :: Int
 agentPopoverGap = 1
 
-positionAgentPopover :: AgentHover -> AgentEntry -> Widget Name
-positionAgentPopover hover entry =
+positionAgentPopover :: AppState -> AgentHover -> AgentEntry -> Widget Name
+positionAgentPopover state hover entry =
     Widget Fixed Fixed do
         context <- getContext
         let screenWidth = max 0 context.availWidth
@@ -1148,10 +1362,10 @@ positionAgentPopover hover entry =
             else
                 render $
                     translateBy (Location (x, y)) $
-                        drawAgentPopover placeLeft width height entry
+                        drawAgentPopover state placeLeft width height entry
 
-drawAgentPopover :: Bool -> Int -> Int -> AgentEntry -> Widget Name
-drawAgentPopover placeLeft width height entry =
+drawAgentPopover :: AppState -> Bool -> Int -> Int -> AgentEntry -> Widget Name
+drawAgentPopover state placeLeft width height entry =
     clickable (AgentPopover entry.agentTarget) surface
   where
     surface
@@ -1180,6 +1394,7 @@ drawAgentPopover placeLeft width height entry =
                                             (vLimit 1 (fill ' '))
                                             (map
                                                 (drawAgentStep
+                                                    state
                                                     (max 1 (width - 4)))
                                                 steps)
                                             <> [fill ' ']
@@ -1195,13 +1410,13 @@ drawAgentPopover placeLeft width height entry =
                 ]
             recent -> recent
 
-drawAgentStep :: Int -> AgentStep -> Widget Name
-drawAgentStep width step =
+drawAgentStep :: AppState -> Int -> AgentStep -> Widget Name
+drawAgentStep state width step =
     vLimit 2 $
         vBox
             [ hBox
                 [ withAttr (agentStepAttr step.agentStepState) $
-                    txt (agentStepGlyph step.agentStepState)
+                    txt (agentStepGlyph state step.agentStepState)
                 , txt " "
                 , withAttr Theme.assistantAttr $
                     txt
@@ -1219,9 +1434,13 @@ drawAgentStep width step =
                                 step.agentStepDetail))
             ]
 
-agentStepGlyph :: AgentStepState -> Text
-agentStepGlyph = \case
-    AgentStepRunning -> "●"
+agentStepGlyph :: AppState -> AgentStepState -> Text
+agentStepGlyph state = \case
+    AgentStepRunning ->
+        quietIndicator
+            motionGlyphSet
+            state.appRuntime.runtimeMotionMode
+            state.appMotionElapsedMillis
     AgentStepCompleted -> "✓"
     AgentStepFailed -> "✕"
     AgentStepInfo -> "◆"
@@ -1263,12 +1482,12 @@ agentEntryWindow count selected entries
                 (selectedIndex - count `div` 2)
                 (length entries - count)
 
-drawHeader :: UiState -> Widget Name
+drawHeader :: AppState -> Widget Name
 drawHeader state =
     withAttr Theme.headerAttr $
         padLeftRight 2 $
             hBox
-                [ hLimitPercent 68 (drawRepositoryHeader state)
+                [ hLimitPercent 68 (drawRepositoryHeader state.appUi)
                 , vLimit 1 (fill ' ')
                 , drawHeaderRight state
                 ]
@@ -1289,35 +1508,66 @@ repositoryHeaderText branch cwd =
     Text.intercalate "  " $
         filter (not . Text.null) [branch, cwd]
 
-drawHeaderRight :: UiState -> Widget Name
+drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     hBox
-        [ withAttr activityAttr (txt activity)
+        [ activityWidget
         , withAttr Theme.mutedAttr (txt elapsed)
         , withAttr Theme.mutedAttr (txt usage)
         ]
   where
+    ui = state.appUi
+    waiting = userActionPending state
+    background = hasBackgroundActivity state.appAgentEntries
+    mode = state.appRuntime.runtimeMotionMode
+    motionMillis = state.appMotionElapsedMillis
+    activityWidget
+        | waiting =
+            hBox
+                [ withAttr (waitingIndicatorAttr state) $
+                    txt (waitingIndicator motionGlyphSet mode motionMillis)
+                , withAttr Theme.thinkingAttr (txt " Waiting for you")
+                ]
+        | otherwise =
+            withAttr activityAttr (txt activity)
     activityAttr
-        | state.uiRunning = Theme.thinkingAttr
-        | state.uiCompletionTicks > 0 = Theme.successAttr
+        | ui.uiRunning = Theme.thinkingAttr
+        | ui.uiCompletionRemainingMillis > 0 = Theme.successAttr
+        | background = Theme.toolAttr
         | otherwise = Theme.mutedAttr
-    activity =
-        (if state.uiRunning then spinnerFrame state.uiFrame <> " " else "")
-            <> state.uiActivity
+    activity
+        | ui.uiRunning =
+            foregroundIndicator motionGlyphSet mode motionMillis
+                <> " "
+                <> ui.uiActivity
+        | ui.uiCompletionRemainingMillis > 0 =
+            ui.uiActivity
+        | background =
+            backgroundIndicator motionGlyphSet mode motionMillis
+                <> " Background work"
+        | otherwise =
+            ui.uiActivity
     elapsed =
-        if state.uiRunning
+        if ui.uiRunning
             then " · "
                 <> formatElapsed
-                    (fromIntegral state.uiElapsedTenths / 10)
+                    (fromIntegral ui.uiElapsedMillis / 1000)
             else ""
-    formattedUsage = formatTokenUsage state.uiPrompt.promptUsage
+    formattedUsage = formatTokenUsage ui.uiPrompt.promptUsage
     usage =
         if Text.null formattedUsage then "" else " │ " <> formattedUsage
 
-spinnerFrame :: Int -> Text
-spinnerFrame frame =
-    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        !! (frame `mod` 10)
+waitingIndicatorAttr :: AppState -> AttrName
+waitingIndicatorAttr state =
+    case waitingIndicator
+        motionGlyphSet
+        state.appRuntime.runtimeMotionMode
+        state.appMotionElapsedMillis of
+        "◇" -> Theme.waitingDimAttr
+        "." -> Theme.waitingDimAttr
+        "◈" -> Theme.waitingMidAttr
+        "*" -> Theme.waitingMidAttr
+        _ -> Theme.thinkingAttr
 
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
@@ -1366,9 +1616,16 @@ conversationReserveWidgets = \case
             ]
     _ -> []
 
-drawEmptyConversation :: Int -> Widget Name
-drawEmptyConversation frame =
+drawEmptyConversation :: AppState -> Widget Name
+drawEmptyConversation state =
     center (lambdaArtWidget frame)
+  where
+    frame
+        | userActionPending state = 0
+        | otherwise = case state.appRuntime.runtimeMotionMode of
+            MotionFull -> state.appMotionElapsedMillis `div` 160
+            MotionReduced -> 0
+            MotionOff -> 0
 
 data LambdaComposition = LambdaComposition
     { lambdaUpperHeight :: !Int
@@ -1645,20 +1902,20 @@ drawBlock state block =
                             (codeBlockHeader state block.blockId)
                             block.blockBody)
             BlockThinking ->
-                accentBlock Theme.thinkingAttr
-                    (blockStateGlyph ui block <> block.blockTitle)
+                accentBlock (thinkingBlockAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
-                accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
+                accentBlock (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockShell ->
-                accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
+                accentBlock (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
                     (visibleShellBody block)
             BlockEdit ->
-                accentBlock (statusAttr block.blockState)
-                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
+                accentBlock (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
                 withAttr Theme.mutedAttr (txtWrap block.blockBody)
@@ -1679,7 +1936,7 @@ drawBlock state block =
                             (txt (if highlighted then "❯ " else "  "))
                         , framed
                         ]
-    in if cacheableBlock block
+    in if cacheableBlock state block
         then cached
             (ConversationBlockCache
                 block.blockId
@@ -1716,19 +1973,34 @@ codeCopyCacheState state blockId =
                     )
         _ -> Nothing
 
-cacheableBlock :: UiBlock -> Bool
-cacheableBlock block =
+cacheableBlock :: AppState -> UiBlock -> Bool
+cacheableBlock state block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        && not (blockFlashing state block)
 
-blockStateGlyph :: UiState -> UiBlock -> Text
+blockStateGlyph :: AppState -> UiBlock -> Text
 blockStateGlyph state block = case block.blockState of
-    BlockRunning -> spinnerFrame state.uiFrame <> " "
-    BlockStreaming -> spinnerFrame state.uiFrame <> " "
+    BlockRunning -> liveGlyph
+    BlockStreaming -> liveGlyph
     BlockComplete -> "✓ "
     BlockFailed -> "✗ "
     BlockDenied -> "⊘ "
     BlockCancelled -> "⊘ "
+  where
+    liveGlyph
+        | userActionPending state =
+            waitingIndicator
+                motionGlyphSet
+                MotionOff
+                state.appMotionElapsedMillis
+                <> " "
+        | otherwise =
+            foregroundIndicator
+                motionGlyphSet
+                state.appRuntime.runtimeMotionMode
+                state.appMotionElapsedMillis
+                <> " "
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
@@ -1769,29 +2041,54 @@ detailSuffix block
     | Text.null (Text.strip block.blockDetail) = ""
     | otherwise = "  " <> block.blockDetail
 
-statusAttr :: BlockState -> AttrName
-statusAttr state = case state of
-    BlockFailed -> Theme.errorAttr
-    BlockCancelled -> Theme.mutedAttr
-    BlockDenied -> Theme.errorAttr
-    BlockComplete -> Theme.successAttr
-    BlockRunning -> Theme.toolAttr
-    BlockStreaming -> Theme.thinkingAttr
+statusAttr :: AppState -> UiBlock -> AttrName
+statusAttr state block
+    | blockFlashing state block
+    , block.blockState == BlockComplete =
+        Theme.completionFlashAttr
+    | otherwise = case block.blockState of
+        BlockFailed -> Theme.errorAttr
+        BlockCancelled -> Theme.mutedAttr
+        BlockDenied -> Theme.errorAttr
+        BlockComplete -> Theme.successAttr
+        BlockRunning -> Theme.toolAttr
+        BlockStreaming -> Theme.thinkingAttr
 
-drawNotice :: UiState -> Widget Name
-drawNotice state = case state.uiNotice of
+thinkingBlockAttr :: AppState -> UiBlock -> AttrName
+thinkingBlockAttr state block
+    | blockFlashing state block
+    , block.blockState == BlockComplete =
+        Theme.completionFlashAttr
+    | otherwise =
+        Theme.thinkingAttr
+
+blockFlashing :: AppState -> UiBlock -> Bool
+blockFlashing state block =
+    Map.member block.blockId state.appCompletionFlashes
+
+drawNotice :: AppState -> Widget Name
+drawNotice state = case state.appUi.uiNotice of
     Nothing -> emptyWidget
     Just notice ->
-        let (attr, prefix) = noticePresentation state.uiFrame notice.noticeKind
+        let (attr, prefix) = noticePresentation state notice.noticeKind
         in withAttr attr $
             padLeftRight 2 (txtWrap (prefix <> notice.noticeText))
 
-noticePresentation :: Int -> NoticeKind -> (AttrName, Text)
-noticePresentation frame = \case
+noticePresentation :: AppState -> NoticeKind -> (AttrName, Text)
+noticePresentation state = \case
     NoticeInfo -> (Theme.footerAttr, "• ")
     NoticeSuccess -> (Theme.successAttr, "✓ ")
     NoticeWarning -> (Theme.thinkingAttr, "⚠ ")
-    NoticeProgress -> (Theme.thinkingAttr, spinnerFrame frame <> " ")
+    NoticeProgress ->
+        ( Theme.thinkingAttr
+        , foregroundIndicator
+            motionGlyphSet
+            (if userActionPending state
+                then MotionOff
+                else state.appRuntime.runtimeMotionMode)
+            state.appMotionElapsedMillis
+            <> " "
+        )
     NoticeError -> (Theme.errorAttr, "✗ ")
 
 drawFollowStatus :: UiState -> Widget Name
@@ -1825,13 +2122,14 @@ drawFooter state =
                         | otherwise ->
                             "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
 
-drawPermission :: PermissionOverlay -> Widget Name
-drawPermission permission =
+drawPermission :: AppState -> PermissionOverlay -> Widget Name
+drawPermission state permission =
     centerLayer $
         hLimitPercent 78 $
             overrideAttr Border.borderAttr Theme.borderActiveAttr $
                 withBorderStyle unicodeRounded $
-                    borderWithLabel (txt " Permission ") $
+                    borderWithLabel
+                        (waitingOverlayLabel state "Permission") $
                         padAll 1 $
                             vBox
                                 [ txtWrap ("Allow " <> permission.permissionSummary <> "?")
@@ -1864,7 +2162,7 @@ drawChoice appState choice =
                 overrideAttr Border.borderAttr Theme.borderActiveAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
-                            (txt (" " <> choice.choiceTitle <> " ")) $
+                            (waitingOverlayLabel appState choice.choiceTitle) $
                             padAll 1 $
                                 vBox
                                     [ if Text.null (Text.strip choice.choiceBody)
@@ -1887,15 +2185,28 @@ drawChoice appState choice =
         max 0 (min choice.choiceIndex (max 0 (count - 14)))
     rows = take 14 (drop start choice.choiceRows)
 
-drawTextPrompt :: TextOverlay -> Widget Name
-drawTextPrompt prompt =
+waitingOverlayLabel :: AppState -> Text -> Widget Name
+waitingOverlayLabel state label =
+    hBox
+        [ txt " "
+        , withAttr (waitingIndicatorAttr state) $
+            txt
+                (waitingIndicator
+                    motionGlyphSet
+                    state.appRuntime.runtimeMotionMode
+                    state.appMotionElapsedMillis)
+        , txt (" " <> label <> " ")
+        ]
+
+drawTextPrompt :: AppState -> TextOverlay -> Widget Name
+drawTextPrompt state prompt =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
                 overrideAttr Border.borderAttr Theme.borderAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
-                            (txt (" " <> prompt.textTitle <> " ")) $
+                            (waitingOverlayLabel state prompt.textTitle) $
                             padAll 1 $
                                 vBox
                                     [ if Text.null (Text.strip prompt.textBody)
@@ -1957,10 +2268,6 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
-    liftIO $
-        writeIORef
-            final.appRuntime.runtimeRunning
-            (uiNeedsTick final.appUi)
     case nativeProgress of
         Nothing -> pure ()
         Just active ->
@@ -1974,13 +2281,6 @@ handleUiEvents uiEvents = do
                 queueConversationReflow
             Nothing ->
                 vScrollToEnd (viewportScroll ConversationViewport)
-    -- An idle tick is the only batch that can leave the presentation
-    -- unchanged. Avoid comparing complete 'UiState' values here: that walks
-    -- the full conversation, including large streamed block bodies, on every
-    -- animation tick.
-    when
-        (all (== UiTick) uiEvents && not (uiNeedsTick initial.appUi))
-        continueWithoutRedraw
   where
     applyOne
         renderedContentHeight
@@ -1994,7 +2294,10 @@ handleUiEvents uiEvents = do
                             uiEvent
                             state
                 progress =
-                    case Bridge.nativeProgressSignal uiEvent next.appUi of
+                    case Bridge.nativeProgressSignal
+                        (userActionPending next)
+                        uiEvent
+                        next.appUi of
                         Nothing -> previousProgress
                         signal -> signal
                 follows =
@@ -2028,11 +2331,173 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
 
 applyUiEvent :: UiEvent -> AppState -> AppState
 applyUiEvent uiEvent state =
-    Composer.applyComposerUiEvent uiEvent $
-        state { appUi = reduceUi uiEvent state.appUi }
+    let
+        previousUi = state.appUi
+        nextUi = reduceUi uiEvent previousUi
+        retainedFlashes =
+            case uiEvent of
+                UiConversationCleared ->
+                    Map.empty
+                UiTurnRestarted ->
+                    retainExistingFlashes
+                        nextUi
+                        state.appCompletionFlashes
+                _ ->
+                    state.appCompletionFlashes
+        transitionIds
+            | uiEventCanCompleteBlocks uiEvent =
+                completionFlashTransitions previousUi nextUi
+            | otherwise =
+                []
+        newFlashes =
+            if state.appRuntime.runtimeMotionMode == MotionOff
+                then Map.empty
+                else Map.fromList
+                    [ (blockId, completionFlashDurationMillis)
+                    | blockId <- transitionIds
+                    ]
+        restartSchedule =
+            uiEventRestartsMotionSchedule
+                uiEvent
+                previousUi
+                nextUi
+                newFlashes
+        nextState =
+            state
+                { appUi = nextUi
+                , appCompletionFlashes =
+                    Map.union newFlashes retainedFlashes
+                , appMotionScheduleReset =
+                    state.appMotionScheduleReset || restartSchedule
+                , appNativeProgressKeepaliveBucket =
+                    if nextUi.uiElapsedMillis < previousUi.uiElapsedMillis
+                        then 0
+                        else state.appNativeProgressKeepaliveBucket
+                }
+    in Composer.applyComposerUiEvent uiEvent nextState
+
+retainExistingFlashes
+    :: UiState
+    -> Map.Map BlockId Int
+    -> Map.Map BlockId Int
+retainExistingFlashes ui =
+    Map.filterWithKey
+        (\blockId _ ->
+            any ((== blockId) . (.blockId))
+                (toList ui.uiBlocks))
+
+uiEventCanCompleteBlocks :: UiEvent -> Bool
+uiEventCanCompleteBlocks = \case
+    UiLoop (ToolFinished _) -> True
+    UiLoop (TurnFinished _) -> True
+    UiSetAwaitingInput True -> True
+    UiTurnEnded _ -> True
+    _ -> False
+
+uiEventRestartsMotionSchedule
+    :: UiEvent
+    -> UiState
+    -> UiState
+    -> Map.Map BlockId Int
+    -> Bool
+uiEventRestartsMotionSchedule event previous next newFlashes =
+    explicitReset
+        || (previous.uiCompletionRemainingMillis == 0
+            && next.uiCompletionRemainingMillis > 0)
+        || not (Map.null newFlashes)
+  where
+    explicitReset = case event of
+        UiLoop TurnStarted -> True
+        UiSetNotice (Just _) -> True
+        UiInputPromoted _ -> True
+        UiTurnRestarted -> True
+        _ -> False
+
+nextMotionSchedule
+    :: Bool
+    -> MotionDemand
+    -> Int
+    -> (MotionDemand, Int, Int)
+    -> (MotionDemand, Int, Int)
+nextMotionSchedule
+    resetSchedule
+    demand
+    delayMicros
+    current@(currentDemand, currentDelay, generation)
+    | resetSchedule
+        || currentDemand /= demand
+        || currentDelay /= delayMicros =
+        (demand, delayMicros, generation + 1)
+    | otherwise =
+        current
+
+elapsedMillisSince :: Word64 -> Word64 -> (Int, Word64)
+elapsedMillisSince previous now
+    | now <= previous =
+        (0, previous)
+    | otherwise =
+        let elapsedMillis = (now - previous) `div` 1000000
+        in
+        ( fromIntegral elapsedMillis
+        , previous + elapsedMillis * 1000000
+        )
+
+advanceAppTime :: Word64 -> AppState -> AppState
+advanceAppTime now state =
+    let
+        (elapsedMillis, nextClock) =
+            elapsedMillisSince state.appClockNanos now
+    in state
+        { appUi = advanceUiTime elapsedMillis state.appUi
+        , appMotionElapsedMillis =
+            state.appMotionElapsedMillis + elapsedMillis
+        , appCompletionFlashes =
+            advanceCompletionFlashes
+                elapsedMillis
+                state.appCompletionFlashes
+        , appClockNanos = nextClock
+        }
+
+advanceAppClockNow :: EventM Name AppState ()
+advanceAppClockNow = do
+    now <- liftIO getMonotonicTimeNSec
+    modify' (advanceAppTime now)
+
+applyLocalUiEvent :: UiEvent -> EventM Name AppState ()
+applyLocalUiEvent event =
+    applyLocalUiEventWith event id
+
+applyLocalUiEventWith
+    :: UiEvent
+    -> (AppState -> AppState)
+    -> EventM Name AppState ()
+applyLocalUiEventWith event update = do
+    advanceAppClockNow
+    modify' (update . applyUiEvent event)
+
+nativeProgressKeepaliveDue :: Bool -> Int -> UiState -> Bool
+nativeProgressKeepaliveDue blocked previousBucket ui =
+    not blocked
+        && ui.uiRunning
+        && ui.uiElapsedMillis `div` 5000 > previousBucket
+
+refreshNativeProgressKeepalive :: EventM Name AppState ()
+refreshNativeProgressKeepalive = do
+    state <- get
+    let bucket = state.appUi.uiElapsedMillis `div` 5000
+    when
+        (nativeProgressKeepaliveDue
+            (userActionPending state)
+            state.appNativeProgressKeepaliveBucket
+            state.appUi) do
+        liftIO (state.appRuntime.runtimeNativeProgress True)
+        modify' \current ->
+            current { appNativeProgressKeepaliveBucket = bucket }
 
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
+    advanceAppClockNow
+    when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     state <- get
     let visible =
@@ -2050,16 +2515,53 @@ handleEvent event = do
             modifyIORef'
                 state.appRuntime.runtimeImagePreviewRevision
                 (+ 1)
+    syncMotionDemand
+  where
+    isMotionTick = \case
+        AppEvent AppMotionTick -> True
+        _ -> False
+
+syncMotionDemand :: EventM Name AppState ()
+syncMotionDemand = do
+    advanceAppClockNow
+    state <- get
+    let
+        (demand, delayMicros) = appMotionTiming state
+        resetSchedule = state.appMotionScheduleReset
+    liftIO $
+        atomically do
+            current <-
+                readTVar state.appRuntime.runtimeMotionSchedule
+            let next =
+                    nextMotionSchedule
+                        resetSchedule
+                        demand
+                        delayMicros
+                        current
+            when (next /= current) $
+                writeTVar
+                    state.appRuntime.runtimeMotionSchedule
+                    next
+    modify' \current ->
+        current
+            { appMotionScheduleReset = False }
 
 handleEventInner :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEventInner event = case event of
+    AppEvent AppMotionTick -> do
+        state <- get
+        liftIO $
+            atomically $
+                writeTVar
+                    state.appRuntime.runtimeMotionTickQueued
+                    False
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
     AppEvent (AppSetSkillCommands skills) -> do
         state <- get
         if state.appSkillCommands == skills
-            then continueWithoutRedraw
+            then pure ()
             else modify' \current -> current
                 { appSkillCommands = skills
                 , appSlashIndex = 0
@@ -2103,7 +2605,7 @@ handleEventInner event = case event of
                 Bridge.normalizeAgentSelection selected entries
         if state.appAgentSelected == normalized
             && state.appAgentEntries == entries
-            then continueWithoutRedraw
+            then pure ()
             else do
                 modify' \current ->
                     current
@@ -2139,14 +2641,19 @@ handleEventInner event = case event of
         modify' \state ->
             state { appConversationReflowQueued = False }
         reflowConversation
-    AppEvent (AppAskPermission summary reply) ->
-        modify' \state ->
-            state
-                { appUi = reduceUi (UiPermissionShown summary) state.appUi
-                , appPermissionReply = Just reply
-                , appAgentHover = Nothing
-                }
+    AppEvent (AppAskPermission summary reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        applyLocalUiEventWith
+            (UiPermissionShown summary)
+            \current ->
+                current
+                    { appPermissionReply = Just reply
+                    , appAgentHover = Nothing
+                    }
     AppEvent (AppAskChoice title body initial rows reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
             state
                 { appChoice = Just ChoiceOverlay
@@ -2161,6 +2668,8 @@ handleEventInner event = case event of
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppAskText title body initial reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
             state
                 { appTextPrompt = Just TextOverlay
@@ -2213,16 +2722,19 @@ handleEventInner event = case event of
                             (CodeCopy blockId codeIndex)
                     (SlashRow index, V.BLeft) ->
                         Composer.activateSlashAt
+                            applyLocalUiEventWith
                             handleCtrlC
                             scrollConversationPage
                             index
                     (SlashRow _, V.BScrollUp) ->
                         Composer.handleComposerKey
+                            applyLocalUiEventWith
                             handleCtrlC
                             scrollConversationPage
                             (V.EvKey V.KUp [])
                     (SlashRow _, V.BScrollDown) ->
                         Composer.handleComposerKey
+                            applyLocalUiEventWith
                             handleCtrlC
                             scrollConversationPage
                             (V.EvKey V.KDown [])
@@ -2331,8 +2843,7 @@ handlePermissionKey = \case
     _ -> pure ()
   where
     movePermission delta =
-        modify' \state ->
-            state { appUi = reduceUi (UiPermissionMoved delta) state.appUi }
+        applyLocalUiEvent (UiPermissionMoved delta)
 
 permissionChoiceAt :: Int -> PermissionChoice
 permissionChoiceAt = \case
@@ -2349,11 +2860,22 @@ resolvePermission choice = do
         Nothing -> pure ()
         Just reply ->
             liftIO $ atomically (putTMVar reply (Just choice))
-    modify' \current ->
-        current
-            { appUi = reduceUi UiPermissionHidden current.appUi
-            , appPermissionReply = Nothing
-            }
+    applyLocalUiEventWith UiPermissionHidden \current ->
+        current { appPermissionReply = Nothing }
+    resumeNativeProgressIfRunning
+
+resumeNativeProgressIfRunning :: EventM Name AppState ()
+resumeNativeProgressIfRunning = do
+    state <- get
+    when
+        (state.appUi.uiRunning
+            && not (userActionPending state)) do
+        liftIO (state.appRuntime.runtimeNativeProgress True)
+        modify' \current ->
+            current
+                { appNativeProgressKeepaliveBucket =
+                    current.appUi.uiElapsedMillis `div` 5000
+                }
 
 handleCtrlC :: EventM Name AppState CtrlCDecision
 handleCtrlC = do
@@ -2361,27 +2883,17 @@ handleCtrlC = do
     decision <- liftIO state.appRuntime.runtimeCtrlC
     case decision of
         SoftCancel ->
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetNotice
-                                (Just
-                                    (warningNotice
-                                        "Interrupted; press Ctrl-C again to exit.")))
-                            current.appUi
-                    }
+            applyLocalUiEvent $
+                UiSetNotice $
+                    Just $
+                        warningNotice
+                            "Interrupted; press Ctrl-C again to exit."
         WarnExit ->
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetNotice
-                                (Just
-                                    (warningNotice
-                                        "Press Ctrl-C again to exit.")))
-                            current.appUi
-                    }
+            applyLocalUiEvent $
+                UiSetNotice $
+                    Just $
+                        warningNotice
+                            "Press Ctrl-C again to exit."
         ForceExit ->
             liftIO (throwIO UserInterrupt)
     pure decision
@@ -2390,6 +2902,7 @@ handleNormalKey :: V.Event -> EventM Name AppState ()
 handleNormalKey event
     | Bridge.isSendNowKey event =
         Composer.handleComposerKey
+            applyLocalUiEventWith
             handleCtrlC
             scrollConversationPage
             event
@@ -2405,6 +2918,7 @@ handleNormalKey event
                     FocusScrollback -> handleScrollbackKey event
                     FocusComposer ->
                         Composer.handleComposerKey
+                            applyLocalUiEventWith
                             handleCtrlC
                             scrollConversationPage
                             event
@@ -2474,21 +2988,11 @@ handleMouseDown name button =
         V.BScrollDown -> scrollConversationBy mouseScrollLines
         V.BLeft -> case name of
             ConversationBlock ident ->
-                modify' \state ->
-                    state
-                        { appUi =
-                            reduceUi
-                                (UiFocusChanged FocusScrollback)
-                                (reduceUi (UiSelectBlock ident) state.appUi)
-                        }
+                applyLocalUiEventWith
+                    (UiSelectBlock ident)
+                    (applyUiEvent (UiFocusChanged FocusScrollback))
             ComposerArea ->
-                modify' \state ->
-                    state
-                        { appUi =
-                            reduceUi
-                                (UiFocusChanged FocusComposer)
-                                state.appUi
-                        }
+                applyLocalUiEvent (UiFocusChanged FocusComposer)
             _ -> pure ()
         _ -> pure ()
 
@@ -2530,8 +3034,7 @@ handleScrollbackKey = \case
   where
     scroll = viewportScroll ConversationViewport
     moveBlock delta = do
-        modify' \state ->
-            state { appUi = reduceUi (UiMoveSelection delta) state.appUi }
+        applyLocalUiEvent (UiMoveSelection delta)
         state <- get
         case state.appUi.uiSelectedBlock of
             Just ident -> do
@@ -2539,20 +3042,16 @@ handleScrollbackKey = \case
                 queueConversationReflow
             Nothing -> pure ()
     toggle = do
-        modify' \state ->
-            state { appUi = reduceUi UiToggleSelected state.appUi }
+        applyLocalUiEvent UiToggleSelected
         queueConversationReflow
     focusComposer =
-        modify' \state ->
-            state { appUi = reduceUi (UiFocusChanged FocusComposer) state.appUi }
+        applyLocalUiEvent (UiFocusChanged FocusComposer)
     leaveFollow =
-        modify' \state ->
-            state { appUi = reduceUi (UiSetFollow False) state.appUi }
+        applyLocalUiEvent (UiSetFollow False)
     resumeFollow = do
-        modify' \state ->
+        applyLocalUiEventWith (UiSetFollow True) \state ->
             state
-                { appUi = reduceUi (UiSetFollow True) state.appUi
-                , appConversationAnchor =
+                { appConversationAnchor =
                     Scroll.followConversationTail
                         <$> state.appConversationAnchor
                 }
@@ -2565,19 +3064,14 @@ handleScrollbackKey = \case
             Just block -> do
                 copied <- liftIO $
                     state.appRuntime.runtimeCopy block.blockBody
-                modify' \current ->
-                    current
-                        { appUi =
-                            reduceUi
-                                (UiSetNotice
-                                    (Just
-                                        (if copied
-                                            then successNotice
-                                                "Copied selected block."
-                                            else warningNotice
-                                                "Terminal clipboard is unavailable.")))
-                                current.appUi
-                        }
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            if copied
+                                then successNotice
+                                    "Copied selected block."
+                                else warningNotice
+                                    "Terminal clipboard is unavailable."
 
 scrollConversationPage :: Direction -> EventM Name AppState ()
 scrollConversationPage direction = do
@@ -2625,8 +3119,7 @@ scrollConversationBy amount
 
 setConversationFollow :: Bool -> EventM Name AppState ()
 setConversationFollow follow =
-    modify' \state ->
-        state { appUi = reduceUi (UiSetFollow follow) state.appUi }
+    applyLocalUiEvent (UiSetFollow follow)
 
 conversationUnpaddedContentHeight :: EventM Name AppState Int
 conversationUnpaddedContentHeight =
