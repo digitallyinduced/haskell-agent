@@ -98,7 +98,8 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.CLI.Interrupt
-    ( InterruptState
+    ( CtrlCDecision(..)
+    , InterruptState
     , isWrappedUserInterrupt
     , newInterruptState
     , noteFullscreenCtrlC
@@ -232,6 +233,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenSessionActions
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
@@ -414,6 +416,16 @@ data RunResult
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
 
+data PreparedAgent = PreparedAgent
+    { preparedFullscreen :: !(Maybe FullscreenRuntime)
+    , preparedRun :: !(IO RunResult)
+    }
+
+data PendingTurnPresentation
+    = SubmitPendingTurn
+    | RestartPendingTurn
+    | ContinuePendingTurn
+
 data AgentStepCache = AgentStepCache
     { cachedTranscript :: !(StableName [ResponseItem])
     , cachedVariant :: !(Maybe SubagentStatus)
@@ -431,6 +443,7 @@ data StartupRuntime = StartupRuntime
     , startupStderrTty :: !Bool
     , startupStdinTty :: !Bool
     , startupStdoutTty :: !Bool
+    , startupFullscreenReused :: !Bool
     , startupAgentSnapshot :: !(IORef (IO (AgentTarget, [AgentEntry])))
     , startupAgentSelect :: !(IORef (AgentTarget -> IO ()))
     , startupRestartEffort :: !(IORef (Text -> IO ()))
@@ -558,13 +571,14 @@ runAgentWithRestarts options = do
                 case transition of
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
-                            continueAutomaticFallback failed apiError >>= \case
+                            continueAutomaticFallback
+                                Nothing failed apiError >>= \case
                                 Just next ->
                                     go fullscreenInputs
                                         (applyProviderTransition current next)
                                         (Just next)
                                 Nothing -> do
-                                    reportProviderUnavailable apiError
+                                    reportProviderUnavailable Nothing apiError
                                     pure DevQuit
                     _ -> pure DevQuit
             RunQuit -> pure DevQuit
@@ -722,6 +736,44 @@ runAgent
     -> Maybe ProviderTransition
     -> IO RunResult
 runAgent fullscreenInputs options transition = do
+    prepared <-
+        prepareAgentIteration fullscreenInputs Nothing options transition
+    let runPrepared = case prepared.preparedFullscreen of
+            Nothing -> prepared.preparedRun
+            Just runtime ->
+                runFullscreen runtime $
+                    runFullscreenRestartLoop
+                        fullscreenInputs
+                        runtime
+                        options
+                        transition
+                        prepared.preparedRun
+    outcome <- try @_ @StartupFailure runPrepared
+    result <- either (\(StartupFailure message) -> die message) pure outcome
+    case (prepared.preparedFullscreen, result) of
+        -- The retained screen has been restored before this persistent final
+        -- diagnostic is printed.
+        (Just _, RunProviderStartFailed apiError) -> do
+            reportProviderUnavailable Nothing apiError
+            pure RunQuit
+        _ -> pure result
+
+-- | Prepare one provider-specific backend. The outer Brick worker loops over
+-- these prepared actions while reusing @activeFullscreen@, so Vty stays in the
+-- alternate screen until the whole provider-restart chain finishes. Session
+-- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
+prepareAgentIteration
+    :: FullscreenInputBuffer
+    -> Maybe FullscreenRuntime
+    -> CliOptions
+    -> Maybe ProviderTransition
+    -> IO PreparedAgent
+prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
+    forM_ activeFullscreen resetFullscreenSessionActions
+    let failPreparation message =
+            case activeFullscreen of
+                Nothing -> die message
+                Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
@@ -731,7 +783,7 @@ runAgent fullscreenInputs options transition = do
         Nothing -> pure Nothing
         Just sessionId ->
             loadSession root sessionId >>= \case
-                Left err -> die (Text.unpack err)
+                Left err -> failPreparation (Text.unpack err)
                 Right loaded -> pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
@@ -741,7 +793,8 @@ runAgent fullscreenInputs options transition = do
             | otherwise -> makeAbsolute meta.metaCwd
         Nothing
             | options.optWorktree -> do
-                createWorktree source (worktreeRoot home) >>= either (die . Text.unpack) \path -> do
+                createWorktree source (worktreeRoot home)
+                    >>= either (failPreparation . Text.unpack) \path -> do
                     color <- resolveColor stderr
                     putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> toText path))
                     pure path
@@ -787,28 +840,41 @@ runAgent fullscreenInputs options transition = do
                             <> toText (takeFileName cwd)))
                     (hydrateUiHistory initialTurns)))
                         { uiQueuedInputs = queuedInputDisplays }
-    fullscreen <- if fullscreenEnabled
-        then Just <$> newFullscreenRuntime
-            fullscreenInputs
+    fullscreen <- case activeFullscreen of
+        Just runtime -> pure (Just runtime)
+        Nothing
+            | fullscreenEnabled ->
+                Just <$> newFullscreenRuntime
+                    fullscreenInputs
+                    (requestCancel toolEnv.toolCancel)
+                    (\level ->
+                        readIORef restartEffortActionRef >>= ($ level))
+                    (noteFullscreenCtrlC interrupt)
+                    (copyTerminalClipboard terminal stdout)
+                    (setCliWindowTitle stdoutTty stdout)
+                    (\active ->
+                        when
+                            (terminal.terminalNativeProgress
+                                && nativeProgressAnimationEnabled
+                                    options.optMotionMode) $
+                            setNativeProgress stderr active)
+                    (readIORef agentSnapshotRef >>= id)
+                    (\target -> readIORef agentSelectRef >>= ($ target))
+                    (recordStartupTiming
+                        startedAt startupTimingsRef "first frame")
+                    (writeIORef syntaxLoadDurationRef . Just)
+                    options.optMotionMode
+                    useColor
+                    initialFullscreenState
+            | otherwise -> pure Nothing
+    forM_ fullscreen \runtime ->
+        setFullscreenSessionActions
+            runtime
             (requestCancel toolEnv.toolCancel)
             (\level -> readIORef restartEffortActionRef >>= ($ level))
             (noteFullscreenCtrlC interrupt)
-            (copyTerminalClipboard terminal stdout)
-            (setCliWindowTitle stdoutTty stdout)
-            (\active ->
-                when
-                    (terminal.terminalNativeProgress
-                        && nativeProgressAnimationEnabled
-                            options.optMotionMode) $
-                    setNativeProgress stderr active)
             (readIORef agentSnapshotRef >>= id)
             (\target -> readIORef agentSelectRef >>= ($ target))
-            (recordStartupTiming startedAt startupTimingsRef "first frame")
-            (writeIORef syntaxLoadDurationRef . Just)
-            options.optMotionMode
-            useColor
-            initialFullscreenState
-        else pure Nothing
     writeIORef uiRuntimeRef fullscreen
     let startup = StartupRuntime
             { startupToolEnv = toolEnv
@@ -821,6 +887,7 @@ runAgent fullscreenInputs options transition = do
             , startupStderrTty = stderrTty
             , startupStdinTty = stdinTty
             , startupStdoutTty = stdoutTty
+            , startupFullscreenReused = isJust activeFullscreen
             , startupAgentSnapshot = agentSnapshotRef
             , startupAgentSelect = agentSelectRef
             , startupRestartEffort = restartEffortActionRef
@@ -831,13 +898,72 @@ runAgent fullscreenInputs options transition = do
         action =
             runAgentInitialized
                 options transition home root resumed cwd startup
-    outcome <-
-        try @_ @StartupFailure
-            (case fullscreen of
-                Nothing -> action
-                Just runtime -> runFullscreen runtime action)
-            `finally` writeIORef uiRuntimeRef Nothing
-    either (\(StartupFailure message) -> die message) pure outcome
+        cleanup = do
+            writeIORef uiRuntimeRef Nothing
+            forM_ fullscreen resetFullscreenSessionActions
+    pure PreparedAgent
+        { preparedFullscreen = fullscreen
+        , preparedRun = action `finally` cleanup
+        }
+
+resetFullscreenSessionActions :: FullscreenRuntime -> IO ()
+resetFullscreenSessionActions runtime =
+    setFullscreenSessionActions
+        runtime
+        (pure ())
+        (const (pure ()))
+        -- No session-local interrupt state is alive between providers. A
+        -- transition must remain escapable even if auth probing blocks.
+        (pure ForceExit)
+        (pure (AgentRoot, []))
+        (const (pure ()))
+
+runFullscreenRestartLoop
+    :: FullscreenInputBuffer
+    -> FullscreenRuntime
+    -> CliOptions
+    -> Maybe ProviderTransition
+    -> IO RunResult
+    -> IO RunResult
+runFullscreenRestartLoop
+    fullscreenInputs
+    runtime =
+        loop
+  where
+    loop options transition action =
+        -- The notifier in 'runFullscreen' watches this whole tail-recursive
+        -- chain, rather than stopping Brick after the first provider exits.
+        action >>= \case
+            RunSwitchProvider next -> do
+                let nextOptions = applyProviderTransition options next
+                prepared <- prepareAgentIteration
+                    fullscreenInputs
+                    (Just runtime)
+                    nextOptions
+                    (Just next)
+                loop nextOptions (Just next) prepared.preparedRun
+            RunProviderStartFailed apiError ->
+                case transition of
+                    Just failed
+                        | failed.transitionCause == AutomaticFallback ->
+                            continueAutomaticFallback
+                                (Just runtime) failed apiError >>= \case
+                                Just next -> do
+                                    let nextOptions =
+                                            applyProviderTransition options next
+                                    prepared <- prepareAgentIteration
+                                        fullscreenInputs
+                                        (Just runtime)
+                                        nextOptions
+                                        (Just next)
+                                    loop
+                                        nextOptions
+                                        (Just next)
+                                        prepared.preparedRun
+                                Nothing ->
+                                    pure (RunProviderStartFailed apiError)
+                    _ -> pure (RunProviderStartFailed apiError)
+            result -> pure result
 
 runAgentInitialized
     :: CliOptions
@@ -1740,7 +1866,12 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             initializeSkills
             case pendingTurn of
                 Just pending ->
-                    runPendingTurn env pending
+                    runPendingTurn
+                        (if startup.startupFullscreenReused
+                            then ContinuePendingTurn
+                            else SubmitPendingTurn)
+                        env
+                        pending
                 Nothing -> case prompt of
                     Just text -> do
                         inputs <- preparePromptSkillInputs env text [UserMessage text]
@@ -1754,20 +1885,33 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     applyPendingSessionTitles env
     pure result
 
-runPendingTurn :: SessionEnv -> PendingTurn -> IO RunResult
-runPendingTurn = runPendingTurnWithCooldownRetry True
-
-runPendingTurnWithCooldownRetry
-    :: Bool
+runPendingTurn
+    :: PendingTurnPresentation
     -> SessionEnv
     -> PendingTurn
     -> IO RunResult
-runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
+runPendingTurn presentation =
+    runPendingTurnWithCooldownRetry True presentation
+
+runPendingTurnWithCooldownRetry
+    :: Bool
+    -> PendingTurnPresentation
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+runPendingTurnWithCooldownRetry
+    allowCooldownRetry presentation env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
     case env.sessionFullscreen of
         Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime (UiUserSubmitted pending.pendingPromptText)
+        Just runtime -> case presentation of
+            SubmitPendingTurn ->
+                emitUiEvent runtime
+                    (UiUserSubmitted pending.pendingPromptText)
+            RestartPendingTurn ->
+                emitUiEvent runtime UiTurnRestarted
+            ContinuePendingTurn ->
+                pure ()
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
@@ -1824,7 +1968,8 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                     Just delay | allowCooldownRetry ->
                         waitAndRetryPendingTurn env delay pending'
                     _ -> do
-                        reportProviderUnavailable apiError
+                        reportProviderUnavailable
+                            env.sessionFullscreen apiError
                         if exitAfter
                             then exitFailure
                             else do
@@ -1898,15 +2043,24 @@ waitAndRetryPendingTurn env delay pending = do
                     color <- resolveColor stderr
                     putTextLn stderr
                         (roleMuted color (glyphOk <> "retrying turn"))
-            runPendingTurnWithCooldownRetry False env pending
+            runPendingTurnWithCooldownRetry
+                False RestartPendingTurn env pending
 
-reportProviderUnavailable :: ApiError -> IO ()
-reportProviderUnavailable apiError = do
-    color <- resolveColor stderr
+reportProviderUnavailable
+    :: Maybe FullscreenRuntime
+    -> ApiError
+    -> IO ()
+reportProviderUnavailable fullscreen apiError = do
     now <- getCurrentTime
-    putTextLn stderr $ roleError color $
-        "No usable fallback provider account is available.\n"
+    let message =
+            "No usable fallback provider account is available.\n"
             <> formatApiErrorAt now apiError
+    case fullscreen of
+        Nothing -> do
+            color <- resolveColor stderr
+            putTextLn stderr (roleError color message)
+        Just runtime ->
+            emitUiEvent runtime (UiErrorMessage message)
 
 setSessionEffort :: SessionEnv -> Text -> IO ()
 setSessionEffort env level = do
@@ -2856,7 +3010,8 @@ replWithDraft env@SessionEnv
                                 (glyphOk <> message))
                     next
                 | otherwise ->
-                    requestModelProviderSwitch choice keptDraft persist >>= \case
+                    requestModelProviderSwitch
+                        fullscreen choice keptDraft persist >>= \case
                         Left err -> do
                             displayError err $
                                 Text.hPutStrLn stderr
@@ -3131,23 +3286,29 @@ applyModelChange projectRoot provider name paramsRef render previous persist = d
                 else ""
 
 requestModelProviderSwitch
-    :: ModelOption
+    :: Maybe FullscreenRuntime
+    -> ModelOption
     -> Text
     -> Persistence
     -> IO (Either Text RunResult)
-requestModelProviderSwitch choice draft persist =
+requestModelProviderSwitch fullscreen choice draft persist =
     prepareProviderTransition
         ManualTransition [] Nothing draft choice persist >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
-                Text.putStrLn $ roleMuted color $
-                    glyphOk
-                        <> "switching to "
-                        <> providerSlug choice.modelProvider
-                        <> "/"
-                        <> choice.modelId
-                        <> " (conversation continued locally)"
+                let message =
+                        "switching to "
+                            <> providerSlug choice.modelProvider
+                            <> "/"
+                            <> choice.modelId
+                            <> " (conversation continued locally)"
+                case fullscreen of
+                    Nothing ->
+                        Text.putStrLn
+                            (roleMuted color (glyphOk <> message))
+                    Just runtime ->
+                        emitUiEvent runtime (UiSystemMessage message)
                 pure (Right (RunSwitchProvider transition))
 
 requestAutomaticProviderFallback
@@ -3156,9 +3317,11 @@ requestAutomaticProviderFallback
     -> PendingTurn
     -> IO (Maybe ProviderTransition)
 requestAutomaticProviderFallback env apiError pending = do
+    forM_ env.sessionFullscreen \runtime ->
+        emitUiEvent runtime UiTurnRestarted
     sessionId <- ensureTransitionSessionId env.sessionPersist
     unavailable <- readIORef env.sessionUnavailableProviders
-    chooseAutomaticProviderTransition
+    chooseAutomaticProviderTransition env.sessionFullscreen
         env.sessionProvider
         unavailable
         sessionId
@@ -3166,14 +3329,15 @@ requestAutomaticProviderFallback env apiError pending = do
         apiError
 
 continueAutomaticFallback
-    :: ProviderTransition
+    :: Maybe FullscreenRuntime
+    -> ProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
-continueAutomaticFallback failed apiError =
+continueAutomaticFallback fullscreen failed apiError =
     case failed.transitionPendingTurn of
         Nothing -> pure Nothing
         Just pending ->
-            chooseAutomaticProviderTransition
+            chooseAutomaticProviderTransition fullscreen
                 failed.transitionTarget.modelProvider
                 failed.transitionUnavailableProviders
                 failed.transitionSessionId
@@ -3181,13 +3345,15 @@ continueAutomaticFallback failed apiError =
                 apiError
 
 chooseAutomaticProviderTransition
-    :: Provider
+    :: Maybe FullscreenRuntime
+    -> Provider
     -> [Provider]
     -> Maybe Text
     -> PendingTurn
     -> ApiError
     -> IO (Maybe ProviderTransition)
-chooseAutomaticProviderTransition current unavailable0 sessionId pending apiError =
+chooseAutomaticProviderTransition
+    fullscreen current unavailable0 sessionId pending apiError =
     tryCandidates unavailable candidates
   where
     unavailable = markUnavailable current unavailable0
@@ -3198,24 +3364,34 @@ chooseAutomaticProviderTransition current unavailable0 sessionId pending apiErro
         choice : rest ->
             validateProviderTarget choice >>= \case
                 Left err -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr $ roleMuted color $
-                        "skipping "
+                    let message =
+                            "skipping "
                             <> providerSlug choice.modelProvider
                             <> ": "
                             <> err
+                    case fullscreen of
+                        Nothing -> do
+                            color <- resolveColor stderr
+                            putTextLn stderr (roleMuted color message)
+                        Just runtime ->
+                            emitUiEvent runtime (UiSystemMessage message)
                     tryCandidates
                         (markUnavailable choice.modelProvider unavailable)
                         rest
                 Right () -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr $ roleWarn color $
-                        glyphWarn
-                            <> providerSlug current
+                    let message =
+                            providerSlug current
                             <> " unavailable; trying this turn with "
                             <> providerSlug choice.modelProvider
                             <> "/"
                             <> choice.modelId
+                    case fullscreen of
+                        Nothing -> do
+                            color <- resolveColor stderr
+                            putTextLn stderr
+                                (roleWarn color (glyphWarn <> message))
+                        Just runtime ->
+                            emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice
                         , transitionSessionId = sessionId
@@ -3450,7 +3626,7 @@ enterPlanFromSlash env@SessionEnv
                     requestAutomaticProviderFallback
                         planEnv apiError pending >>= \case
                             Nothing -> do
-                                reportProviderUnavailable apiError
+                                reportProviderUnavailable fullscreen apiError
                                 pure Nothing
                             Just providerTransition ->
                                 pure (Just providerTransition)
