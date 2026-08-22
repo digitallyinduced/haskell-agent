@@ -9,6 +9,8 @@ This package owns presentation state and reusable Brick/Vty rendering:
 - `Agent.TUI.Theme` — semantic Brick attributes and themes
 - `Agent.TUI.Presentation` — plain tool-call presentation helpers
 
+Renderer-independent syntax loading and tokenization live in `agent-syntax`.
+
 The CLI-specific runtime adapter remains in `agent-cli` as
 `Agent.CLI.TUI.App`. It coordinates clipboard access, command completion,
 permissions, interrupts, history, and agent selection while depending on this

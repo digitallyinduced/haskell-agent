@@ -16,6 +16,37 @@ spec = do
             let text = "~~~bash\nprintf 'copy me\\n'\n~~~\n"
             fencedCodeBlock 1 text `shouldBe` Just "printf 'copy me\\n'\n"
 
+        it "matches marker type and requires a sufficiently long closer" do
+            let text =
+                    "````haskell\n"
+                        <> "```\n"
+                        <> "main = pure ()\n"
+                        <> "~~~\n"
+                        <> "`````\n"
+                        <> "~~~bash\n"
+                        <> "echo ok\n"
+                        <> "~~~\n"
+            fencedCodeBlock 1 text
+                `shouldBe` Just "```\nmain = pure ()\n~~~\n"
+            fencedCodeBlock 2 text `shouldBe` Just "echo ok\n"
+
+        it "includes unterminated fences with their exact body" do
+            fencedCodeBlock 1 "before\n```text\nno final newline"
+                `shouldBe` Just "no final newline"
+
+        it "numbers mixed fence types in source order" do
+            let text =
+                    "~~~a\none\n~~~\n"
+                        <> "````b\ntwo\n````\n"
+                        <> "```c\nthree\n```\n"
+            map (`fencedCodeBlock` text) [1, 2, 3, 4]
+                `shouldBe`
+                    [ Just "one\n"
+                    , Just "two\n"
+                    , Just "three\n"
+                    , Nothing
+                    ]
+
     describe "lastDiffBlock" do
         it "selects the last diff-like fence" do
             let text = "```diff\n-old\n+new\n```\n```patch\n-a\n+b\n```\n"

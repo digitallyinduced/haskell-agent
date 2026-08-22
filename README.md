@@ -5,6 +5,10 @@ A universal coding-agent harness written in Haskell.
 ## Packages
 
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
+- `agent-syntax` provides renderer-independent syntax loading, language
+  resolution, tokenization, and semantic token classes.
+- `agent-tui` provides retained fullscreen presentation state, Markdown
+  rendering, themes, and terminal presentation of syntax spans.
 - `agent-core` provides provider-neutral credentials, common
   errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
 - `agent-responses` provides the canonical Responses wire model, codecs, error
@@ -20,6 +24,9 @@ A universal coding-agent harness written in Haskell.
 ## Development
 
 All compiler and package dependencies come from the pinned Nix flake.
+The flake also fetches Skylighting's complete XML syntax-definition set and
+configures it for development, tests, and packaged `agent-cli` executables; the
+generated grammar data is not vendored in this repository.
 
 Each package has a checked-in `package.nix` generated with `cabal2nix` (no IFD).
 After changing a `.cabal` file, regenerate that package's Nix expression:
@@ -30,6 +37,8 @@ After changing a `.cabal` file, regenerate that package's Nix expression:
 (cd packages/agent-openai && cabal2nix . > package.nix)
 (cd packages/agent-xai && cabal2nix . > package.nix)
 (cd packages/agent-openrouter && cabal2nix . > package.nix)
+(cd packages/agent-syntax && cabal2nix . > package.nix)
+(cd packages/agent-tui && cabal2nix . > package.nix)
 (cd packages/agent-cli && cabal2nix . > package.nix)
 ```
 

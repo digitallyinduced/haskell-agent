@@ -115,9 +115,10 @@ spec = describe "Agent.CLI.AgentSessions" do
                 second `shouldSatisfy` \case
                     Left err -> "already running" `Text.isInfixOf` err
                     Right _ -> False
-                threadDelay 500000
-                sessionProcessStatus manager handle.sessionMeta.metaId
-                    `shouldReturn` "completed"
+                waitForSessionStatus
+                    manager
+                    handle.sessionMeta.metaId
+                    "completed"
                 closeSessionProcessManager manager
 
     it "does not terminate background sessions when the manager closes" $
@@ -195,6 +196,23 @@ waitForFile path = go (50 :: Int)
         if exists
             then pure ()
             else threadDelay 20000 >> go (attempts - 1)
+
+waitForSessionStatus
+    :: SessionProcessManager
+    -> Text.Text
+    -> Text.Text
+    -> IO ()
+waitForSessionStatus manager sessionId expected = go (100 :: Int)
+  where
+    go attempts
+        | attempts <= 0 = do
+            actual <- sessionProcessStatus manager sessionId
+            actual `shouldBe` expected
+        | otherwise = do
+            actual <- sessionProcessStatus manager sessionId
+            if actual == expected
+                then pure ()
+                else threadDelay 20000 >> go (attempts - 1)
 
 shellQuote :: FilePath -> String
 shellQuote path = "'" <> concatMap escape path <> "'"

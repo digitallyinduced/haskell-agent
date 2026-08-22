@@ -91,6 +91,7 @@ library
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-syntax >= 0.1 && < 0.2
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2

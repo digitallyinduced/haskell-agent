@@ -5,6 +5,10 @@
         nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
         flake-utils.url = "github:numtide/flake-utils";
         nix-filter.url = "github:numtide/nix-filter";
+        skylighting = {
+            url = "github:jgm/skylighting/e432d65743ecef9475816b2cc074d34833837ced";
+            flake = false;
+        };
     };
 
     outputs =
@@ -13,6 +17,7 @@
             nixpkgs,
             flake-utils,
             nix-filter,
+            skylighting,
             ...
         }:
         flake-utils.lib.eachDefaultSystem (
@@ -31,6 +36,17 @@
                         "LICENSE"
                         "README.md"
                         "UPSTREAM.md"
+                    ];
+                };
+
+                agentSyntaxSource = nix-filter.lib {
+                    root = ./packages/agent-syntax;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-syntax.cabal"
+                        "LICENSE"
+                        "README.md"
                     ];
                 };
 
@@ -100,11 +116,46 @@
                     ];
                 };
 
+                skylightingSyntaxes = pkgs.runCommand "skylighting-syntaxes" { } ''
+                    mkdir -p "$out/share/skylighting/xml"
+                    cp ${skylighting}/skylighting-core/xml/*.xml \
+                        "$out/share/skylighting/xml/"
+
+                    mkdir -p "$out/share/doc/skylighting-syntaxes"
+                    cp ${skylighting}/skylighting-core/README.md \
+                        "$out/share/doc/skylighting-syntaxes/UPSTREAM_README.md"
+                    cat > "$out/share/doc/skylighting-syntaxes/NOTICE" <<'EOF'
+                    These unmodified KDE XML syntax definitions come from the
+                    pinned jgm/skylighting source. They are distributed under
+                    various licenses recorded in the individual XML files.
+                    See UPSTREAM_README.md for upstream provenance.
+                    EOF
+                '';
+                skylightingSyntaxDirectory =
+                    "${skylightingSyntaxes}/share/skylighting/xml";
+
                 haskellPackages = pkgs.haskellPackages.extend (
                     final: previous: {
                         vty-unix = pkgs.haskell.lib.appendPatch
                             previous.vty-unix
                             ./patches/vty-unix-all-motion.patch;
+                        skylighting-core = final.callCabal2nix
+                            "skylighting-core"
+                            "${skylighting}/skylighting-core"
+                            { };
+                        agent-syntax =
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-syntax/package.nix { })
+                                {
+                                    src = agentSyntaxSource;
+                                }).overrideAttrs
+                                (old: {
+                                    preCheck =
+                                        (old.preCheck or "")
+                                        + ''
+                                            export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                                        '';
+                                });
                         agent-core = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
@@ -125,9 +176,19 @@
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         };
-                        agent-tui = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-tui/package.nix { }) {
-                            src = agentTuiSource;
-                        };
+                        agent-tui =
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-tui/package.nix { })
+                                {
+                                    src = agentTuiSource;
+                                }).overrideAttrs
+                                (old: {
+                                    preCheck =
+                                        (old.preCheck or "")
+                                        + ''
+                                            export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                                        '';
+                                });
                         agent-cli = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
@@ -137,13 +198,27 @@
                 );
 
                 agentCorePackage = haskellPackages.agent-core;
+                agentSyntaxPackage = haskellPackages.agent-syntax;
                 agentResponsesPackage = haskellPackages.agent-responses;
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
-                agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
+                agentCliExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    wrapProgram "$out/bin/agent-cli" \
+                                        --set-default AGENT_SYNTAX_DIR \
+                                            "${skylightingSyntaxDirectory}"
+                                '';
+                        });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
 
                 # Opens cabal repl on the agent-cli library and enters the
@@ -220,7 +295,9 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
+                packages.skylighting-syntaxes = skylightingSyntaxes;
                 packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
@@ -240,6 +317,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-syntax
                         packages.agent-tui
                         packages.agent-responses
                         packages.agent-openai
@@ -247,6 +325,9 @@
                         packages.agent-openrouter
                     ];
                     withHoogle = false;
+                    shellHook = ''
+                        export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                    '';
                     nativeBuildInputs =
                         (with haskellPackages; [
                             cabal-install
@@ -262,6 +343,7 @@
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-syntax = agentSyntaxPackage;
                     agent-tui = agentTuiPackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
