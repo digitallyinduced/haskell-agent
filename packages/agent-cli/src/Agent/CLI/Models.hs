@@ -62,8 +62,7 @@ modelsForProvider provider =
                 ]
             OpenRouterProvider ->
                 [ opt "openai/gpt-5.1" (Just "default")
-                , opt "thinkingmachines/inkling:free" (Just "free")
-                , opt "thinkingmachines/inkling-small:free" (Just "free · faster")
+                , opt "stealth/ox-alpha" (Just "free · coding · 1M context")
                 , opt "anthropic/claude-sonnet-4" Nothing
                 , opt "x-ai/grok-4" Nothing
                 , opt "google/gemini-2.5-pro" Nothing
