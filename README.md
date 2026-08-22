@@ -52,26 +52,34 @@ persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
 web search, and interactive terminal interfaces. Those are important product
 features, but not the core differentiation.
 
-## Quick start
+## Install
 
-Install [Nix](https://nixos.org/download/) with flakes enabled, then start an
-interactive session:
+Install [Nix](https://nixos.org/download/) with flakes enabled, then install
+`haskell-agent`:
 
 ```console
-nix run github:digitallyinduced/haskell-agent
+nix profile install github:digitallyinduced/haskell-agent
+```
+
+## Run
+
+Start an interactive session:
+
+```console
+agent-cli
 ```
 
 Run a one-shot task:
 
 ```console
-nix run github:digitallyinduced/haskell-agent -- \
-  -p "inspect this Cabal project, explain its architecture, and run its tests"
+agent-cli -p \
+  "inspect this Cabal project, explain its architecture, and run its tests"
 ```
 
 Start in an isolated Git worktree:
 
 ```console
-nix run github:digitallyinduced/haskell-agent -- --worktree
+agent-cli --worktree
 ```
 
 Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
