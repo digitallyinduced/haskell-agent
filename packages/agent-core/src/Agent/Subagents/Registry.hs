@@ -536,22 +536,33 @@ spawnSubagentAtWithIdPreparedForTurn
                         rollbackAdmission registry record
                         pure $ Left $
                             "Failed to prepare subagent: " <> Text.pack (show exc)
-                    Right lease ->
-                        startPrepared restore record lease)
+                    Right lease -> do
+                        leaseSettled <- newTVarIO False
+                        startPrepared restore record lease leaseSettled)
                 `onException` rollbackAdmission registry record
   where
-    startPrepared restore record lease = do
+    startPrepared restore record lease leaseSettled = do
         started <-
             restore
                 (withMVar registry.registryLifecycle \_ ->
-                    startRecordSupervisor registry record lease)
-                `onException` shutdownRecord registry record
+                    startRecordSupervisorWithHandoff
+                        registry record lease
+                        (writeTVar leaseSettled True))
+                `onException`
+                    (shutdownRecord registry record
+                        `finally` releaseIfUnsettled leaseSettled lease)
         case started of
             Left err -> do
                 rollbackAdmission registry record
                 pure (Left err)
             Right () ->
                 pure (Right (agentId, record.recordTaskPath))
+
+    releaseIfUnsettled leaseSettled lease = do
+        settled <- atomically (readTVar leaseSettled)
+        if settled
+            then pure ()
+            else releaseSubagentLease lease
 
 resolveParentSTM
     :: Map SubagentId SubagentRecord
@@ -729,6 +740,15 @@ startRecordSupervisor
     -> SubagentLease
     -> IO (Either Text ())
 startRecordSupervisor registry record lease =
+    startRecordSupervisorWithHandoff registry record lease (pure ())
+
+startRecordSupervisorWithHandoff
+    :: SubagentRegistry
+    -> SubagentRecord
+    -> SubagentLease
+    -> STM ()
+    -> IO (Either Text ())
+startRecordSupervisorWithHandoff registry record lease settleLease =
     mask \restore -> do
         canStart <- atomically do
             closed <- readTVar registry.registryClosed
@@ -747,6 +767,7 @@ startRecordSupervisor registry record lease =
                     && maybe True (const False) current
         if not canStart
             then do
+                atomically settleLease
                 releaseSubagentLease lease
                 pure (Left "Subagent closed before its supervisor started.")
             else do
@@ -755,10 +776,13 @@ startRecordSupervisor registry record lease =
                     supervisorAction ready
                 case started of
                     Left (exception :: SomeException) -> do
+                        atomically settleLease
                         releaseSubagentLease lease
                         pure (Left ("Failed to start subagent: " <> Text.pack (show exception)))
                     Right supervisor -> do
-                        atomically $ writeTVar record.recordAsync (Just supervisor)
+                        atomically do
+                            writeTVar record.recordAsync (Just supervisor)
+                            settleLease
                         ownership <- restore (atomically (takeTMVar ready))
                             `onException` stopRecordSupervisor record
                         case ownership of
