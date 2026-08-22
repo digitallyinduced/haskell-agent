@@ -1,7 +1,13 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
 import Agent.TUI.Markdown
-import Brick (Widget, renderWidget, txt)
+import Brick
+    ( ViewportType(..)
+    , Widget
+    , renderWidget
+    , txt
+    , viewport
+    )
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -47,3 +53,11 @@ spec = describe "fullscreen Markdown inline parsing" do
             rendered = show (renderWidget Nothing [widget] (40, 12))
         rendered `shouldSatisfy` isInfixOf "1:bash"
         rendered `shouldSatisfy` isInfixOf "2:haskell"
+
+    it "renders thematic breaks inside a vertical viewport" do
+        let widget :: Widget ()
+            widget =
+                viewport () Vertical $
+                    markdownWidget "---\n\n***\n\n___"
+            rendered = show (renderWidget Nothing [widget] (40, 12))
+        rendered `shouldSatisfy` (not . null)
