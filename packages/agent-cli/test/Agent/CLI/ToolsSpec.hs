@@ -1,23 +1,34 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.Loop (LoopError(..))
 import Agent.Responses.Types
 import Agent.Provider (Provider(..))
+import Agent.Subagents
+    ( closeSubagentRegistry
+    , defaultSubagentConfig
+    , newSubagentRegistry
+    )
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
     )
+import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -95,6 +106,64 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure
                 ("expected collaboration namespace, got " <> show other)
 
+    it "matches the reserved wait_agent schema with the production tool" do
+        bracket
+            (newSubagentRegistry
+                defaultSubagentConfig
+                (unsafeEncodeUtf "/tmp")
+                (\_ _ _ _ -> pure (Left LoopNoResponseId))
+                (\_ _ -> pure ()))
+            closeSubagentRegistry
+            \registry -> do
+                let context = MultiAgentContext
+                        { multiRegistry = registry
+                        , multiSelfId = Nothing
+                        , multiDepth = 0
+                        , multiTaskPath = taskPathRoot
+                        , multiRootTurnId = pure Nothing
+                        , multiResumeFromDisk = Nothing
+                        , multiCreateWorktree = Nothing
+                        , multiPrepareSpawn = Nothing
+                        , multiSendToRoot = Nothing
+                        }
+                    namespaces =
+                        [ tagged
+                        | KnownResponseTool ToolNamespace tagged <-
+                            schemasFromAppTools
+                                OpenAIProvider
+                                (multiAgentTools context)
+                        ]
+                case namespaces of
+                    [tagged] ->
+                        case KeyMap.lookup "tools" tagged.fields of
+                            Just (Aeson.Array tools) -> do
+                                let waitTools =
+                                        mapMaybe waitAgentObject (toList tools)
+                                case waitTools of
+                                    [tool] -> do
+                                        KeyMap.lookup "strict" tool
+                                            `shouldBe` Just (Aeson.Bool False)
+                                        Just (Aeson.Object parameters) <-
+                                            pure (KeyMap.lookup "parameters" tool)
+                                        KeyMap.lookup "required" parameters
+                                            `shouldBe` Nothing
+                                        KeyMap.lookup "additionalProperties" parameters
+                                            `shouldBe` Just (Aeson.Bool False)
+                                        Just (Aeson.Object properties) <-
+                                            pure (KeyMap.lookup "properties" parameters)
+                                        Just (Aeson.Object timeout) <-
+                                            pure (KeyMap.lookup "timeout_ms" properties)
+                                        KeyMap.lookup "type" timeout
+                                            `shouldBe` Just (Aeson.String "number")
+                                    other -> expectationFailure
+                                        ("expected production wait_agent, got "
+                                            <> show other)
+                            other -> expectationFailure
+                                ("expected namespace tools, got " <> show other)
+                    other -> expectationFailure
+                        ("expected one collaboration namespace, got "
+                            <> show other)
+
 jsonTool :: AppTool
 jsonTool = jsonAppTool "read_file" "Read a file."
         [ PropertySchema "target_file" PropertyString True Nothing
@@ -108,6 +177,12 @@ patchTool =
     freeformApplyPatchAppTool
         "apply_patch" "Apply a patch." AlwaysPrompt
         (noArgsTool "apply_patch" (pure (Right "ok")))
+
+waitAgentObject :: Aeson.Value -> Maybe Aeson.Object
+waitAgentObject (Aeson.Object tool)
+    | KeyMap.lookup "name" tool == Just (Aeson.String "wait_agent") =
+        Just tool
+waitAgentObject _ = Nothing
 
 required_ :: FunctionTool -> Maybe Aeson.Value
 required_ tool = do
