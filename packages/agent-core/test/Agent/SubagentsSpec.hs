@@ -15,14 +15,15 @@ import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (finally, uninterruptibleMask_)
 import Control.Monad (unless)
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
+import GHC.Conc (BlockReason(..), ThreadStatus(..), threadStatus)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -142,6 +143,44 @@ spec = describe "Agent.Subagents" do
         Async.cancel spawning
         _ <- Async.waitCatch spawning
         Right _ <- spawnSubagent registry Nothing 0 "next" Nothing
+        closeSubagentRegistry registry
+
+    it "releases a prepared lease when cancellation wins before supervisor ownership" do
+        preparationEntered <- newEmptyMVar
+        finishPreparation <- newEmptyMVar
+        firstCleanupStarted <- newEmptyMVar
+        finishFirstCleanup <- newEmptyMVar
+        leaseReleases <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right first <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $ subagentLease $
+                uninterruptibleMask_ $
+                    putMVar firstCleanupStarted () >> takeMVar finishFirstCleanup)
+            Nothing 0 "first" Nothing
+
+        Async.withAsync
+            (spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (\_ -> do
+                    putMVar preparationEntered ()
+                    takeMVar finishPreparation
+                    pure $ subagentLease $
+                        atomicModifyIORef' leaseReleases \n -> (n + 1, ()))
+                Nothing 0 "cancelled-after-preparation" Nothing)
+            \spawning -> do
+                takeMVar preparationEntered
+                Async.withAsync (closeSubagent registry first) \closing -> do
+                    takeMVar firstCleanupStarted
+                    closingStatus <- Async.poll closing
+                    closingStatus `shouldSatisfy` isNothing
+                    putMVar finishPreparation ()
+                    waitForMVarBlock "spawn" spawning
+                    Async.cancel spawning
+                    _ <- Async.waitCatch spawning
+                    putMVar finishFirstCleanup ()
+                    _ <- Async.wait closing
+                    readIORef leaseReleases `shouldReturn` 1
         closeSubagentRegistry registry
 
     it "releases pending capacity exactly once when an agent closes during preparation" do
@@ -996,6 +1035,17 @@ shutdownRaceRegistry ran =
 blockPreparation :: MVar () -> MVar () -> SubagentId -> IO SubagentLease
 blockPreparation entered release _ =
     putMVar entered () >> takeMVar release >> pure mempty
+
+waitForMVarBlock :: String -> Async.Async a -> IO ()
+waitForMVarBlock label running = go (1000 :: Int)
+  where
+    go 0 = expectationFailure (label <> " thread did not block on an MVar")
+    go attempts =
+        threadStatus (Async.asyncThreadId running) >>= \case
+            ThreadBlocked BlockedOnMVar -> pure ()
+            ThreadFinished -> expectationFailure (label <> " thread finished before cancellation")
+            ThreadDied -> expectationFailure (label <> " thread died before cancellation")
+            _ -> threadDelay 1000 >> go (attempts - 1)
 
 spawnPreparedAt
     :: SubagentRegistry

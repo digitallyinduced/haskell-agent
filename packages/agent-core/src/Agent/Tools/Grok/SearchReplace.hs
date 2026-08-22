@@ -14,6 +14,7 @@ import Agent.Tools.PlanMode
     , planFileName
     , planFilePath
     , planModeBlockedEditMessage
+    , withPlanModeLock
     )
 import Agent.Tools.Types
     ( AppTool
@@ -73,9 +74,10 @@ searchReplaceDescription =
     \- To create a new file, set old_string to an empty string. An empty old_string cannot overwrite an existing non-empty file."
 
 runSearchReplace :: ToolEnv -> PlanModeEnv -> SearchReplaceArgs -> IO (Either Text Text)
-runSearchReplace env planMode args = runExceptT do
-    guardPlanMode env planMode args.filePath
-    runSearchReplaceBody env args
+runSearchReplace env planMode args = withPlanModeLock planMode $
+    runExceptT do
+        guardPlanMode env planMode args.filePath
+        runSearchReplaceBody env args
 
 guardPlanMode :: ToolEnv -> PlanModeEnv -> Text -> ExceptT Text IO ()
 guardPlanMode env planMode filePath = do

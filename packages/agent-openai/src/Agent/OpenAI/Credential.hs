@@ -29,21 +29,41 @@ poolTokenProvider pool = do
                         acquireFromPool pool
                     AccountAuthenticationRejected -> do
                         state <- Auth.readAccountState pool credential.accountId
-                        if maybe False (Text.null . (.refreshToken)) state
-                            then rejectStaticCredential pool credential.accountId
-                            else do
+                        case state of
+                            Just current
+                                | current.accessToken /= credential.accessToken ->
+                                    pure $ Right $
+                                        credentialFromAuthState current
+                            Just current
+                                | Text.null current.refreshToken ->
+                                    rejectStaticCredential pool credential.accountId
+                            _ -> do
                                 shouldRefresh <- takeAuthRecoverySlot
                                     authRecoveryAttempts
                                     credential.accountId
                                 if shouldRefresh
-                                    then Auth.refreshAfterAuthFailure pool credential.accountId >>= \case
-                                        Right refreshed ->
-                                            pure $ Right $
-                                                credentialFromAuthState refreshed
-                                        Left _ -> acquireFromPool pool
-                                    else do
-                                        Auth.reportAuthBroken pool credential.accountId
-                                        acquireFromPool pool
+                                    then
+                                        Auth.refreshAfterAuthFailureIfCurrent
+                                            pool
+                                            credential.accountId
+                                            credential.accessToken
+                                            >>= \case
+                                                Right refreshed ->
+                                                    pure $ Right $
+                                                        credentialFromAuthState refreshed
+                                                Left _ ->
+                                                    acquireFromPool pool
+                                    else
+                                        Auth.reportAuthBrokenIfCurrent
+                                            pool
+                                            credential.accountId
+                                            credential.accessToken
+                                            >>= \case
+                                                Just replacement ->
+                                                    pure $ Right $
+                                                        credentialFromAuthState replacement
+                                                Nothing ->
+                                                    acquireFromPool pool
 
 rejectStaticCredential :: Auth.Pool -> Text -> IO (Either ApiError Credential)
 rejectStaticCredential pool accountId = do

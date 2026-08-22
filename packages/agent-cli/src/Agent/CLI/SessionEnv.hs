@@ -6,6 +6,7 @@ module Agent.CLI.SessionEnv
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.CancelWatch (StdinGate)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -21,6 +22,7 @@ import Agent.Provider (Provider, TokenProvider)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
+import Control.Concurrent.MVar (MVar)
 import Data.IORef (IORef)
 import Data.Text (Text)
 
@@ -37,6 +39,7 @@ data SessionEnv = SessionEnv
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !Persistence
+    , sessionPersistLock :: !(MVar ())
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
@@ -49,7 +52,7 @@ data SessionEnv = SessionEnv
     , sessionSkills :: !(IORef SkillCatalog)
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
-    , sessionEscPaused :: !(IORef Bool)
+    , sessionStdinGate :: !StdinGate
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState

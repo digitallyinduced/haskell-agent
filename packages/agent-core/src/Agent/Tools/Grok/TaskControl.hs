@@ -157,6 +157,7 @@ terminalCommandOutput :: Text -> Bool
 terminalCommandOutput text =
     "exit:" `Text.isPrefixOf` text
         || "killed " `Text.isPrefixOf` text
+        || "Grok session is closed." `Text.isPrefixOf` text
 
 formatMultiTaskOutput :: Bool -> [TaskOutputEntry] -> Text
 formatMultiTaskOutput waits entries =

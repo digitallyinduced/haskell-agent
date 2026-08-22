@@ -431,7 +431,7 @@ handleEffortControlClick applyUiEvent = do
                             , choiceIndex = initial
                             , choiceRows = [(effort, "") | effort <- efforts]
                             }
-                        , appChoiceReply = Just choose
+                        , appChoiceReply = Just (LocalChoice choose)
                         }
                 vScrollToBeginning (viewportScroll OverlayViewport)
             else

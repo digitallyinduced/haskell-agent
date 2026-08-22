@@ -90,6 +90,7 @@ library
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Composer
                     , Agent.CLI.TUI.ImagePreview
+                    , Agent.CLI.TUI.Modal
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
@@ -140,6 +141,7 @@ test-suite agent-cli-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
+    ghc-options:      -threaded
     other-modules:    Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
@@ -188,6 +190,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec
+                    , Agent.CLI.TUIModalSpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
@@ -199,6 +202,7 @@ test-suite agent-cli-test
                     , agent-xai
                     , aeson
                     , ansi-terminal
+                    , async
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , bytestring

@@ -76,6 +76,7 @@ import Agent.CLI.TUI.ImagePreview
     , previewCellSize
     , renderTuiImagePreview
     )
+import qualified Agent.CLI.TUI.Modal as Modal
 import Agent.TUI.Markdown
     ( markdownWidget
     , markdownWidgetWithSyntaxHighlighting
@@ -112,6 +113,7 @@ import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
     ( STM
+    , TMVar
     , atomically
     , check
     , newEmptyTMVarIO
@@ -122,6 +124,7 @@ import Control.Concurrent.STM
     , readTMVar
     , registerDelay
     , retry
+    , tryPutTMVar
     , writeTVar
     )
 import Control.Monad (unless, void, when)
@@ -190,6 +193,7 @@ newFullscreenRuntime
         mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
+        modals <- Modal.newModalCoordinator
         imagePreviews <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -201,6 +205,7 @@ newFullscreenRuntime
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
+            , runtimeModals = modals
             , runtimeInput = inputBuffer
             , runtimeCancel = cancelAction
             , runtimeRestartEffort = restartEffortAction
@@ -299,8 +304,10 @@ requestFullscreenPermission
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
     let summary = summarizeToolCall call
-    enqueueAppEvent runtime (AppAskPermission summary reply)
-    atomically (readTMVar reply)
+    awaitFullscreenModal
+        runtime
+        (FullscreenPermission summary reply)
+        reply
 
 requestFullscreenChoice
     :: FullscreenRuntime
@@ -320,9 +327,10 @@ requestFullscreenChoiceWithBody
     -> IO (Maybe Int)
 requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
-        (AppAskChoice title body initial rows reply)
-    atomically (readTMVar reply)
+    awaitFullscreenModal
+        runtime
+        (FullscreenChoice title body initial rows reply)
+        reply
 
 requestFullscreenText
     :: FullscreenRuntime
@@ -332,9 +340,25 @@ requestFullscreenText
     -> IO (Maybe Text)
 requestFullscreenText runtime title body initial = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
-        (AppAskText title body initial reply)
-    atomically (readTMVar reply)
+    awaitFullscreenModal
+        runtime
+        (FullscreenText title body initial reply)
+        reply
+
+awaitFullscreenModal
+    :: FullscreenRuntime
+    -> FullscreenModal
+    -> TMVar (Maybe answer)
+    -> IO (Maybe answer)
+awaitFullscreenModal runtime modal reply =
+    Modal.runModalRequest
+        runtime.runtimeModals
+        modal
+        (void (tryPutTMVar reply Nothing))
+        (readTMVar reply)
+        (enqueueAppEvent runtime . AppShowModal)
+        (\modalId next ->
+            enqueueAppEventSTM runtime (AppModalAdvanced modalId next))
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
@@ -418,7 +442,9 @@ runFullscreen runtime workerAction = do
                                     (Just runtime.runtimeEvents)
                                     fullscreenApp
                                     initialState
-                                `finally` runtime.runtimeNativeProgress False
+                                `finally` do
+                                    closeFullscreenModals runtime
+                                    runtime.runtimeNativeProgress False
                             when (not finalState.appWorkerStopped) $
                                 atomically $
                                     Composer.appendFullscreenInput
@@ -566,6 +592,10 @@ allocateNativePreviewImageIdBase = do
     let availableBases = 4_294_967_293 :: Integer
     pure $
         fromInteger ((micros * 65_537 + pid) `mod` availableBases) + 1
+
+closeFullscreenModals :: FullscreenRuntime -> IO ()
+closeFullscreenModals runtime =
+    atomically (Modal.closeModalCoordinator runtime.runtimeModals)
 
 -- | Move events from the producer-facing mailbox into Brick. UI updates are
 -- collected for one frame so a fast token stream causes at most one redraw
@@ -720,10 +750,13 @@ advanceCompletionFlashes rawElapsedMillis =
 
 enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
 enqueueAppEvent runtime event =
-    atomically do
-        let AppEventMailbox pendingRef = runtime.runtimeMailbox
-        pending <- readTVar pendingRef
-        writeTVar pendingRef (appendAppEvent event pending)
+    atomically (enqueueAppEventSTM runtime event)
+
+enqueueAppEventSTM :: FullscreenRuntime -> AppEvent -> STM ()
+enqueueAppEventSTM runtime event = do
+    let AppEventMailbox pendingRef = runtime.runtimeMailbox
+    pending <- readTVar pendingRef
+    writeTVar pendingRef (appendAppEvent event pending)
 
 enqueueMotionTick :: FullscreenRuntime -> IO ()
 enqueueMotionTick runtime =
@@ -931,19 +964,36 @@ copyCodeBlock blockId codeIndex = do
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
     state <- get
+    let answer =
+            if confirmed
+                then (.choiceIndex) <$> state.appChoice
+                else Nothing
     case state.appChoiceReply of
-        Nothing -> pure ()
-        Just reply ->
-            liftIO $ reply $
-                if confirmed
-                    then (.choiceIndex) <$> state.appChoice
-                    else Nothing
-    modify' \current ->
-        current
-            { appChoice = Nothing
-            , appChoiceReply = Nothing
-            }
-    resumeNativeProgressIfRunning
+        Nothing -> do
+            clearChoiceOverlay
+            resumeNativeProgressIfRunning
+        Just (LocalChoice reply) -> do
+            liftIO (reply answer)
+            clearChoiceOverlay
+            resumeNativeProgressIfRunning
+        Just (CoordinatedChoice modalId) -> do
+            transition <- liftIO $ atomically $
+                Modal.completeModal
+                    state.appRuntime.runtimeModals
+                    modalId
+                    (\case
+                        FullscreenChoice _ _ _ _ reply ->
+                            Just (putTMVar reply answer)
+                        _ ->
+                            Nothing)
+            applyFullscreenModalTransition modalId transition
+  where
+    clearChoiceOverlay =
+        modify' \current ->
+            current
+                { appChoice = Nothing
+                , appChoiceReply = Nothing
+                }
 
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
@@ -1018,20 +1068,32 @@ handleTextPromptKey = \case
 resolveTextPrompt :: Bool -> EventM Name AppState ()
 resolveTextPrompt confirmed = do
     state <- get
+    let answer =
+            if confirmed
+                then (.textDraft) <$> state.appTextPrompt
+                else Nothing
     case state.appTextReply of
-        Nothing -> pure ()
-        Just reply ->
-            liftIO $ atomically $
-                putTMVar reply $
-                    if confirmed
-                        then (.textDraft) <$> state.appTextPrompt
-                        else Nothing
-    modify' \current ->
-        current
-            { appTextPrompt = Nothing
-            , appTextReply = Nothing
-            }
-    resumeNativeProgressIfRunning
+        Nothing -> do
+            clearTextOverlay
+            resumeNativeProgressIfRunning
+        Just modalId -> do
+            transition <- liftIO $ atomically $
+                Modal.completeModal
+                    state.appRuntime.runtimeModals
+                    modalId
+                    (\case
+                        FullscreenText _ _ _ reply ->
+                            Just (putTMVar reply answer)
+                        _ ->
+                            Nothing)
+            applyFullscreenModalTransition modalId transition
+  where
+    clearTextOverlay =
+        modify' \current ->
+            current
+                { appTextPrompt = Nothing
+                , appTextReply = Nothing
+                }
 
 fullscreenApp :: App AppState AppEvent Name
 fullscreenApp = App
@@ -2494,6 +2556,101 @@ refreshNativeProgressKeepalive = do
         modify' \current ->
             current { appNativeProgressKeepaliveBucket = bucket }
 
+showFullscreenModal
+    :: Modal.ModalTicket FullscreenModal
+    -> EventM Name AppState ()
+showFullscreenModal ticket = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' (installFullscreenModal ticket)
+    when (modalUsesOverlayViewport ticket) $
+        vScrollToBeginning (viewportScroll OverlayViewport)
+
+applyFullscreenModalTransition
+    :: Modal.ModalId
+    -> Modal.ModalTransition FullscreenModal
+    -> EventM Name AppState ()
+applyFullscreenModalTransition modalId transition =
+    case transition of
+        Modal.ModalUnchanged ->
+            pure ()
+        Modal.ModalAdvanced next -> do
+            state <- get
+            when (activeFullscreenModalId state == Just modalId) do
+                put $
+                    maybe
+                        (clearFullscreenModal state)
+                        (`installFullscreenModal` state)
+                        next
+                when (maybe False modalUsesOverlayViewport next) $
+                    vScrollToBeginning (viewportScroll OverlayViewport)
+                when (isNothing next) resumeNativeProgressIfRunning
+
+installFullscreenModal
+    :: Modal.ModalTicket FullscreenModal
+    -> AppState
+    -> AppState
+installFullscreenModal ticket state =
+    case Modal.modalTicketRequest ticket of
+        FullscreenPermission summary _ ->
+            (applyUiEvent (UiPermissionShown summary) cleared)
+                { appPermissionReply = Just modalId }
+        FullscreenChoice title body initial rows _ ->
+            cleared
+                { appChoice = Just ChoiceOverlay
+                    { choiceTitle = title
+                    , choiceBody = body
+                    , choiceIndex =
+                        max 0 (min (max 0 (length rows - 1)) initial)
+                    , choiceRows = rows
+                    }
+                , appChoiceReply = Just (CoordinatedChoice modalId)
+                }
+        FullscreenText title body initial _ ->
+            cleared
+                { appTextPrompt = Just TextOverlay
+                    { textTitle = title
+                    , textBody = body
+                    , textDraft = initial
+                    , textCursor = Text.length initial
+                    }
+                , appTextReply = Just modalId
+                }
+  where
+    modalId = Modal.modalTicketId ticket
+    cleared = (clearFullscreenModal state) { appAgentHover = Nothing }
+
+clearFullscreenModal :: AppState -> AppState
+clearFullscreenModal state =
+    (applyUiEvent UiPermissionHidden state)
+        { appPermissionReply = Nothing
+        , appChoice = Nothing
+        , appChoiceReply = Nothing
+        , appTextPrompt = Nothing
+        , appTextReply = Nothing
+        }
+
+activeFullscreenModalId :: AppState -> Maybe Modal.ModalId
+activeFullscreenModalId state =
+    case state.appPermissionReply of
+        Just modalId ->
+            Just modalId
+        Nothing ->
+            case state.appChoiceReply of
+                Just (CoordinatedChoice modalId) ->
+                    Just modalId
+                _ ->
+                    state.appTextReply
+
+modalUsesOverlayViewport
+    :: Modal.ModalTicket FullscreenModal
+    -> Bool
+modalUsesOverlayViewport ticket =
+    case Modal.modalTicketRequest ticket of
+        FullscreenPermission{} -> False
+        FullscreenChoice{} -> True
+        FullscreenText{} -> True
+
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
@@ -2556,6 +2713,8 @@ handleEventInner event = case event of
                     state.appRuntime.runtimeMotionTickQueued
                     False
     AppEvent AppStop -> do
+        state <- get
+        liftIO $ closeFullscreenModals state.appRuntime
         modify' \state -> state { appWorkerStopped = True }
         halt
     AppEvent (AppSetSkillCommands skills) -> do
@@ -2641,47 +2800,12 @@ handleEventInner event = case event of
         modify' \state ->
             state { appConversationReflowQueued = False }
         reflowConversation
-    AppEvent (AppAskPermission summary reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        applyLocalUiEventWith
-            (UiPermissionShown summary)
-            \current ->
-                current
-                    { appPermissionReply = Just reply
-                    , appAgentHover = Nothing
-                    }
-    AppEvent (AppAskChoice title body initial rows reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
-                { appChoice = Just ChoiceOverlay
-                    { choiceTitle = title
-                    , choiceBody = body
-                    , choiceIndex =
-                        max 0 (min (max 0 (length rows - 1)) initial)
-                    , choiceRows = rows
-                    }
-                , appChoiceReply = Just (atomically . putTMVar reply)
-                , appAgentHover = Nothing
-                }
-        vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent (AppAskText title body initial reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
-                { appTextPrompt = Just TextOverlay
-                    { textTitle = title
-                    , textBody = body
-                    , textDraft = initial
-                    , textCursor = Text.length initial
-                    }
-                , appTextReply = Just reply
-                , appAgentHover = Nothing
-                }
-        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppShowModal ticket) ->
+        showFullscreenModal ticket
+    AppEvent (AppModalAdvanced modalId next) ->
+        applyFullscreenModalTransition
+            modalId
+            (Modal.ModalAdvanced next)
     AppEvent (AppSuspend action reply) -> do
         state <- get
         suspendAndResume do
@@ -2857,12 +2981,24 @@ resolvePermission
 resolvePermission choice = do
     state <- get
     case state.appPermissionReply of
-        Nothing -> pure ()
-        Just reply ->
-            liftIO $ atomically (putTMVar reply (Just choice))
-    applyLocalUiEventWith UiPermissionHidden \current ->
-        current { appPermissionReply = Nothing }
-    resumeNativeProgressIfRunning
+        Nothing -> do
+            clearPermissionOverlay
+            resumeNativeProgressIfRunning
+        Just modalId -> do
+            transition <- liftIO $ atomically $
+                Modal.completeModal
+                    state.appRuntime.runtimeModals
+                    modalId
+                    (\case
+                        FullscreenPermission _ reply ->
+                            Just (putTMVar reply (Just choice))
+                        _ ->
+                            Nothing)
+            applyFullscreenModalTransition modalId transition
+  where
+    clearPermissionOverlay =
+        applyLocalUiEventWith UiPermissionHidden \current ->
+            current { appPermissionReply = Nothing }
 
 resumeNativeProgressIfRunning :: EventM Name AppState ()
 resumeNativeProgressIfRunning = do

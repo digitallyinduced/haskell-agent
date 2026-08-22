@@ -80,15 +80,27 @@ import Agent.Subagents.Types
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, race, waitCatch)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newEmptyMVar
+    , newMVar
+    , putMVar
+    , readMVar
+    , withMVar
+    )
 import Control.Concurrent.STM
 import Control.Exception.Safe
-    ( SomeException
+    ( SomeAsyncException
+    , SomeException
+    , catchAsync
     , catchAny
     , finally
     , mask
     , onException
     , throwIO
+    , toException
     , tryAny
     )
 import Control.Monad (void)
@@ -190,6 +202,51 @@ instance Monoid SubagentLease where
 subagentLease :: IO () -> SubagentLease
 subagentLease cleanup =
     SubagentLease (mkAcquire (pure ()) (const cleanup))
+
+data LeaseReleaseState
+    = LeaseReleaseOpen
+    | LeaseReleasing !(MVar (Either SomeException ()))
+    | LeaseReleased !(Either SomeException ())
+
+data LeaseReleaseDecision
+    = LeaseReleaseLeader !(MVar (Either SomeException ()))
+    | LeaseReleaseFollower !(MVar (Either SomeException ()))
+    | LeaseReleaseFinished !(Either SomeException ())
+
+-- Preparation and supervisor startup have several competing rollback paths.
+-- Wrap the prepared lease so whichever path wins performs the underlying
+-- release exactly once and all other paths wait for the same result.
+guardSubagentLease :: SubagentLease -> IO SubagentLease
+guardSubagentLease lease = do
+    stateVar <- newMVar LeaseReleaseOpen
+    pure $ subagentLease $
+        mask \restore -> do
+            decision <- modifyMVar stateVar \case
+                LeaseReleaseOpen -> do
+                    done <- newEmptyMVar
+                    pure (LeaseReleasing done, LeaseReleaseLeader done)
+                current@(LeaseReleasing done) ->
+                    pure (current, LeaseReleaseFollower done)
+                current@(LeaseReleased result) ->
+                    pure (current, LeaseReleaseFinished result)
+            result <- case decision of
+                LeaseReleaseLeader done -> do
+                    released <- tryAllExceptions
+                        (restore (releaseSubagentLease lease))
+                    putMVar done released
+                    modifyMVar_ stateVar (const (pure (LeaseReleased released)))
+                    pure released
+                LeaseReleaseFollower done ->
+                    restore (readMVar done)
+                LeaseReleaseFinished released ->
+                    pure released
+            either throwIO pure result
+
+tryAllExceptions :: IO a -> IO (Either SomeException a)
+tryAllExceptions action =
+    ((Right <$> action) `catchAny` (pure . Left))
+        `catchAsync` \(exception :: SomeAsyncException) ->
+            pure (Left (toException exception))
 
 data SubagentRegistry = SubagentRegistry
     { registryAgents :: !(TVar (Map SubagentId SubagentRecord))
@@ -536,8 +593,9 @@ spawnSubagentAtWithIdPreparedForTurn
                         rollbackAdmission registry record
                         pure $ Left $
                             "Failed to prepare subagent: " <> Text.pack (show exc)
-                    Right lease ->
-                        startPrepared restore record lease)
+                    Right lease -> do
+                        guardedLease <- guardSubagentLease lease
+                        startPrepared restore record guardedLease)
                 `onException` rollbackAdmission registry record
   where
     startPrepared restore record lease = do
@@ -545,7 +603,9 @@ spawnSubagentAtWithIdPreparedForTurn
             restore
                 (withMVar registry.registryLifecycle \_ ->
                     startRecordSupervisor registry record lease)
-                `onException` shutdownRecord registry record
+                `onException`
+                    (shutdownRecord registry record
+                        `finally` releaseSubagentLease lease)
         case started of
             Left err -> do
                 rollbackAdmission registry record
@@ -789,17 +849,20 @@ stopAsync supervisor = do
     _ <- waitCatch supervisor
     pure ()
 
-takeRecordSupervisor :: SubagentRecord -> IO (Maybe (Async ()))
-takeRecordSupervisor record =
-    atomically do
-        current <- readTVar record.recordAsync
-        writeTVar record.recordAsync Nothing
-        pure current
-
 stopRecordSupervisor :: SubagentRecord -> IO ()
-stopRecordSupervisor record = do
-    supervisor <- takeRecordSupervisor record
-    mapM_ stopAsync supervisor
+stopRecordSupervisor record =
+    mask \restore -> do
+        supervisor <- atomically (readTVar record.recordAsync)
+        case supervisor of
+            Nothing -> pure ()
+            Just running -> do
+                -- Keep ownership published until cancel+join completes. If
+                -- this stopper is itself cancelled, a later close can retry
+                -- instead of losing the only handle to a live supervisor.
+                restore (stopAsync running)
+                atomically $
+                    modifyTVar' record.recordAsync \current ->
+                        if current == Just running then Nothing else current
 
 data SupervisorStep
     = SupervisorStop

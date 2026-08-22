@@ -75,9 +75,14 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , canonicalToolName
     )
-import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
+import Control.Concurrent
+    ( ThreadId
+    , forkIOWithUnmask
+    , killThread
+    , threadDelay
+    )
 import Control.Concurrent.MVar (MVar, withMVar)
-import Control.Exception.Safe (tryIO)
+import Control.Exception.Safe (mask_, tryIO, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -303,17 +308,27 @@ startThinkingSpinnerUnlocked config
                 writeIORef config.renderThinkingVisible True
                 paintThinkingFrame config
                 started <- getMonotonicTimeNSec
-                tid <- forkIO (spinnerLoop config started 0)
-                writeIORef config.renderThinkingSpinner (Just tid)
+                -- Publish the worker handle atomically with respect to async
+                -- exceptions. The child is explicitly unmasked so stopping it
+                -- remains prompt even though it is forked from this masked
+                -- publication window.
+                mask_ do
+                    tid <- forkIOWithUnmask \unmask ->
+                        unmask (spinnerLoop config started 0)
+                    writeIORef config.renderThinkingSpinner (Just tid)
 
 -- | Stop the spinner and erase its in-place status line. Does not commit a
 -- reasoning block; callers that need that use 'commitThinkingUnlocked'.
 stopThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 stopThinkingSpinnerUnlocked config = do
-    mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
-    case mtid of
-        Just tid -> killThread tid
-        Nothing -> pure ()
+    -- Do not clear the only handle and then get interrupted before the worker
+    -- has actually stopped. Spinner workers stay interruptible, so this short
+    -- uninterruptible region cannot wait on application work.
+    uninterruptibleMask_ do
+        mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
+        case mtid of
+            Just tid -> killThread tid
+            Nothing -> pure ()
     visible <- readIORef config.renderThinkingVisible
     when visible do
         void $ tryIO do

@@ -20,7 +20,9 @@ module Agent.OpenAI.Auth
       -- * Cooldown management
     , reportRateLimit
     , reportAuthBroken
+    , reportAuthBrokenIfCurrent
     , refreshAfterAuthFailure
+    , refreshAfterAuthFailureIfCurrent
     , authFailureRetrySeconds
 
       -- * Inspection and manual refresh
@@ -69,8 +71,13 @@ import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime, utctDayTime)
 data AccountEntry = AccountEntry
     { entryAccountId     :: !Text
     , entryAuthRef       :: !(IORef AuthState)
-    , entryCooldownUntil :: !(IORef (Maybe UTCTime))
+    , entryCooldowns     :: !(IORef AccountCooldowns)
     , entryRefreshLock   :: !(MVar ())
+    }
+
+data AccountCooldowns = AccountCooldowns
+    { cooldownRateLimitUntil :: !(Maybe UTCTime)
+    , cooldownAuthBrokenUntil :: !(Maybe UTCTime)
     }
 
 -- | Optional source of newly available accounts. The callback receives every
@@ -199,14 +206,20 @@ buildPool initial emptyRetryAt refresh discovery = do
 mkEntry :: AuthState -> IO AccountEntry
 mkEntry state = do
     authRef <- newIORef state
-    cooldownRef <- newIORef Nothing
+    cooldownRef <- newIORef emptyAccountCooldowns
     refreshLock <- newMVar ()
     pure AccountEntry
         { entryAccountId = state.accountId
         , entryAuthRef = authRef
-        , entryCooldownUntil = cooldownRef
+        , entryCooldowns = cooldownRef
         , entryRefreshLock = refreshLock
         }
+
+emptyAccountCooldowns :: AccountCooldowns
+emptyAccountCooldowns = AccountCooldowns
+    { cooldownRateLimitUntil = Nothing
+    , cooldownAuthBrokenUntil = Nothing
+    }
 
 --------------------------------------------------------------------------------
 -- Access-token dispensing
@@ -258,45 +271,40 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
             case picked of
                 Left earliest -> pure $ Left (CredentialsExhausted earliest)
                 Right entry ->
-                    currentAuthState pool entry >>= \case
-                        Right state ->
+                    checkoutEntry pool entry >>= \case
+                        CheckoutReady state ->
                             pure $ Right (state.accessToken, state.accountId)
+                        CheckoutRetry ->
+                            go (attemptsLeft - 1)
+                        CheckoutFailed err ->
+                            pure (Left err)
+
+data CheckoutResult
+    = CheckoutReady !AuthState
+    | CheckoutRetry
+    | CheckoutFailed !ApiError
+
+checkoutEntry :: Pool -> AccountEntry -> IO CheckoutResult
+checkoutEntry pool entry =
+    withMVar entry.entryRefreshLock \_ -> do
+        now <- getCurrentTime
+        cooldown <- currentCooldown entry now
+        case cooldown of
+            Just _ -> pure CheckoutRetry
+            Nothing -> do
+                state <- readIORef entry.entryAuthRef
+                if not (needsRefresh state now)
+                    then pure (CheckoutReady state)
+                    else pool.poolRefresh state >>= \case
+                        Right new -> do
+                            writeIORef entry.entryAuthRef new
+                            pure (CheckoutReady new)
                         Left err
                             | isAuthError err -> do
-                                reportAuthBroken pool entry.entryAccountId
-                                go (attemptsLeft - 1)
-                            | otherwise -> pure $ Left err
-
--- | Read a checkout state while serialized with every refresh for this
--- account. Always taking the lock prevents an in-flight forced refresh from
--- handing another caller the rejected token it is replacing. Re-checking
--- expiry after acquiring it makes concurrent expiry-driven checkouts share
--- the first successful refresh.
-currentAuthState
-    :: Pool
-    -> AccountEntry
-    -> IO (Either ApiError AuthState)
-currentAuthState pool entry =
-    withMVar entry.entryRefreshLock \_ -> do
-        state <- readIORef entry.entryAuthRef
-        now <- getCurrentTime
-        if needsRefresh state now
-            then refreshEntry pool entry state
-            else pure (Right state)
-
--- | Invoke the refresh callback and commit its result. The caller must hold
--- 'entryRefreshLock'.
-refreshEntry
-    :: Pool
-    -> AccountEntry
-    -> AuthState
-    -> IO (Either ApiError AuthState)
-refreshEntry pool entry state =
-    pool.poolRefresh state >>= \case
-        Right new -> do
-            writeIORef entry.entryAuthRef new
-            pure (Right new)
-        Left err -> pure (Left err)
+                                markAuthBroken entry
+                                pure CheckoutRetry
+                            | otherwise ->
+                                pure (CheckoutFailed err)
 
 -- | Ask the dynamic source only for accounts this process has never seen.
 -- Broker outages do not replace a precise local 'CredentialsExhausted' reset time
@@ -354,22 +362,48 @@ pickAccount pool = do
                     | k >= n = pure Nothing
                     | otherwise = do
                         let entry = entries !! ((startIdx + k) `mod` n)
-                        cooldown <- readIORef entry.entryCooldownUntil
+                        cooldown <- currentCooldown entry now
                         case cooldown of
                             Nothing -> pure (Just entry)
-                            Just t | t <= now -> do
-                                writeIORef entry.entryCooldownUntil Nothing
-                                pure (Just entry)
                             _ -> tryFrom (k + 1)
             available <- tryFrom 0
             case available of
                 Just entry -> pure (Right entry)
                 Nothing -> do
                     expirations <- fmap catMaybes $ forM entries $ \entry ->
-                        readIORef entry.entryCooldownUntil
+                        currentCooldown entry now
                     case expirations of
                         []       -> pure (Left now)
                         (t : ts) -> pure (Left (minimum (t : ts)))
+
+currentCooldown :: AccountEntry -> UTCTime -> IO (Maybe UTCTime)
+currentCooldown entry now =
+    atomicModifyIORef' entry.entryCooldowns \cooldowns ->
+        let current = pruneCooldowns now cooldowns
+        in (current, effectiveCooldown current)
+
+pruneCooldowns :: UTCTime -> AccountCooldowns -> AccountCooldowns
+pruneCooldowns now cooldowns = AccountCooldowns
+    { cooldownRateLimitUntil =
+        keepFuture cooldowns.cooldownRateLimitUntil
+    , cooldownAuthBrokenUntil =
+        keepFuture cooldowns.cooldownAuthBrokenUntil
+    }
+  where
+    keepFuture = \case
+        Just until_ | until_ > now -> Just until_
+        _ -> Nothing
+
+effectiveCooldown :: AccountCooldowns -> Maybe UTCTime
+effectiveCooldown cooldowns =
+    maxMaybe
+        cooldowns.cooldownRateLimitUntil
+        cooldowns.cooldownAuthBrokenUntil
+
+maxMaybe :: Ord a => Maybe a -> Maybe a -> Maybe a
+maxMaybe Nothing right = right
+maxMaybe left Nothing = left
+maxMaybe (Just left) (Just right) = Just (max left right)
 
 --------------------------------------------------------------------------------
 -- Cooldown management
@@ -387,16 +421,34 @@ reportRateLimit pool limitedAccountId retryAfter = do
     now <- getCurrentTime
     let seconds = fromMaybe rateLimitCooldownSeconds retryAfter
         until_ = addUTCTime (fromIntegral seconds) now
-    setCooldown pool limitedAccountId until_
+    setRateLimitCooldown pool limitedAccountId until_
 
 -- | Mark the account with the given OpenAI @accountId@ as auth-broken
 -- (401/403 from Codex). Uses the same cooldown mechanism as
 -- 'reportRateLimit' with 'authFailureRetrySeconds'.
 reportAuthBroken :: Pool -> Text -> IO ()
 reportAuthBroken pool brokenAccountId = do
-    now <- getCurrentTime
-    let until_ = addUTCTime (fromIntegral authFailureRetrySeconds) now
-    setCooldown pool brokenAccountId until_
+    found <- findEntry pool brokenAccountId
+    mapM_ (\entry -> withMVar entry.entryRefreshLock \_ -> markAuthBroken entry) found
+
+-- | Mark an account as auth-broken only if @rejectedAccessToken@ is still the
+-- token cached for that account. If another thread already installed a
+-- replacement, return it instead of cooling healthy capacity.
+reportAuthBrokenIfCurrent
+    :: Pool
+    -> Text
+    -> Text
+    -> IO (Maybe AuthState)
+reportAuthBrokenIfCurrent pool accountId rejectedAccessToken = do
+    found <- findEntry pool accountId
+    case found of
+        Nothing -> pure Nothing
+        Just entry ->
+            withMVar entry.entryRefreshLock \_ -> do
+                current <- readIORef entry.entryAuthRef
+                if current.accessToken /= rejectedAccessToken
+                    then pure (Just current)
+                    else markAuthBroken entry >> pure Nothing
 
 -- | Force-rotate an access token that Codex has rejected with HTTP 401/403,
 -- even when its JWT expiry is still in the future. ChatGPT can invalidate an
@@ -408,14 +460,54 @@ reportAuthBroken pool brokenAccountId = do
 -- the caller can fail over without selecting the same known-bad token again.
 refreshAfterAuthFailure :: Pool -> Text -> IO (Either ApiError AuthState)
 refreshAfterAuthFailure pool rejectedAccountId = do
-    result <- forceRefresh pool rejectedAccountId
-    case result of
-        Right newState -> do
-            clearCooldown pool newState.accountId
-            pure (Right newState)
-        Left err -> do
-            reportAuthBroken pool rejectedAccountId
-            pure (Left err)
+    found <- findEntry pool rejectedAccountId
+    case found of
+        Nothing -> unknownAccountError "refreshAfterAuthFailure" rejectedAccountId
+        Just entry -> do
+            rejected <- readIORef entry.entryAuthRef
+            refreshAfterAuthFailureEntry
+                pool entry (Just rejected.accessToken)
+
+-- | Refresh a rejected token if it is still current. Concurrent callers that
+-- report the same stale token share one refresh; later callers receive the
+-- replacement already cached by the winner.
+refreshAfterAuthFailureIfCurrent
+    :: Pool
+    -> Text
+    -> Text
+    -> IO (Either ApiError AuthState)
+refreshAfterAuthFailureIfCurrent pool rejectedAccountId rejectedAccessToken = do
+    found <- findEntry pool rejectedAccountId
+    case found of
+        Nothing ->
+            unknownAccountError
+                "refreshAfterAuthFailureIfCurrent"
+                rejectedAccountId
+        Just entry ->
+            refreshAfterAuthFailureEntry
+                pool entry (Just rejectedAccessToken)
+
+refreshAfterAuthFailureEntry
+    :: Pool
+    -> AccountEntry
+    -> Maybe Text
+    -> IO (Either ApiError AuthState)
+refreshAfterAuthFailureEntry pool entry expectedAccessToken =
+    withMVar entry.entryRefreshLock \_ -> do
+        current <- readIORef entry.entryAuthRef
+        case expectedAccessToken of
+            Just rejected
+                | current.accessToken /= rejected ->
+                    pure (Right current)
+            _ ->
+                pool.poolRefresh current >>= \case
+                    Right new -> do
+                        writeIORef entry.entryAuthRef new
+                        clearAuthBrokenCooldown entry
+                        pure (Right new)
+                    Left err -> do
+                        markAuthBroken entry
+                        pure (Left err)
 
 isAuthError :: ApiError -> Bool
 isAuthError (HttpError 401 _) = True
@@ -424,24 +516,40 @@ isAuthError (ProviderError AuthenticationError _ _) = True
 isAuthError CredentialError{} = True
 isAuthError _ = False
 
-setCooldown :: Pool -> Text -> UTCTime -> IO ()
-setCooldown pool targetAccountId until_ =
+setRateLimitCooldown :: Pool -> Text -> UTCTime -> IO ()
+setRateLimitCooldown pool targetAccountId until_ =
     readIORef pool.poolEntries >>= mapM_ go
   where
-    go entry = do
-        state <- readIORef entry.entryAuthRef
-        when (state.accountId == targetAccountId) $
-            atomicModifyIORef' entry.entryCooldownUntil \current ->
-                (Just (maybe until_ (max until_) current), ())
+    go entry =
+        when (entry.entryAccountId == targetAccountId) $
+            atomicModifyIORef' entry.entryCooldowns \current ->
+                ( current
+                    { cooldownRateLimitUntil =
+                        Just
+                            (maybe until_ (max until_)
+                                current.cooldownRateLimitUntil)
+                    }
+                , ()
+                )
 
-clearCooldown :: Pool -> Text -> IO ()
-clearCooldown pool targetAccountId =
-    readIORef pool.poolEntries >>= mapM_ go
-  where
-    go entry = do
-        state <- readIORef entry.entryAuthRef
-        when (state.accountId == targetAccountId) $
-            writeIORef entry.entryCooldownUntil Nothing
+markAuthBroken :: AccountEntry -> IO ()
+markAuthBroken entry = do
+    now <- getCurrentTime
+    let until_ = addUTCTime (fromIntegral authFailureRetrySeconds) now
+    atomicModifyIORef' entry.entryCooldowns \current ->
+        ( current
+            { cooldownAuthBrokenUntil =
+                Just
+                    (maybe until_ (max until_)
+                        current.cooldownAuthBrokenUntil)
+            }
+        , ()
+        )
+
+clearAuthBrokenCooldown :: AccountEntry -> IO ()
+clearAuthBrokenCooldown entry =
+    atomicModifyIORef' entry.entryCooldowns \current ->
+        (current { cooldownAuthBrokenUntil = Nothing }, ())
 
 --------------------------------------------------------------------------------
 -- Inspection and manual refresh
@@ -473,7 +581,7 @@ snapshotAccounts pool = do
     entries <- readIORef pool.poolEntries
     forM entries \entry -> do
         auth <- readIORef entry.entryAuthRef
-        cooldown <- readIORef entry.entryCooldownUntil
+        cooldown <- effectiveCooldown <$> readIORef entry.entryCooldowns
         pure AccountSnapshot
             { snapshotAuth = auth
             , snapshotCooldownUntil = cooldown
@@ -482,20 +590,37 @@ snapshotAccounts pool = do
 -- | Force a refresh of the given account, regardless of JWT expiry. Useful
 -- for scheduled refresh jobs that rotate ahead of the natural expiry window.
 --
--- Refreshes for the same account are serialized within this pool. The callback
--- remains responsible for cross-process serialization (e.g. via a Postgres
--- row-level lock). On success the new state is written back to the pool's
--- in-memory cache.
+-- In-process refreshes for the same account are serialized by the pool.
+-- Cross-process callers sharing a persistent token store must still serialize
+-- and version-check inside the callback (e.g. via a Postgres row-level lock).
+-- On success the new state is written back to the pool's in-memory cache.
 forceRefresh :: Pool -> Text -> IO (Either ApiError AuthState)
 forceRefresh pool targetAccountId = do
     found <- findEntry pool targetAccountId
     case found of
-        Nothing ->
-            pure $ Left (ProviderError AuthenticationError
-                ("Agent.OpenAI.Auth.forceRefresh: unknown accountId " <> targetAccountId) Nothing)
-        Just entry -> withMVar entry.entryRefreshLock \_ -> do
-            state <- readIORef entry.entryAuthRef
-            refreshEntry pool entry state
+        Nothing -> unknownAccountError "forceRefresh" targetAccountId
+        Just entry ->
+            withMVar entry.entryRefreshLock \_ -> do
+                state <- readIORef entry.entryAuthRef
+                result <- pool.poolRefresh state
+                case result of
+                    Right new ->
+                        writeIORef entry.entryAuthRef new >> pure (Right new)
+                    Left err ->
+                        pure (Left err)
+
+unknownAccountError
+    :: Text
+    -> Text
+    -> IO (Either ApiError AuthState)
+unknownAccountError operation targetAccountId =
+    pure $ Left $ ProviderError AuthenticationError
+        ( "Agent.OpenAI.Auth."
+            <> operation
+            <> ": unknown accountId "
+            <> targetAccountId
+        )
+        Nothing
 
 findEntry :: Pool -> Text -> IO (Maybe AccountEntry)
 findEntry pool targetAccountId = do

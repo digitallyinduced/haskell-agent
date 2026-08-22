@@ -964,6 +964,7 @@ reloadableFileCredentialProvider
     -> IO TokenProvider
 reloadableFileCredentialProvider expectedProvider initial reload = do
     cache <- newIORef (Just initial)
+    cacheLock <- newMVar ()
     let loadFresh rejectedToken =
             reload >>= \case
                 Nothing ->
@@ -982,6 +983,16 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
                     | otherwise -> do
                         writeIORef cache (Just credential)
                         pure (Right credential)
+        isExplicitReloadRequest rejected =
+            -- /reload-auth uses this otherwise-invalid credential as an
+            -- explicit cache invalidation request.
+            rejected.provider == expectedProvider
+                && Text.null rejected.accessToken
+                && Text.null rejected.accountId
+                && rejected.leaseId == Nothing
+        rejectsCachedCredential rejected credential =
+            rejected.provider == credential.provider
+                && rejected.accessToken == credential.accessToken
     pure $ TokenProvider \failed -> case failed of
         Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
             now <- getCurrentTime
@@ -991,13 +1002,26 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
         Just FailedCredential
             { credential = rejected
             , failure = AccountAuthenticationRejected
-            } -> do
-            writeIORef cache Nothing
-            loadFresh (Just rejected.accessToken)
+            } ->
+            withMVar cacheLock \_ -> do
+                current <- readIORef cache
+                let forceReload = isExplicitReloadRequest rejected
+                case current of
+                    Just credential
+                        | not forceReload
+                        , not (rejectsCachedCredential rejected credential) ->
+                            pure (Right credential)
+                    _ -> do
+                        writeIORef cache Nothing
+                        loadFresh
+                            (if forceReload
+                                then Nothing
+                                else Just rejected.accessToken)
         Nothing ->
-            readIORef cache >>= \case
-                Just credential -> pure (Right credential)
-                Nothing -> loadFresh Nothing
+            withMVar cacheLock \_ ->
+                readIORef cache >>= \case
+                    Just credential -> pure (Right credential)
+                    Nothing -> loadFresh Nothing
 
 staticCredentialProvider :: Credential -> TokenProvider
 staticCredentialProvider credential = TokenProvider \failed ->

@@ -89,6 +89,7 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Control.Concurrent.MVar (withMVar)
 import Control.Monad (when)
 import Control.Exception.Safe (onException)
 import Data.IORef
@@ -115,7 +116,7 @@ runOneTurn env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionStartupContext = startupContext
-    , sessionEscPaused = escPaused
+    , sessionStdinGate = stdinGate
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
@@ -135,7 +136,7 @@ runOneTurn env@SessionEnv
   withTurnCancel interrupt config.loopCancel $
     (if isJust fullscreen
         then id
-        else withEscCancel config.loopCancel escPaused) do
+        else withEscCancel config.loopCancel stdinGate) do
     applyPendingSessionTitles env
     pending <- readIORef planMode.planStateRef
     when (pending == PlanPending) (activatePlanMode planMode)
@@ -215,24 +216,26 @@ runOneTurn env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete errorText = case persist of
-            PersistenceDisabled -> pure ()
-            PersistenceEnabled slotRef -> do
-                now <- getCurrentTime
-                handle <- ensureSession slotRef
-                writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                writeIORef storeRoot (Just handle.sessionDir)
-                let turn = SessionTurn
-                        { turnAt = now
-                        , turnUserText = promptText
-                        , turnAssistantText = Nothing
-                        , turnError = Just errorText
-                        , turnResponseId = Nothing
-                        , turnItems = []
-                        , turnUsage = Nothing
-                        }
-                handle' <- appendTurn handle turn
-                writeIORef slotRef (PersistenceActive handle')
+        persistIncomplete errorText =
+            withMVar env.sessionPersistLock \_ ->
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef -> do
+                        now <- getCurrentTime
+                        handle <- ensureSession slotRef
+                        writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                        writeIORef storeRoot (Just handle.sessionDir)
+                        let turn = SessionTurn
+                                { turnAt = now
+                                , turnUserText = promptText
+                                , turnAssistantText = Nothing
+                                , turnError = Just errorText
+                                , turnResponseId = Nothing
+                                , turnItems = []
+                                , turnUsage = Nothing
+                                }
+                        handle' <- appendTurn handle turn
+                        writeIORef slotRef (PersistenceActive handle')
     case (restartEffort, result) of
         (Just level, _) -> do
             restoreStartupContext
@@ -359,40 +362,43 @@ runOneTurn env@SessionEnv
                     | beforeItems `isPrefixOf` afterItems =
                         drop (length beforeItems) afterItems
                     | otherwise = afterItems
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef -> do
-                    now <- getCurrentTime
-                    handle <- ensureSession slotRef
-                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                    writeIORef storeRoot (Just handle.sessionDir)
-                    let turn = SessionTurn
-                            { turnAt = now
-                            , turnUserText = promptText
-                            , turnAssistantText = assistantText
-                            , turnError = Nothing
-                            , turnResponseId = Just loopResult.finalResponseId
-                            , turnItems = newItems
-                            , turnUsage = Just loopResult.tokenUsage
-                            }
-                    titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
-                    countedHandle <- appendTurnWithMetaUpdate handle turn \meta ->
-                        meta { metaTitleUserTurns = titleTurns }
-                    writeIORef env.sessionTitleTurnCount titleTurns
-                    let countedMeta = countedHandle.sessionMeta
-                    writeIORef slotRef (PersistenceActive countedHandle)
-                    when
-                        ( titleTurns `elem` [3, 6]
-                            && not countedMeta.metaTitleIsManual
-                            && countedMeta.metaTitleRefreshIndex
-                                < titleRefreshIndex titleTurns
-                        )
-                        (requestConversationTitle env countedHandle titleTurns)
-                    when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        setWindowTitle
-                            (cliWindowTitle countedMeta.metaCwd
-                                (Just countedMeta.metaTitle))
-                    applyPendingSessionTitles env
+            withMVar env.sessionPersistLock \_ ->
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef -> do
+                        now <- getCurrentTime
+                        handle <- ensureSession slotRef
+                        writeIORef planMode.planSessionDir (Just handle.sessionDir)
+                        writeIORef storeRoot (Just handle.sessionDir)
+                        let turn = SessionTurn
+                                { turnAt = now
+                                , turnUserText = promptText
+                                , turnAssistantText = assistantText
+                                , turnError = Nothing
+                                , turnResponseId = Just loopResult.finalResponseId
+                                , turnItems = newItems
+                                , turnUsage = Just loopResult.tokenUsage
+                                }
+                        titleTurns <-
+                            (+ 1) <$> readIORef env.sessionTitleTurnCount
+                        countedHandle <-
+                            appendTurnWithMetaUpdate handle turn \meta ->
+                                meta { metaTitleUserTurns = titleTurns }
+                        writeIORef env.sessionTitleTurnCount titleTurns
+                        let countedMeta = countedHandle.sessionMeta
+                        writeIORef slotRef (PersistenceActive countedHandle)
+                        when
+                            ( titleTurns `elem` [3, 6]
+                                && not countedMeta.metaTitleIsManual
+                                && countedMeta.metaTitleRefreshIndex
+                                    < titleRefreshIndex titleTurns
+                            )
+                            (requestConversationTitle env countedHandle titleTurns)
+                        when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                            setWindowTitle
+                                (cliWindowTitle countedMeta.metaCwd
+                                    (Just countedMeta.metaTitle))
+                        applyPendingSessionTitles env
             case followUp of
                 Nothing -> pure TurnSucceeded
                 Just notes -> do

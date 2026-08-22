@@ -18,7 +18,7 @@ module Agent.CLI.Plan
     , planDecisionFollowUp
     ) where
 
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.CancelWatch (StdinGate, withStdinPaused)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readChoiceSelection
@@ -49,7 +49,6 @@ import Agent.Tools.PlanMode
     )
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
-import Data.IORef (IORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -62,14 +61,14 @@ import System.Console.ANSI
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
 
--- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
--- arrow keys / single-key answers are not stolen mid-turn.
-cliPlanHooks :: InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
-cliPlanHooks interrupt escPaused resolveColor = PlanModeHooks
-    { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
-    , planDecideExit = withStdinPaused escPaused . decideExit interrupt resolveColor
+-- | Build plan-mode prompts. @stdinGate@ gives each picker exclusive stdin
+-- ownership so the Esc watcher and concurrent prompts cannot steal its keys.
+cliPlanHooks :: InterruptState -> StdinGate -> IO Bool -> PlanModeHooks
+cliPlanHooks interrupt stdinGate resolveColor = PlanModeHooks
+    { planConfirmEnter = withStdinPaused stdinGate . confirmEnter resolveColor
+    , planDecideExit = withStdinPaused stdinGate . decideExit interrupt resolveColor
     , planAskQuestion = \q opts ->
-        withStdinPaused escPaused (askQuestion interrupt resolveColor q opts)
+        withStdinPaused stdinGate (askQuestion interrupt resolveColor q opts)
     }
 
 data PlanEnterChoice = PlanEnter | PlanStayNormal

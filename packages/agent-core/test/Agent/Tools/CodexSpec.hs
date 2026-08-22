@@ -18,8 +18,15 @@ import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
+import Agent.Tools.PlanMode
+    ( PlanDecision(..)
+    , PlanModeHooks(..)
+    , isPlanModeActive
+    , newPlanModeEnv
+    )
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -113,6 +120,53 @@ spec = describe "Agent.Tools.Codex" do
                         "{\"explanation\":\"The user requested a design plan.\"}")
                 result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
                 isPlanModeActive plan `shouldReturn` True)
+                `finally` closeGhciSession ghci
+
+    it "does not let an approved patch cross a concurrent plan-mode transition" do
+        withTempEnv \env -> do
+            confirmationStarted <- newEmptyMVar
+            releaseConfirmation <- newEmptyMVar
+            let hooks = PlanModeHooks
+                    { planConfirmEnter = \_ -> do
+                        putMVar confirmationStarted ()
+                        takeMVar releaseConfirmation
+                        pure True
+                    , planDecideExit = \_ -> pure PlanApprove
+                    , planAskQuestion = \_ _ -> pure Nothing
+                    }
+                patch = Text.unlines
+                    [ "*** Begin Patch"
+                    , "*** Add File: raced.txt"
+                    , "+must not be written"
+                    , "*** End Patch"
+                    ]
+            ghci <- newGhciSession env
+            plan <- newPlanModeEnv env.toolCwd (Just hooks)
+            tools <- codexTools env ghci plan Nothing
+            let dispatch = dispatchToolCall
+                    defaultLoopDispatch
+                    (appToolHandlers tools)
+            (withAsync
+                (dispatch
+                    (functionToolCall "call-enter-plan" "enter_plan_mode"
+                        "{\"explanation\":\"race test\"}"))
+                \entering -> do
+                    takeMVar confirmationStarted
+                    withAsync
+                        (dispatch
+                            (customToolCall "call-patch" "apply_patch" patch))
+                        \patching -> do
+                            putMVar releaseConfirmation ()
+                            entered <- wait entering
+                            blocked <- wait patching
+                            entered.output
+                                `shouldSatisfy` Text.isInfixOf "entered plan mode"
+                            blocked.output
+                                `shouldSatisfy` Text.isInfixOf
+                                    "file edits are not allowed in plan mode"
+                            doesFileExist
+                                (toFilePath env.toolCwd </> "raced.txt")
+                                `shouldReturn` False)
                 `finally` closeGhciSession ghci
 
     it "adds, updates, and deletes files via apply_patch" do

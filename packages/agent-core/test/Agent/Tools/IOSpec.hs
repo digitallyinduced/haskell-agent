@@ -22,7 +22,7 @@ import Agent.Tools.IO
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket, tryIO)
+import Control.Exception.Safe (bracket, bracket_, tryIO)
 import Control.Monad (replicateM)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Either (isLeft, isRight)
@@ -183,6 +183,31 @@ spec = describe "Agent.Tools.IO" do
             finalSnapshots <- readIORef snapshots
             finalSnapshots `shouldSatisfy`
                 any (Text.isInfixOf "firstsecond")
+
+    it "does not overlap periodic and final snapshot callbacks" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            active <- newIORef (0 :: Int)
+            peak <- newIORef (0 :: Int)
+            let callback _ _ =
+                    bracket_
+                        (do
+                            next <- atomicModifyIORef' active \current ->
+                                let next = current + 1
+                                in (next, next)
+                            atomicModifyIORef' peak \highest ->
+                                (max highest next, ()))
+                        (atomicModifyIORef' active \current ->
+                            (current - 1, ()))
+                        (threadDelay 300000)
+            _ <- runShellCommandStreaming
+                env
+                osDir
+                "printf first; sleep 0.15; printf second"
+                5000
+                callback
+            readIORef peak `shouldReturn` 1
 
     it "force-kills a process group on timeout" do
         withTempDir checkTimeoutKillsProcessGroup

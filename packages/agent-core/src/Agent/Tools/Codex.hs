@@ -34,6 +34,9 @@ import Agent.Tools.PlanMode
     , askUserQuestionTool
     , enterPlanModeTool
     , isPlanModeActive
+    , planFilePath
+    , planModeBlockedEditMessage
+    , withPlanModeLock
     )
 import Agent.Tools.Types
     ( AppTool
@@ -62,7 +65,7 @@ codexTools env ghci planMode multi = do
     planRef <- newIORef []
     pure $
         [ shellCommandTool env
-        , applyPatchTool env
+        , applyPatchTool env planMode
         , updatePlanTool planMode planRef
         , runGhciTool ghci
         , enterPlanModeTool planMode
@@ -171,11 +174,11 @@ instance FromJSON ApplyPatchArgs where
         ApplyPatchArgs <$> (reqText object "input" <|> reqText object "patch" <|> reqText object "command")
     parseJSON _ = parseFail "apply_patch expects freeform patch text"
 
-applyPatchTool :: ToolEnv -> AppTool
-applyPatchTool env =
+applyPatchTool :: ToolEnv -> PlanModeEnv -> AppTool
+applyPatchTool env planMode =
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
-        (typedTool "apply_patch" (runApplyPatch env))
+        (typedTool "apply_patch" (runApplyPatch env planMode))
 
 applyPatchDescription :: Text
 applyPatchDescription =
@@ -192,8 +195,16 @@ applyPatchDescription =
     \*** Delete File: path\n\
     \*** End Patch"
 
-runApplyPatch :: ToolEnv -> ApplyPatchArgs -> IO (Either Text Text)
-runApplyPatch env args = applyPatch env args.patch
+runApplyPatch
+    :: ToolEnv
+    -> PlanModeEnv
+    -> ApplyPatchArgs
+    -> IO (Either Text Text)
+runApplyPatch env planMode args = withPlanModeLock planMode do
+    active <- isPlanModeActive planMode
+    if active
+        then Left . planModeBlockedEditMessage <$> planFilePath planMode
+        else applyPatch env args.patch
 
 --------------------------------------------------------------------------------
 -- update_plan
@@ -244,7 +255,7 @@ updatePlanDescription =
     \This is a progress checklist, not Plan Mode. It errors while Plan Mode is active."
 
 runUpdatePlan :: PlanModeEnv -> IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
-runUpdatePlan planMode planRef args = do
+runUpdatePlan planMode planRef args = withPlanModeLock planMode do
     active <- isPlanModeActive planMode
     if active
         then pure $ Left

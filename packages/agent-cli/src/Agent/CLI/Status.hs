@@ -22,6 +22,7 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeState(..)
     , deactivatePlanMode
+    , setPlanModeState
     )
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
@@ -72,7 +73,7 @@ applyReplMode
     -> IO ()
 applyReplMode planMode policyRef projectRoot = \case
     ReplModePlan ->
-        writeIORef planMode.planStateRef PlanPending
+        setPlanModeState planMode PlanPending
     ReplModeAlwaysApprove -> do
         deactivatePlanMode planMode
         writeIORef policyRef ApproveAll

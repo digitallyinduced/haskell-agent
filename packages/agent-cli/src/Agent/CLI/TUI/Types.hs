@@ -4,9 +4,11 @@ module Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , AppState(..)
     , AgentHover(..)
+    , ChoiceReply(..)
     , ChoiceOverlay(..)
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
+    , FullscreenModal(..)
     , FullscreenRuntime(..)
     , Name(..)
     , PendingAppEvent(..)
@@ -20,6 +22,7 @@ import Agent.CLI.Input (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
 import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
+import qualified Agent.CLI.TUI.Modal as Modal
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
@@ -65,18 +68,10 @@ data Name
 data AppEvent
     = AppUi !UiEvent
     | AppUiBatch !(NonEmpty UiEvent)
-    | AppAskPermission !Text !(TMVar (Maybe PermissionChoice))
-    | AppAskChoice
-        !Text
-        !Text
-        !Int
-        ![(Text, Text)]
-        !(TMVar (Maybe Int))
-    | AppAskText
-        !Text
-        !Text
-        !Text
-        !(TMVar (Maybe Text))
+    | AppShowModal !(Modal.ModalTicket FullscreenModal)
+    | AppModalAdvanced
+        !Modal.ModalId
+        !(Maybe (Modal.ModalTicket FullscreenModal))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
     | AppSetImagePreviews ![ImageAttachment]
@@ -110,6 +105,7 @@ newtype FullscreenInputBuffer =
 data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
     , runtimeMailbox :: !AppEventMailbox
+    , runtimeModals :: !(Modal.ModalCoordinator FullscreenModal)
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -135,13 +131,13 @@ data FullscreenRuntime = FullscreenRuntime
 
 data AppState = AppState
     { appUi :: !UiState
-    , appPermissionReply :: !(Maybe (TMVar (Maybe PermissionChoice)))
+    , appPermissionReply :: !(Maybe Modal.ModalId)
     , appRuntime :: !FullscreenRuntime
     , appSlashIndex :: !Int
     , appChoice :: !(Maybe ChoiceOverlay)
-    , appChoiceReply :: !(Maybe (Maybe Int -> IO ()))
+    , appChoiceReply :: !(Maybe ChoiceReply)
     , appTextPrompt :: !(Maybe TextOverlay)
-    , appTextReply :: !(Maybe (TMVar (Maybe Text)))
+    , appTextReply :: !(Maybe Modal.ModalId)
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
     , appHistory :: ![Text]
@@ -165,6 +161,26 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     }
+
+data FullscreenModal
+    = FullscreenPermission
+        !Text
+        !(TMVar (Maybe PermissionChoice))
+    | FullscreenChoice
+        !Text
+        !Text
+        !Int
+        ![(Text, Text)]
+        !(TMVar (Maybe Int))
+    | FullscreenText
+        !Text
+        !Text
+        !Text
+        !(TMVar (Maybe Text))
+
+data ChoiceReply
+    = CoordinatedChoice !Modal.ModalId
+    | LocalChoice !(Maybe Int -> IO ())
 
 data AgentHover = AgentHover
     { agentHoverTarget :: !AgentTarget

@@ -50,6 +50,7 @@ import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
+import qualified Agent.CLI.TUIModalSpec as TUIModalSpec
 import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
@@ -104,6 +105,7 @@ main = hspec do
     TUIBridgeSpec.spec
     TUIComposerSpec.spec
     TUIImagePreviewSpec.spec
+    TUIModalSpec.spec
     TUIScrollSpec.spec
     UsageSpec.spec
     WorktreeSpec.spec

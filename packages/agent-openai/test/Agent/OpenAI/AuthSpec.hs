@@ -2,11 +2,14 @@ module Agent.OpenAI.AuthSpec (spec) where
 
 import Agent.OpenAI.Auth
 import Agent.Error (ApiError(..), ErrorType(..))
+import Control.Concurrent (forkFinally, threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
+    , readMVar
     , takeMVar
+    , tryPutMVar
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -225,6 +228,35 @@ spec = do
                 _ -> expectationFailure
                     ("expected two refresh attempts, got " <> show tried)
 
+        it "single-flights concurrent refreshes of one expired account" $ do
+            refreshCalls <- newIORef (0 :: Int)
+            refreshStarted <- newEmptyMVar
+            releaseRefresh <- newEmptyMVar
+            let rotated = (mkFreshAuth "acc")
+                    { accessToken = (mkFreshAuth "rotated").accessToken
+                    , refreshToken = "rotated-refresh"
+                    }
+                refresh _ = do
+                    atomicModifyIORef' refreshCalls \n -> (n + 1, ())
+                    _ <- tryPutMVar refreshStarted ()
+                    readMVar releaseRefresh
+                    pure (Right rotated)
+            pool <- newPool [mkExpiredAuth "acc"] refresh
+
+            firstDone <- forkResult (getAccessToken pool)
+            takeMVar refreshStarted
+            secondDone <- forkResult (getAccessToken pool)
+            -- Give the second checkout time to contend on the account lock.
+            threadDelay 100_000
+            putMVar releaseRefresh ()
+
+            first <- waitFork firstDone
+            second <- waitFork secondDone
+
+            first `shouldBe` Right (rotated.accessToken, "acc")
+            second `shouldBe` Right (rotated.accessToken, "acc")
+            readIORef refreshCalls `shouldReturn` 1
+
     describe "reportRateLimit" $ do
         it "skips rate-limited accounts on subsequent picks" $ do
             callCounter <- newIORef (0 :: Int)
@@ -406,6 +438,32 @@ spec = do
             token <- getAccessToken pool
             fmap fst token `shouldBe` Right rotated.accessToken
 
+        it "does not clear a concurrent rate-limit cooldown" $ do
+            refreshStarted <- newEmptyMVar
+            releaseRefresh <- newEmptyMVar
+            let startState = mkFreshAuth "acc"
+                rotated = startState
+                    { accessToken = (mkFreshAuth "rotated").accessToken
+                    , refreshToken = "rotated-refresh"
+                    }
+                refresh _ = do
+                    putMVar refreshStarted ()
+                    readMVar releaseRefresh
+                    pure (Right rotated)
+            pool <- newPool [startState] refresh
+
+            refreshDone <- forkResult (refreshAfterAuthFailure pool "acc")
+            takeMVar refreshStarted
+            reportRateLimit pool "acc" (Just 3600)
+            putMVar releaseRefresh ()
+
+            outcome <- waitFork refreshDone
+            fmap (.accessToken) outcome `shouldBe` Right rotated.accessToken
+            checkout <- getAccessToken pool
+            checkout `shouldSatisfy` \case
+                Left CredentialsExhausted{} -> True
+                _ -> False
+
         it "cools a rejected account when forced refresh fails" $ do
             let states = [mkFreshAuth "broken", mkFreshAuth "healthy"]
                 refresh state
@@ -492,6 +550,19 @@ isRight _         = False
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft _        = False
+
+forkResult action = do
+    result <- newEmptyMVar
+    _ <- forkFinally action (putMVar result)
+    pure result
+
+waitFork result =
+    takeMVar result >>= \case
+        Left exception ->
+            expectationFailure ("forked action failed: " <> show exception)
+                >> fail "forked action failed"
+        Right value ->
+            pure value
 
 uniq :: Eq a => [a] -> [a]
 uniq []     = []

@@ -14,8 +14,10 @@ module Agent.Tools.PlanMode
     , planFileName
     , planFilePath
     , isPlanModeActive
+    , setPlanModeState
     , activatePlanMode
     , deactivatePlanMode
+    , withPlanModeLock
     , readPlanMarkdown
     , writePlanMarkdown
     , planModeReminder
@@ -42,6 +44,7 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     )
 import Control.Exception.Safe (tryAny)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.Aeson (FromJSON(..), withObject)
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -68,6 +71,7 @@ data PlanDecision
 -- directory when known; otherwise plans live under the tool cwd.
 data PlanModeEnv = PlanModeEnv
     { planStateRef :: !(IORef PlanModeState)
+    , planStateLock :: !(MVar ())
     , planSessionDir :: !(IORef (Maybe OsPath))
     , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
@@ -95,9 +99,11 @@ defaultHooks = PlanModeHooks
 newPlanModeEnv :: OsPath -> Maybe PlanModeHooks -> IO PlanModeEnv
 newPlanModeEnv fallbackDir hooks = do
     stateRef <- newIORef PlanInactive
+    stateLock <- newMVar ()
     sessionRef <- newIORef Nothing
     pure PlanModeEnv
         { planStateRef = stateRef
+        , planStateLock = stateLock
         , planSessionDir = sessionRef
         , planFallbackDir = fallbackDir
         , planHooks = fromMaybe defaultHooks hooks
@@ -113,11 +119,22 @@ planFilePath env = do
 isPlanModeActive :: PlanModeEnv -> IO Bool
 isPlanModeActive env = (== PlanActive) <$> readIORef env.planStateRef
 
+setPlanModeState :: PlanModeEnv -> PlanModeState -> IO ()
+setPlanModeState env state =
+    withPlanModeLock env (writeIORef env.planStateRef state)
+
 activatePlanMode :: PlanModeEnv -> IO ()
-activatePlanMode env = writeIORef env.planStateRef PlanActive
+activatePlanMode env = setPlanModeState env PlanActive
 
 deactivatePlanMode :: PlanModeEnv -> IO ()
-deactivatePlanMode env = writeIORef env.planStateRef PlanInactive
+deactivatePlanMode env = setPlanModeState env PlanInactive
+
+-- | Serialize plan-state transitions with operations whose permission depends
+-- on that state. Keep the critical section around the actual mutation, not
+-- only around its earlier approval check.
+withPlanModeLock :: PlanModeEnv -> IO a -> IO a
+withPlanModeLock env action =
+    withMVar env.planStateLock (const action)
 
 readPlanMarkdown :: PlanModeEnv -> IO Text
 readPlanMarkdown env = do
@@ -210,7 +227,7 @@ enterPlanDescription =
     \explore the codebase, write the plan, then call exit_plan_mode for approval."
 
 runEnterPlanMode :: PlanModeEnv -> EnterPlanArgs -> IO (Either Text Text)
-runEnterPlanMode env args = do
+runEnterPlanMode env args = withPlanModeLock env do
     active <- isPlanModeActive env
     if active
         then pure $ Right "Plan mode is already active."
@@ -221,7 +238,7 @@ runEnterPlanMode env args = do
                 then pure $ Left "User declined plan mode. Stay in normal mode and continue."
                 else do
                     path <- planFilePath env
-                    activatePlanMode env
+                    writeIORef env.planStateRef PlanActive
                     pure $ Right $
                         "You have entered plan mode. Explore the codebase and write an implementation plan to "
                             <> toText path
@@ -252,7 +269,7 @@ exitPlanDescription =
     \or cancel (abandon the plan and turn plan mode off)."
 
 runExitPlanMode :: PlanModeEnv -> ExitPlanArgs -> IO (Either Text Text)
-runExitPlanMode env args = do
+runExitPlanMode env args = withPlanModeLock env do
     active <- isPlanModeActive env
     if not active
         then pure $ Left "Plan mode is not active."
@@ -269,7 +286,7 @@ runExitPlanMode env args = do
             decision <- env.planHooks.planDecideExit (header <> body)
             case decision of
                 PlanApprove -> do
-                    deactivatePlanMode env
+                    writeIORef env.planStateRef PlanInactive
                     pure (Right planApprovedContinuation)
                 PlanRequestChanges notes ->
                     pure $ Right $
@@ -277,7 +294,7 @@ runExitPlanMode env args = do
                             <> "Feedback:\n"
                             <> notes
                 PlanCancel -> do
-                    deactivatePlanMode env
+                    writeIORef env.planStateRef PlanInactive
                     pure $ Right
                         "The user cancelled the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
 
@@ -308,13 +325,17 @@ askUserDescription =
     "Ask the user a clarifying question during plan mode without leaving plan mode."
 
 runAskUserQuestion :: PlanModeEnv -> AskUserQuestionArgs -> IO (Either Text Text)
-runAskUserQuestion env args = do
-    let choices = parseOptions (fromMaybe "" args.options)
-    answer <- env.planHooks.planAskQuestion args.question choices
-    pure $ case answer of
-        Nothing -> Left "No answer from user."
-        Just text | Text.null (Text.strip text) -> Left "No answer from user."
-        Just text -> Right text
+runAskUserQuestion env args = withPlanModeLock env do
+    active <- isPlanModeActive env
+    if not active
+        then pure (Left "Plan mode is not active.")
+        else do
+            let choices = parseOptions (fromMaybe "" args.options)
+            answer <- env.planHooks.planAskQuestion args.question choices
+            pure $ case answer of
+                Nothing -> Left "No answer from user."
+                Just text | Text.null (Text.strip text) -> Left "No answer from user."
+                Just text -> Right text
 
 parseOptions :: Text -> [Text]
 parseOptions raw =

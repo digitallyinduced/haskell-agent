@@ -179,6 +179,24 @@ spec = do
             rotated.accessToken `shouldNotBe` initial.accessToken
             readIORef refreshCalls `shouldReturn` 1
 
+        it "returns a replacement for a delayed rejection of the old token" do
+            refreshCalls <- newIORef (0 :: Int)
+            let refresh :: AuthState -> IO (Either ApiError AuthState)
+                refresh state = do
+                    modifyIORef' refreshCalls (+ 1)
+                    pure $ Right state
+                        { Auth.accessToken = freshToken "rotated" }
+            provider <- localProvider ["acc-a"] refresh
+            initial <- expectCredential =<< getNextToken provider Nothing
+            rotated <- expectCredential =<< getNextToken provider
+                (failed initial AccountAuthenticationRejected)
+
+            replacement <- expectCredential =<< getNextToken provider
+                (failed initial AccountAuthenticationRejected)
+
+            replacement `shouldBe` rotated
+            readIORef refreshCalls `shouldReturn` 1
+
         it "does not repeatedly refresh a persistently rejected account" do
             refreshCalls <- newIORef (0 :: Int)
             let refresh :: AuthState -> IO (Either ApiError AuthState)

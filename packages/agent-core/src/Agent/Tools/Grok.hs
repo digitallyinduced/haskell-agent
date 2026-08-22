@@ -17,8 +17,9 @@ import Agent.Tools.Grok.ListDir (listDirTool)
 import Agent.Tools.Grok.ReadFile (readFileTool)
 import Agent.Tools.Grok.SearchReplace (searchReplaceTool)
 import Agent.Tools.Grok.Shell
-    ( GrokSession(..)
+    ( GrokSession
     , closeGrokSession
+    , grokSessionEnv
     , newGrokSession
     )
 import Agent.Tools.Grok.Task
@@ -51,7 +52,7 @@ grokTools
     -> GrokSubagentSpecs
     -> [AppTool]
 grokTools session ghci planMode multi typesRef =
-    let env = session.grokEnv
+    let env = grokSessionEnv session
         base =
             [ readFileTool env
             , grepTool env

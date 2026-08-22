@@ -1,17 +1,35 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.CLI.SubagentStore
+import Agent.CLI.Subagents.Runtime
+    ( SubagentSession(..)
+    , lookupOrCreateSubagentSession
+    , restoreAgentFromDisk
+    )
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentIdentity(..)
     , SubagentStatus(..)
+    , closeSubagentRegistry
+    , defaultSubagentConfig
+    , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (parseTaskPath)
+import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    )
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_, replicateM_)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified System.Directory as Directory
 import System.Directory.OsPath (doesFileExist)
@@ -118,6 +136,87 @@ spec = describe "Agent.CLI.SubagentStore" do
             `shouldBe` drop 2 items
         forkSubagentTranscript (Just "18446744073709551617") items
             `shouldBe` items
+
+    it "shares one session across concurrent disk hydration" do
+        withTempDir \dir -> do
+            let agentId = SubagentId "agent-concurrent-hydration"
+                persistedItems =
+                    replicate 20000 (messageItem RoleUser "persisted")
+                workerCount = 16
+            saveSubagentState dir agentId persistedItems Nothing
+                (Completed Nothing) Nothing Nothing Nothing Nothing Nothing
+                `shouldReturn` Right ()
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef (Just dir)
+            typesRef <- newIORef Map.empty
+            ready <- newEmptyMVar
+            start <- newEmptyMVar
+            let hydrate _ = do
+                    putMVar ready ()
+                    readMVar start
+                    lookupOrCreateSubagentSession
+                        sessionsRef storeRootRef typesRef agentId
+            withAsync
+                (mapConcurrently hydrate [1 .. workerCount])
+                \workers -> do
+                    replicateM_ workerCount (takeMVar ready)
+                    putMVar start ()
+                    sessions <- wait workers
+                    case sessions of
+                        [] -> expectationFailure "expected hydrated sessions"
+                        first : _ -> do
+                            let marker = [messageItem RoleAssistant "shared"]
+                            writeIORef first.subSessionTranscript marker
+                            forM_ sessions \session ->
+                                readIORef session.subSessionTranscript
+                                    `shouldReturn` marker
+
+    it "keeps the installed session across concurrent registry restores" do
+        withTempDir \dir -> do
+            let agentId = SubagentId "agent-concurrent-restore"
+                persisted = [messageItem RoleUser "persisted"]
+                inMemory = [messageItem RoleAssistant "in-memory"]
+                workerCount = 8
+            saveSubagentState dir agentId persisted Nothing
+                (Completed Nothing) Nothing Nothing Nothing Nothing Nothing
+                `shouldReturn` Right ()
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef (Just dir)
+            typesRef <- newIORef Map.empty
+            installed <-
+                lookupOrCreateSubagentSession
+                    sessionsRef storeRootRef typesRef agentId
+            writeIORef installed.subSessionTranscript inMemory
+            bracket
+                (newSubagentRegistry defaultSubagentConfig dir
+                    (\_ _ _ _ -> fail "unexpected subagent runner invocation")
+                    (\_ _ -> pure ()))
+                closeSubagentRegistry
+                \registry -> do
+                    ready <- newEmptyMVar
+                    start <- newEmptyMVar
+                    let restore _ = do
+                            putMVar ready ()
+                            readMVar start
+                            restoreAgentFromDisk
+                                storeRootRef registry sessionsRef typesRef agentId
+                    withAsync
+                        (mapConcurrently restore [1 .. workerCount])
+                        \workers -> do
+                            replicateM_ workerCount (takeMVar ready)
+                            putMVar start ()
+                            wait workers
+                                `shouldReturn` replicate workerCount (Right ())
+                    sessions <- readIORef sessionsRef
+                    case Map.lookup agentId sessions of
+                        Nothing -> expectationFailure "expected restored session"
+                        Just current -> do
+                            readIORef current.subSessionTranscript
+                                `shouldReturn` inMemory
+                            let marker = [messageItem RoleAssistant "same-ref"]
+                            writeIORef current.subSessionTranscript marker
+                            readIORef installed.subSessionTranscript
+                                `shouldReturn` marker
 
 messageItem :: ResponseRole -> Text -> ResponseItem
 messageItem role text = MessageItem ResponseMessage

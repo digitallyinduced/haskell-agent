@@ -56,7 +56,12 @@ import Agent.CLI.Btw
     , formatBtwError
     , runBtwWithCancel
     )
-import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
+import Agent.CLI.CancelWatch
+    ( StdinGate
+    , newStdinGate
+    , withEscCancel
+    , withStdinPaused
+    )
 import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
@@ -326,6 +331,7 @@ import Agent.Tools.PlanMode
     , activatePlanMode
     , deactivatePlanMode
     , planFilePath
+    , setPlanModeState
     )
 import Agent.Tools.Types
     ( AppTool
@@ -342,12 +348,14 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe
     ( Exception
     , SomeException
+    , bracket
     , catchAny
     , catchAsync
     , finally
     , mask_
     , throwIO
     , try
+    , uninterruptibleMask_
     )
 import Control.Monad (forM_, when)
 import qualified Data.ByteString as BS
@@ -409,7 +417,7 @@ data AgentStepCache = AgentStepCache
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
     , startupInterrupt :: !InterruptState
-    , startupEscPaused :: !(IORef Bool)
+    , startupStdinGate :: !StdinGate
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
     , startupFullscreen :: !(Maybe FullscreenRuntime)
     , startupTerminal :: !TerminalCapabilities
@@ -729,8 +737,9 @@ runAgent fullscreenInputs options transition = do
         clearNativeProgress stderr
         color <- resolveColor stderr
         putTextLn stderr (roleMuted color msg)
-    -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
-    escPaused <- newIORef False
+    -- Shared by Esc cancellation, approvals, and plan prompts so exactly one
+    -- consumer owns stdin at a time.
+    stdinGate <- newStdinGate
     uiRuntimeRef <- newIORef Nothing
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
@@ -786,7 +795,7 @@ runAgent fullscreenInputs options transition = do
     let startup = StartupRuntime
             { startupToolEnv = toolEnv
             , startupInterrupt = interrupt
-            , startupEscPaused = escPaused
+            , startupStdinGate = stdinGate
             , startupUiRuntimeRef = uiRuntimeRef
             , startupFullscreen = fullscreen
             , startupTerminal = terminal
@@ -823,7 +832,7 @@ runAgentInitialized
 runAgentInitialized options transition home root resumed cwd startup = do
     let toolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
-        escPaused = startup.startupEscPaused
+        stdinGate = startup.startupStdinGate
         uiRuntimeRef = startup.startupUiRuntimeRef
         fullscreen = startup.startupFullscreen
         isTty = startup.startupStdinTty
@@ -867,7 +876,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
 
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
-            cliPlanHooks interrupt escPaused (resolveColor stderr)
+            cliPlanHooks interrupt stdinGate (resolveColor stderr)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         provider = loaded.loadedProvider
         model = fromMaybe
@@ -923,7 +932,6 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
-    coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
         Just ctx ->
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -939,7 +947,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         Nothing -> pure ()
     let claimCurrentSession handle
             | managedAgentSession = pure ()
-            | otherwise = do
+            | otherwise = uninterruptibleMask_ do
                 let desired =
                         unsafeToFilePath
                             (handle.sessionDir </> unsafeEncodeUtf ".agent-running")
@@ -965,24 +973,42 @@ runAgentInitialized options transition home root resumed cwd startup = do
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
-        tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
-        planMode = coding.codingPlanMode
-        -- Keep planSessionDir and subagent store root in sync.
-        noteSessionDir dir = do
-            writeIORef planMode.planSessionDir (Just dir)
-            writeIORef subagentStoreRoot (Just dir)
-        closeAll = do
+        closeSubagents =
             case multiCtx of
-                Just ctx -> do
+                Just ctx ->
                     interruptActiveSubagents ctx.multiRegistry
-                    flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
-                        subagentSessions agentTypesRef
-                    closeSubagentRegistry ctx.multiRegistry
+                        `finally`
+                            (flushAllSubagentSnapshots
+                                subagentStoreRoot
+                                ctx.multiRegistry
+                                subagentSessions
+                                agentTypesRef
+                                `finally`
+                                    closeSubagentRegistry ctx.multiRegistry)
                 Nothing -> pure ()
-            closeSessionProcessManager sessionProcessManager
-            readIORef activeSessionLock >>= mapM_ releaseSessionLock
-            coding.codingClose
-    flip finally closeAll do
+        releaseActiveSessionLock =
+            uninterruptibleMask_ do
+                owned <- atomicModifyIORef' activeSessionLock
+                    (\current -> (Nothing, current))
+                mapM_ releaseSessionLock owned
+        closeAll coding =
+            closeSubagents
+                `finally`
+                    (closeSessionProcessManager sessionProcessManager
+                        `finally`
+                            (releaseActiveSessionLock
+                                `finally` coding.codingClose))
+    bracket
+        (codingToolsForWithTypes
+            provider toolEnv (Just planHooks) multiCtx agentTypesRef)
+        closeAll
+        \coding -> do
+        let tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
+            planMode = coding.codingPlanMode
+            -- Keep planSessionDir and subagent store root in sync.
+            noteSessionDir dir = do
+                writeIORef planMode.planSessionDir (Just dir)
+                writeIORef subagentStoreRoot (Just dir)
         today <- utctDay <$> getCurrentTime
         let instructions = systemPrompt provider cwd today (isOneShot options)
             params = requestParams model instructions
@@ -1105,7 +1131,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                                    previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef stdinGate interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -1151,7 +1177,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef stdinGate interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
@@ -1185,7 +1211,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef stdinGate interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
 
 preparePersistence
@@ -1314,7 +1340,7 @@ runSession
     -> IORef (Maybe Text)
     -> IORef SkillCatalog
     -> IORef [SkillInvocation]
-    -> IORef Bool
+    -> StdinGate
     -> InterruptState
     -> Maybe MultiAgentContext
     -> IORef (Maybe RootTurnId)
@@ -1327,9 +1353,10 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef stdinGate interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
+  persistLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       useColor = startup.startupUseColor
@@ -1343,15 +1370,17 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
           case persist of
               PersistenceDisabled -> pure ()
               PersistenceEnabled slotRef ->
-                  readIORef slotRef >>= \case
-                      PersistenceActive handle
-                          | handle.sessionMeta.metaId == resultSessionId
-                          , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ ->
-                                  setWindowTitle
-                                      (cliWindowTitle handle.sessionMeta.metaCwd
-                                          (Just resultTitle))
-                      _ -> pure ()
+                  withMVar persistLock \_ ->
+                      readIORef slotRef >>= \case
+                          PersistenceActive handle
+                              | handle.sessionMeta.metaId == resultSessionId
+                              , not handle.sessionMeta.metaTitleIsManual ->
+                                  withMVar ioLock \_ ->
+                                      setWindowTitle
+                                          (cliWindowTitle
+                                              handle.sessionMeta.metaCwd
+                                              (Just resultTitle))
+                          _ -> pure ()
   withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
@@ -1489,6 +1518,14 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
         (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
     let sessionReset = do
+            -- Stop and join the old generation before clearing any state it
+            -- can still publish into. In particular, sendToRoot and an
+            -- already-admitted completion callback run on child supervisors.
+            case multiCtx of
+                Just ctx -> do
+                    interruptActiveSubagents ctx.multiRegistry
+                    resetSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
             writeIORef lastAssistantRef Nothing
@@ -1496,9 +1533,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
             writeIORef agentStepCache Map.empty
-            case multiCtx of
-                Just ctx -> resetSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext fullscreen options provider home cwd [] Nothing
             freshSkills <- loadSkillsCatalog options home projectRoot cwd True
@@ -1571,7 +1605,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                 withMVar ioLock \_ ->
                     case fullscreen of
                         Nothing ->
-                            withStdinPaused escPaused $
+                            withStdinPaused stdinGate $
                                 approveToolDecision
                                     policyRef allowedToolsRef toolRegistry planMode call
                         Just runtime ->
@@ -1614,6 +1648,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
             , sessionPersist = persist
+            , sessionPersistLock = persistLock
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
@@ -1626,7 +1661,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
-            , sessionEscPaused = escPaused
+            , sessionStdinGate = stdinGate
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
@@ -1645,9 +1680,12 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionReset = sessionReset
             }
     writeIORef startup.startupRestartEffort \level -> do
-        setSessionEffort env level
+        -- Publish the restart before any metadata I/O. Otherwise the provider
+        -- can finish and consume an empty restart slot while this callback is
+        -- blocked updating the session file.
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
+        setSessionEffort env level
     let formatSkillWarning warning =
             "skill ignored: "
                 <> toText warning.skillWarningPath
@@ -1695,7 +1733,7 @@ runPendingTurnWithCooldownRetry
     -> PendingTurn
     -> IO RunResult
 runPendingTurnWithCooldownRetry allowCooldownRetry env pending = do
-    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    setPlanModeState env.sessionPlanMode pending.pendingPlanState
     case env.sessionFullscreen of
         Nothing -> pure ()
         Just runtime ->
@@ -1736,7 +1774,7 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
                 continueAfterTurn env
     TurnRestartRequested level pending -> do
         setSessionEffort env level
-        writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+        setPlanModeState env.sessionPlanMode pending.pendingPlanState
         case env.sessionFullscreen of
             Just runtime ->
                 emitUiEvent runtime
@@ -1799,7 +1837,7 @@ waitAndRetryPendingTurn env delay pending = do
         waitAction = case env.sessionFullscreen of
             Just _ -> waitForCancel
             Nothing ->
-                withEscCancel cancel env.sessionEscPaused waitForCancel
+                withEscCancel cancel env.sessionStdinGate waitForCancel
     resetCancel cancel
     cancelled <-
         (withTurnCancel env.sessionInterrupt cancel waitAction)
@@ -1847,19 +1885,20 @@ setSessionEffort env level = do
         Just runtime ->
             emitUiEvent runtime (UiSetPromptEffort level)
         Nothing -> pure ()
-    case env.sessionPersist of
-        PersistenceDisabled -> pure ()
-        PersistenceEnabled slotRef -> do
-            slot <- readIORef slotRef
-            case slot of
-                PersistencePending pending ->
-                    writeIORef slotRef
-                        (PersistencePending pending { createEffort = level })
-                PersistenceActive handle -> do
-                    let meta = handle.sessionMeta { metaEffort = level }
-                    writeSessionMeta handle.sessionMetaPath meta
-                    writeIORef slotRef
-                        (PersistenceActive handle { sessionMeta = meta })
+    withMVar env.sessionPersistLock \_ ->
+        case env.sessionPersist of
+            PersistenceDisabled -> pure ()
+            PersistenceEnabled slotRef -> do
+                slot <- readIORef slotRef
+                case slot of
+                    PersistencePending pending ->
+                        writeIORef slotRef
+                            (PersistencePending pending { createEffort = level })
+                    PersistenceActive handle -> do
+                        let meta = handle.sessionMeta { metaEffort = level }
+                        writeSessionMeta handle.sessionMetaPath meta
+                        writeIORef slotRef
+                            (PersistenceActive handle { sessionMeta = meta })
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -1887,7 +1926,7 @@ replWithDraft env@SessionEnv
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
-    , sessionEscPaused = escPaused
+    , sessionStdinGate = stdinGate
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionLastAssistant = lastAssistantRef
@@ -2418,7 +2457,7 @@ replWithDraft env@SessionEnv
                                         case fullscreen of
                                             Nothing ->
                                                 withEscCancel
-                                                    cancel escPaused action
+                                                    cancel stdinGate action
                                             Just _ -> action)
                                 btwBackend
                                 paramsRef
@@ -2594,36 +2633,42 @@ replWithDraft env@SessionEnv
                                         (roleError color
                                             "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
-                                readIORef slotRef >>= \case
-                                    PersistencePending pending -> do
-                                        writeIORef slotRef (PersistencePending pending
-                                            { createTitleHint = Just title
-                                            , createTitleIsManual = True
-                                            })
-                                        setWindowTitle
-                                            (cliWindowTitle pending.createCwd
-                                                (Just title))
-                                        let message = "session title: " <> title
-                                        displayInfo message $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                                    PersistenceActive handle -> do
-                                        invalidateSessionTitles
-                                            env.sessionTitleManager
-                                            handle.sessionMeta.metaId
-                                        updated <- setManualSessionTitle title handle
-                                        writeIORef slotRef (PersistenceActive updated)
-                                        setWindowTitle
-                                            (cliWindowTitle updated.sessionMeta.metaCwd
-                                                (Just updated.sessionMeta.metaTitle))
-                                        let message =
-                                                "session title: "
-                                                    <> updated.sessionMeta.metaTitle
-                                        displayInfo message $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
+                                withMVar env.sessionPersistLock \_ ->
+                                    readIORef slotRef >>= \case
+                                        PersistencePending pending -> do
+                                            writeIORef slotRef
+                                                (PersistencePending pending
+                                                    { createTitleHint = Just title
+                                                    , createTitleIsManual = True
+                                                    })
+                                            setWindowTitle
+                                                (cliWindowTitle
+                                                    pending.createCwd
+                                                    (Just title))
+                                            let message = "session title: " <> title
+                                            displayInfo message $
+                                                putTextLn stderr
+                                                    (roleMuted color
+                                                        (glyphOk <> message))
+                                        PersistenceActive handle -> do
+                                            invalidateSessionTitles
+                                                env.sessionTitleManager
+                                                handle.sessionMeta.metaId
+                                            updated <- setManualSessionTitle title handle
+                                            writeIORef slotRef
+                                                (PersistenceActive updated)
+                                            setWindowTitle
+                                                (cliWindowTitle
+                                                    updated.sessionMeta.metaCwd
+                                                    (Just
+                                                        updated.sessionMeta.metaTitle))
+                                            let message =
+                                                    "session title: "
+                                                        <> updated.sessionMeta.metaTitle
+                                            displayInfo message $
+                                                putTextLn stderr
+                                                    (roleMuted color
+                                                        (glyphOk <> message))
                         continue
                     ReplRenameAuto -> do
                         color <- resolveColor stderr
@@ -2635,45 +2680,50 @@ replWithDraft env@SessionEnv
                                         (roleError color
                                             "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
-                                readIORef slotRef >>= \case
-                                    PersistencePending pending -> do
-                                        writeIORef slotRef (PersistencePending pending
-                                            { createTitleHint = Nothing
-                                            , createTitleIsManual = False
-                                            })
-                                        setWindowTitle
-                                            (cliWindowTitle pending.createCwd Nothing)
-                                        displayInfo
-                                            "automatic session titles enabled" $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk
-                                                        <> "automatic session titles enabled"))
-                                    PersistenceActive handle -> do
-                                        invalidateSessionTitles
-                                            env.sessionTitleManager
-                                            handle.sessionMeta.metaId
-                                        updated <- resetSessionTitleToAuto handle
-                                        writeIORef slotRef (PersistenceActive updated)
-                                        loadSession
-                                            (takeDirectory updated.sessionDir)
-                                            updated.sessionMeta.metaId
-                                            >>= \case
-                                                Left _ -> pure ()
-                                                Right (_, turns) -> do
-                                                    let source =
-                                                            sessionConversationText turns
-                                                    requestSessionTitle
-                                                        env.sessionTitleManager
-                                                        updated.sessionMeta.metaId
-                                                        1
-                                                        source
-                                        displayInfo
-                                            "automatic session titles enabled" $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk
-                                                        <> "automatic session titles enabled"))
+                                withMVar env.sessionPersistLock \_ ->
+                                    readIORef slotRef >>= \case
+                                        PersistencePending pending -> do
+                                            writeIORef slotRef
+                                                (PersistencePending pending
+                                                    { createTitleHint = Nothing
+                                                    , createTitleIsManual = False
+                                                    })
+                                            setWindowTitle
+                                                (cliWindowTitle
+                                                    pending.createCwd
+                                                    Nothing)
+                                            displayInfo
+                                                "automatic session titles enabled" $
+                                                putTextLn stderr
+                                                    (roleMuted color
+                                                        (glyphOk
+                                                            <> "automatic session titles enabled"))
+                                        PersistenceActive handle -> do
+                                            invalidateSessionTitles
+                                                env.sessionTitleManager
+                                                handle.sessionMeta.metaId
+                                            updated <- resetSessionTitleToAuto handle
+                                            writeIORef slotRef
+                                                (PersistenceActive updated)
+                                            loadSession
+                                                (takeDirectory updated.sessionDir)
+                                                updated.sessionMeta.metaId
+                                                >>= \case
+                                                    Left _ -> pure ()
+                                                    Right (_, turns) -> do
+                                                        let source =
+                                                                sessionConversationText turns
+                                                        requestSessionTitle
+                                                            env.sessionTitleManager
+                                                            updated.sessionMeta.metaId
+                                                            1
+                                                            source
+                                            displayInfo
+                                                "automatic session titles enabled" $
+                                                putTextLn stderr
+                                                    (roleMuted color
+                                                        (glyphOk
+                                                            <> "automatic session titles enabled"))
                         continue
                     ReplLogin -> do
                         color <- resolveColor stderr
@@ -3340,7 +3390,7 @@ enterPlanFromSlash env@SessionEnv
         PersistenceDisabled -> pure ()
     case maybeDescription of
         Nothing -> do
-            writeIORef planMode.planStateRef PlanPending
+            setPlanModeState planMode PlanPending
             let message =
                     "plan mode armed; send a prompt to activate \
                     \(or /plan <description>)"
