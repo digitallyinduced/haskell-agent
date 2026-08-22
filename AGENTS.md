@@ -102,17 +102,21 @@ When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval p
 ### memory / RTS heap cap
 
 `nix develop` does not impose a heap ceiling on every development command. The
-`repl` wrapper defaults `GHCRTS` to `-M8G -A64m`, which leaves enough room for
-the multi-package GHCi session while protecting the machine from an unbounded
-long-running agent. The compiled `agent-cli` executable has the same 8 GiB RTS
-default, overridable via `+RTS` because `-rtsopts` is enabled. Set `GHCRTS`
-explicitly to override the wrapper:
+`repl` wrapper defaults `GHCRTS` to `-M8G`, which protects the machine from an
+unbounded long-running GHCi/agent process while preserving the RTS allocation
+area default. The compiled `agent-cli` executable defaults to `-N4 -M8G`;
+four capabilities cover concurrent agent I/O without scaling nursery memory
+with every host core. Both defaults are overridable because `-rtsopts` is
+enabled. Set `GHCRTS` explicitly to override the wrapper:
 
 ```
-GHCRTS='-M16G -A64m' repl
-GHCRTS='-M4G -A32m' cabal repl agent-cli
-cabal run agent-cli -- +RTS -M16G -RTS
+GHCRTS='-M16G' repl
+GHCRTS='-M4G' cabal repl agent-cli
+cabal run agent-cli -- +RTS -N8 -M16G -RTS
 ```
+
+Avoid large `-A` defaults: the allocation area is per capability, so
+`-N14 -A64m` consumes roughly 896 MiB before meaningful application data.
 
 
 # haskell
