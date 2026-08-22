@@ -79,16 +79,7 @@ override automatic provider detection.
 
 ### Authentication
 
-- OpenAI / ChatGPT: `~/.codex/auth.json` or `CODEX_ACCESS_TOKEN`
-- xAI: `~/.grok/auth.json` or `GROK_ACCESS_TOKEN`
-- OpenRouter: `OPENROUTER_API_KEY`
-
-To create an OpenAI/ChatGPT credential:
-
-```console
-nix run github:digitallyinduced/haskell-agent#agent-openai-login -- \
-  --output ~/.codex/auth.json
-```
+Works with your Codex subscription, Grok subscription, and provider API keys.
 
 ## Vision
 
