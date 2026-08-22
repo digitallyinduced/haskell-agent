@@ -23,13 +23,17 @@ import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (cancel, poll, wait, withAsync)
 import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( doesFileExist
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>))
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Temp (mkdtemp)
@@ -165,6 +169,24 @@ spec = describe "Agent.Tools.Ghci" do
                 recovered.ghciOk `shouldBe` True
                 recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "5"
 
+    it "discards a sent request after asynchronous cancellation" do
+        withTempEnv \env -> do
+            let pidFile = toFilePath env.toolCwd </> "cancelled.pid"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                withAsync
+                    (evalGhci ghci (delayedOutputCommand pidFile) 10000)
+                    \running -> do
+                        waitForFile pidFile
+                        childPid <- read <$> readFile pidFile
+                        completed <- timeout 5000000 (cancel running)
+                        _ <- requireCompleted
+                            "asynchronous GHCi cancellation" completed
+                        waitForProcessDeath childPid
+                recovered <- evalGhci ghci "\"NEW\"" 10000
+                recovered.ghciOk `shouldBe` True
+                recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "NEW"
+                recovered.ghciOutput `shouldNotSatisfy` Text.isInfixOf "OLD"
+
     it "caps retained output and reports truncation" do
         withTempEnv \baseEnv -> do
             let env = baseEnv { toolStdoutCap = 32 }
@@ -222,6 +244,30 @@ spec = describe "Agent.Tools.Ghci" do
             result.ghciOutcome `shouldBe` GhciProcessFailed
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "closed"
 
+    it "does not reopen after close is asynchronously interrupted" do
+        withTempEnv \env -> do
+            let pidFile = toFilePath env.toolCwd </> "closing-child.pid"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                spawned <- evalGhci ghci (backgroundCommand pidFile) 10000
+                spawned.ghciOk `shouldBe` True
+                childPid <- read <$> readFile pidFile
+                withAsync (closeGhciSession ghci) \closing -> do
+                    -- The child ignores INT/TERM, keeping group shutdown in
+                    -- its bounded wait after the close state is published.
+                    threadDelay 100000
+                    poll closing >>= \case
+                        Nothing -> pure ()
+                        Just result ->
+                            expectationFailure
+                                ("close finished before cancellation: "
+                                    <> show result)
+                    cancel closing
+                result <- evalGhci ghci "1 + 1" 10000
+                result.ghciOutcome `shouldBe` GhciProcessFailed
+                result.ghciOutput `shouldSatisfy` Text.isInfixOf "closed"
+                closeGhciSession ghci
+                waitForProcessDeath childPid
+
     it "exposes run_ghci through grokTools dispatch" do
         withTempTools \tools -> do
             let handlers = appToolHandlers tools
@@ -249,6 +295,12 @@ backgroundCommand pidFile =
         <> "</dev/null >/dev/null 2>&1 & echo $! > "
         <> Text.pack (show pidFile)
 
+delayedOutputCommand :: FilePath -> Text.Text
+delayedOutputCommand pidFile =
+    ":! sh -c 'echo $$ > "
+        <> Text.pack pidFile
+        <> "; sleep 30; printf OLD'"
+
 requireCompleted :: String -> Maybe a -> IO a
 requireCompleted label = \case
     Just value -> pure value
@@ -275,6 +327,17 @@ waitForProcessDeath pid = go (200 :: Int)
 processAlive :: ProcessID -> IO Bool
 processAlive pid =
     isRight <$> try @_ @SomeException (signalProcess nullSignal pid)
+
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (500 :: Int)
+  where
+    go remaining = do
+        exists <- doesFileExist path
+        if exists
+            then pure ()
+            else if remaining <= 0
+                then expectationFailure ("file was not created: " <> path)
+                else threadDelay 10000 >> go (remaining - 1)
 
 withTempEnv :: (ToolEnv -> IO a) -> IO a
 withTempEnv action =
