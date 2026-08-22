@@ -6,6 +6,7 @@ module Agent.Transport.WebSocket
     , WebSocketSessionOptions(..)
     , defaultWebSocketSessionOptions
     , withWebSocketSession
+    , closeWebSocketSession
     , withWebSocketRequest
     , completeWebSocketRequest
     , invalidateWebSocketRequest
@@ -45,6 +46,7 @@ import qualified Network.Connection as Connection
 import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
 import System.IO.Error (ioeGetErrorType)
+import System.Timeout (timeout)
 
 -- | A provider-neutral, reusable WebSocket session. The underlying socket is
 -- owned by a background pump for the duration of 'withWebSocketSession'.
@@ -85,6 +87,7 @@ data OutCommand
     = SendText !Word64 !LBS.ByteString !(TMVar (Either ApiError ()))
     | SendControl !WS.Message
     | CloseSession !LBS.ByteString
+    | CloseSessionAndWait !LBS.ByteString !(TMVar ())
 
 -- | Run an action with a reusable WebSocket session.
 --
@@ -113,6 +116,20 @@ withWebSocketSession options connection action =
     withClientPings inner = case options.clientPingIntervalSeconds of
         Just seconds | seconds > 0 -> WS.withPingThread connection seconds (pure ()) inner
         _ -> inner
+
+-- | Close an idle reusable session and ask the writer pump to close the
+-- underlying WebSocket. Active requests observe the supplied connection error.
+closeWebSocketSession :: WebSocketSession -> Text -> IO ()
+closeWebSocketSession session reason = do
+    closed <- newEmptyTMVarIO
+    atomically do
+        closeSession session (ConnectionError reason)
+        writeTQueue session.sessionOut
+            (CloseSessionAndWait
+                (LBS.fromStrict (Text.encodeUtf8 reason))
+                closed)
+    _ <- timeout 1000000 (atomically (takeTMVar closed))
+    pure ()
 
 -- | Serialize one request/response exchange on a reusable session.
 --
@@ -387,6 +404,13 @@ writerLoop connection session = loop
                     Left exception | isAsyncException exception ->
                         Exception.throwIO exception
                     _ -> pure ()
+            CloseSessionAndWait reason closed -> do
+                result <- Exception.try @Exception.SomeException
+                    (WS.sendClose connection reason)
+                case result of
+                    Left exception | isAsyncException exception ->
+                        Exception.throwIO exception
+                    _ -> atomically (putTMVar closed ())
             SendControl message -> do
                 result <- Exception.try @Exception.SomeException (WS.send connection message)
                 case result of

@@ -1230,6 +1230,10 @@ activateControl = \case
         Composer.handlePromptControlClick
             applyLocalUiEventWith
             ReplCycleMode
+    ComposerAccount ->
+        Composer.handlePromptControlClick
+            applyLocalUiEventWith
+            ReplChooseAccount
     ChoiceRow index ->
         confirmChoiceAt index
     ResumeRow sessionId ->
@@ -1244,6 +1248,7 @@ isInteractiveControl = \case
     ComposerModel -> True
     ComposerEffort -> True
     ComposerMode -> True
+    ComposerAccount -> True
     ChoiceRow _ -> True
     ResumeRow _ -> True
     CodeCopy _ _ -> True
@@ -3262,6 +3267,8 @@ handleEventInner event = case event of
                                 Composer.handleControlMouseDown ComposerEffort
                             (ComposerMode, V.BLeft) ->
                                 Composer.handleControlMouseDown ComposerMode
+                            (ComposerAccount, V.BLeft) ->
+                                Composer.handleControlMouseDown ComposerAccount
                             (CodeCopy blockId codeIndex, V.BLeft) ->
                                 Composer.handleControlMouseDown
                                     (CodeCopy blockId codeIndex)

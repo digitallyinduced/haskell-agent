@@ -57,6 +57,7 @@ data Name
     | ComposerModel
     | ComposerEffort
     | ComposerMode
+    | ComposerAccount
     | ChoiceRow !Int
     | ResumeViewport
     | ResumeRow !Text

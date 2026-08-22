@@ -123,6 +123,7 @@ data PromptState = PromptState
     , promptEffort :: !Text
     , promptMode :: !Text
     , promptAccount :: !Text
+    , promptAccountSelectable :: !Bool
     , promptUsage :: !TokenUsage
     , promptAttachments :: !Int
     }
@@ -201,6 +202,7 @@ initialUiState = UiState
         , promptEffort = ""
         , promptMode = "ask"
         , promptAccount = ""
+        , promptAccountSelectable = False
         , promptUsage = emptyTokenUsage
         , promptAttachments = 0
         }

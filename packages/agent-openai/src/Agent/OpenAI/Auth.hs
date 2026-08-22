@@ -28,6 +28,8 @@ module Agent.OpenAI.Auth
     , readAccountState
     , AccountSnapshot(..)
     , snapshotAccounts
+    , getAccessTokenForAccount
+    , discoverAccounts
     , forceRefresh
 
       -- * State
@@ -478,6 +480,42 @@ snapshotAccounts pool = do
             { snapshotAuth = auth
             , snapshotCooldownUntil = cooldown
             }
+
+-- | Get a fresh token for one specific account without changing round-robin
+-- state. Cooldowns and token refresh use the same rules as normal checkout.
+getAccessTokenForAccount
+    :: Pool
+    -> Text
+    -> IO (Either ApiError (Text, Text))
+getAccessTokenForAccount pool targetAccountId =
+    findEntry pool targetAccountId >>= \case
+        Nothing ->
+            pure $ Left $
+                CredentialError
+                    ("unknown OpenAI account " <> targetAccountId)
+        Just entry -> do
+            now <- getCurrentTime
+            readIORef entry.entryCooldownUntil >>= \case
+                Just until_
+                    | until_ > now ->
+                        pure (Left (CredentialsExhausted until_))
+                Just _ -> do
+                    writeIORef entry.entryCooldownUntil Nothing
+                    loadEntry entry
+                Nothing ->
+                    loadEntry entry
+  where
+    loadEntry entry =
+        fmap
+            (\state -> (state.accessToken, state.accountId))
+            <$> currentAuthState pool entry
+
+-- | Ask the configured dynamic source for accounts added since pool creation.
+-- Returns whether at least one new account was appended.
+discoverAccounts :: Pool -> IO Bool
+discoverAccounts pool = do
+    knownAccountIds <- allAccountIds pool
+    discoverAdditionalAccounts pool knownAccountIds
 
 -- | Force a refresh of the given account, regardless of JWT expiry. Useful
 -- for scheduled refresh jobs that rotate ahead of the natural expiry window.

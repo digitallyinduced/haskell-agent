@@ -1,6 +1,7 @@
 module Agent.OpenAI.WebSocketClient
     ( withCodexWs
     , withCodexWsWithProvider
+    , withCodexWsCredential
     , withCodexWsRetrying
     , withCodexWsRetryingAfter
     , sendWsRequest
@@ -15,6 +16,7 @@ module Agent.OpenAI.WebSocketClient
     , StreamEventCallback
     , RawStreamEventCallback
     , CodexConn
+    , closeCodexConn
     , CodexAuthFailed(..)
     ) where
 
@@ -61,6 +63,11 @@ import qualified Wuss
 -- | An OpenAI Codex connection backed by the provider-neutral WebSocket
 -- transport session from @agent-core@.
 newtype CodexConn = CodexWsConn WebSocket.WebSocketSession
+
+-- | Close a reusable Codex connection before its owning callback returns.
+closeCodexConn :: CodexConn -> IO ()
+closeCodexConn (CodexWsConn session) =
+    WebSocket.closeWebSocketSession session "switching account"
 
 --------------------------------------------------------------------------------
 -- Connect
@@ -119,6 +126,18 @@ withCodexWsWithProvider provider action =
         Left err -> Exception.throwIO (CodexAuthFailed err)
         Right value -> pure value
 
+-- | Open one exact credential for an interactive account switch. Connection
+-- retries are deliberately bounded so the selector cannot hang indefinitely.
+withCodexWsCredential
+    :: Credential
+    -> (CodexConn -> Credential -> IO a)
+    -> IO (Either ApiError a)
+withCodexWsCredential credential action =
+    runConnectionAttemptWithPolicy
+        (limitRetries 2 <> exponentialBackoff 500000)
+        credential
+        (\conn activeCredential -> Right <$> action conn activeCredential)
+
 -- | Run a replay-safe WebSocket action and automatically reacquire a
 -- credential after handshake or in-band account failures. The callback is
 -- executed again from the beginning after a 401, 403, or usage-limit error;
@@ -147,17 +166,26 @@ runConnectionAttempt
     :: Credential
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-runConnectionAttempt credential _action
+runConnectionAttempt =
+    runConnectionAttemptWithPolicy WebSocket.transientWsConnectRetryPolicy
+
+runConnectionAttemptWithPolicy
+    :: RetryPolicyM IO
+    -> Credential
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+runConnectionAttemptWithPolicy _ credential _action
     | credential.provider == XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "XAI credentials must be used through agent-xai"
         Nothing
+runConnectionAttemptWithPolicy _ credential _action
     | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
-runConnectionAttempt credential action = do
+runConnectionAttemptWithPolicy retryPolicy credential action = do
     let headers = buildCodexWsHeaders credential
     WebSocket.retryTransientWsConnectWithPolicy
-        WebSocket.transientWsConnectRetryPolicy
+        retryPolicy
         \connected ->
             Wuss.runSecureClientWith
                 wsHost
