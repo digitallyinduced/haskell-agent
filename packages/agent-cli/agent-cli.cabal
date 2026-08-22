@@ -45,6 +45,7 @@ library
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Compaction
+                    , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.ImagePreview
@@ -82,13 +83,13 @@ library
                     , Agent.CLI.Tools
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
-                    , Agent.CLI.TUI.Markdown
-                    , Agent.CLI.TUI.Theme
-                    , Agent.CLI.UI.Model
+                    , Agent.CLI.TUI.ImagePreview
+                    , Agent.CLI.TUI.Scroll
                     , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
@@ -105,6 +106,7 @@ library
                     , directory
                     , filepath
                     , haskeline >= 0.8 && < 0.9
+                    , JuicyPixels
                     , mtl
                     , process >= 1.6.26
                     , safe-exceptions
@@ -139,6 +141,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -170,13 +173,15 @@ test-suite agent-cli-test
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
+                    , Agent.CLI.TUIAppSpec
                     , Agent.CLI.TUIBridgeSpec
-                    , Agent.CLI.TUIMarkdownSpec
-                    , Agent.CLI.UIModelSpec
+                    , Agent.CLI.TUIImagePreviewSpec
+                    , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-tui
                     , agent-openai
                     , agent-responses
                     , agent-xai
@@ -190,8 +195,11 @@ test-suite agent-cli-test
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
+                    , JuicyPixels
                     , process
                     , safe-exceptions
                     , text
                     , time
+                    , transformers
                     , unix
+                    , vty >= 6.4 && < 7

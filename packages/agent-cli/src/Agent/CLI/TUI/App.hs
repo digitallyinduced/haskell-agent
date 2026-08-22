@@ -13,14 +13,18 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , fullscreenVtyConfig
+    , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     ) where
 
 import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
+    ( formatImageSize
+    , nonEmptyClipboardImages
     , readClipboardImages
     )
+import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
@@ -41,14 +45,23 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Options (reasoningEfforts)
-import Agent.CLI.ReplMode (replModeLabel)
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Status (formatTokenUsage)
-import qualified Agent.CLI.TUI.Theme as Theme
+import Agent.CLI.Terminal (shiftEnterCsiBodies)
+import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
-import Agent.CLI.TUI.Markdown (markdownWidget)
-import Agent.CLI.UI.Model
-import Agent.Loop (LoopEvent(..))
+import Agent.CLI.TUI.ImagePreview
+    ( TuiImagePreview(..)
+    , prepareTuiImagePreview
+    , renderTuiImagePreview
+    )
+import Agent.TUI.Markdown
+    ( markdownWidget
+    , markdownWidgetWithCodeControls
+    )
+import qualified Agent.CLI.TUI.Scroll as Scroll
+import Agent.TUI.Model
+import Agent.Loop (ImageAttachment, LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
 import Brick.BChan
@@ -57,6 +70,7 @@ import Brick.BChan
     , writeBChan
     )
 import Brick.Widgets.Border (borderWithLabel)
+import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (centerLayer)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
@@ -74,7 +88,7 @@ import Control.Concurrent.STM
     , retry
     , writeTVar
     )
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (SomeException, finally, throwIO, tryAny)
@@ -90,7 +104,7 @@ import Data.IORef
     )
 import Data.List (elemIndex, find, findIndex, intersperse, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -102,9 +116,15 @@ import qualified Graphics.Vty.CrossPlatform as Vty
 
 data Name
     = ConversationViewport
+    | ConversationReserve
     | OverlayViewport
     | ConversationBlock !BlockId
-    | ConversationBlockCache !BlockId !Bool !Bool
+    | ConversationBlockCache
+        !BlockId
+        !Bool
+        !Bool
+        !(Maybe (Int, Bool))
+    | CodeCopy !BlockId !Int
     | ComposerArea
     | ComposerCursor
     | ComposerModel
@@ -134,8 +154,10 @@ data AppEvent
         !(TMVar (Maybe Text))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
+    | AppSetImagePreviews ![ImageAttachment]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
+    | AppConversationReflow
     | AppStop
 
 data PendingAppEvent
@@ -193,11 +215,14 @@ data AppState = AppState
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
+    , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appHoveredControl :: !(Maybe Name)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
+    , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
+    , appConversationReflowQueued :: !Bool
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -247,7 +272,7 @@ newFullscreenRuntime
     initial = do
         events <- newBChan 512
         mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
-        running <- newIORef False
+        running <- newIORef (uiNeedsTick initial)
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
@@ -267,22 +292,19 @@ newFullscreenRuntime
             }
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()
-emitUiEvent runtime event = do
-    updateRuntimeRunning runtime event
+emitUiEvent runtime event =
     enqueueAppEvent runtime (AppUi event)
-
-updateRuntimeRunning :: FullscreenRuntime -> UiEvent -> IO ()
-updateRuntimeRunning runtime = \case
-    UiLoop TurnStarted -> writeIORef runtime.runtimeRunning True
-    UiLoop TurnFinished{} -> writeIORef runtime.runtimeRunning False
-    UiTurnEnded _ -> writeIORef runtime.runtimeRunning False
-    UiTurnRestarted -> writeIORef runtime.runtimeRunning False
-    UiSetAwaitingInput True -> writeIORef runtime.runtimeRunning False
-    _ -> pure ()
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
 setFullscreenWindowTitle runtime =
     enqueueAppEvent runtime . AppSetWindowTitle
+
+setFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+setFullscreenImagePreviews runtime =
+    enqueueAppEvent runtime . AppSetImagePreviews
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -325,6 +347,22 @@ readFullscreenLine runtime skills prompt initial = do
                 Just _ -> UiQueuedInputStarted
                 Nothing -> UiSetAwaitingInput False
     pure input.fullscreenInputLine
+
+-- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
+-- are not present in the default terminfo input table. Without these entries,
+-- Vty emits the payload of Shift+Enter sequences as printable characters.
+fullscreenVtyConfig :: V.VtyUserConfig
+fullscreenVtyConfig =
+    V.defaultConfig
+        { V.configPreferredColorMode = Just V.FullColor
+        , V.configInputMap =
+            [ ( Nothing
+              , "\ESC[" <> body
+              , V.EvKey V.KEnter [V.MShift]
+              )
+            | body <- shiftEnterCsiBodies
+            ]
+        }
 
 requestFullscreenPermission
     :: FullscreenRuntime
@@ -380,12 +418,8 @@ runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
-    let vtyConfig =
-            V.defaultConfig
-                { V.configPreferredColorMode = Just V.FullColor
-                }
-        buildVty = do
-            vty <- Vty.mkVty vtyConfig
+    let buildVty = do
+            vty <- Vty.mkVty fullscreenVtyConfig
             let output = V.outputIface vty
             -- Without this mode terminals paste image clipboard fallbacks
             -- (paths, URLs, or other text representations) as ordinary key
@@ -414,11 +448,14 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
             , appHoveredControl = Nothing
             , appPressedControl = Nothing
             , appWorkerStopped = False
+            , appConversationAnchor = Nothing
+            , appConversationReflowQueued = False
             }
     withAsync workerAction \worker ->
         withAsync uiTicker \_uiTicker ->
@@ -655,7 +692,9 @@ handlePromptControlClick choice = do
                     { appUi =
                         reduceUi
                             (UiSetNotice
-                                (Just "Prompt settings can be changed when input is ready."))
+                                (Just
+                                    (warningNotice
+                                        "Prompt settings can be changed when input is ready.")))
                             current.appUi
                     }
 
@@ -700,7 +739,9 @@ handleEffortControlClick = do
                         { appUi =
                             reduceUi
                                 (UiSetNotice
-                                    (Just "Prompt settings cannot be changed right now."))
+                                    (Just
+                                        (warningNotice
+                                            "Prompt settings cannot be changed right now.")))
                                 current.appUi
                         }
 
@@ -755,6 +796,8 @@ activateControl = \case
         handlePromptControlClick ReplCycleMode
     ChoiceRow index ->
         confirmChoiceAt index
+    CodeCopy blockId codeIndex ->
+        copyCodeBlock blockId codeIndex
     _ ->
         pure ()
 
@@ -764,7 +807,42 @@ isInteractiveControl = \case
     ComposerEffort -> True
     ComposerMode -> True
     ChoiceRow _ -> True
+    CodeCopy _ _ -> True
     _ -> False
+
+copyCodeBlock :: BlockId -> Int -> EventM Name AppState ()
+copyCodeBlock blockId codeIndex = do
+    state <- get
+    let code =
+            selectedBlock state.appUi blockId
+                >>= fencedCodeBlock codeIndex . (.blockBody)
+    case code of
+        Nothing ->
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetNotice
+                                (Just
+                                    (warningNotice
+                                        "Code block is no longer available.")))
+                            current.appUi
+                    }
+        Just payload -> do
+            copied <- liftIO (state.appRuntime.runtimeCopy payload)
+            modify' \current ->
+                current
+                    { appUi =
+                        reduceUi
+                            (UiSetNotice
+                                (Just
+                                    (if copied
+                                        then successNotice
+                                            "Copied code block."
+                                        else warningNotice
+                                            "Terminal clipboard is unavailable.")))
+                            current.appUi
+                    }
 
 resolveChoice :: Bool -> EventM Name AppState ()
 resolveChoice confirmed = do
@@ -886,20 +964,17 @@ fullscreenApp = App
 
 drawApp :: AppState -> [Widget Name]
 drawApp state =
+    let mainLayers = stickyPromptLayers state <> [drawMain state]
+        dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
+    in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
         (Just prompt, _, _) ->
-            [ drawTextPrompt prompt
-            , drawMain state
-            ]
+            drawTextPrompt prompt : dimmedMainLayers
         (Nothing, Just choice, _) ->
-            [ drawChoice state choice
-            , drawMain state
-            ]
+            drawChoice state choice : dimmedMainLayers
         (Nothing, Nothing, Just permission) ->
-            [ drawPermission permission
-            , drawMain state
-            ]
-        (Nothing, Nothing, Nothing) -> [drawMain state]
+            drawPermission permission : dimmedMainLayers
+        (Nothing, Nothing, Nothing) -> mainLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
@@ -908,11 +983,41 @@ drawMain state =
             [ drawHeader state.appUi
             , drawWorkspace state
             , drawNotice state.appUi
+            , drawImagePreviews state.appImagePreviews
             , drawQueuedInputs state.appUi
             , drawSlashMenu state
+            , drawFollowStatus state.appUi
             , drawComposer state
             , drawFooter state
             ]
+
+drawImagePreviews :: [TuiImagePreview] -> Widget Name
+drawImagePreviews previews =
+    case takeLast 3 previews of
+        [] -> emptyWidget
+        shown ->
+            padLeftRight 2 $
+                padBottom (Pad 1) $
+                    hBox $
+                        intersperse (padLeft (Pad 2) emptyWidget)
+                            (map drawPreview shown)
+  where
+    drawPreview preview =
+        vBox
+            [ renderTuiImagePreview preview
+            , withAttr Theme.mutedAttr $
+                txt $
+                    "🖼 "
+                        <> preview.previewMime
+                        <> " · "
+                        <> Text.pack (show preview.previewSourceWidth)
+                        <> "×"
+                        <> Text.pack (show preview.previewSourceHeight)
+                        <> " · "
+                        <> formatImageSize preview.previewBytes
+            ]
+    takeLast count values =
+        drop (max 0 (length values - count)) values
 
 drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =
@@ -920,7 +1025,7 @@ drawWorkspace state =
         hBox $
             [ withVScrollBars OnRight $
                 viewport ConversationViewport Vertical $
-                    padLeftRight 2 (drawTranscript state.appUi)
+                    padLeftRight 2 (drawTranscript state)
             ]
                 <> if length state.appAgentEntries <= 1
                     then []
@@ -1010,43 +1115,100 @@ drawHeader state =
             hBox
                 [ hLimitPercent 68 (txt left)
                 , vLimit 1 (fill ' ')
-                , txt right
+                , drawHeaderRight state
                 ]
   where
     left =
         (if Text.null state.uiBranch then "" else "git " <> state.uiBranch <> "  ")
             <> state.uiCwd
-    usage = formatTokenUsage state.uiPrompt.promptUsage
-    right =
+
+drawHeaderRight :: UiState -> Widget Name
+drawHeaderRight state =
+    hBox
+        [ withAttr activityAttr (txt activity)
+        , withAttr Theme.mutedAttr (txt elapsed)
+        , withAttr Theme.mutedAttr (txt usage)
+        ]
+  where
+    activityAttr
+        | state.uiRunning = Theme.thinkingAttr
+        | state.uiCompletionTicks > 0 = Theme.successAttr
+        | otherwise = Theme.mutedAttr
+    activity =
         (if state.uiRunning then spinnerFrame state.uiFrame <> " " else "")
             <> state.uiActivity
-            <> if state.uiRunning
-                then " · "
-                    <> formatElapsed
-                        (fromIntegral state.uiElapsedTenths / 10)
-                else ""
-            <> if Text.null usage then "" else " │ " <> usage
+    elapsed =
+        if state.uiRunning
+            then " · "
+                <> formatElapsed
+                    (fromIntegral state.uiElapsedTenths / 10)
+            else ""
+    formattedUsage = formatTokenUsage state.uiPrompt.promptUsage
+    usage =
+        if Text.null formattedUsage then "" else " │ " <> formattedUsage
 
 spinnerFrame :: Int -> Text
 spinnerFrame frame =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         !! (frame `mod` 10)
 
-drawTranscript :: UiState -> Widget Name
+drawTranscript :: AppState -> Widget Name
 drawTranscript state
     | null blocks =
         withAttr Theme.mutedAttr $
             padTop (Pad 2) $
                 txt "Start by describing what you want to build or change."
     | otherwise =
-        vBox (map (drawBlock state) blocks)
+        vBox $
+            [vBox (map (drawBlock state) blocks)]
+                <> conversationReserveWidgets anchor
   where
-    blocks = toList state.uiBlocks
+    blocks = toList state.appUi.uiBlocks
+    anchor = state.appConversationAnchor
 
-drawBlock :: UiState -> UiBlock -> Widget Name
+stickyPromptLayers :: AppState -> [Widget Name]
+stickyPromptLayers state =
+    case state.appConversationAnchor of
+        Just anchor
+            | Scroll.conversationAnchorSticky anchor ->
+                [ translateBy (Location (0, 2)) $
+                    hLimitPercent conversationWidth $
+                        padLeftRight 2 $
+                            withAttr Theme.userAttr $
+                                vLimit 5 $
+                                    padAll 1 $
+                                        txtWrap
+                                            (stickyPromptPreview
+                                                anchor.anchorText)
+                ]
+        _ -> []
+  where
+    conversationWidth =
+        if length state.appAgentEntries <= 1 then 100 else 68
+
+stickyPromptPreview :: Text -> Text
+stickyPromptPreview text =
+    case splitAt 3 (Text.lines text) of
+        (shown, []) -> Text.intercalate "\n" shown
+        (shown, _ : _) ->
+            Text.intercalate "\n" (take 2 shown <> ["…"])
+
+conversationReserveWidgets
+    :: Maybe Scroll.ConversationAnchor
+    -> [Widget Name]
+conversationReserveWidgets = \case
+    Just anchor
+        | anchor.anchorReserveRows > 0 ->
+            [ reportExtent ConversationReserve $
+                vLimit anchor.anchorReserveRows (fill ' ')
+            ]
+    _ -> []
+
+drawBlock :: AppState -> UiBlock -> Widget Name
 drawBlock state block =
-    let selected = state.uiSelectedBlock == Just block.blockId
-        highlighted = selected && state.uiFocus == FocusScrollback
+    let ui = state.appUi
+        selected = ui.uiSelectedBlock == Just block.blockId
+        highlighted = selected && ui.uiFocus == FocusScrollback
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
@@ -1054,22 +1216,24 @@ drawBlock state block =
             BlockAssistant ->
                 padLeft (Pad 3) $
                     withAttr Theme.assistantAttr
-                        (markdownWidget block.blockBody)
+                        (markdownWidgetWithCodeControls
+                            (codeBlockHeader state block.blockId)
+                            block.blockBody)
             BlockThinking ->
                 accentBlock Theme.thinkingAttr
-                    ("◆ " <> block.blockTitle)
+                    (blockStateGlyph ui block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
                 accentBlock (statusAttr block.blockState)
-                    ("◆ " <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockShell ->
                 accentBlock (statusAttr block.blockState)
-                    ("◆ " <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleShellBody block)
             BlockEdit ->
                 accentBlock (statusAttr block.blockState)
-                    ("◆ " <> block.blockTitle <> detailSuffix block)
+                    (blockStateGlyph ui block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
                 withAttr Theme.mutedAttr (txtWrap block.blockBody)
@@ -1081,20 +1245,65 @@ drawBlock state block =
                 else content
         rendered =
             clickable (ConversationBlock block.blockId) $
-                padBottom (Pad 1) framed
+                padBottom (Pad 1) $
+                    hBox
+                        [ withAttr
+                            (if highlighted
+                                then Theme.borderActiveAttr
+                                else Theme.mutedAttr)
+                            (txt (if highlighted then "❯ " else "  "))
+                        , framed
+                        ]
     in if cacheableBlock block
         then cached
             (ConversationBlockCache
                 block.blockId
                 highlighted
-                block.blockExpanded)
+                block.blockExpanded
+                (codeCopyCacheState state block.blockId))
             rendered
         else rendered
+
+codeBlockHeader :: AppState -> BlockId -> Int -> Text -> Widget Name
+codeBlockHeader state blockId codeIndex language =
+    hBox
+        [ if Text.null language
+            then emptyWidget
+            else withAttr Theme.mutedAttr (txt language)
+        , vLimit 1 (fill ' ')
+        , clickable name $
+            withAttr
+                (controlAttr state name Theme.controlLinkAttr)
+                (txt " Copy ")
+        ]
+  where
+    name = CodeCopy blockId codeIndex
+
+codeCopyCacheState :: AppState -> BlockId -> Maybe (Int, Bool)
+codeCopyCacheState state blockId =
+    case state.appHoveredControl of
+        Just (CodeCopy hoveredBlock codeIndex)
+            | hoveredBlock == blockId ->
+                Just
+                    ( codeIndex
+                    , state.appPressedControl
+                        == Just (CodeCopy blockId codeIndex)
+                    )
+        _ -> Nothing
 
 cacheableBlock :: UiBlock -> Bool
 cacheableBlock block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+
+blockStateGlyph :: UiState -> UiBlock -> Text
+blockStateGlyph state block = case block.blockState of
+    BlockRunning -> spinnerFrame state.uiFrame <> " "
+    BlockStreaming -> spinnerFrame state.uiFrame <> " "
+    BlockComplete -> "✓ "
+    BlockFailed -> "✗ "
+    BlockDenied -> "⊘ "
+    BlockCancelled -> "⊘ "
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
@@ -1148,8 +1357,25 @@ drawNotice :: UiState -> Widget Name
 drawNotice state = case state.uiNotice of
     Nothing -> emptyWidget
     Just notice ->
-        withAttr Theme.footerAttr $
-            padLeftRight 2 (txtWrap notice)
+        let (attr, prefix) = noticePresentation state.uiFrame notice.noticeKind
+        in withAttr attr $
+            padLeftRight 2 (txtWrap (prefix <> notice.noticeText))
+
+noticePresentation :: Int -> NoticeKind -> (AttrName, Text)
+noticePresentation frame = \case
+    NoticeInfo -> (Theme.footerAttr, "• ")
+    NoticeSuccess -> (Theme.successAttr, "✓ ")
+    NoticeWarning -> (Theme.thinkingAttr, "⚠ ")
+    NoticeProgress -> (Theme.thinkingAttr, spinnerFrame frame <> " ")
+    NoticeError -> (Theme.errorAttr, "✗ ")
+
+drawFollowStatus :: UiState -> Widget Name
+drawFollowStatus state
+    | state.uiFollow = emptyWidget
+    | otherwise =
+        withAttr Theme.thinkingAttr $
+            padLeftRight 2 $
+                txt "↓ Live output paused · End to resume"
 
 drawQueuedInputs :: UiState -> Widget Name
 drawQueuedInputs state =
@@ -1217,8 +1443,7 @@ drawComposer :: AppState -> Widget Name
 drawComposer appState =
     let focused = state.uiFocus == FocusComposer
         attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
-        mode = replModeLabel state.uiPrompt.promptMode
-        usage = formatTokenUsage state.uiPrompt.promptUsage
+        mode = state.uiPrompt.promptMode
         leading =
             filter (not . Text.null)
                 [ if state.uiPrompt.promptAttachments > 0
@@ -1226,9 +1451,11 @@ drawComposer appState =
                         <> Text.pack
                             (show state.uiPrompt.promptAttachments)
                     else ""
-                , usage
                 , if Seq.null state.uiQueuedInputs
-                    then ""
+                    then
+                        if not state.uiAwaitingInput
+                            then "next message"
+                            else ""
                     else "queued "
                         <> Text.pack
                             (show (Seq.length state.uiQueuedInputs))
@@ -1238,7 +1465,10 @@ drawComposer appState =
             | otherwise =
                 [ clickable ComposerModel $
                     forceAttr
-                        (controlAttr appState ComposerModel)
+                        (controlAttr
+                            appState
+                            ComposerModel
+                            Theme.controlLinkAttr)
                         (txt state.uiPrompt.promptModel)
                 ]
         effortControl
@@ -1246,7 +1476,10 @@ drawComposer appState =
             | otherwise =
                 [ clickable ComposerEffort $
                     forceAttr
-                        (controlAttr appState ComposerEffort)
+                        (controlAttr
+                            appState
+                            ComposerEffort
+                            Theme.assistantAttr)
                         (txt (" (" <> state.uiPrompt.promptEffort <> ")"))
                 ]
         modelAndEffort = case modelControl <> effortControl of
@@ -1257,7 +1490,10 @@ drawComposer appState =
                 <> modelAndEffort
                 <> [ clickable ComposerMode $
                         forceAttr
-                            (controlAttr appState ComposerMode)
+                            (controlAttr
+                                appState
+                                ComposerMode
+                                (modeAttr mode))
                             (txt mode)
                    | not (Text.null mode)
                    ]
@@ -1267,25 +1503,28 @@ drawComposer appState =
                 else hBox
                     (txt " " : intersperse (txt " · ") labelWidgets <> [txt " "])
         editor =
-            padLeftRight 1 $
-                hBox
-                    [ withAttr Theme.assistantAttr (txt "❯ ")
-                    , renderDraft focused state
-                    , vLimit 1 (fill ' ')
-                    ]
-    in clickable ComposerArea $
-        withAttr attr $
+            clickable ComposerArea $
+                padLeftRight 1 $
+                    hBox
+                        [ withAttr
+                            (if focused then Theme.borderActiveAttr else Theme.mutedAttr)
+                            (txt "❯ ")
+                        , withAttr Theme.assistantAttr (renderDraft focused state)
+                        , vLimit 1 (fill ' ')
+                        ]
+        composer =
             withBorderStyle unicodeRounded $
                 borderWithLabel (withAttr Theme.footerAttr label) $
                     editor
+    in overrideAttr Border.borderAttr attr composer
   where
     state = appState.appUi
 
-controlAttr :: AppState -> Name -> AttrName
-controlAttr state name =
+controlAttr :: AppState -> Name -> AttrName -> AttrName
+controlAttr state name fallback =
     case controlInteractionAttr state name of
         Just attr -> attr
-        Nothing -> Theme.controlLinkAttr
+        Nothing -> fallback
 
 controlInteractionAttr :: AppState -> Name -> Maybe AttrName
 controlInteractionAttr state name
@@ -1296,6 +1535,12 @@ controlInteractionAttr state name
         Just Theme.controlLinkHoverAttr
     | otherwise =
         Nothing
+
+modeAttr :: Text -> AttrName
+modeAttr mode = case Text.toLower mode of
+    "yolo" -> Theme.thinkingAttr
+    "plan" -> Theme.headingAttr
+    _ -> Theme.linkAttr
 
 renderDraft :: Bool -> UiState -> Widget Name
 renderDraft focused state =
@@ -1339,7 +1584,7 @@ drawFooter state =
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                            "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
                             "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
 
@@ -1347,7 +1592,7 @@ drawPermission :: PermissionOverlay -> Widget Name
 drawPermission permission =
     centerLayer $
         hLimitPercent 78 $
-            withAttr Theme.borderActiveAttr $
+            overrideAttr Border.borderAttr Theme.borderActiveAttr $
                 withBorderStyle unicodeRounded $
                     borderWithLabel (txt " Permission ") $
                         padAll 1 $
@@ -1379,7 +1624,7 @@ drawChoice appState choice =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
-                withAttr Theme.borderActiveAttr $
+                overrideAttr Border.borderAttr Theme.borderActiveAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
                             (txt (" " <> choice.choiceTitle <> " ")) $
@@ -1410,7 +1655,7 @@ drawTextPrompt prompt =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
-                withAttr Theme.borderActiveAttr $
+                overrideAttr Border.borderAttr Theme.borderAttr $
                     withBorderStyle unicodeRounded $
                         borderWithLabel
                             (txt (" " <> prompt.textTitle <> " ")) $
@@ -1422,7 +1667,7 @@ drawTextPrompt prompt =
                                             vLimitPercent 60 $
                                                 viewport OverlayViewport Vertical $
                                                     markdownWidget prompt.textBody
-                                    , withAttr Theme.borderAttr $
+                                    , overrideAttr Border.borderAttr Theme.borderActiveAttr $
                                         withBorderStyle unicodeRounded $
                                             borderWithLabel (txt " Answer ") $
                                                 padLeftRight 1 $
@@ -1464,26 +1709,49 @@ choiceRow appState selected index (label, detail) =
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
     initial <- get
+    renderedContentHeight <-
+        if any isSubmittedPrompt uiEvents
+            then conversationUnpaddedContentHeight
+            else pure 0
     let
         (final, nativeProgress, shouldFollow, shouldInvalidate) =
-            foldl' applyOne (initial, Nothing, False, False) uiEvents
+            foldl'
+                (applyOne renderedContentHeight)
+                (initial, Nothing, False, False)
+                uiEvents
     put final
+    liftIO $
+        writeIORef
+            final.appRuntime.runtimeRunning
+            (uiNeedsTick final.appUi)
     case nativeProgress of
         Nothing -> pure ()
         Just active ->
             liftIO (final.appRuntime.runtimeNativeProgress active)
     when shouldInvalidate invalidateCache
     when shouldFollow $
-        vScrollToEnd (viewportScroll ConversationViewport)
+        case final.appConversationAnchor of
+            Just _ -> do
+                when (any isSubmittedPrompt uiEvents) $
+                    vScrollToEnd (viewportScroll ConversationViewport)
+                queueConversationReflow
+            Nothing ->
+                vScrollToEnd (viewportScroll ConversationViewport)
     when
         (all (== UiTick) uiEvents && final.appUi == initial.appUi)
         continueWithoutRedraw
   where
     applyOne
+        renderedContentHeight
         (state, previousProgress, followed, invalidated)
         uiEvent =
             let
-                next = applyUiEvent uiEvent state
+                next =
+                    applyUiEvent uiEvent $
+                        applyConversationUiEvent
+                            renderedContentHeight
+                            uiEvent
+                            state
                 progress =
                     case Bridge.nativeProgressSignal uiEvent next.appUi of
                         Nothing -> previousProgress
@@ -1495,6 +1763,27 @@ handleUiEvents uiEvents = do
                 invalidates =
                     invalidated || uiEvent == UiConversationCleared
             in (next, progress, follows, invalidates)
+
+applyConversationUiEvent :: Int -> UiEvent -> AppState -> AppState
+applyConversationUiEvent renderedContentHeight uiEvent state =
+    case uiEvent of
+        UiUserSubmitted text ->
+            state
+                { appConversationAnchor =
+                    Just $
+                        Scroll.startConversationAnchor
+                            (BlockId state.appUi.uiNextBlockId)
+                            text
+                            (if null state.appUi.uiBlocks
+                                then 0
+                                else renderedContentHeight)
+                }
+        UiConversationCleared ->
+            state
+                { appConversationAnchor = Nothing
+                , appConversationReflowQueued = False
+                }
+        _ -> state
 
 applyUiEvent :: UiEvent -> AppState -> AppState
 applyUiEvent uiEvent state =
@@ -1528,6 +1817,14 @@ handleEvent event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
+    AppEvent (AppSetImagePreviews images) ->
+        modify' \state ->
+            state
+                { appImagePreviews =
+                    mapMaybe
+                        (either (const Nothing) Just . prepareTuiImagePreview)
+                        images
+                }
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
@@ -1552,6 +1849,10 @@ handleEvent event = case event of
         handleUiEvents (uiEvent :| [])
     AppEvent (AppUiBatch uiEvents) ->
         handleUiEvents uiEvents
+    AppEvent AppConversationReflow -> do
+        modify' \state ->
+            state { appConversationReflowQueued = False }
+        reflowConversation
     AppEvent (AppAskPermission summary reply) ->
         modify' \state ->
             state
@@ -1614,6 +1915,8 @@ handleEvent event = case event of
                         handleControlMouseDown ComposerEffort
                     (ComposerMode, V.BLeft) ->
                         handleControlMouseDown ComposerMode
+                    (CodeCopy blockId codeIndex, V.BLeft) ->
+                        handleControlMouseDown (CodeCopy blockId codeIndex)
                     (SlashRow index, V.BLeft) ->
                         activateSlashAt index
                     (SlashRow _, V.BScrollUp) ->
@@ -1654,6 +1957,11 @@ handleEvent event = case event of
         | isInteractiveControl name
         , button == Just V.BLeft || button == Nothing ->
             handleControlMouseUp name (activateControl name)
+    MouseUp _ Nothing _ ->
+        modify' \state ->
+            state
+                { appHoveredControl = Nothing
+                }
     VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
         modify' \state ->
             state
@@ -1735,7 +2043,9 @@ handleCtrlC = do
                     { appUi =
                         reduceUi
                             (UiSetNotice
-                                (Just "Interrupted; press Ctrl-C again to exit."))
+                                (Just
+                                    (warningNotice
+                                        "Interrupted; press Ctrl-C again to exit.")))
                             current.appUi
                     }
         WarnExit ->
@@ -1744,7 +2054,9 @@ handleCtrlC = do
                     { appUi =
                         reduceUi
                             (UiSetNotice
-                                (Just "Press Ctrl-C again to exit."))
+                                (Just
+                                    (warningNotice
+                                        "Press Ctrl-C again to exit.")))
                             current.appUi
                     }
         ForceExit ->
@@ -1752,18 +2064,23 @@ handleCtrlC = do
     pure decision
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
-handleNormalKey event = do
-    case event of
-        V.EvMouseDown _ _ V.BScrollUp _ ->
-            scrollConversationBy (-mouseScrollLines)
-        V.EvMouseDown _ _ V.BScrollDown _ ->
-            scrollConversationBy mouseScrollLines
-        _ -> do
-            state <- get
-            case state.appUi.uiFocus of
-                FocusScrollback -> handleScrollbackKey event
-                FocusComposer -> handleComposerKey event
-                FocusPermission -> pure ()
+handleNormalKey event
+    | Bridge.isSendNowKey event =
+        handleComposerKey event
+    | otherwise = do
+        case event of
+            V.EvResize _ _ ->
+                queueConversationReflow
+            V.EvMouseDown _ _ V.BScrollUp _ ->
+                scrollConversationBy (-mouseScrollLines)
+            V.EvMouseDown _ _ V.BScrollDown _ ->
+                scrollConversationBy mouseScrollLines
+            _ -> do
+                state <- get
+                case state.appUi.uiFocus of
+                    FocusScrollback -> handleScrollbackKey event
+                    FocusComposer -> handleComposerKey event
+                    FocusPermission -> pure ()
 
 activateSlashAt :: Int -> EventM Name AppState ()
 activateSlashAt index = do
@@ -1819,9 +2136,15 @@ handleScrollbackKey = \case
         | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Up
     V.EvKey (V.KChar 'd') modifiers
         | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Down
-    V.EvKey V.KHome [] -> leaveFollow >> vScrollToBeginning scroll
+    V.EvKey V.KHome [] -> do
+        leaveFollow
+        vScrollToBeginning scroll
+        queueConversationReflow
     V.EvKey V.KEnd [] -> resumeFollow
-    V.EvKey (V.KChar 'g') [] -> leaveFollow >> vScrollToBeginning scroll
+    V.EvKey (V.KChar 'g') [] -> do
+        leaveFollow
+        vScrollToBeginning scroll
+        queueConversationReflow
     V.EvKey (V.KChar 'G') [] -> resumeFollow
     V.EvKey V.KLeft [] -> toggle
     V.EvKey V.KRight [] -> toggle
@@ -1838,11 +2161,14 @@ handleScrollbackKey = \case
             state { appUi = reduceUi (UiMoveSelection delta) state.appUi }
         state <- get
         case state.appUi.uiSelectedBlock of
-            Just ident -> makeVisible (ConversationBlock ident)
+            Just ident -> do
+                makeVisible (ConversationBlock ident)
+                queueConversationReflow
             Nothing -> pure ()
-    toggle =
+    toggle = do
         modify' \state ->
             state { appUi = reduceUi UiToggleSelected state.appUi }
+        queueConversationReflow
     focusComposer =
         modify' \state ->
             state { appUi = reduceUi (UiFocusChanged FocusComposer) state.appUi }
@@ -1851,8 +2177,14 @@ handleScrollbackKey = \case
             state { appUi = reduceUi (UiSetFollow False) state.appUi }
     resumeFollow = do
         modify' \state ->
-            state { appUi = reduceUi (UiSetFollow True) state.appUi }
+            state
+                { appUi = reduceUi (UiSetFollow True) state.appUi
+                , appConversationAnchor =
+                    Scroll.followConversationTail
+                        <$> state.appConversationAnchor
+                }
         vScrollToEnd scroll
+        queueConversationReflow
     copySelected = do
         state <- get
         case state.appUi.uiSelectedBlock >>= selectedBlock state.appUi of
@@ -1867,8 +2199,10 @@ handleScrollbackKey = \case
                                 (UiSetNotice
                                     (Just
                                         (if copied
-                                            then "Copied selected block."
-                                            else "Terminal clipboard is unavailable.")))
+                                            then successNotice
+                                                "Copied selected block."
+                                            else warningNotice
+                                                "Terminal clipboard is unavailable.")))
                                 current.appUi
                         }
 
@@ -1878,6 +2212,8 @@ handleComposerKey event = do
     let ui = state.appUi
         slashMenu = currentSlashMenu state
     case event of
+        _ | Bridge.isSendNowKey event ->
+            sendNow
         V.EvKey (V.KChar 'q') [V.MCtrl] ->
             submitRaw ReplEof
         V.EvKey (V.KChar 'd') [V.MCtrl]
@@ -1912,7 +2248,9 @@ handleComposerKey event = do
         V.EvKey (V.KChar '\t') [] ->
             case slashMenu of
                 Just menu -> acceptSlash menu
-                Nothing -> modifyUi (UiFocusChanged FocusScrollback)
+                Nothing ->
+                    when (not (null (toList ui.uiBlocks))) $
+                        modifyUi (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter [V.MShift] ->
             insertText "\n"
         V.EvKey V.KEnter [] ->
@@ -2019,6 +2357,53 @@ handleComposerKey event = do
                 }
         vScrollToEnd (viewportScroll ConversationViewport)
 
+    sendNow = do
+        state <- get
+        let ui = state.appUi
+            draft = ui.uiDraft
+        when ui.uiRunning $
+            if Text.null (Text.strip draft)
+                then
+                    if Seq.null ui.uiQueuedInputs
+                        then modifyUi
+                            (UiSetNotice
+                                (Just
+                                    (warningNotice
+                                        "There is no queued prompt to send now.")))
+                        else do
+                            modifyUi
+                                (UiSetNotice
+                                    (Just
+                                        (warningNotice
+                                            "Cancelling the current turn; sending the queued prompt next…")))
+                            liftIO state.appRuntime.runtimeCancel
+                else do
+                    liftIO (appendReplHistory draft)
+                    liftIO $ atomically $
+                        promoteFullscreenInput
+                            state.appRuntime.runtimeInput
+                            FullscreenInput
+                                { fullscreenInputLine =
+                                    if state.appPasted
+                                        then ReplPasted draft
+                                        else ReplText draft
+                                , fullscreenInputQueued = True
+                                , fullscreenInputDisplay = Just draft
+                                }
+                    modify' \current ->
+                        current
+                            { appUi =
+                                reduceUi (UiInputPromoted draft) current.appUi
+                            , appPasted = False
+                            , appHistory = draft : current.appHistory
+                            , appHistoryIndex = Nothing
+                            , appHistoryDraft = ""
+                            , appSlashIndex = 0
+                            , appSlashDismissed = False
+                            }
+                    liftIO state.appRuntime.runtimeCancel
+                    vScrollToEnd (viewportScroll ConversationViewport)
+
     enqueueInput state replLine display clearDraft = do
         let queued = not state.appUi.uiAwaitingInput
         modify' \current ->
@@ -2048,7 +2433,8 @@ handleComposerKey event = do
         if not state.appUi.uiAwaitingInput
             then do
                 liftIO state.appRuntime.runtimeCancel
-                modifyUi (UiSetNotice (Just "Cancelling…"))
+                modifyUi
+                    (UiSetNotice (Just (progressNotice "Cancelling…")))
             else
                 modifyUi (UiSetDraft "" 0)
 
@@ -2251,15 +2637,18 @@ scrollConversationBy amount
     | amount < 0 = do
         setConversationFollow False
         vScrollBy scroll amount
+        queueConversationReflow
     | otherwise =
         lookupViewport ConversationViewport >>= \case
             Just (VP _ top (_, height) (_, contentHeight))
                 | top + height + amount >= contentHeight -> do
                     setConversationFollow True
                     vScrollToEnd scroll
+                    queueConversationReflow
             _ -> do
                 setConversationFollow False
                 vScrollBy scroll amount
+                queueConversationReflow
   where
     scroll = viewportScroll ConversationViewport
 
@@ -2267,6 +2656,65 @@ setConversationFollow :: Bool -> EventM Name AppState ()
 setConversationFollow follow =
     modify' \state ->
         state { appUi = reduceUi (UiSetFollow follow) state.appUi }
+
+conversationUnpaddedContentHeight :: EventM Name AppState Int
+conversationUnpaddedContentHeight =
+    lookupViewport ConversationViewport >>= \case
+        Just (VP _ _ _ (_, contentHeight)) -> do
+            renderedReserveRows <- conversationRenderedReserveRows
+            pure $ max 0 (contentHeight - renderedReserveRows)
+        Nothing -> pure 0
+
+queueConversationReflow :: EventM Name AppState ()
+queueConversationReflow = do
+    state <- get
+    unless state.appConversationReflowQueued do
+        modify' \current ->
+            current { appConversationReflowQueued = True }
+        liftIO $
+            enqueueAppEvent
+                state.appRuntime
+                AppConversationReflow
+
+reflowConversation :: EventM Name AppState ()
+reflowConversation = do
+    state <- get
+    case state.appConversationAnchor of
+        Nothing -> pure ()
+        Just anchor ->
+            lookupViewport ConversationViewport >>= \case
+                Nothing -> pure ()
+                Just (VP _ top (_, height) (_, contentHeight)) -> do
+                    renderedReserveRows <-
+                        conversationRenderedReserveRows
+                    let unpaddedContentHeight =
+                            max 0
+                                (contentHeight - renderedReserveRows)
+                        (next, scrollAction) =
+                            Scroll.reflowConversationAnchor
+                                state.appUi.uiFollow
+                                top
+                                height
+                                unpaddedContentHeight
+                                anchor
+                    modify' \current ->
+                        current { appConversationAnchor = Just next }
+                    case scrollAction of
+                        Scroll.KeepConversationPosition -> pure ()
+                        Scroll.ScrollConversationToEnd ->
+                            vScrollToEnd
+                                (viewportScroll ConversationViewport)
+
+conversationRenderedReserveRows :: EventM Name AppState Int
+conversationRenderedReserveRows =
+    lookupExtent ConversationReserve >>= \case
+        Just (Extent _ _ (_, reserveRows)) -> pure reserveRows
+        Nothing -> pure 0
+
+isSubmittedPrompt :: UiEvent -> Bool
+isSubmittedPrompt = \case
+    UiUserSubmitted _ -> True
+    _ -> False
 
 decodePaste :: ByteString -> Text
 decodePaste =
@@ -2325,6 +2773,37 @@ appendFullscreenInput
 appendFullscreenInput (FullscreenInputBuffer inputs) input = do
     queued <- readTVar inputs
     writeTVar inputs (queued Seq.|> input)
+
+-- | Put an interruptive prompt ahead of already queued prompts. Clipboard
+-- actions entered after the last submitted prompt belong to the current draft,
+-- so keep that trailing prelude immediately before the promoted prompt.
+promoteFullscreenInput
+    :: FullscreenInputBuffer
+    -> FullscreenInput
+    -> STM ()
+promoteFullscreenInput (FullscreenInputBuffer inputs) input = do
+    queued <- readTVar inputs
+    let (remaining, prelude) = splitTrailingPromptPrelude queued
+    writeTVar inputs $
+        prelude Seq.>< Seq.singleton input Seq.>< remaining
+
+splitTrailingPromptPrelude
+    :: Seq FullscreenInput
+    -> (Seq FullscreenInput, Seq FullscreenInput)
+splitTrailingPromptPrelude = go Seq.empty
+  where
+    go prelude queued =
+        case Seq.viewr queued of
+            remaining Seq.:> input
+                | isPromptPrelude input ->
+                    go (input Seq.<| prelude) remaining
+            _ -> (queued, prelude)
+
+isPromptPrelude :: FullscreenInput -> Bool
+isPromptPrelude input =
+    case input.fullscreenInputLine of
+        ReplClipboardPaste _ _ -> True
+        _ -> False
 
 takeFullscreenInput
     :: FullscreenInputBuffer

@@ -4,8 +4,8 @@ module Agent.CLI.Compaction
     , codexAutoCompactTokenLimit
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWith
+    , compactOpenAIWith
     , runProviderCompact
-    , shouldFallbackFromRemoteCompact
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -14,10 +14,6 @@ import Agent.Loop
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnOutput(..)
-    )
-import Agent.OpenAI.CompactClient
-    ( CompactRequest(..)
-    , compactConversation
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
@@ -49,7 +45,6 @@ import Control.Monad.Trans.Except
     , withExceptT
     )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -94,53 +89,31 @@ compactOpenAI
     -> Int
     -> Maybe Text
     -> ExceptT Text IO CompactOutcome
-compactOpenAI tokenProvider params history before focus = do
+compactOpenAI =
+    compactOpenAIWith OpenAI.createCodexMessageWithProvider
+
+compactOpenAIWith
+    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
+    -> Maybe TokenProvider
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> Maybe Text
+    -> ExceptT Text IO CompactOutcome
+compactOpenAIWith send tokenProvider params history before focus = do
     provider <- requireTokenProvider OpenAIProvider tokenProvider
-    requireHistory history
-    let model = fromMaybe "gpt-5.6-luna" params.model
-        focusedHistory = case focus of
-            Just text | not (Text.null (Text.strip text)) ->
-                history
-                    <> [ userTextItem
-                            ( "Compaction focus from the user: "
-                                <> Text.strip text
-                            )
-                       ]
-            _ -> history
-        request =
-            CompactRequest
-                { compactModel = model
-                , compactInput = focusedHistory
-                , compactInstructions = params.instructions
-                , compactTools = params.tools
-                , compactParallelToolCalls =
-                    fromMaybe True params.parallelToolCalls
-                , compactReasoning = params.reasoning
-                }
-    remoteResult <- lift (compactConversation provider request)
-    case remoteResult of
-        Right items ->
-            pure CompactOutcome
-                { compactBeforeTokens = before
-                , compactAfterTokens = estimateItemsTokens items
-                , compactHistory = items
-                , compactSummary =
-                    "remote compact returned "
-                        <> Text.pack (show (length items))
-                        <> " items"
-                }
-        Left remoteError
-            | shouldFallbackFromRemoteCompact remoteError ->
-                withExceptT (formatFallbackError remoteError) $
-                    summarizeLocal
-                        OpenAI.createCodexMessageWithProvider
-                        provider
-                        params
-                        history
-                        before
-                        focus
-            | otherwise ->
-                throwE (formatApiError remoteError)
+    -- The default OpenAI transport uses the ChatGPT Codex backend. Its normal
+    -- /responses endpoint is available, but /responses/compact returns 404.
+    -- Compact locally without first paying for a known-failing HTTP request.
+    -- Agent.OpenAI.CompactClient remains available to callers targeting an
+    -- API-compatible host that implements the remote compact endpoint.
+    summarizeLocal
+        send
+        provider
+        params
+        history
+        before
+        focus
 
 compactLocalXai
     :: Maybe TokenProvider
@@ -290,36 +263,6 @@ providerLabel = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
-
--- | The remote compact endpoint can be unavailable or reject payloads/models
--- that the normal Responses endpoint accepts. Fall back locally for those
--- endpoint-specific failures, but preserve terminal account, policy, quota,
--- and context-window failures.
-shouldFallbackFromRemoteCompact :: ApiError -> Bool
-shouldFallbackFromRemoteCompact = \case
-    ConnectionError{} -> True
-    JsonDecodeError{} -> True
-    HttpError status _ ->
-        status `elem` [400, 404, 408, 409, 413, 422, 425]
-            || (status >= 500 && status < 600)
-    ProviderError errorType _ _ ->
-        errorType `elem`
-            [ NotFoundError
-            , PreviousResponseNotFound
-            , ApiErrorType
-            , OverloadedError
-            , ServiceUnavailableError
-            , PayloadTooLargeError
-            , WebSocketConnectionLimitReached
-            ]
-    CredentialsExhausted{} -> False
-
-formatFallbackError :: ApiError -> Text -> Text
-formatFallbackError remoteError localError =
-    "remote compact failed: "
-        <> formatApiError remoteError
-        <> "; local fallback failed: "
-        <> localError
 
 formatApiError :: ApiError -> Text
 formatApiError err = Text.pack (show err)

@@ -5,6 +5,7 @@ module Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
+    , providerTransitionDraft
     , setPendingExitAfter
     ) where
 
@@ -33,6 +34,7 @@ data ProviderTransition = ProviderTransition
     { transitionTarget :: !ModelOption
     , transitionSessionId :: !(Maybe Text)
     , transitionPendingTurn :: !(Maybe PendingTurn)
+    , transitionDraft :: !Text
     , transitionUnavailableProviders :: ![Provider]
     , transitionCause :: !TransitionCause
     }
@@ -56,6 +58,11 @@ applyProviderTransition options transition =
         , optEffort = Nothing
         , optResume = transition.transitionSessionId <|> options.optResume
         }
+
+-- | An idle composer draft survives a manual provider rebuild. Automatic
+-- fallback resumes a pending turn instead, so its transition draft is empty.
+providerTransitionDraft :: Maybe ProviderTransition -> Text
+providerTransitionDraft = maybe "" (.transitionDraft)
 
 setPendingExitAfter :: Bool -> PendingTurn -> PendingTurn
 setPendingExitAfter exitAfter pending =

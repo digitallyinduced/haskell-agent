@@ -578,7 +578,11 @@ spec = do
 --------------------------------------------------------------------------------
 
 baseParams :: ResponseCreateParams
-baseParams = defaultResponseCreateParams { model = Just "gpt-5.6-luna" }
+baseParams = withModel (Just "gpt-5.6-luna") defaultResponseCreateParams
+
+withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withModel nextModel ResponseCreateParams { model = _, .. } =
+    ResponseCreateParams { model = nextModel, .. }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =

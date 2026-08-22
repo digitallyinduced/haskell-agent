@@ -15,7 +15,6 @@ module Agent.ToolDispatch
     , canonicalToolName
     , dispatchToolCall
     , dispatchToolHandler
-    , canonicalToolName
     , handlerName
     , toolArgumentsValue
     , decodeToolArguments

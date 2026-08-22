@@ -293,6 +293,7 @@ rgbToXterm256 colour =
     cubeIndex r g b =
         let q x = min (5 :: Word8) (x `div` 51)
         in 16 + 36 * q r + 6 * q g + q b
+    grayIndex :: Double -> Word8
     grayIndex avg =
         let idx = round ((avg - 8) / 10) :: Int
         in fromIntegral (max 0 (min 23 idx) + 232)

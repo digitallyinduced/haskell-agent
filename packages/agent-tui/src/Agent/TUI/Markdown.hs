@@ -1,17 +1,23 @@
 -- | Lightweight fullscreen Markdown block rendering.
-module Agent.CLI.TUI.Markdown
+module Agent.TUI.Markdown
     ( InlineSpan(..)
     , InlineStyle(..)
     , inlinePlainText
     , markdownWidget
+    , markdownWidgetWithCodeControls
     , parseInline
     ) where
 
-import Agent.CLI.Input (terminalCharWidth)
-import qualified Agent.CLI.TUI.Theme as Theme
+import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
-import Data.Char (isDigit, isSpace)
+import Data.Char
+    ( GeneralCategory(..)
+    , generalCategory
+    , isDigit
+    , isSpace
+    , ord
+    )
 import Data.List (transpose)
 import qualified Data.List as List
 import Data.Text (Text)
@@ -19,6 +25,38 @@ import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
+
+terminalCharWidth :: Char -> Int
+terminalCharWidth char
+    | char == '\n' || char == '\r' || char == '\t' = 1
+    | code <= 0x1f || code == 0x7f = 1
+    | code >= 0x80 && code <= 0x9f = 1
+    | category == Format = 1
+    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
+    | category `elem` [Control, Surrogate, NotAssigned] = 0
+    | isWideCharacter char = 2
+    | otherwise = 1
+  where
+    code = ord char
+    category = generalCategory char
+
+isWideCharacter :: Char -> Bool
+isWideCharacter char =
+    let code = ord char
+    in code >= 0x1100
+        && ( code <= 0x115f
+            || code == 0x2329
+            || code == 0x232a
+            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
+            || (code >= 0xac00 && code <= 0xd7a3)
+            || (code >= 0xf900 && code <= 0xfaff)
+            || (code >= 0xfe10 && code <= 0xfe19)
+            || (code >= 0xfe30 && code <= 0xfe6f)
+            || (code >= 0xff00 && code <= 0xff60)
+            || (code >= 0xffe0 && code <= 0xffe6)
+            || (code >= 0x1f300 && code <= 0x1faff)
+            || (code >= 0x20000 && code <= 0x3fffd)
+           )
 
 data InlineStyle
     = InlinePlain
@@ -35,55 +73,73 @@ data InlineSpan = InlineSpan
     deriving (Eq, Show)
 
 markdownWidget :: Text -> Widget n
-markdownWidget input =
-    vBox (renderLines False (Text.lines input))
+markdownWidget =
+    markdownWidgetWithCodeControls \_ language ->
+        if Text.null language
+            then emptyWidget
+            else withAttr Theme.mutedAttr (txt language)
 
-renderLines :: Bool -> [Text] -> [Widget n]
-renderLines _ [] = []
-renderLines False lines_
+-- | Render Markdown, allowing callers to add an interactive control to each
+-- fenced code block header. Code block indices are one-based.
+markdownWidgetWithCodeControls
+    :: (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithCodeControls codeHeader input =
+    vBox (renderLines codeHeader 1 False (Text.lines input))
+
+renderLines
+    :: (Int -> Text -> Widget n)
+    -> Int
+    -> Bool
+    -> [Text]
+    -> [Widget n]
+renderLines _ _ _ [] = []
+renderLines codeHeader codeIndex False lines_
     | Just (table, rest) <- takeTable lines_ =
-        table : renderLines False rest
-renderLines inFence (line : rest)
+        table : renderLines codeHeader codeIndex False rest
+renderLines codeHeader codeIndex inFence (line : rest)
     | isFence line =
         let language = Text.strip (Text.drop 3 (Text.stripStart line))
-            label
-                | inFence || Text.null language = []
-                | otherwise =
-                    [withAttr Theme.mutedAttr (txt language)]
-        in label <> renderLines (not inFence) rest
+        in if inFence
+            then renderLines codeHeader codeIndex False rest
+            else
+                codeHeader codeIndex language
+                    : renderLines codeHeader (codeIndex + 1) True rest
     | inFence =
         withAttr Theme.codeAttr
             (padLeftRight 1 (txt line))
-            : renderLines True rest
+            : renderLines codeHeader codeIndex True rest
     | Just heading <- stripHeading line =
         withAttr Theme.headingAttr
             (padTop (Pad 1) (inlineWidget (parseInline heading)))
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just item <- stripBullet line =
         hBox
             [ withAttr Theme.headingAttr (txt "• ")
             , inlineWidget (parseInline item)
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just (number, item) <- stripOrdered line =
         hBox
             [ withAttr Theme.headingAttr (txt (number <> ". "))
             , inlineWidget (parseInline item)
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Just quote <- Text.stripPrefix "> " (Text.stripStart line) =
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
             , withAttr Theme.mutedAttr (inlineWidget (parseInline quote))
             ]
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | Text.null (Text.strip line) =
-        txt " " : renderLines False rest
+        txt " " : renderLines codeHeader codeIndex False rest
     | isThematicBreak line =
         withAttr Theme.mutedAttr (fill '─')
-            : renderLines False rest
+            : renderLines codeHeader codeIndex False rest
     | otherwise =
-        inlineWidget (parseInline line) : renderLines False rest
+        inlineWidget (parseInline line)
+            : renderLines codeHeader codeIndex False rest
 
 isFence :: Text -> Bool
 isFence line =

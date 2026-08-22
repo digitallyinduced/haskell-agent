@@ -16,7 +16,11 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.TUI.App
     ( emitUiEvent
     )
-import Agent.CLI.UI.Model (BlockState(..), UiEvent(..))
+import Agent.TUI.Model
+    ( BlockState(..)
+    , UiEvent(..)
+    , successNotice
+    )
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
@@ -318,7 +322,11 @@ runOneTurn env@SessionEnv
                     detail = elapsedDetail extra
                 case fullscreen of
                     Just runtime ->
-                        emitUiEvent runtime (UiSetNotice (Just detail))
+                        emitUiEvent runtime
+                            (UiSetNotice
+                                (Just
+                                    (successNotice
+                                        ("Finished · " <> detail))))
                     Nothing -> do
                         color <- resolveColor stderr
                         putTextLn stderr

@@ -101,20 +101,17 @@ spec = do
 
         it "pastes clipboard images with an optional caption" do
             parseReplLine "/paste"
-                `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }
+                `shouldBe` ReplPaste False ""
             parseReplLine "  /Paste  "
-                `shouldBe` ReplPaste { pasteImmediate = False, pasteCaption = "" }
+                `shouldBe` ReplPaste False ""
             parseReplLine "/paste what is this?"
-                `shouldBe` ReplPaste
-                    { pasteImmediate = False, pasteCaption = "what is this?" }
+                `shouldBe` ReplPaste False "what is this?"
             parseReplLine "/paste   keep  spaces"
-                `shouldBe` ReplPaste
-                    { pasteImmediate = False, pasteCaption = "keep  spaces" }
+                `shouldBe` ReplPaste False "keep  spaces"
             parseReplLine "/paste --send"
-                `shouldBe` ReplPaste { pasteImmediate = True, pasteCaption = "" }
+                `shouldBe` ReplPaste True ""
             parseReplLine "/paste --send look"
-                `shouldBe` ReplPaste
-                    { pasteImmediate = True, pasteCaption = "look" }
+                `shouldBe` ReplPaste True "look"
             parseReplLine "/attachments" `shouldBe` ReplShowAttachments
             parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
 
