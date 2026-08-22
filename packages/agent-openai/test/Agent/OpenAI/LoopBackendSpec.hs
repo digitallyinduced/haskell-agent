@@ -16,6 +16,34 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "withRequestInput" do
+        it "repairs legacy assistant input_text from compacted sessions" do
+            let legacySummary = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [InputTextPart "Compacted conversation summary:\nold" Nothing KeyMap.empty]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                request = withRequestInput baseParams [legacySummary]
+            inputItems request `shouldBe`
+                [ MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [OutputTextPart
+                            "Compacted conversation summary:\nold"
+                            Nothing
+                            Nothing
+                            KeyMap.empty]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                ]
+
     describe "turnInputsToItems" do
         it "encodes a user message as RoleUser input_text" do
             case turnInputsToItems [UserMessage "hello"] of

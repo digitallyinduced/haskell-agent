@@ -24,6 +24,7 @@ spec = do
                 compacted = buildLocalCompactedHistory 2 history "did stuff"
             length compacted `shouldBe` 3
             compacted `shouldSatisfy` any isSummary
+            compacted `shouldSatisfy` any isWireValidAssistantSummary
             -- newest users retained
             let texts = [userOnly m | MessageItem m <- compacted, m.role == RoleUser]
             texts `shouldBe` ["two", "three"]
@@ -118,10 +119,16 @@ spec = do
     isSummary (MessageItem m) =
         m.role == RoleAssistant
             && case m.content of
-                MessageContentParts (InputTextPart text _ _ : _) ->
+                MessageContentParts (OutputTextPart text _ _ _ : _) ->
                     Text.isPrefixOf summaryPrefix text
                 _ -> False
     isSummary _ = False
+    isWireValidAssistantSummary (MessageItem m) =
+        m.role == RoleAssistant
+            && case m.content of
+                MessageContentParts [OutputTextPart {}] -> True
+                _ -> False
+    isWireValidAssistantSummary _ = False
     userOnly m = case m.content of
         MessageContentParts (InputTextPart text _ _ : _) -> text
         MessageContentText text -> text
