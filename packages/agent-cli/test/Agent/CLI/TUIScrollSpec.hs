@@ -26,6 +26,21 @@ spec = describe "fullscreen conversation scrolling" do
         grown.anchorViewportTop `shouldBe` 40
         grown.anchorPhase `shouldBe` ConversationFillingPage
 
+    it "recomputes the reserve when the terminal height changes" do
+        let initial = startConversationAnchor (BlockId 7) "question" 40
+            (pinned, _) =
+                reflowConversationAnchor True 40 20 45 initial
+            (taller, tallerAction) =
+                reflowConversationAnchor True 40 30 45 pinned
+            (shorter, shorterAction) =
+                reflowConversationAnchor True 40 10 45 taller
+        taller.anchorReserveRows `shouldBe` 25
+        taller.anchorViewportTop `shouldBe` 40
+        tallerAction `shouldBe` ScrollConversationToEnd
+        shorter.anchorReserveRows `shouldBe` 5
+        shorter.anchorViewportTop `shouldBe` 40
+        shorterAction `shouldBe` ScrollConversationToEnd
+
     it "switches permanently to tail following after the page overflows" do
         let initial = startConversationAnchor (BlockId 7) "question" 40
             (pinned, _) =

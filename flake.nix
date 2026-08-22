@@ -168,13 +168,39 @@
                     fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
+                    stty_bin="${pkgs.coreutils}/bin/stty"
                     export AGENT_REPL_SCRIPT="$script"
                     export AGENT_REPL_CABAL="$cabal"
+                    export AGENT_REPL_STTY="$stty_bin"
                     exec "$expect_bin" -c '
                       set timeout -1
                       set cabal $env(AGENT_REPL_CABAL)
                       set script $env(AGENT_REPL_SCRIPT)
+                      set external_stty $env(AGENT_REPL_STTY)
                       spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script
+                      # Expect gives Cabal/GHCi its own PTY. Keep that PTY in
+                      # sync so Vty receives resize events with current bounds.
+                      proc sync_spawn_size {} {
+                        global external_stty spawn_out
+                        if {![info exists spawn_out(slave,name)]} {
+                          return
+                        }
+                        if {[catch {
+                          exec $external_stty --file=/dev/tty size
+                        } size]} {
+                          return
+                        }
+                        if {[scan $size "%d %d" rows columns] != 2
+                            || $rows <= 0
+                            || $columns <= 0} {
+                          return
+                        }
+                        catch {
+                          exec $external_stty --file=$spawn_out(slave,name) rows $rows columns $columns
+                        }
+                      }
+                      trap sync_spawn_size SIGWINCH
+                      sync_spawn_size
                       expect {
                         -re {Ok, [0-9]+ modules? loaded\.} {}
                         eof {
