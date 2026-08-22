@@ -1,138 +1,229 @@
 # haskell-agent
 
-A universal coding-agent harness written in Haskell.
+**An independent agent harness, written in Haskell.**
 
-## Quick start
-
-With [Nix](https://nixos.org/download/) installed, run the agent directly from
-GitHub:
+`haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI, and
+OpenRouter models with first-class GHCi integration and a runtime designed
+around types, pure functions, explicit effects, and composable concurrency.
 
 ```console
 nix run github:digitallyinduced/haskell-agent
 ```
 
-## Packages
+## What is distinctive
 
-- `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
-- `agent-syntax` provides renderer-independent syntax loading, language
-  resolution, tokenization, and semantic token classes.
-- `agent-tui` provides retained fullscreen presentation state, Markdown
-  rendering, themes, and terminal presentation of syntax spans.
-- `agent-core` provides provider-neutral credentials, common
-  errors, tool dispatch, and transport utilities under the `Agent.*` namespace.
-- `agent-responses` provides the canonical Responses wire model, codecs, error
-  normalization, response merging, and provider-neutral loop adapters.
-- `agent-openai` provides the OpenAI/ChatGPT Responses transports,
-  authentication, and streaming under the `Agent.OpenAI.*` module namespace.
-- `agent-xai` provides Grok request mapping, OAuth login, HTTP SSE transport,
-  and stateful sessions under the `Agent.XAI.*` module namespace.
-- `agent-openrouter` provides OpenRouter static API-key auth, HTTP SSE
-  transport, and a local-transcript loop backend under the
-  `Agent.OpenRouter.*` module namespace.
+Most agent harnesses are effectively untyped imperative programming
+environments. A model emits loosely structured commands that mutate files,
+processes, conversation state, and other shared resources. Correctness depends
+on conventions enforced at runtime, often after effects have already begun.
+
+`haskell-agent` is an exploration in a different direction. Model output is
+treated as untrusted input at the boundary. Accepted actions are decoded into
+typed values, state changes are expressed as pure transformations where
+possible, and effects are interpreted explicitly by the runtime. The model
+remains probabilistic; the environment in which its actions execute does not
+have to be.
+
+- **A functional agent runtime:** protocol states, tool policies, transport
+  ownership, UI transitions, and agent lifecycles are modeled with algebraic
+  data types. Pure transformations are separated from effectful boundaries,
+  while STM coordinates shared concurrent state.
+- **GHCi as part of the agent architecture:** every model gets a persistent
+  typed workspace. The harness distinguishes pure expressions from effectful
+  actions, preserves bindings across calls, and recovers or restarts GHCi when
+  interruption makes its state uncertain.
+- **One runtime without one generic tool dialect:** the harness owns the agent
+  loop and connects to providers directly, but OpenAI still receives
+  Codex-style tools while xAI receives the Grok Build tool surface.
+- **Cross-provider state and billing policy:** provider transitions preserve
+  the pending turn and durable session state. Credential failover understands
+  account cooldowns and prevents automatic fallback from silently converting
+  subscription usage into API-credit spending.
+- **Explicit response ownership:** reusable WebSocket requests carry
+  generation-scoped ownership. If an exchange is interrupted, malformed, or
+  returned before its terminal frame, the connection is poisoned rather than
+  risking old frames entering a later response.
+- **Types as a path toward safer agency:** typed tool decoding, approval rules,
+  and execution policies are the current foundation for deeper work with
+  LLMs, ADTs, type checkers, effect systems, and program verification.
+
+The harness also includes the capabilities expected of a modern coding agent:
+persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
+web search, and interactive terminal interfaces. Those are important product
+features, but not the core differentiation.
+
+## Quick start
+
+Install [Nix](https://nixos.org/download/) with flakes enabled, then start an
+interactive session:
+
+```console
+nix run github:digitallyinduced/haskell-agent
+```
+
+Run a one-shot task:
+
+```console
+nix run github:digitallyinduced/haskell-agent -- \
+  -p "inspect this Cabal project, explain its architecture, and run its tests"
+```
+
+Start in an isolated Git worktree:
+
+```console
+nix run github:digitallyinduced/haskell-agent -- --worktree
+```
+
+Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
+override automatic provider detection.
+
+### Authentication
+
+- OpenAI / ChatGPT: `~/.codex/auth.json` or `CODEX_ACCESS_TOKEN`
+- xAI: `~/.grok/auth.json` or `GROK_ACCESS_TOKEN`
+- OpenRouter: `OPENROUTER_API_KEY`
+
+To create an OpenAI/ChatGPT credential:
+
+```console
+nix run github:digitallyinduced/haskell-agent#agent-openai-login -- \
+  --output ~/.codex/auth.json
+```
+
+## Vision
+
+### The agent harness is the interface
+
+We believe the agent harness will become the primary interface through which
+people use computers.
+
+Instead of learning which application, menu, command, or workflow to use,
+people will describe the outcome they want. Their harness will assemble
+context, choose models, invoke tools, coordinate agents, manage permissions,
+and carry work across devices and sessions.
+
+A model can reason, but the harness turns that reasoning into useful work. The
+harness is the layer that owns:
+
+- identity, preferences, instructions, and long-term context
+- access to files, processes, applications, services, and devices
+- permissions and boundaries for consequential actions
+- model selection, routing, retries, and billing policy
+- concurrent agents that can divide work and communicate
+- sessions that persist, resume, move between clients, and produce artifacts
+
+Models will change. Providers will change. User interfaces will change. The
+harness should remain the stable layer that the user controls.
+
+### Code is the universal control surface
+
+It is a coding harness because code is the universal control surface of the
+computer. Through files, processes, protocols, APIs, compilers, and operating
+system interfaces, an agent that can write and execute programs can use the
+hardware and perform general digital work.
+
+Coding is not one temporary vertical on the way to a broader agent. It is the
+substrate that makes a general computer agent possible.
+
+That is also why this project does not wrap one vendor CLI or bind its core
+runtime to one model family. The goal is an independent system that can use
+the best available model while preserving one coherent tool, session,
+permission, and agent environment.
+
+### Why Haskell
+
+An agent harness is a concurrent, stateful program that manages untrusted
+inputs and long-lived effects:
+
+- streamed protocol events arrive incrementally
+- tools read, write, and execute concurrently
+- users interrupt work at arbitrary points
+- credentials fail and accounts enter cooldown
+- subagents start, communicate, persist, and terminate
+- sessions must recover without mixing old and new state
+
+These problems map naturally to Haskell:
+
+- algebraic data types make protocol states and valid transitions explicit
+- pure functions keep decoding, policy, state reduction, and assembly
+  understandable
+- effectful provider, tool, process, and filesystem operations stay at narrow
+  boundaries
+- STM makes mailboxes, cancellation, capacity, and shared state composable
+- managed resource lifetimes give connections, subprocesses, and agents clear
+  owners and shutdown paths
+
+The point is not Haskell for its own sake. The point is a harness whose
+behavior can be reasoned about when many agents, tools, streams, and failures
+are active at once.
+
+### LLMs, types, effects, and verification
+
+We believe there is a large unexplored design space at the intersection of
+LLMs and programming languages:
+
+- **ADTs can define the agent's action language.** Instead of interpreting
+  arbitrary text, the harness can ask a model to construct values from a
+  closed set of valid operations and states.
+- **Type checking can become part of the reasoning loop.** A model can propose
+  a program, query its type, receive structured compiler feedback, and refine
+  the proposal before any effect is executed.
+- **Plans can become typed programs.** Dependencies, resources, permissions,
+  concurrency, and expected outputs can be represented explicitly rather than
+  hidden in prose.
+- **Effect systems can make consequences explicit.** A model should describe
+  not only what a program computes, but which files, processes, networks,
+  credentials, and external services it may affect.
+- **Verification can guard the effect boundary.** Preconditions, invariants,
+  capability constraints, and postconditions can be checked before the
+  harness commits an action to the outside world.
+- **Compiler feedback is high-quality supervision.** Type errors, failed
+  proofs, and violated properties give models precise signals before mistakes
+  reach execution.
+
+Today, this begins with typed protocol states, strict tool decoding, explicit
+approval and concurrency policies, pure reducers, and GHCi-based type
+exploration. The direction is deeper: agents that synthesize typed programs,
+use type checkers, effect systems, and proof systems as collaborators, and
+execute only after the runtime has established the required guarantees.
+
+## Architecture
+
+```text
+                 agent-cli / future native clients
+                              |
+                   provider-neutral events
+                              |
+     +------------------- agent-core -------------------+
+     | agent loop | tools | approvals | agents | state |
+     +-------------------------+------------------------+
+                               |
+                    canonical Responses model
+                               |
+          +--------------------+--------------------+
+          |                    |                    |
+     agent-openai          agent-xai        agent-openrouter
+          |                    |                    |
+   OpenAI / ChatGPT            xAI              OpenRouter
+```
+
+The provider-neutral loop sees typed turns, tool calls, tool results, usage,
+and streamed events. Provider packages own wire formats, authentication,
+transport, and provider-specific continuation. Presentation consumes the same
+events through renderer-independent state.
 
 ## Development
 
 All compiler and package dependencies come from the pinned Nix flake.
-The flake also fetches Skylighting's complete XML syntax-definition set and
-configures it for development, tests, and packaged `agent-cli` executables; the
-generated grammar data is not vendored in this repository.
-
-Each package has a checked-in `package.nix` generated with `cabal2nix` (no IFD).
-After changing a `.cabal` file, regenerate that package's Nix expression:
-
-```console
-(cd packages/agent-core && cabal2nix . > package.nix)
-(cd packages/agent-responses && cabal2nix . > package.nix)
-(cd packages/agent-openai && cabal2nix . > package.nix)
-(cd packages/agent-xai && cabal2nix . > package.nix)
-(cd packages/agent-openrouter && cabal2nix . > package.nix)
-(cd packages/agent-syntax && cabal2nix . > package.nix)
-(cd packages/agent-tui && cabal2nix . > package.nix)
-(cd packages/agent-cli && cabal2nix . > package.nix)
-```
 
 ```console
 nix develop
-cabal build all
 cabal test all
 ```
 
-```console
-nix develop
-cabal run agent-cli -- --help
-cabal run agent-cli -- -p "list the files here"
-```
+From the development shell, `repl` opens the agent under GHCi. Edit the
+harness, leave the running agent, reload the changed modules, and resume the
+same session without rebuilding the executable.
 
-From `nix develop`, `repl` opens `cabal repl lib:agent-cli` (via expect) and
-starts the agent with a GHCi `:cmd` loop. Development REPL sessions default to
-OpenAI `gpt-5.6-sol` with `--yolo`. On first open it also passes `--worktree`
-when the cwd is not already under `~/.haskell-agent/worktrees`. Inside the agent
-REPL, `:reload` returns to GHCi, reloads modules, and resumes the same session
-automatically through that REPL's GHCi continuation. Concurrent development
-REPLs therefore keep independent reload state. `:q` exits the agent back to
-`ghci>`.
-
-Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
-`~/.grok/auth.json` / `GROK_ACCESS_TOKEN` (xAI), `~/.codex/auth.json` /
-`CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
-`--provider` overrides auto-detection.
-
-OpenAI sessions compact automatically at the selected model's default context
-threshold. Pass `--compact-threshold N` to override it in estimated tokens, for
-example `--model gpt-5.6-luna --compact-threshold 120000`.
-
-Terminal animation is controlled independently of color with
-`--motion full|reduced|off`. `reduced` keeps stable semantic glyphs with
-coarser elapsed-time updates; `off` removes cosmetic animation and retains only
-one-second semantic timer refreshes. Terminal-native indeterminate progress is
-also disabled outside full-motion mode.
-
-Ghostty receives native progress, notifications, semantic turn boundaries,
-working-directory updates, inline images, synchronized picker redraws, and
-terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the
-CLI to inspect the detected capabilities.
-
-## Skills
-
-The CLI discovers reusable Agent Skills from `SKILL.md` files. It scans
-`.agents/skills`, `.grok/skills`, and `.codex/skills` in each directory from
-the repository root to the current working directory, plus the matching
-directories under the user home. Repository skills take priority over user
-skills for bare invocation names; colliding definitions remain available
-through qualified names shown by `/skills`.
-
-Each skill is a directory whose `SKILL.md` starts with YAML frontmatter:
-
-```markdown
----
-name: commit
-description: Create a well-formed commit. Use when the user asks to commit changes.
----
-
-Review the diff, run relevant checks, and create the commit.
-```
-
-Skill names appear in the interactive slash menu. Invoke one with
-`/commit optional arguments`, mention one in a prompt as `$commit`, or let the
-model select it from its description. `/skills` lists the active catalog and
-`/skills reload` rescans disk. Use `--no-skills` to disable discovery and
-invocation for a session.
-
-Skill scripts, references, and assets remain relative to the skill directory
-and are loaded only when needed. Skill-specific model overrides and
-`allowed-tools` auto-approval are parsed for compatibility but are not applied;
-normal model selection, permissions, and plan-mode restrictions remain in
-force.
-
-Build and run the CLI directly with Nix:
-
-```console
-nix flake check
-nix run .
-```
-
-The imported OpenAI package also retains the headless ChatGPT login executable:
-
-```console
-nix run .#agent-openai-login -- --output ~/.codex/auth.json
-```
+See [`AGENTS.md`](AGENTS.md) for the complete development workflow, including
+multi-package GHCi sessions, Nix package maintenance, and CLI testing.
