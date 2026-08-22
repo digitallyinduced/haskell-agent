@@ -12,6 +12,7 @@ module Agent.TUI.FencedCode
     , fencedBlocks
     ) where
 
+import Control.Applicative ((<|>))
 import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,7 +45,7 @@ data FencedBlock = FencedBlock
 -- backtick.
 fenceOpener :: Text -> Maybe (FenceMarker, Text)
 fenceOpener line = do
-    stripped <- stripFenceIndent line
+    (_, stripped) <- stripFenceIndent line
     character <- Text.uncons stripped >>= \(first, _) ->
         if first == '`' || first == '~'
             then Just first
@@ -64,7 +65,7 @@ isFenceCloser :: FenceMarker -> Text -> Bool
 isFenceCloser marker line =
     case stripFenceIndent line of
         Nothing -> False
-        Just stripped ->
+        Just (_, stripped) ->
             let (markerText, suffix) =
                     Text.span (== marker.fenceCharacter) stripped
             in Text.length markerText >= marker.fenceLength
@@ -74,38 +75,163 @@ isFenceCloser marker line =
 -- blocks are included with 'fencedClosed' set to 'False'. Prose and body text
 -- retain their original line endings.
 fenceChunks :: Text -> [FenceChunk]
-fenceChunks = go 1 [] . sourceLines
+fenceChunks = go 1 [] [] . sourceLines
   where
-    go _ prose [] = proseChunk prose
-    go index prose (line : rest) =
-        case fenceOpener line.lineText of
-            Nothing -> go index (line : prose) rest
-            Just (marker, info) ->
+    go _ prose _ [] = proseChunk prose
+    go index prose previous (line : rest) =
+        case fenceOpenerInContext previous line.lineText of
+            Nothing -> go index (line : prose) (line : previous) rest
+            Just opener ->
                 let
                     (bodyLines, closingAndRest) =
-                        break (isFenceCloser marker . (.lineText)) rest
-                    (closed, remaining) =
+                        break
+                            (isContextualFenceCloser opener . (.lineText))
+                            rest
+                    (closed, closingLine, remaining) =
                         case closingAndRest of
-                            [] -> (False, [])
-                            _closing : after -> (True, after)
+                            [] -> (False, [], [])
+                            closing : after -> (True, [closing], after)
                     block = FencedBlock
                         { fencedIndex = index
-                        , fencedMarker = marker
-                        , fencedInfo = info
+                        , fencedMarker = opener.openMarker
+                        , fencedInfo = opener.openInfo
                         , fencedBody =
                             foldMap
                                 (\bodyLine ->
-                                    bodyLine.lineText <> bodyLine.lineEnding)
+                                    stripBodyIndent
+                                        opener.openIndent
+                                        bodyLine.lineText
+                                        <> bodyLine.lineEnding)
                                 bodyLines
                         , fencedClosed = closed
                         }
+                    consumed = line : bodyLines <> closingLine
                 in proseChunk prose
                     <> [FenceBlock block]
-                    <> go (index + 1) [] remaining
+                    <> go
+                        (index + 1)
+                        []
+                        (reverse consumed <> previous)
+                        remaining
 
     proseChunk [] = []
     proseChunk reversedLines =
         [FenceText (foldMap sourceLineText (reverse reversedLines))]
+
+data ContextualFence = ContextualFence
+    { openMarker :: !FenceMarker
+    , openInfo :: !Text
+    , openContainerIndent :: !Int
+    , openIndent :: !Int
+    }
+
+fenceOpenerInContext :: [SourceLine] -> Text -> Maybe ContextualFence
+fenceOpenerInContext previous line =
+    if not (startsWithFenceMarker line)
+        then Nothing
+        else
+            let lineIndent = leadingSpaceCount line
+            in (do
+                    containerIndent <-
+                        listContainerIndent lineIndent previous
+                    contextualFence containerIndent line)
+                <|> contextualFence 0 line
+
+contextualFence :: Int -> Text -> Maybe ContextualFence
+contextualFence containerIndent line = do
+    insideContainer <- dropSpaceIndent containerIndent line
+    (fenceIndent, stripped) <- stripFenceIndent insideContainer
+    (marker, info) <- fenceOpener stripped
+    pure ContextualFence
+        { openMarker = marker
+        , openInfo = info
+        , openContainerIndent = containerIndent
+        , openIndent = containerIndent + fenceIndent
+        }
+
+isContextualFenceCloser :: ContextualFence -> Text -> Bool
+isContextualFenceCloser opener line =
+    maybe False
+        (isFenceCloser opener.openMarker)
+        (dropSpaceIndent opener.openContainerIndent line)
+
+-- | Find the nearest surrounding list item whose continuation indentation
+-- contains the prospective fence. Intervening non-blank lines must remain
+-- within that item, which prevents an old list from making an unrelated
+-- top-level four-space-indented line look like a fence.
+listContainerIndent :: Int -> [SourceLine] -> Maybe Int
+listContainerIndent lineIndent = go maxBound
+  where
+    go _ [] = Nothing
+    go minimumIndent (line : rest)
+        | Text.null (Text.strip line.lineText) =
+            go minimumIndent rest
+        | Just contentIndent <- listItemContentIndent line.lineText
+        , contentIndent <= lineIndent
+        , contentIndent <= minimumIndent =
+            Just contentIndent
+        | otherwise =
+            let minimumIndent' =
+                    min minimumIndent (leadingSpaceCount line.lineText)
+            in if minimumIndent' == 0
+                then Nothing
+                else go minimumIndent' rest
+
+listItemContentIndent :: Text -> Maybe Int
+listItemContentIndent line =
+    bulletIndent <|> orderedIndent
+  where
+    leading = leadingSpaceCount line
+    stripped = Text.drop leading line
+    bulletIndent = do
+        (marker, afterMarker) <- Text.uncons stripped
+        if marker `elem` ['-', '+', '*']
+            then contentIndentAfterMarker leading 1 afterMarker
+            else Nothing
+    orderedIndent = do
+        let (digits, afterDigits) = Text.span isAsciiDigit stripped
+        if Text.null digits || Text.length digits > 9
+            then Nothing
+            else do
+                (marker, afterMarker) <- Text.uncons afterDigits
+                if marker == '.' || marker == ')'
+                    then
+                        contentIndentAfterMarker
+                            leading
+                            (Text.length digits + 1)
+                            afterMarker
+                    else Nothing
+
+contentIndentAfterMarker :: Int -> Int -> Text -> Maybe Int
+contentIndentAfterMarker leading markerWidth afterMarker =
+    let spaces = leadingSpaceCount afterMarker
+    in if spaces >= 1 && spaces <= 4
+        then Just (leading + markerWidth + spaces)
+        else Nothing
+
+isAsciiDigit :: Char -> Bool
+isAsciiDigit character = character >= '0' && character <= '9'
+
+leadingSpaceCount :: Text -> Int
+leadingSpaceCount = Text.length . Text.takeWhile (== ' ')
+
+startsWithFenceMarker :: Text -> Bool
+startsWithFenceMarker line =
+    case Text.uncons (Text.dropWhile (== ' ') line) of
+        Just (marker, _) -> marker == '`' || marker == '~'
+        Nothing -> False
+
+dropSpaceIndent :: Int -> Text -> Maybe Text
+dropSpaceIndent count line =
+    let (spaces, _) = Text.span (== ' ') line
+    in if Text.length spaces >= count
+        then Just (Text.drop count line)
+        else Nothing
+
+stripBodyIndent :: Int -> Text -> Text
+stripBodyIndent count line =
+    let available = leadingSpaceCount line
+    in Text.drop (min count available) line
 
 -- | Extract all fenced blocks in source order.
 fencedBlocks :: Text -> [FencedBlock]
@@ -135,9 +261,9 @@ sourceLines input
 sourceLineText :: SourceLine -> Text
 sourceLineText line = line.lineText <> line.lineEnding
 
-stripFenceIndent :: Text -> Maybe Text
+stripFenceIndent :: Text -> Maybe (Int, Text)
 stripFenceIndent line =
     let (spaces, stripped) = Text.span (== ' ') line
     in if Text.length spaces <= 3
-        then Just stripped
+        then Just (Text.length spaces, stripped)
         else Nothing
