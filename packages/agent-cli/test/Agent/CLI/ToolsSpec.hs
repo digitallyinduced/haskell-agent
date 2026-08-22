@@ -47,6 +47,10 @@ spec = describe "schemasFromAppTools" do
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "does not advertise harness tools to the Claude Code subprocess" do
+        schemasFromAppTools ClaudeCodeProvider [jsonTool, patchTool]
+            `shouldBe` []
+
     it "builds a loose grok-build function tool for xAI" do
         case schemasFromAppTools XAIProvider [jsonTool] of
             [_, FunctionToolValue tool] -> do

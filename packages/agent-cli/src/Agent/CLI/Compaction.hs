@@ -159,6 +159,9 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
                         params
                         history
                         focus
+        ClaudeCodeProvider ->
+            pure (compactTextFailure
+                "Claude Code manages its own context; /compact is unavailable")
     pure attempt.compactAttemptResult
   where
     compactTextAttempt sender params history focus
@@ -632,6 +635,7 @@ providerLabel = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
+    ClaudeCodeProvider -> "claude-code"
 
 hasFocus :: Maybe Text -> Bool
 hasFocus =

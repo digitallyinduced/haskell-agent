@@ -88,6 +88,13 @@ codingToolsForWithTypes provider env hooks multi typesRef = do
                 grokCodingTools resources plan
             OpenRouterProvider ->
                 grokCodingTools resources plan
+            ClaudeCodeProvider ->
+                pure CodingTools
+                    { codingAppTools = []
+                    , codingPlanMode = plan
+                    , codingClose = closeResourceScope resources
+                    , codingAgentTypes = typesRef
+                    }
             OpenAIProvider -> do
                 (_, ghci) <- allocateResource resources
                     (newGhciSession env)

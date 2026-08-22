@@ -64,6 +64,13 @@ spec = do
                     , (OpenRouterProvider, "openai/gpt-5.1")
                     ]
 
+        it "never automatically enters or leaves the Claude Code bridge" do
+            fallbackCandidates [] ClaudeCodeProvider exhausted
+                `shouldBe` []
+            map (.modelProvider)
+                (fallbackCandidates [] OpenAIProvider exhausted)
+                `shouldSatisfy` (ClaudeCodeProvider `notElem`)
+
         it "skips providers already found unavailable" do
             map (.modelProvider)
                 (fallbackCandidates [OpenAIProvider] XAIProvider exhausted)

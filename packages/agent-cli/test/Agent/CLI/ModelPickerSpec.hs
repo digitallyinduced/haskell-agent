@@ -34,6 +34,7 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "xai"
             frame `shouldSatisfy` Text.isInfixOf "openai"
             frame `shouldSatisfy` Text.isInfixOf "openrouter"
+            frame `shouldSatisfy` Text.isInfixOf "claude-code"
             frame `shouldSatisfy` Text.isInfixOf (defaultModelFor XAIProvider)
             frame `shouldSatisfy` Text.isInfixOf "enter"
             frame `shouldSatisfy` Text.isInfixOf "filter"
@@ -48,3 +49,4 @@ spec = do
             listing `shouldSatisfy` Text.isInfixOf "openai"
             listing `shouldSatisfy` Text.isInfixOf "grok-4.6"
             listing `shouldSatisfy` Text.isInfixOf "openrouter"
+            listing `shouldSatisfy` Text.isInfixOf "claude-code"

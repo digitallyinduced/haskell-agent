@@ -160,7 +160,7 @@ spec = describe "Agent.ProjectInstructions" do
                     expectationFailure "expected rendered Grok instructions"
 
     describe "formatAgentsMdForProvider" do
-        it "picks Codex formatting for OpenAI and Grok formatting otherwise" do
+        it "uses contextual formatting for OpenAI/Claude and reminders for Grok transports" do
             let loaded = LoadedAgentsMd
                     { loadedGlobal = Nothing
                     , loadedProject = [InstructionFile (fromFilePath "/repo/AGENTS.md") "x"]
@@ -171,15 +171,19 @@ spec = describe "Agent.ProjectInstructions" do
                 `shouldSatisfy` maybe False (Text.isInfixOf "<system-reminder>")
             formatAgentsMdForProvider OpenRouterProvider (fromFilePath "/repo") loaded
                 `shouldSatisfy` maybe False (Text.isInfixOf "<system-reminder>")
+            formatAgentsMdForProvider ClaudeCodeProvider (fromFilePath "/repo") loaded
+                `shouldSatisfy` maybe False (Text.isPrefixOf "# AGENTS.md instructions")
 
     describe "globalAgentsHomeDir" do
-        it "uses ~/.codex for OpenAI and ~/.grok for the others" do
+        it "uses each first-party CLI's home directory" do
             globalAgentsHomeDir OpenAIProvider (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.codex"
             globalAgentsHomeDir XAIProvider (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.grok"
             globalAgentsHomeDir OpenRouterProvider (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.grok"
+            globalAgentsHomeDir ClaudeCodeProvider (fromFilePath "/home/u")
+                `shouldBe` fromFilePath "/home/u/.claude"
 
 checkLockedInstructions :: FilePath -> IO ()
 checkLockedInstructions dir = do

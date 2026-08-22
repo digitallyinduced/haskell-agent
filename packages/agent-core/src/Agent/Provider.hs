@@ -26,7 +26,11 @@ import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 
-data Provider = OpenAIProvider | XAIProvider | OpenRouterProvider
+data Provider
+    = OpenAIProvider
+    | XAIProvider
+    | OpenRouterProvider
+    | ClaudeCodeProvider
     deriving (Eq, Show)
 
 providerSlug :: Provider -> Text
@@ -34,12 +38,15 @@ providerSlug = \case
     OpenAIProvider -> "openai"
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
+    ClaudeCodeProvider -> "claude-code"
 
 parseProvider :: Text -> Maybe Provider
 parseProvider = \case
     "openai" -> Just OpenAIProvider
     "xai" -> Just XAIProvider
     "openrouter" -> Just OpenRouterProvider
+    "claude-code" -> Just ClaudeCodeProvider
+    "claude" -> Just ClaudeCodeProvider
     _ -> Nothing
 
 data Credential = Credential

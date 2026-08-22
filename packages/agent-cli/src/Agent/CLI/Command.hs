@@ -112,7 +112,7 @@ slashCommands =
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
     , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
-    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials" False
+    , cmd "reload-auth" [] "/reload-auth" "Re-read provider credentials" False
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
     , cmd "attachments" [] "/attachments" "List queued clipboard images" False
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False

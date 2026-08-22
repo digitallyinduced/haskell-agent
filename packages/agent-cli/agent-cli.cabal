@@ -101,6 +101,7 @@ library
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-claude-code >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
@@ -201,6 +202,7 @@ test-suite agent-cli-test
                     , agent-tui
                     , agent-openai
                     , agent-openrouter
+                    , agent-claude-code
                     , agent-responses
                     , agent-xai
                     , aeson

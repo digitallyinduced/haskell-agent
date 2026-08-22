@@ -74,6 +74,7 @@ globalAgentsHomeDir provider home = case provider of
     OpenAIProvider -> home </> unsafeEncodeUtf ".codex"
     XAIProvider -> home </> unsafeEncodeUtf ".grok"
     OpenRouterProvider -> home </> unsafeEncodeUtf ".grok"
+    ClaudeCodeProvider -> home </> unsafeEncodeUtf ".claude"
 
 -- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
 -- are skipped. Project files are ordered root -> cwd.
@@ -156,6 +157,7 @@ formatAgentsMdForProvider provider cwd loaded = case provider of
     OpenAIProvider -> formatCodexAgentsMd cwd loaded
     XAIProvider -> formatGrokAgentsMd loaded
     OpenRouterProvider -> formatGrokAgentsMd loaded
+    ClaudeCodeProvider -> formatCodexAgentsMd cwd loaded
 
 -- | Codex-style contextual user fragment.
 formatCodexAgentsMd :: OsPath -> LoadedAgentsMd -> Maybe Text

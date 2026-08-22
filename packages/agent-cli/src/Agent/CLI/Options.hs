@@ -112,6 +112,7 @@ defaultEffortFor = \case
     XAIProvider -> "high"
     OpenAIProvider -> "medium"
     OpenRouterProvider -> "medium"
+    ClaudeCodeProvider -> "xhigh"
 
 isOneShot :: CliOptions -> Bool
 isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
@@ -159,7 +160,9 @@ parseOptions options = \case
     "--provider" : value : rest -> do
         provider <- case parseProvider (Text.pack value) of
             Just parsed -> Right parsed
-            Nothing -> Left ("unknown provider: " <> value <> " (use openai, xai, or openrouter)")
+            Nothing -> Left
+                ("unknown provider: " <> value
+                    <> " (use openai, xai, openrouter, or claude-code)")
         parseOptions options { optProvider = Just provider } rest
     "--model" : value : rest ->
         parseOptions options { optModel = Just (Text.pack value) } rest
@@ -258,7 +261,8 @@ usage = unlines
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
-    , "      --provider NAME     openai, xai, or openrouter (default: detect from auth)"
+    , "      --provider NAME     openai, xai, openrouter, or claude-code"
+    , "                          (default: detect from API/OAuth auth)"
     , "      --model NAME        Override the project's saved/default model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
@@ -278,7 +282,8 @@ usage = unlines
     , "                          OpenAI auto-compaction threshold in tokens"
     , "                          (default: model-specific, currently 244800)"
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
-    , "                          (default: high for xai/grok, medium otherwise)"
+    , "                          (default: xhigh for Claude Code, high for xai/grok,"
+    , "                          medium otherwise)"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""

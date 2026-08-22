@@ -1,4 +1,4 @@
--- | Load ChatGPT, Grok, or OpenRouter credentials for the CLI process.
+-- | Load provider credentials or validate a local subscription-backed CLI.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
     , authErrorNeedsOnboarding
@@ -35,6 +35,7 @@ import Agent.CLI.CredentialStore
     )
 import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
+import qualified Agent.ClaudeCode.Auth as ClaudeCode
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
@@ -144,6 +145,8 @@ credentialAccountLabel credential = case credential.provider of
             XAIAuth.emailFromToken credential.accessToken
     OpenRouterProvider ->
         fallback "OpenRouter"
+    ClaudeCodeProvider ->
+        fallback "Claude"
   where
     accountId = Text.strip credential.accountId
     fallback providerName
@@ -161,6 +164,7 @@ credentialEmail credential = case credential.provider of
     OpenAIProvider -> OpenAI.deriveEmail credential.accessToken
     XAIProvider -> XAIAuth.emailFromToken credential.accessToken
     OpenRouterProvider -> Nothing
+    ClaudeCodeProvider -> Nothing
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
@@ -190,6 +194,7 @@ loadAuth requested = runExceptT do
         XAIProvider -> loadXai Nothing
         OpenAIProvider -> loadOpenAi
         OpenRouterProvider -> loadOpenRouter Nothing
+        ClaudeCodeProvider -> loadClaudeCode
 
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.
@@ -199,6 +204,8 @@ loadAuthForAccount provider selectionId = runExceptT case provider of
     OpenRouterProvider -> loadOpenRouter (Just selectionId)
     OpenAIProvider ->
         throwE "OpenAI account selection is handled by the live account pool"
+    ClaudeCodeProvider ->
+        throwE "Claude Code accounts are managed by `claude auth login`"
 
 -- | Ask the token source whether it has a usable credential now without
 -- making a model request, preserving a successful checkout for later use.
@@ -363,6 +370,25 @@ loadXai requestedSelectionId = do
                         , loadedSelectionId = Just selectionId
                         , loadedOpenAiPool = Nothing
                         }
+
+loadClaudeCode :: ExceptT Text IO LoadedAuth
+loadClaudeCode = do
+    auth <- lift ClaudeCode.loadClaudeCodeAuth >>= either throwE pure
+    let label = auth.accountLabel
+        credential = Credential
+            { accessToken = ""
+            , accountId = label
+            , leaseId = Nothing
+            , provider = ClaudeCodeProvider
+            }
+    pure LoadedAuth
+        { loadedProvider = ClaudeCodeProvider
+        , loadedTokenProvider =
+            staticCredentialProvider SubscriptionBilled credential
+        , loadedAccountLabel = const (pure label)
+        , loadedSelectionId = Nothing
+        , loadedOpenAiPool = Nothing
+        }
 
 loadOpenRouterCredential
     :: Maybe Text
@@ -1331,9 +1357,10 @@ textField name object = case KeyMap.lookup (Key.fromText name) object of
 noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
-    \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+    \or OPENROUTER_API_KEY, place auth at ~/.grok/auth.json / ~/.codex/auth.json, \
+    \or use --provider claude-code after `claude auth login`."
 
 authErrorNeedsOnboarding :: Text -> Bool
 authErrorNeedsOnboarding message =
-    message == noAuthHint
+    "no credentials found." `Text.isPrefixOf` message
         || "no valid OpenAI credentials found:" `Text.isPrefixOf` message

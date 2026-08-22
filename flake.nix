@@ -39,6 +39,17 @@
                     ];
                 };
 
+                agentClaudeCodeSource = nix-filter.lib {
+                    root = ./packages/agent-claude-code;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-claude-code.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentSyntaxSource = nix-filter.lib {
                     root = ./packages/agent-syntax;
                     include = [
@@ -176,6 +187,9 @@
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         };
+                        agent-claude-code = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude-code/package.nix { }) {
+                            src = agentClaudeCodeSource;
+                        };
                         agent-tui =
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-tui/package.nix { })
@@ -203,6 +217,7 @@
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
+                agentClaudeCodePackage = haskellPackages.agent-claude-code;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable =
@@ -302,6 +317,7 @@
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
+                packages.agent-claude-code = agentClaudeCodePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
 
                 apps.default = flake-utils.lib.mkApp {
@@ -323,6 +339,7 @@
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
+                        packages.agent-claude-code
                     ];
                     withHoogle = false;
                     shellHook = ''
@@ -349,6 +366,7 @@
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
                     agent-openrouter = agentOpenrouterPackage;
+                    agent-claude-code = agentClaudeCodePackage;
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

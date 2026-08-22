@@ -45,7 +45,8 @@ cabal repl \
   agent-responses:lib:agent-responses \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
-  agent-openrouter:lib:agent-openrouter
+  agent-openrouter:lib:agent-openrouter \
+  agent-claude-code:lib:agent-claude-code
 ```
 
 In GHCi:

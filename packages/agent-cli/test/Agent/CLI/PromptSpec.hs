@@ -41,6 +41,10 @@ spec = describe "systemPrompt" do
         let openrouter = systemPrompt OpenRouterProvider (fromFilePath "/tmp/repo") day False
         openrouter `shouldSatisfy` Text.isInfixOf "read_file"
         openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
+        let claude = systemPrompt ClaudeCodeProvider (fromFilePath "/tmp/repo") day False
+        claude `shouldSatisfy` Text.isInfixOf "Claude Code's built-in tools"
+        claude `shouldSatisfy` Text.isInfixOf "/tmp/repo"
+        claude `shouldNotSatisfy` Text.isInfixOf "run_ghci"
 
     it "uses the autonomous identity for one-shot Grok sessions" do
         let grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") (fromGregorian 2026 8 19) True
@@ -76,3 +80,4 @@ spec = describe "systemPrompt" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.6"
         defaultModelFor OpenAIProvider `shouldBe` "gpt-5.6-luna"
         defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"
+        defaultModelFor ClaudeCodeProvider `shouldBe` "sonnet"

@@ -51,6 +51,7 @@ schemasFromAppTools provider tools = case provider of
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
+    ClaudeCodeProvider -> []
     _ ->
         webSearchTool : map (schemaFromAppTool provider) tools
 
@@ -64,6 +65,7 @@ schemaFromAppTool provider tool = case tool.appToolSchema of
                 XAIProvider -> buildGrokTool
                 OpenRouterProvider -> buildGrokTool
                 OpenAIProvider -> buildTool
+                ClaudeCodeProvider -> buildTool
         in build tool.appToolName tool.appToolDescription parameters
     FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription

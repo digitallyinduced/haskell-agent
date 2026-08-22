@@ -1,0 +1,163 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+module Agent.ClaudeCode.AuthSpec (spec) where
+
+import Agent.ClaudeCode.Auth
+import Control.Exception.Safe (bracket, finally)
+import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.Text as Text
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    , removeFile
+    )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
+import System.Posix.Files
+    ( ownerExecuteMode
+    , ownerReadMode
+    , ownerWriteMode
+    , setFileMode
+    , unionFileModes
+    )
+import Test.Hspec
+
+spec :: Spec
+spec = do
+    describe "parseClaudeCodeAuthStatus" do
+        it "accepts first-party claude.ai subscription status" do
+            parseClaudeCodeAuthStatus "/bin/claude" (ByteString.pack validStatus)
+                `shouldBe`
+                    Right ClaudeCodeAuth
+                        { executable = "/bin/claude"
+                        , accountLabel = "person@example.com"
+                        , subscriptionType = Just "max"
+                        }
+
+        it "rejects API-key and third-party provider authentication" do
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":true,\"authMethod\":\"apiKey\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}")
+                `shouldSatisfy` isLeftContaining "claude.ai"
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"bedrock\",\"subscriptionType\":\"max\"}")
+                `shouldSatisfy` isLeftContaining "third-party"
+
+        it "requires login and a nonempty subscription type" do
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":false,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}")
+                `shouldSatisfy` isLeftContaining "not logged in"
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"  \"}")
+                `shouldSatisfy` isLeftContaining "subscription"
+
+        it "uses a non-secret fallback account label" do
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"pro\"}")
+                `shouldBe`
+                    Right ClaudeCodeAuth
+                        { executable = "/bin/claude"
+                        , accountLabel = "Claude Code (pro)"
+                        , subscriptionType = Just "pro"
+                        }
+
+        it "uses Claude's orgName metadata when no email is present" do
+            parseClaudeCodeAuthStatus "/bin/claude"
+                (ByteString.pack
+                    "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"orgName\":\"Example Org\",\"subscriptionType\":\"team\"}")
+                `shouldBe`
+                    Right ClaudeCodeAuth
+                        { executable = "/bin/claude"
+                        , accountLabel = "Example Org"
+                        , subscriptionType = Just "team"
+                        }
+
+    describe "loadClaudeCodeAuth" do
+        it "does not pass API or provider overrides to the auth subprocess" $
+            withScratchDirectory "agent-claude-code-auth" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScript
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [ ("CLAUDE_CODE_EXECUTABLE", Just executable)
+                    , ("ANTHROPIC_API_KEY", Just "must-not-leak")
+                    , ("ANTHROPIC_AUTH_TOKEN", Just "must-not-leak")
+                    , ("ANTHROPIC_BASE_URL", Just "https://example.invalid")
+                    , ("CLAUDE_CODE_USE_BEDROCK", Just "1")
+                    , ("CLAUDE_CODE_USE_VERTEX", Just "1")
+                    , ("CLAUDE_CODE_USE_FOUNDRY", Just "1")
+                    , ("CLAUDE_CODE_API_BASE_URL", Just "https://example.invalid")
+                    , ("AWS_BEARER_TOKEN_BEDROCK", Just "must-not-leak")
+                    , ("CLAUDE_TEST_PRESERVED", Just "yes")
+                    ]
+                    do
+                        loadClaudeCodeAuth `shouldReturn`
+                            Right ClaudeCodeAuth
+                                { executable
+                                , accountLabel = "auth@example.com"
+                                , subscriptionType = Just "max"
+                                }
+
+isLeftContaining :: Text.Text -> Either Text.Text a -> Bool
+isLeftContaining needle = \case
+    Left message -> needle `Text.isInfixOf` message
+    Right _ -> False
+
+validStatus :: String
+validStatus =
+    "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\
+    \\"apiProvider\":\"firstParty\",\"email\":\"person@example.com\",\
+    \\"subscriptionType\":\"max\",\"credential\":\"must-not-be-read\"}"
+
+fakeAuthScript :: String
+fakeAuthScript =
+    unlines
+        [ "#!/bin/sh"
+        , "test \"$1\" = auth || exit 41"
+        , "test \"$2\" = status || exit 42"
+        , "test \"$3\" = --json || exit 43"
+        , "test \"$CLAUDE_TEST_PRESERVED\" = yes || exit 44"
+        , "if env | grep -E '^(ANTHROPIC_|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)=|CLAUDE_CODE_API_BASE_URL=|AWS_BEARER_TOKEN_BEDROCK=)' >/dev/null; then"
+        , "  echo 'billing override leaked into auth subprocess' >&2"
+        , "  exit 45"
+        , "fi"
+        , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"auth@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
+withScratchDirectory :: String -> (FilePath -> IO a) -> IO a
+withScratchDirectory prefix =
+    bracket acquire removeDirectoryRecursive
+  where
+    acquire = do
+        temporary <- getTemporaryDirectory
+        (path, handle) <- openTempFile temporary prefix
+        hClose handle
+        removeFile path
+        createDirectory path
+        pure path
+
+withEnvironmentVariables
+    :: [(String, Maybe String)]
+    -> IO a
+    -> IO a
+withEnvironmentVariables variables action = do
+    previous <- mapM
+        (\(name, _) -> do
+            value <- lookupEnv name
+            pure (name, value))
+        variables
+    mapM_ (uncurry install) variables
+    action `finally` mapM_ (uncurry install) previous
+  where
+    install name = \case
+        Nothing -> unsetEnv name
+        Just value -> setEnv name value

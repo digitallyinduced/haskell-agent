@@ -21,6 +21,8 @@ spec = do
                 `shouldBe` Just (defaultModelFor OpenAIProvider)
             firstId (modelsForProvider OpenRouterProvider)
                 `shouldBe` Just (defaultModelFor OpenRouterProvider)
+            firstId (modelsForProvider ClaudeCodeProvider)
+                `shouldBe` Just (defaultModelFor ClaudeCodeProvider)
 
 
         it "lists the gpt-5.6 series for OpenAI" do
@@ -37,6 +39,7 @@ spec = do
             length (modelsForProvider XAIProvider) `shouldSatisfy` (>= 2)
             length (modelsForProvider OpenAIProvider) `shouldSatisfy` (>= 2)
             length (modelsForProvider OpenRouterProvider) `shouldSatisfy` (>= 2)
+            length (modelsForProvider ClaudeCodeProvider) `shouldSatisfy` (>= 2)
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelProvider))
@@ -47,7 +50,11 @@ spec = do
         it "includes every provider" do
             nub (map (.modelProvider) modelCatalog)
                 `shouldMatchList`
-                    [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                    [ OpenAIProvider
+                    , XAIProvider
+                    , OpenRouterProvider
+                    , ClaudeCodeProvider
+                    ]
 
     describe "ensureCurrentInList" do
         it "prepends an unknown current model" do
@@ -79,7 +86,11 @@ spec = do
         it "shows models from every provider" do
             nub (map (.modelProvider) (visibleOptions state0))
                 `shouldMatchList`
-                    [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                    [ OpenAIProvider
+                    , XAIProvider
+                    , OpenRouterProvider
+                    , ClaudeCodeProvider
+                    ]
 
         it "moves down and wraps" do
             let n = length (visibleOptions state0)

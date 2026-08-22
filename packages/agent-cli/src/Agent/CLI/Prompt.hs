@@ -19,16 +19,22 @@ defaultModelFor = \case
     XAIProvider -> "grok-4.6"
     OpenAIProvider -> "gpt-5.6-luna"
     OpenRouterProvider -> "openai/gpt-5.1"
+    ClaudeCodeProvider -> "sonnet"
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Provider -> OsPath -> Day -> Bool -> Text
 systemPrompt provider cwd today isNonInteractive =
-    base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
+    case provider of
+        ClaudeCodeProvider ->
+            claudeCodeSystemPrompt cwd today <> "\n" <> timeContextGuidance
+        _ ->
+            base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
   where
     base = case provider of
         XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
         OpenRouterProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
         OpenAIProvider -> codexSystemPrompt cwd today
+        ClaudeCodeProvider -> claudeCodeSystemPrompt cwd today
 
 -- | Prefer GHCI as the general-purpose scripting environment.
 ghciGuidance :: Text
@@ -70,4 +76,17 @@ codexSystemPrompt cwd today =
         , "block (opening and closing tags on their own lines). Do not implement until plan"
         , "mode ends. update_plan is not Plan Mode."
         , "Be concise. Do not mention tools this session does not register."
+        ]
+
+claudeCodeSystemPrompt :: OsPath -> Day -> Text
+claudeCodeSystemPrompt cwd today =
+    Text.unlines
+        [ "You are Claude Code running as the model and tool runtime for an independent agent harness."
+        , "Work in " <> toText cwd <> "."
+        , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
+        , ""
+        , "Use Claude Code's built-in tools directly. The outer harness renders your local"
+        , "Claude Code transcript and does not execute tool calls on your behalf."
+        , "Follow any AGENTS.md instructions supplied in user context."
+        , "Be concise in user-visible responses."
         ]

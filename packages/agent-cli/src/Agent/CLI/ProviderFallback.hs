@@ -74,11 +74,13 @@ fallbackCandidates
     -> ApiError
     -> [ModelOption]
 fallbackCandidates unavailable current err
+    | current == ClaudeCodeProvider = []
     | not (isProviderUnavailable err) = []
     | otherwise =
         filter
             (\option ->
                 option.modelProvider /= current
+                    && option.modelProvider /= ClaudeCodeProvider
                     && option.modelProvider `notElem` unavailable)
             (nubBy sameProvider rankedModels)
   where

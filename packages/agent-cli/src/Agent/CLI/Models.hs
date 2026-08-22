@@ -67,6 +67,11 @@ modelsForProvider provider =
                 , opt "x-ai/grok-4" Nothing
                 , opt "google/gemini-2.5-pro" Nothing
                 ]
+            ClaudeCodeProvider ->
+                [ opt "sonnet" (Just "default · subscription")
+                , opt "opus" (Just "frontier · subscription")
+                , opt "fable" (Just "fast · subscription")
+                ]
         -- Keep the provider default first even if the table drifts.
         def = defaultModelFor provider
     in ensureCurrentInList provider def opts
@@ -78,7 +83,12 @@ modelsForProvider provider =
         }
 
 allProviders :: [Provider]
-allProviders = [OpenAIProvider, XAIProvider, OpenRouterProvider]
+allProviders =
+    [ OpenAIProvider
+    , XAIProvider
+    , ClaudeCodeProvider
+    , OpenRouterProvider
+    ]
 
 -- | Every curated model, grouped by provider.
 modelCatalog :: [ModelOption]
