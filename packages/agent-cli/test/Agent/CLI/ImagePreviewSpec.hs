@@ -2,7 +2,13 @@ module Agent.CLI.ImagePreviewSpec (spec) where
 
 import Agent.CLI.ImagePreview
 import Agent.Loop (ImageAttachment(..))
+import Codec.Picture
+    ( PixelYCbCr8(..)
+    , encodeJpegAtQuality
+    , generateImage
+    )
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -43,9 +49,16 @@ spec = do
             -- payload is base64 of the raw bytes
             seq_ `shouldSatisfy` Text.isInfixOf "cG5nLWJ5dGVz"
 
-        it "still uses f=100 for JPEG (Kitty has no JPEG format code)" do
-            let seq_ = kittyImageSequence 1 12 4 "image/jpeg" "jpg"
-            seq_ `shouldSatisfy` Text.isInfixOf ",f=100,"
+        it "transcodes JPEG attachments to PNG before transmission" do
+            let source = generateImage (\_ _ -> PixelYCbCr8 20 128 128) 4 3
+                jpeg =
+                    LBS.toStrict (encodeJpegAtQuality 90 source)
+                compatible =
+                    kittyCompatibleAttachment
+                        (ImageAttachment "image/jpeg" jpeg)
+            compatible.imageMime `shouldBe` "image/png"
+            BS.take 8 compatible.imageBytes
+                `shouldBe` "\137PNG\r\n\SUB\n"
 
         it "chunks payloads larger than 4096 encoded bytes" do
             let bytes = BS.replicate 4000 65 -- 'A'; base64 expands past 4096
@@ -53,7 +66,25 @@ spec = do
             Text.count ",m=1;" seq_ `shouldBe` 1
             seq_ `shouldSatisfy` Text.isInfixOf ",m=0;"
             Text.count "\ESC_Ga=T" seq_ `shouldBe` 1
-            Text.count "\ESC_Ga=t" seq_ `shouldBe` 1
+            Text.count "\ESC_Gq=2,m=0;" seq_ `shouldBe` 1
+            Text.count ",i=2," seq_ `shouldBe` 1
+
+    describe "kittyPlacedImageSequence" do
+        it "uses a stable placement id and explicit fullscreen cell rectangle" do
+            let seq_ =
+                    kittyPlacedImageSequence
+                        2000000001
+                        2000000001
+                        72
+                        19
+                        "image/png"
+                        "png-bytes"
+            seq_ `shouldSatisfy` Text.isInfixOf
+                "\ESC_Ga=T,q=2,i=2000000001,f=100,t=d,r=19,c=72,p=2000000001,z=1,C=1,m=0;"
+
+        it "deletes only the requested image and frees its data" do
+            kittyDeleteImageSequence 2000000001
+                `shouldBe` "\ESC_Ga=d,d=I,q=2,i=2000000001\ESC\\"
 
     describe "itermImageSequence" do
         it "emits OSC 1337 inline file with cell size" do
@@ -65,6 +96,11 @@ spec = do
         it "doubles ESC so tmux forwards the inner sequence" do
             wrapTmuxPassthrough "\ESC]1337;File=inline=1:\BEL"
                 `shouldBe` "\ESCPtmux;\ESC\ESC]1337;File=inline=1:\BEL\ESC\\"
+
+    describe "positionImagePayload" do
+        it "moves to a zero-based cell and restores Vty's cursor" do
+            positionImagePayload 4 9 "image"
+                `shouldBe` "\ESC7\ESC[5;10Himage\ESC8"
 
     describe "renderImagePreview" do
         let img = ImageAttachment "image/png" "png-bytes"

@@ -1,9 +1,12 @@
 module Agent.CLI.TUIImagePreviewSpec (spec) where
 
 import Agent.CLI.TUI.ImagePreview
-    ( TuiImagePreview(..)
+    ( NativePreviewPlacement(..)
+    , TuiImagePreview(..)
+    , nativePreviewPlacements
     , prepareTuiImagePreview
     , previewCellSize
+    , previewImageAt
     )
 import Agent.Loop (ImageAttachment(..))
 import Codec.Picture
@@ -11,6 +14,9 @@ import Codec.Picture
     , PixelRGBA8(..)
     , encodePng
     , generateImage
+    , imageHeight
+    , imageWidth
+    , pixelAt
     )
 import qualified Data.ByteString.Lazy as LBS
 import Test.Hspec
@@ -54,6 +60,56 @@ spec =
                 Right preview -> do
                     previewCellSize 72 23 preview `shouldBe` (72, 20)
                     previewCellSize 48 12 preview `shouldBe` (42, 12)
+
+        it "preserves thin screenshot details while downsampling" do
+            let source =
+                    generateImage
+                        (\x y ->
+                            if x `elem` [2, 3] || y `elem` [2, 3]
+                                then PixelRGB8 0 0 0
+                                else PixelRGB8 255 255 255)
+                        1604
+                        442
+                attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = LBS.toStrict (encodePng source)
+                    }
+            case prepareTuiImagePreview attachment of
+                Left err -> expectationFailure (show err)
+                Right preview -> do
+                    let image = previewImageAt 72 23 preview
+                    imageWidth image `shouldBe` 72
+                    imageHeight image `shouldBe` 19
+                    pixelAt image 0 0 `shouldNotBe` PixelRGB8 255 255 255
+
+        it "centers native Kitty placements over the fullscreen placeholder" do
+            let source =
+                    generateImage
+                        (\_ _ -> PixelRGB8 10 20 30)
+                        1604
+                        442
+                attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = LBS.toStrict (encodePng source)
+                    }
+            case prepareTuiImagePreview attachment of
+                Left err -> expectationFailure (show err)
+                Right preview ->
+                    nativePreviewPlacements
+                        2000000000
+                        120
+                        40
+                        [(attachment, preview)]
+                        `shouldBe`
+                            [ NativePreviewPlacement
+                                { nativePreviewImageId = 2000000000
+                                , nativePreviewRow = 14
+                                , nativePreviewColumn = 24
+                                , nativePreviewColumns = 72
+                                , nativePreviewRows = 10
+                                , nativePreviewAttachment = attachment
+                                }
+                            ]
 
         it "composites alpha instead of exposing hidden transparent RGB" do
             let transparentSource =
