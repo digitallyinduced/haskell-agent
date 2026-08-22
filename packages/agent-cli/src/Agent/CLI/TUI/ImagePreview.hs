@@ -1,7 +1,8 @@
--- | Small true-colour thumbnails for the retained fullscreen interface.
+-- | True-colour image previews for the retained fullscreen interface.
 module Agent.CLI.TUI.ImagePreview
     ( TuiImagePreview(..)
     , prepareTuiImagePreview
+    , previewCellSize
     , renderTuiImagePreview
     ) where
 
@@ -13,6 +14,7 @@ import Codec.Picture
     , PixelRGBA8(..)
     , convertRGBA8
     , decodeImage
+    , generateImage
     , imageHeight
     , imageWidth
     , pixelAt
@@ -29,16 +31,33 @@ data PreviewCell = PreviewCell
     }
     deriving (Eq, Show)
 
--- | A bounded, terminal-cell representation. Keeping only sampled pixels
--- avoids retaining another full decoded copy of a large screenshot.
+-- | A bounded RGB sample. It is large enough to fill a typical terminal while
+-- avoiding retention of another full decoded copy of a large screenshot.
 data TuiImagePreview = TuiImagePreview
     { previewMime :: !Text
     , previewBytes :: !Int
     , previewSourceWidth :: !Int
     , previewSourceHeight :: !Int
-    , previewCells :: ![[PreviewCell]]
+    , previewSample :: !(Image PixelRGB8)
     }
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show TuiImagePreview where
+    show preview =
+        "TuiImagePreview { previewMime = "
+            <> show preview.previewMime
+            <> ", previewBytes = "
+            <> show preview.previewBytes
+            <> ", previewSourceWidth = "
+            <> show preview.previewSourceWidth
+            <> ", previewSourceHeight = "
+            <> show preview.previewSourceHeight
+            <> ", previewSampleSize = "
+            <> show
+                ( imageWidth preview.previewSample
+                , imageHeight preview.previewSample
+                )
+            <> " }"
 
 prepareTuiImagePreview :: ImageAttachment -> Either Text TuiImagePreview
 prepareTuiImagePreview ImageAttachment{imageMime, imageBytes} = do
@@ -53,17 +72,45 @@ prepareTuiImagePreview ImageAttachment{imageMime, imageBytes} = do
         , previewBytes = BS.length imageBytes
         , previewSourceWidth = sourceWidth
         , previewSourceHeight = sourceHeight
-        , previewCells =
-            sampleCells image targetWidth targetHeight
+        , previewSample =
+            generateImage
+                (\x y -> samplePixel image targetWidth targetHeight x y)
+                targetWidth
+                targetHeight
         }
 
-renderTuiImagePreview :: TuiImagePreview -> Widget n
-renderTuiImagePreview preview =
+-- | Size the preview to the supplied terminal-cell bounds while preserving its
+-- aspect ratio. One terminal row represents two sampled pixel rows.
+previewCellSize :: Int -> Int -> TuiImagePreview -> (Int, Int)
+previewCellSize maxColumns maxRows preview =
+    let (pixelWidth, pixelHeight) =
+            previewSizeWithin
+                maxColumns
+                (max 1 maxRows * 2)
+                preview.previewSourceWidth
+                preview.previewSourceHeight
+    in (pixelWidth, (pixelHeight + 1) `div` 2)
+
+renderTuiImagePreview :: Int -> Int -> TuiImagePreview -> Widget n
+renderTuiImagePreview maxColumns maxRows preview =
     raw $
         V.vertCat
-            [ V.horizCat (map renderCell row)
-            | row <- preview.previewCells
+            [ V.horizCat
+                [ renderCell PreviewCell
+                    { cellTop =
+                        samplePreviewPixel preview targetWidth targetHeight x topY
+                    , cellBottom =
+                        samplePreviewPixel preview targetWidth targetHeight x
+                            (min (targetHeight - 1) (topY + 1))
+                    }
+                | x <- [0 .. targetWidth - 1]
+                ]
+            | topY <- [0, 2 .. targetHeight - 1]
             ]
+  where
+    (targetWidth, targetRows) =
+        previewCellSize maxColumns maxRows preview
+    targetHeight = max 1 (targetRows * 2)
 
 renderCell :: PreviewCell -> V.Image
 renderCell PreviewCell{cellTop, cellBottom} =
@@ -81,32 +128,23 @@ pixelAttr
             (V.rgbColor bottomRed bottomGreen bottomBlue)
 
 previewSize :: Int -> Int -> (Int, Int)
-previewSize width height
+previewSize =
+    previewSizeWithin maxPreviewColumns maxPreviewPixelRows
+
+previewSizeWithin :: Int -> Int -> Int -> Int -> (Int, Int)
+previewSizeWithin maxWidth maxHeight width height
     | width <= 0 || height <= 0 = (1, 1)
     | otherwise =
         let scale :: Double
             scale =
                 minimum
                     [ 1
-                    , fromIntegral maxPreviewColumns / fromIntegral width
-                    , fromIntegral maxPreviewPixelRows / fromIntegral height
+                    , fromIntegral (max 1 maxWidth) / fromIntegral width
+                    , fromIntegral (max 1 maxHeight) / fromIntegral height
                     ]
         in ( max 1 (floor (fromIntegral width * scale))
            , max 1 (floor (fromIntegral height * scale))
            )
-
-sampleCells :: Image PixelRGBA8 -> Int -> Int -> [[PreviewCell]]
-sampleCells image targetWidth targetHeight =
-    [ [ PreviewCell
-            { cellTop = samplePixel image targetWidth targetHeight x topY
-            , cellBottom =
-                samplePixel image targetWidth targetHeight x
-                    (min (targetHeight - 1) (topY + 1))
-            }
-      | x <- [0 .. targetWidth - 1]
-      ]
-    | topY <- [0, 2 .. targetHeight - 1]
-    ]
 
 samplePixel
     :: Image PixelRGBA8
@@ -124,6 +162,24 @@ samplePixel image targetWidth targetHeight x y =
     sourceY =
         min (imageHeight image - 1)
             (y * imageHeight image `div` targetHeight)
+
+samplePreviewPixel
+    :: TuiImagePreview
+    -> Int
+    -> Int
+    -> Int
+    -> Int
+    -> PixelRGB8
+samplePreviewPixel preview targetWidth targetHeight x y =
+    pixelAt sample sourceX sourceY
+  where
+    sample = preview.previewSample
+    sourceX =
+        min (imageWidth sample - 1)
+            (x * imageWidth sample `div` targetWidth)
+    sourceY =
+        min (imageHeight sample - 1)
+            (y * imageHeight sample `div` targetHeight)
 
 -- Transparent PNG pixels can retain arbitrary RGB data. Dropping alpha with
 -- 'convertRGB8' exposes those hidden colours as bright smears, so composite
@@ -151,11 +207,11 @@ previewBackground :: PixelRGB8
 previewBackground = PixelRGB8 0 43 54
 
 maxPreviewColumns :: Int
-maxPreviewColumns = 24
+maxPreviewColumns = 240
 
 -- Two sampled pixel rows fit in one terminal row via the upper-half block.
 maxPreviewPixelRows :: Int
-maxPreviewPixelRows = 12
+maxPreviewPixelRows = 160
 
 firstText :: Either String a -> Either Text a
 firstText = either (Left . Text.pack) Right
