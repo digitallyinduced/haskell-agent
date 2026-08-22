@@ -2,6 +2,7 @@ module Agent.OpenAI.WebSocketClient
     ( withCodexWs
     , withCodexWsWithProvider
     , withCodexWsRetrying
+    , withCodexWsRetryingAfter
     , sendWsRequest
     , sendWsRequestWithOptions
     , sendWsRequestWithEvents
@@ -27,9 +28,11 @@ import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
     ( Credential(..)
+    , FailedCredential
     , Provider(..)
     , TokenProvider
     , runWithTokenProvider
+    , runWithTokenProviderAfter
     )
 import Agent.Responses.Types
 import Control.Retry
@@ -126,6 +129,18 @@ withCodexWsRetrying
     -> IO (Either ApiError a)
 withCodexWsRetrying provider action =
     runWithTokenProvider provider \credential ->
+        runConnectionAttempt credential action
+
+-- | Like 'withCodexWsRetrying', but first reports a credential that failed on
+-- an already-open connection. This ensures an exhausted resumed-session
+-- account is cooled down before a replacement WebSocket credential is chosen.
+withCodexWsRetryingAfter
+    :: TokenProvider
+    -> FailedCredential
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsRetryingAfter provider failed action =
+    runWithTokenProviderAfter provider (Just failed) \credential ->
         runConnectionAttempt credential action
 
 runConnectionAttempt

@@ -79,6 +79,21 @@ spec = do
             result `shouldBe` Left (ConnectionError "offline")
             readIORef acquisitions `shouldReturn` 1
 
+        it "reports an already-failed connection before choosing a replacement" do
+            reportedFailures <- newIORef ([] :: [Maybe FailedCredential])
+            let exhausted = credentialFor "acc-exhausted"
+                initialFailure =
+                    failed exhausted (AccountRateLimited (Just 120))
+                provider = TokenProvider \reported -> do
+                    modifyIORef' reportedFailures (<> [reported])
+                    pure $ Right (credentialFor "acc-healthy")
+
+            result <- runWithTokenProviderAfter provider initialFailure
+                (pure . Right . (.accountId))
+
+            result `shouldBe` Right "acc-healthy"
+            readIORef reportedFailures `shouldReturn` [initialFailure]
+
     describe "seedTokenProvider" do
         it "uses an acquired replacement exactly once before delegating" do
             acquisitions <- newIORef (0 :: Int)

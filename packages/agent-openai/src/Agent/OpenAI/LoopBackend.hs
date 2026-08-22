@@ -29,8 +29,14 @@ import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
     , withCodexWsRetrying
+    , withCodexWsRetryingAfter
     )
-import Agent.Provider (TokenProvider, accountFailureFromApiError)
+import Agent.Provider
+    ( Credential
+    , FailedCredential(..)
+    , TokenProvider
+    , accountFailureFromApiError
+    )
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseToTurnOutput
@@ -76,19 +82,29 @@ openAiBackend conn =
 -- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
 openAiBackendReconnecting
     :: TokenProvider
+    -> Credential
     -> IORef Bool
     -> CodexConn
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> Backend
-openAiBackendReconnecting provider connectionHealthy conn =
+openAiBackendReconnecting provider currentCredential connectionHealthy conn =
     openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh
   where
     sendCurrent request previousResponseId onEvent =
         sendWsRequestWithEvents conn request previousResponseId onEvent
-    sendFresh request previousResponseId onEvent =
-        withCodexWsRetrying provider
-            (sendOnFresh request previousResponseId onEvent)
+    sendFresh previousFailure request previousResponseId onEvent =
+        case previousFailure >>= accountFailureFromApiError of
+            Just failure ->
+                withCodexWsRetryingAfter provider
+                    FailedCredential
+                        { credential = currentCredential
+                        , failure
+                        }
+                    (sendOnFresh request previousResponseId onEvent)
+            Nothing ->
+                withCodexWsRetrying provider
+                    (sendOnFresh request previousResponseId onEvent)
     sendOnFresh request previousResponseId onEvent freshConn _credential =
         sendWsRequestWithEvents freshConn request previousResponseId onEvent
 
@@ -99,7 +115,8 @@ openAiBackendWithConnectionRecovery
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
-    -> (ResponseCreateParams
+    -> (Maybe ApiError
+        -> ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
@@ -113,7 +130,7 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
         healthy <- readIORef connectionHealthy
         if healthy
             then tryCurrent request previousResponseId onEvent
-            else sendFresh request previousResponseId onEvent
+            else sendFresh Nothing request previousResponseId onEvent
 
     tryCurrent request previousResponseId onEvent = do
         emittedLoopEvent <- newIORef False
@@ -127,7 +144,7 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
                     emitted <- readIORef emittedLoopEvent
                     if emitted
                         then pure result
-                        else sendFresh request previousResponseId onEvent
+                        else sendFresh (Just err) request previousResponseId onEvent
             _ -> pure result
 
     trackOutput emittedLoopEvent onEvent event = do
