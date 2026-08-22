@@ -4,8 +4,7 @@ module Agent.OsPathSpec (spec) where
 
 import Agent.OsPath (fromText, toText)
 import qualified Data.Text as Text
-import qualified System.OsString as OsString
-import System.OsPath (decodeUtf)
+import System.OsPath (decodeUtf, pack, unsafeFromChar)
 import Test.Hspec
 
 spec :: Spec
@@ -18,6 +17,6 @@ spec = describe "Agent.OsPath" do
 
 #ifndef mingw32_HOST_OS
     it "uses an escaped representation only for human-readable output" do
-        let path = OsString.singleton (OsString.unsafeFromChar '\xff')
+        let path = pack [unsafeFromChar '\xff']
         toText path `shouldBe` Text.pack (show path)
 #endif
