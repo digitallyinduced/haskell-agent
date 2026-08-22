@@ -21,7 +21,10 @@ import Agent.Tools.Grok.Shell
     )
 import Agent.Tools.Grok.Task (isSubagentIdText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Tools.Types (AppTool)
+import Agent.Tools.Types
+    ( AppTool
+    , ToolExecutionPolicy(..)
+    )
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (mapConcurrently)
 import Data.Aeson (FromJSON(..))
@@ -56,6 +59,7 @@ getTaskOutputTool session multi = jsonTool "get_task_output" getTaskOutputDescri
         "Max wait time in milliseconds, up to 600000. A positive value waits for completion; omit or pass 0 for a non-blocking status snapshot."
     ]
     True
+    TurnSequential
     (typedTool "get_task_output" (runGetTaskOutput session multi))
 
 getTaskOutputDescription :: Text
@@ -201,6 +205,7 @@ killTaskTool session multi = jsonTool "kill_task" killTaskDescription
         "The task id from a background run_terminal_cmd or the subagent_id from task."
     ]
     False
+    TurnSequential
     (typedTool "kill_task" (runKillTask session multi))
 
 killTaskDescription :: Text

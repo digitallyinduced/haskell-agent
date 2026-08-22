@@ -76,7 +76,9 @@ namespacedReadOnlyTool = tool "list_agents" AlwaysReadOnly
 
 tool :: Text -> ApprovalRule -> AppTool
 tool name approval =
-    jsonAppTool name "" [] approval (noArgsTool name (pure (Right "ok")))
+    jsonAppTool
+        name "" [] approval
+        (noArgsTool name (pure (Right "ok")))
 
 registry :: [AppTool] -> ToolRegistry
 registry = either (error . Text.unpack) id . mkToolRegistry

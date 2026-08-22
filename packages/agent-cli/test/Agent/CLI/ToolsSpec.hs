@@ -105,7 +105,8 @@ jsonTool = jsonAppTool "read_file" "Read a file."
 
 patchTool :: AppTool
 patchTool =
-    freeformApplyPatchAppTool "apply_patch" "Apply a patch." AlwaysPrompt
+    freeformApplyPatchAppTool
+        "apply_patch" "Apply a patch." AlwaysPrompt
         (noArgsTool "apply_patch" (pure (Right "ok")))
 
 required_ :: FunctionTool -> Maybe Aeson.Value

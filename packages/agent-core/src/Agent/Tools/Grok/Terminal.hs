@@ -12,7 +12,10 @@ import Agent.Tools.Grok.Shell
     , startBackground
     )
 import Agent.Tools.IO (CommandResult(..))
-import Agent.Tools.Types (AppTool)
+import Agent.Tools.Types
+    ( AppTool
+    , ToolExecutionPolicy(..)
+    )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -44,6 +47,7 @@ runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
         "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
     ]
     False
+    TurnSequential
     (typedStreamingTool "run_terminal_cmd" (runTerminal session))
 
 terminalDescription :: Text

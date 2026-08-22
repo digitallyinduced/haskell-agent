@@ -15,7 +15,11 @@ import Agent.Tools.PlanMode
     , planFilePath
     , planModeBlockedEditMessage
     )
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ToolEnv(..)
+    , ToolExecutionPolicy(..)
+    )
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -57,6 +61,7 @@ searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescript
         "Replace all occurrences of old_string (default false)"
     ]
     False
+    TurnSequential
     (typedTool "search_replace" (runSearchReplace env planMode))
 
 searchReplaceDescription :: Text

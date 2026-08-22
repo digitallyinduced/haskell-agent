@@ -6,7 +6,11 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Grok.Common (jsonTool)
 import Agent.Tools.IO (resolveUnderCwd)
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool
+    , ToolEnv(..)
+    , ToolExecutionPolicy(..)
+    )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -81,6 +85,7 @@ grepTool env = jsonTool "grep" grepDescription
         "content (default), files_with_matches, or count."
     ]
     True
+    ParallelSafe
     (typedTool "grep" (runGrep env))
 
 grepDescription :: Text

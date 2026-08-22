@@ -56,7 +56,8 @@ import Agent.ToolDispatch (ToolCall(..), ToolHandler, typedTool, typedToolWithCa
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     )
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -129,11 +130,13 @@ jsonTool
     -> Text
     -> [PropertySchema]
     -> Bool
+    -> ToolExecutionPolicy
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly =
-    jsonAppTool name description parameters
+jsonTool name description parameters readOnly execution =
+    jsonAppToolWithExecution name description parameters
         (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+        execution
 
 --------------------------------------------------------------------------------
 -- spawn_agent
@@ -169,6 +172,7 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
     ]
     True
+    TurnSequential
     (typedToolWithCall "spawn_agent" (runSpawn ctx))
 
 spawnAgentDescription :: Text
@@ -259,6 +263,7 @@ waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
         "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True
+    TurnSequential
     (typedTool "wait_agent" (runWait ctx))
 
 waitAgentDescription :: Text
@@ -342,6 +347,7 @@ sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
         (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
     True
+    TurnSequential
     (typedToolWithCall "send_message" (runSendMessage ctx))
 
 sendMessageDescription :: Text
@@ -382,6 +388,7 @@ followupTaskTool ctx = jsonTool "followup_task" followupDescription
         (encryptedString "Message text to send to the target agent.") True Nothing
     ]
     True
+    TurnSequential
     (typedToolWithCall "followup_task" (runFollowup ctx))
 
 followupDescription :: Text
@@ -466,6 +473,7 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
         "Task-path prefix filter without a trailing slash. Omit to list all live agents."
     ]
     True
+    ParallelSafe
     (typedTool "list_agents" (runListAgents ctx))
 
 listAgentsDescription :: Text
@@ -501,6 +509,7 @@ interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
         "Agent id or canonical task name to interrupt (from spawn_agent)."
     ]
     True
+    TurnSequential
     (typedTool "interrupt_agent" (runInterrupt ctx))
 
 interruptDescription :: Text

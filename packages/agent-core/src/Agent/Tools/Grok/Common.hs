@@ -12,7 +12,8 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy
+    , jsonAppToolWithExecution
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (Object)
@@ -29,11 +30,13 @@ jsonTool
     -> Text
     -> [PropertySchema]
     -> Bool
+    -> ToolExecutionPolicy
     -> ToolHandler
     -> AppTool
-jsonTool name description parameters readOnly =
-    jsonAppTool name description parameters
+jsonTool name description parameters readOnly execution =
+    jsonAppToolWithExecution name description parameters
         (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+        execution
 
 isGitIgnored :: OsPath -> OsPath -> IO Bool
 isGitIgnored cwd path = findExecutable "git" >>= \case

@@ -16,6 +16,7 @@ import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
 import Control.Concurrent.MVar
@@ -126,6 +127,7 @@ fake name = AppTool
     , appToolSchema = JsonFunctionSchema []
     , appToolHandler = noArgsTool name (pure (Right "ok"))
     , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
     }
 
 raceArgs :: Text

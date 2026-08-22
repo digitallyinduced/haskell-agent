@@ -46,7 +46,8 @@ import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
-    , jsonAppTool
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
     )
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
@@ -121,7 +122,7 @@ sanitizeOptional value = value >>= \raw ->
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef =
-    jsonAppTool "task" taskDescription
+    jsonAppToolWithExecution "task" taskDescription
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -140,6 +141,7 @@ taskTool baseCwd ctx specsRef =
             "Isolation mode: \"none\" (default) or \"worktree\". Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
         AlwaysPrompt
+        TurnSequential
         (typedTool "task" (runTask baseCwd ctx specsRef))
 
 taskDescription :: Text

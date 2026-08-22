@@ -6,7 +6,11 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Grok.Common (jsonTool)
 import Agent.Tools.IO (readTextFile, resolveUnderCwd)
-import Agent.Tools.Types (AppTool, ToolEnv)
+import Agent.Tools.Types
+    ( AppTool
+    , ToolEnv
+    , ToolExecutionPolicy(..)
+    )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -43,6 +47,7 @@ readFileTool env = jsonTool "read_file" readFileDescription
         "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files."
     ]
     True
+    ParallelSafe
     (typedTool "read_file" (runReadFile env))
 
 readFileDescription :: Text
