@@ -320,6 +320,7 @@ runFullscreen runtime workerAction = do
             , appWorkerStopped = False
             , appConversationAnchor = Nothing
             , appConversationReflowQueued = False
+            , appWindowTitle = Nothing
             }
     withAsync workerAction \worker ->
         withAsync uiTicker \_uiTicker ->
@@ -1909,6 +1910,7 @@ handleEvent event = case event of
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
+        modify' \current -> current { appWindowTitle = Just title }
     AppEvent (AppAgentSnapshot selected entries) -> do
         state <- get
         let normalized =
@@ -1989,6 +1991,9 @@ handleEvent event = case event of
         state <- get
         suspendAndResume do
             result <- tryAny action
+            mapM_
+                (setFullscreenWindowTitle state.appRuntime)
+                state.appWindowTitle
             atomically (putTMVar reply result)
             pure state { appAgentHover = Nothing }
     MouseDown name button _ _ -> do

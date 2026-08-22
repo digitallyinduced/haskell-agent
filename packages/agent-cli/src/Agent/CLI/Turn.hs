@@ -41,6 +41,7 @@ import Agent.CLI.Session
     , ensureSession
     , loadSession
     , sessionConversationText
+    , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
@@ -144,6 +145,13 @@ runOneTurn env@SessionEnv
             onPersisted handle
             writeIORef planMode.planSessionDir (Just handle.sessionDir)
             writeIORef storeRoot (Just handle.sessionDir)
+            when
+                ( handle.sessionMeta.metaTitle == "untitled"
+                    && not (Text.null (Text.strip promptText))
+                )
+                (setWindowTitle
+                    (cliWindowTitle handle.sessionMeta.metaCwd
+                        (Just (sessionTitleFromPrompt promptText))))
             when created do
                 case fullscreen of
                     Just runtime ->

@@ -2526,6 +2526,9 @@ replWithDraft env@SessionEnv
                                             { createTitleHint = Just title
                                             , createTitleIsManual = True
                                             })
+                                        setWindowTitle
+                                            (cliWindowTitle pending.createCwd
+                                                (Just title))
                                         let message = "session title: " <> title
                                         displayInfo message $
                                             putTextLn stderr
@@ -2564,6 +2567,8 @@ replWithDraft env@SessionEnv
                                             { createTitleHint = Nothing
                                             , createTitleIsManual = False
                                             })
+                                        setWindowTitle
+                                            (cliWindowTitle pending.createCwd Nothing)
                                         displayInfo
                                             "automatic session titles enabled" $
                                             putTextLn stderr
