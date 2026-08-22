@@ -6,6 +6,7 @@ import Agent.CLI.TUI.App
     , agentPaneEntryLimit
     , agentPaneVisible
     , fullscreenVtyConfig
+    , repositoryHeaderText
     )
 import Agent.Subagents (SubagentId(..))
 import Data.Text (Text)
@@ -28,6 +29,18 @@ spec = do
                       , V.EvKey V.KEnter [V.MShift]
                       )
                     ]
+
+    describe "repositoryHeaderText" do
+        it "puts the git state before the full checkout path" do
+            repositoryHeaderText
+                "detached"
+                "~/digitallyinduced/haskell-agent"
+                `shouldBe`
+                    "detached  ~/digitallyinduced/haskell-agent"
+
+        it "still renders a path when git state is unavailable" do
+            repositoryHeaderText "" "~/scratch"
+                `shouldBe` "~/scratch"
 
     describe "Agents pane layout" do
         it "hides below the responsive breakpoint and without children" do

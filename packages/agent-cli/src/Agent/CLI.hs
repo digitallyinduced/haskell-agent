@@ -8,6 +8,7 @@ module Agent.CLI
     , devMain
     , devMainResume
     , formatReplStatusLine
+    , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
     , run
@@ -652,17 +653,31 @@ formatStartupDuration elapsed
     | otherwise =
         Text.pack (printf "%.2fs" (realToFrac elapsed :: Double))
 
-setStartupRepository :: Maybe FullscreenRuntime -> Text -> OsPath -> IO ()
-setStartupRepository fullscreen branch cwd =
+setStartupRepository
+    :: Maybe FullscreenRuntime
+    -> OsPath
+    -> Text
+    -> OsPath
+    -> IO ()
+setStartupRepository fullscreen home branch cwd =
     case fullscreen of
         Nothing -> pure ()
         Just runtime ->
             emitUiEvent runtime $
                 UiSetRepository
                     branch
-                    (toText (takeFileName (takeDirectory cwd))
-                        <> "/"
-                        <> toText (takeFileName cwd))
+                    (formatRepositoryPath home cwd)
+
+formatRepositoryPath :: OsPath -> OsPath -> Text
+formatRepositoryPath home cwd
+    | cwdText == homeText = "~"
+    | homePrefix `Text.isPrefixOf` cwdText =
+        "~/" <> Text.drop (Text.length homePrefix) cwdText
+    | otherwise = cwdText
+  where
+    homeText = Text.dropWhileEnd (== '/') (toText home)
+    homePrefix = homeText <> "/"
+    cwdText = toText cwd
 
 runAgent
     :: FullscreenInputBuffer
@@ -803,7 +818,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
     projectRoot <- resolveProjectRoot cwd
     projectSettings <- loadProjectSettings projectRoot
     branch <- detectGitBranch cwd
-    setStartupRepository fullscreen branch cwd
+    setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
@@ -3564,9 +3579,9 @@ detectGitBranch cwd = do
         Right (ExitSuccess, output, _) ->
             let branch = Text.strip (Text.pack output)
             in if Text.null branch
-                then toText (takeFileName cwd)
-                else branch
-        _ -> toText (takeFileName cwd)
+                then ""
+                else if branch == "HEAD" then "detached" else branch
+        _ -> ""
 
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
