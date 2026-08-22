@@ -10,7 +10,8 @@ import Brick (Widget, raw)
 import Codec.Picture
     ( Image
     , PixelRGB8(..)
-    , convertRGB8
+    , PixelRGBA8(..)
+    , convertRGBA8
     , decodeImage
     , imageHeight
     , imageWidth
@@ -19,6 +20,7 @@ import Codec.Picture
 import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word8)
 import qualified Graphics.Vty as V
 
 data PreviewCell = PreviewCell
@@ -41,7 +43,7 @@ data TuiImagePreview = TuiImagePreview
 prepareTuiImagePreview :: ImageAttachment -> Either Text TuiImagePreview
 prepareTuiImagePreview ImageAttachment{imageMime, imageBytes} = do
     dynamic <- firstText (decodeImage imageBytes)
-    let image = convertRGB8 dynamic
+    let image = convertRGBA8 dynamic
         sourceWidth = imageWidth image
         sourceHeight = imageHeight image
         (targetWidth, targetHeight) =
@@ -93,7 +95,7 @@ previewSize width height
            , max 1 (floor (fromIntegral height * scale))
            )
 
-sampleCells :: Image PixelRGB8 -> Int -> Int -> [[PreviewCell]]
+sampleCells :: Image PixelRGBA8 -> Int -> Int -> [[PreviewCell]]
 sampleCells image targetWidth targetHeight =
     [ [ PreviewCell
             { cellTop = samplePixel image targetWidth targetHeight x topY
@@ -107,14 +109,14 @@ sampleCells image targetWidth targetHeight =
     ]
 
 samplePixel
-    :: Image PixelRGB8
+    :: Image PixelRGBA8
     -> Int
     -> Int
     -> Int
     -> Int
     -> PixelRGB8
 samplePixel image targetWidth targetHeight x y =
-    pixelAt image sourceX sourceY
+    compositePixel previewBackground (pixelAt image sourceX sourceY)
   where
     sourceX =
         min (imageWidth image - 1)
@@ -122,6 +124,31 @@ samplePixel image targetWidth targetHeight x y =
     sourceY =
         min (imageHeight image - 1)
             (y * imageHeight image `div` targetHeight)
+
+-- Transparent PNG pixels can retain arbitrary RGB data. Dropping alpha with
+-- 'convertRGB8' exposes those hidden colours as bright smears, so composite
+-- onto the fullscreen canvas before rendering the sampled terminal cells.
+compositePixel :: PixelRGB8 -> PixelRGBA8 -> PixelRGB8
+compositePixel
+    (PixelRGB8 backgroundRed backgroundGreen backgroundBlue)
+    (PixelRGBA8 red green blue alpha) =
+        PixelRGB8
+            (blend red backgroundRed alpha)
+            (blend green backgroundGreen alpha)
+            (blend blue backgroundBlue alpha)
+
+blend :: Word8 -> Word8 -> Word8 -> Word8
+blend foreground background alpha =
+    fromIntegral $
+        ( fromIntegral foreground * alpha'
+            + fromIntegral background * (255 - alpha')
+            + 127
+        ) `div` 255
+  where
+    alpha' = fromIntegral alpha :: Int
+
+previewBackground :: PixelRGB8
+previewBackground = PixelRGB8 0 43 54
 
 maxPreviewColumns :: Int
 maxPreviewColumns = 24

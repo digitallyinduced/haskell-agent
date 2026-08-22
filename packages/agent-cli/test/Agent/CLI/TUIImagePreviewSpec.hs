@@ -5,7 +5,12 @@ import Agent.CLI.TUI.ImagePreview
     , prepareTuiImagePreview
     )
 import Agent.Loop (ImageAttachment(..))
-import Codec.Picture (PixelRGB8(..), encodePng, generateImage)
+import Codec.Picture
+    ( PixelRGB8(..)
+    , PixelRGBA8(..)
+    , encodePng
+    , generateImage
+    )
 import qualified Data.ByteString.Lazy as LBS
 import Test.Hspec
 
@@ -33,6 +38,34 @@ spec =
                     preview.previewSourceHeight `shouldBe` 2
                     length preview.previewCells `shouldBe` 1
                     map length preview.previewCells `shouldBe` [4]
+
+        it "composites alpha instead of exposing hidden transparent RGB" do
+            let transparentSource =
+                    generateImage
+                        (\x _ ->
+                            if x == 0
+                                then PixelRGBA8 255 0 255 0
+                                else PixelRGBA8 255 255 255 128)
+                        2
+                        1
+                compositedSource =
+                    generateImage
+                        (\x _ ->
+                            if x == 0
+                                then PixelRGB8 0 43 54
+                                else PixelRGB8 128 149 155)
+                        2
+                        1
+                attachment source = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = LBS.toStrict (encodePng source)
+                    }
+                transparentPreview =
+                    prepareTuiImagePreview (attachment transparentSource)
+                compositedPreview =
+                    prepareTuiImagePreview (attachment compositedSource)
+            (.previewCells) <$> transparentPreview
+                `shouldBe` (.previewCells) <$> compositedPreview
 
         it "rejects invalid image bytes without crashing the TUI" do
             prepareTuiImagePreview
