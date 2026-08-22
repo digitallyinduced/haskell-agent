@@ -71,6 +71,10 @@ import Agent.CLI.Compaction
     , runProviderCompact
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.CLI.Error
+    ( formatApiErrorAt
+    , formatApiErrorInlineAt
+    )
 import Agent.CLI.ImagePreview
     ( detectImagePreviewProtocol
     , previewColumnsFor
@@ -1070,9 +1074,11 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Just active
                                             | active.transitionCause == AutomaticFallback ->
                                                 pure (RunProviderStartFailed err)
-                                        _ ->
+                                        _ -> do
+                                            now <- getCurrentTime
                                             startupDie startup
-                                                ("openai auth: " <> show err)
+                                                (Text.unpack
+                                                    (formatApiErrorAt now err))
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
@@ -1767,17 +1773,9 @@ reportProviderUnavailable :: ApiError -> IO ()
 reportProviderUnavailable apiError = do
     color <- resolveColor stderr
     now <- getCurrentTime
-    let detail = case apiError of
-            CredentialsExhausted{retryAt} ->
-                let delay = max 0 (diffUTCTime retryAt now)
-                in "all configured accounts are temporarily unavailable"
-                    <> if delay == 0
-                        then "; retry now"
-                        else "; retry in " <> formatDuration delay
-            _ -> Text.pack (show apiError)
     putTextLn stderr $ roleError color $
-        "provider unavailable; no usable fallback provider account is available: "
-            <> detail
+        "No usable fallback provider account is available.\n"
+            <> formatApiErrorAt now apiError
 
 setSessionEffort :: SessionEnv -> Text -> IO ()
 setSessionEffort env level = do
@@ -2905,7 +2903,8 @@ accountUsageText color provider tokenProvider openAiPool = do
                                 Left err ->
                                     pure $
                                         roleError color
-                                            ("usage: " <> Text.pack (show err))
+                                            ("usage: "
+                                                <> formatApiErrorInlineAt now err)
                                 Right credential -> do
                                     result <- fetchUsage
                                         credential.accessToken credential.accountId
@@ -3099,11 +3098,13 @@ validateProviderTarget choice =
                 <> err
         Right loaded ->
             probeLoadedAuth loaded >>= \case
-                Left err -> pure $ Left $
-                    "cannot switch to "
-                        <> providerSlug choice.modelProvider
-                        <> ": credentials unavailable: "
-                        <> Text.pack (show err)
+                Left err -> do
+                    now <- getCurrentTime
+                    pure $ Left $
+                        "cannot switch to "
+                            <> providerSlug choice.modelProvider
+                            <> ": "
+                            <> formatApiErrorInlineAt now err
                 Right usable
                     | usable.loadedProvider /= choice.modelProvider ->
                         pure $ Left $
@@ -3202,9 +3203,10 @@ reloadAuth provider = \case
                 }
             , failure = AccountAuthenticationRejected
             }) >>= \case
-            Left err ->
+            Left err -> do
+                now <- getCurrentTime
                 pure $ Left $
-                    "reload-auth failed: " <> Text.pack (show err)
+                    "reload-auth failed: " <> formatApiErrorInlineAt now err
             Right credential ->
                 pure $ Right $
                     "auth reloaded ("

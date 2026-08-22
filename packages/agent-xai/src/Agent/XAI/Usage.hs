@@ -50,16 +50,16 @@ instance Aeson.FromJSON GrokUsageSnapshot where
 
 decodeGrokUsage :: LBS.ByteString -> Either Text GrokUsageSnapshot
 decodeGrokUsage body = case Aeson.eitherDecode body of
-    Left detail ->
-        Left ("Grok billing response could not be decoded: " <> Text.pack detail)
+    Left _ ->
+        Left "Grok returned an unreadable usage response."
     Right snapshot -> Right snapshot
 
 fetchGrokUsage :: Text -> IO (Either Text GrokUsageSnapshot)
 fetchGrokUsage accessToken =
     tryAny requestUsage >>= \case
-        Left exception ->
+        Left _ ->
             pure $ Left
-                ("Grok billing request failed: " <> Text.pack (show exception))
+                "Could not load Grok usage. Check your connection and retry."
         Right response -> do
             let status = getResponseStatusCode response
             pure $

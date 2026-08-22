@@ -1,6 +1,7 @@
 module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -14,6 +15,8 @@ import Control.Exception (finally)
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime(..), addUTCTime)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
 import Test.Hspec
@@ -134,6 +137,64 @@ spec = do
                 , tokenUsage = emptyTokenUsage
                 })
                 `shouldSatisfy` (/= "")
+
+        it "renders exhausted credentials as actionable user-facing text" do
+            let now = UTCTime (fromGregorian 2026 8 22) 0
+                retryAt = addUTCTime (5 * 86400 + 21 * 3600) now
+                rendered =
+                    formatLoopErrorAt now
+                        (LoopTransport (CredentialsExhausted retryAt))
+            rendered `shouldSatisfy`
+                Text.isInfixOf
+                    "All accounts for this provider are temporarily unavailable"
+            rendered `shouldSatisfy` Text.isInfixOf "Try again in 5d 21h"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "choose another provider with /model"
+            rendered `shouldNotSatisfy`
+                Text.isInfixOf "CredentialsExhausted"
+
+        it "persists absolute retry guidance without UI chrome" do
+            let retryAt =
+                    addUTCTime (5 * 86400 + 21 * 3600)
+                        (UTCTime (fromGregorian 2026 8 22) 0)
+                rendered =
+                    formatLoopErrorPersistedAt
+                        (UTCTime (fromGregorian 2026 8 22) 0)
+                        (LoopTransport (CredentialsExhausted retryAt))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "2026-08-27 21:00:00 UTC"
+            rendered `shouldNotSatisfy` Text.isInfixOf "Try again in"
+            rendered `shouldNotSatisfy` Text.isPrefixOf "✗"
+
+        it "persists provider retry intervals as absolute timestamps" do
+            let rendered =
+                    formatLoopErrorPersistedAt
+                        (UTCTime (fromGregorian 2026 8 22) 0)
+                        (LoopTransport
+                            (ProviderError RateLimitError
+                                "slow down"
+                                (Just 120)))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "2026-08-22 00:02:00 UTC"
+            rendered `shouldNotSatisfy` Text.isInfixOf "Try again in"
+
+        it "renders typed provider errors without constructor syntax" do
+            let rendered =
+                    formatLoopError
+                        (LoopTransport
+                            (ProviderError ContextWindowExceeded
+                                "context too long"
+                                Nothing))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "conversation is too long"
+            rendered `shouldSatisfy` Text.isInfixOf "/compact"
+            rendered `shouldNotSatisfy`
+                Text.isInfixOf "ProviderError"
+
+        it "explains an incomplete provider response" do
+            formatLoopError LoopNoResponseId
+                `shouldSatisfy`
+                    Text.isInfixOf "Provider returned an incomplete response"
 
     describe "renderEvent" do
         it "keeps concurrent tool lines intact" do

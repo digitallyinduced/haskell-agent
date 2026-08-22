@@ -127,6 +127,7 @@ data ApiError
         , message :: !Text
         , retryAfter :: !(Maybe Int)
         }
+    | CredentialError { credentialMessage :: !Text }
     | ConnectionError { exception :: !Text }
     | CredentialsExhausted { retryAt :: !UTCTime }
     deriving (Eq, Show)

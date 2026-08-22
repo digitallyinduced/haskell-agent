@@ -26,7 +26,7 @@ import Agent.CLI.CredentialStore
     , withCredentialRefreshFileLock
     , updateManagedCredentialSecret
     )
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
@@ -38,6 +38,7 @@ import Agent.Provider
     , Provider(..)
     , TokenProvider(..)
     , getNextToken
+    , providerSlug
     , seedTokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
@@ -142,9 +143,8 @@ probeLoadedAuth loaded = do
         Left err -> pure (Left err)
         Right credential
             | credential.provider /= loaded.loadedProvider ->
-                pure $ Left $ ProviderError AuthenticationError
+                pure $ Left $ CredentialError
                     "credential provider does not match loaded auth"
-                    Nothing
             | otherwise -> do
                 tokenProvider <-
                     seedTokenProvider loaded.loadedTokenProvider credential
@@ -412,19 +412,17 @@ refreshOpenAiAccount lock clientId accountSources stale =
             ((== stale.accountId) . (.accountId) . (.openAiState))
             accounts of
             Nothing ->
-                pure $ Left $ ProviderError AuthenticationError
+                pure $ Left $ CredentialError
                     ("OpenAI refresh source is unavailable for account "
                         <> stale.accountId)
-                    Nothing
             Just account ->
                 withOpenAiSourceLock account.openAiSource do
                     reloadOpenAiAccount account.openAiSource stale >>= \case
                         Left err -> pure (Left err)
                         Right current
                             | current.accountId /= stale.accountId ->
-                                pure $ Left $ ProviderError AuthenticationError
+                                pure $ Left $ CredentialError
                                     "OpenAI auth source changed account identity"
-                                    Nothing
                             | openAiAuthStateChanged stale current ->
                                 pure (Right current)
                             | otherwise ->
@@ -432,9 +430,8 @@ refreshOpenAiAccount lock clientId accountSources stale =
                                     Left err -> pure (Left err)
                                     Right newState
                                         | newState.accountId /= stale.accountId ->
-                                            pure $ Left $ ProviderError AuthenticationError
+                                            pure $ Left $ CredentialError
                                                 "OpenAI refresh changed account identity"
-                                                Nothing
                                         | otherwise ->
                                             persistRefreshedOpenAiAccount
                                                 account.openAiSource newState
@@ -518,16 +515,14 @@ reloadOpenAiAccount source stale =
                         ((== managedId) . (.managedId) . fst)
                         credentials of
                         Nothing ->
-                            pure $ Left $ ProviderError AuthenticationError
+                            pure $ Left $ CredentialError
                                 ("managed OpenAI credential " <> managedId
                                     <> " no longer exists")
-                                Nothing
                         Just (metadata, secret)
                             | not metadata.managedEnabled ->
-                                pure $ Left $ ProviderError AuthenticationError
+                                pure $ Left $ CredentialError
                                     ("managed OpenAI credential " <> managedId
                                         <> " is disabled")
-                                    Nothing
                             | otherwise -> do
                                 now <- getCurrentTime
                                 pure $ case openaiAuthStateFromJson now
@@ -535,27 +530,24 @@ reloadOpenAiAccount source stale =
                                         (TextEncoding.encodeUtf8
                                             secret.secretPayload)) of
                                     Nothing ->
-                                        Left $ ProviderError AuthenticationError
+                                        Left $ CredentialError
                                             ("managed OpenAI credential "
                                                 <> managedId
                                                 <> " contains invalid auth JSON")
-                                            Nothing
                                     Just current -> Right current
         OpenAiAuthFile filePath -> do
             exists <- doesFileExist filePath
             if not exists
-                then pure $ Left $ ProviderError AuthenticationError
+                then pure $ Left $ CredentialError
                     "OpenAI auth file no longer exists"
-                    Nothing
                 else do
                     now <- getCurrentTime
                     bytes <- retryOnFileBusy
                         (LBS.readFile (unsafeToFilePath filePath))
                     pure $ case openaiAuthStateFromJson now bytes of
                         Nothing ->
-                            Left $ ProviderError AuthenticationError
+                            Left $ CredentialError
                                 "OpenAI auth file contains invalid auth JSON"
-                                Nothing
                         Just current -> Right current
         OpenAiEnvironmentOAuth ->
             pure (Right stale)
@@ -566,10 +558,9 @@ reloadOpenAiAccount source stale =
 
 staticRefreshError :: Text -> IO (Either ApiError OpenAI.AuthState)
 staticRefreshError accountId =
-    pure $ Left $ ProviderError AuthenticationError
+    pure $ Left $ CredentialError
         ("OpenAI account " <> accountId
             <> " uses a static bearer token that cannot be refreshed")
-        Nothing
 
 persistRefreshedOpenAiAccount
     :: OpenAiCredentialSource
@@ -809,9 +800,8 @@ refreshManagedGrok metadata _secret stateRef refresh state =
                 now <- getCurrentTime
                 case grokAuthStateFromJson now latestSecret.secretPayload of
                     Nothing ->
-                        pure $ Left $ ProviderError AuthenticationError
+                        pure $ Left $ CredentialError
                             "managed Grok OAuth credential became invalid during refresh"
-                            Nothing
                     Just current
                         | grokStateChanged state current -> do
                             writeIORef stateRef current
@@ -839,9 +829,8 @@ refreshCurrentGrok
 refreshCurrentGrok metadata secret stateRef refresh state =
     case state.grokRefreshToken of
         Nothing ->
-            pure $ Left $ ProviderError AuthenticationError
+            pure $ Left $ CredentialError
                 "managed Grok OAuth credential has no refresh token; reconnect the account"
-                Nothing
         Just refreshToken ->
             refresh refreshToken >>= \case
                 Left err -> pure (Left err)
@@ -978,21 +967,18 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
     let loadFresh rejectedToken =
             reload >>= \case
                 Nothing ->
-                    pure $ Left $ ProviderError AuthenticationError
+                    pure $ Left $ CredentialError
                         "no credentials found while reloading auth"
-                        Nothing
                 Just credential
                     | credential.provider /= expectedProvider ->
-                        pure $ Left $ ProviderError AuthenticationError
+                        pure $ Left $ CredentialError
                             ("reloaded auth resolved "
-                                <> Text.pack (show credential.provider)
+                                <> providerSlug credential.provider
                                 <> " but this session expects "
-                                <> Text.pack (show expectedProvider))
-                            Nothing
+                                <> providerSlug expectedProvider)
                     | rejectedToken == Just credential.accessToken ->
-                        pure $ Left $ ProviderError AuthenticationError
+                        pure $ Left $ CredentialError
                             "reloaded credential is unchanged; refresh ~/.grok/auth.json or OPENROUTER_API_KEY and retry"
-                            Nothing
                     | otherwise -> do
                         writeIORef cache (Just credential)
                         pure (Right credential)
@@ -1027,9 +1013,8 @@ staticCredentialProvider credential = TokenProvider \failed ->
         Just FailedCredential
             { failure = AccountAuthenticationRejected
             } ->
-                pure $ Left $ ProviderError AuthenticationError
+                pure $ Left $ CredentialError
                     "static credential was rejected"
-                    Nothing
 
 lookupNonEmpty :: String -> IO (Maybe Text)
 lookupNonEmpty name = do

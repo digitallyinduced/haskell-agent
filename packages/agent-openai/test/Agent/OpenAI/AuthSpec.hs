@@ -205,6 +205,26 @@ spec = do
                     accountIdOf result `shouldBe` second
                 _ -> expectationFailure ("expected two refresh attempts, got " <> show tried)
 
+        it "fails over when the selected account has a local credential error" $ do
+            attempts <- newIORef ([] :: [Text])
+            let states = [ mkExpiredAuth "acc-broken", mkExpiredAuth "acc-ok" ]
+                refresh state = do
+                    previous <- readIORef attempts
+                    modifyIORef' attempts (<> [state.accountId])
+                    if null previous
+                        then pure $ Left
+                            (CredentialError "credential source is unavailable")
+                        else pure $ Right state
+            pool <- newPool states refresh
+            result <- getAccessToken pool
+            tried <- readIORef attempts
+            case tried of
+                [first, second] -> do
+                    first `shouldNotBe` second
+                    accountIdOf result `shouldBe` second
+                _ -> expectationFailure
+                    ("expected two refresh attempts, got " <> show tried)
+
     describe "reportRateLimit" $ do
         it "skips rate-limited accounts on subsequent picks" $ do
             callCounter <- newIORef (0 :: Int)

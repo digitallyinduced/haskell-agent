@@ -46,6 +46,9 @@ spec = do
         it "classifies authentication failures but not connection errors" do
             accountFailureFromApiError (HttpError 401 "rejected")
                 `shouldBe` Just AccountAuthenticationRejected
+            accountFailureFromApiError
+                (CredentialError "credential file is invalid")
+                `shouldBe` Just AccountAuthenticationRejected
             accountFailureFromApiError (ConnectionError "offline")
                 `shouldBe` Nothing
 

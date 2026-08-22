@@ -24,3 +24,7 @@ spec =
                     \\"currentPeriod\":{\"start\":\"2026-08-20T00:00:00Z\",\
                     \\"end\":\"2026-08-21T00:00:00Z\"}}}"
             fmap (.usedPercent) (decodeGrokUsage body) `shouldBe` Right 100
+
+        it "hides parser internals for unreadable responses" do
+            decodeGrokUsage "not json"
+                `shouldBe` Left "Grok returned an unreadable usage response."

@@ -9,6 +9,7 @@ module Agent.CLI.Clipboard
     , formatImageSize
     ) where
 
+import Agent.CLI.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
@@ -253,7 +254,7 @@ readMacClipboardClass typeClass = do
                 _ <- tryAny (removeFile path)
                 pure (Left (clipboardErrorMessage typeClass err))
     case result of
-        Left ex -> pure (Left (Text.pack (show ex)))
+        Left ex -> pure (Left (formatException ex))
         Right value -> pure value
 
 --------------------------------------------------------------------------------
@@ -304,7 +305,7 @@ readImageFile :: FilePath -> IO (Either Text ImageAttachment)
 readImageFile path = do
     result <- tryAny (BS.readFile path)
     pure $ case result of
-        Left ex -> Left (Text.pack (show ex))
+        Left ex -> Left (formatException ex)
         Right bytes
             | BS.null bytes -> Left ("empty image file: " <> Text.pack path)
             | otherwise ->
@@ -326,7 +327,7 @@ runTextCmd :: FilePath -> [String] -> IO (Either Text Text)
 runTextCmd cmd args = do
     result <- tryAny (readProcessWithExitCode cmd args "")
     pure $ case result of
-        Left ex -> Left (Text.pack (show ex))
+        Left ex -> Left (formatException ex)
         Right (ExitSuccess, out, _) -> Right (Text.pack out)
         Right (ExitFailure _, _, err) ->
             Left (Text.strip (Text.pack err))
@@ -358,7 +359,7 @@ runBytesCmd cmd args = do
                 _ <- tryAny (removeFile path)
                 pure (Left (Text.strip (Text.pack err)))
     case result of
-        Left ex -> pure (Left (Text.pack (show ex)))
+        Left ex -> pure (Left (formatException ex))
         Right value -> pure value
 
 shellQuote :: String -> String

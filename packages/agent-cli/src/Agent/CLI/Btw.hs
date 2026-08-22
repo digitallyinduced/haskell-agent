@@ -9,6 +9,7 @@ module Agent.CLI.Btw
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
+import Agent.CLI.Error (formatApiErrorInline)
 import Agent.Error (ApiError)
 import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
 import Agent.Responses.Types
@@ -150,7 +151,8 @@ classifyTurn turn
 
 formatBtwError :: BtwError -> Text
 formatBtwError = \case
-    BtwTransport err -> "side question failed: " <> Text.pack (show err)
+    BtwTransport err ->
+        "side question failed: " <> formatApiErrorInline err
     BtwCancelled -> "side question cancelled"
     BtwEmptyResponse -> "side question returned an empty response"
     BtwUnexpectedToolCall ->

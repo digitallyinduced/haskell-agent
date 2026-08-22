@@ -251,6 +251,7 @@ isPreviousResponseIdError = \case
         mentionsPreviousResponse (Text.pack (show errorType))
             || mentionsPreviousResponse message
     ConnectionError message -> mentionsPreviousResponse message
+    CredentialError{} -> False
     HttpError _ body -> mentionsPreviousResponse body
     JsonDecodeError message body ->
         mentionsPreviousResponse message || mentionsPreviousResponse body

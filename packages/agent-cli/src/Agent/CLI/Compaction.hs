@@ -10,6 +10,7 @@ module Agent.CLI.Compaction
     , runProviderCompact
     ) where
 
+import Agent.CLI.Error (formatApiError)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
@@ -423,6 +424,8 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction transcriptRef contextTo
                 retryAfter
         ConnectionError message ->
             ConnectionError ("automatic compaction failed: " <> message)
+        CredentialError message ->
+            CredentialError ("automatic compaction failed: " <> message)
         err -> err
 
 requireTokenProvider
@@ -454,6 +457,3 @@ providerLabel = \case
 hasFocus :: Maybe Text -> Bool
 hasFocus =
     maybe False (not . Text.null . Text.strip)
-
-formatApiError :: ApiError -> Text
-formatApiError err = Text.pack (show err)

@@ -14,8 +14,18 @@ spec = do
                 `shouldBe` Right
                     (Just "agent", Just 12.5, Just 50, Just 37.5, Just False)
 
+        it "hides parser internals for unreadable responses" do
+            decodeKeyInfo "not json"
+                `shouldBe`
+                    Left "OpenRouter returned an unreadable key-usage response."
+
     describe "decodeCredits" do
         it "decodes total credits and usage" do
             decodeCredits (LBS.pack
                 "{\"data\":{\"total_credits\":100,\"total_usage\":25.25}}")
                 `shouldBe` Right (Just 100, Just 25.25)
+
+        it "hides parser internals for unreadable responses" do
+            decodeCredits "not json"
+                `shouldBe`
+                    Left "OpenRouter returned an unreadable credits response."

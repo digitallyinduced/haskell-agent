@@ -69,8 +69,8 @@ decodeKeyInfo
     -> Either Text
         (Maybe Text, Maybe Scientific, Maybe Scientific, Maybe Scientific, Maybe Bool)
 decodeKeyInfo body = case Aeson.eitherDecode body of
-    Left detail ->
-        Left ("OpenRouter key response could not be decoded: " <> Text.pack detail)
+    Left _ ->
+        Left "OpenRouter returned an unreadable key-usage response."
     Right KeyInfo{label, usage, limit, limitRemaining, freeTier} ->
         Right (label, usage, limit, limitRemaining, freeTier)
 
@@ -78,10 +78,8 @@ decodeCredits
     :: LBS.ByteString
     -> Either Text (Maybe Scientific, Maybe Scientific)
 decodeCredits body = case Aeson.eitherDecode body of
-    Left detail ->
-        Left
-            ("OpenRouter credits response could not be decoded: "
-                <> Text.pack detail)
+    Left _ ->
+        Left "OpenRouter returned an unreadable credits response."
     Right Credits{credits, used} -> Right (credits, used)
 
 fetchOpenRouterUsage :: Text -> IO (Either Text OpenRouterUsage)
@@ -113,10 +111,9 @@ fetchOpenRouterUsage apiKey = do
                     (HttpClient.responseTimeoutMicro (30 * 1_000_000))
                     request
         pure case result of
-            Left exception ->
+            Left _ ->
                 Left
-                    ("OpenRouter usage request failed: "
-                        <> Text.pack (show exception))
+                    "Could not load OpenRouter usage. Check your connection and retry."
             Right response
                 | let status = getResponseStatusCode response
                 , status >= 200

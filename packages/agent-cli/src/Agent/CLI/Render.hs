@@ -8,7 +8,10 @@ module Agent.CLI.Render
     , formatActivityLine
     , formatElapsed
     , formatLoopError
+    , formatLoopErrorAt
     , formatLoopErrorColored
+    , formatLoopErrorColoredAt
+    , formatLoopErrorPersistedAt
     , formatSearchReplaceDiff
     , formatThinkingBlock
     , formatToolOutput
@@ -34,6 +37,11 @@ import Agent.CLI.Progress
     , wrapOscForTmux
     )
 import Agent.CLI.Terminal (fileUri)
+import Agent.CLI.Error
+    ( formatApiError
+    , formatApiErrorAt
+    , formatApiErrorPersistedAt
+    )
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -714,15 +722,48 @@ firstLine = Text.takeWhile (/= '\n')
 formatLoopError :: LoopError -> Text
 formatLoopError = formatLoopErrorColored False
 
+-- | Format a loop error relative to the time it is shown.
+formatLoopErrorAt :: UTCTime -> LoopError -> Text
+formatLoopErrorAt = formatLoopErrorColoredAt False
+
 -- | Like 'formatLoopError', with optional ANSI styling for TTY stderr.
 formatLoopErrorColored :: Bool -> LoopError -> Text
-formatLoopErrorColored color = \case
+formatLoopErrorColored color =
+    formatLoopErrorColoredMaybeAt color Nothing
+
+-- | Like 'formatLoopErrorAt', with optional ANSI styling for TTY stderr.
+formatLoopErrorColoredAt :: Bool -> UTCTime -> LoopError -> Text
+formatLoopErrorColoredAt color now =
+    formatLoopErrorColoredMaybeAt color (Just now)
+
+-- | Stable, unstyled text for session persistence. Retry timestamps stay
+-- absolute so resumed sessions never show stale relative guidance.
+formatLoopErrorPersistedAt :: UTCTime -> LoopError -> Text
+formatLoopErrorPersistedAt now = \case
+    LoopTransport err -> formatApiErrorPersistedAt now err
+    LoopMaxTurns turn ->
+        "Stopped: maximum turns reached."
+            <> maybe "" ("\n" <>) turn.assistantText
+    LoopNoResponseId ->
+        "Provider returned an incomplete response.\nRetry the message."
+    LoopCancelled _ ->
+        "Cancelled."
+
+formatLoopErrorColoredMaybeAt :: Bool -> Maybe UTCTime -> LoopError -> Text
+formatLoopErrorColoredMaybeAt color maybeNow = \case
     LoopTransport err ->
-        roleError color (glyphErr <> "transport error: " <> Text.pack (show err))
+        roleError color $
+            glyphErr
+                <> case maybeNow of
+                    Nothing -> formatApiError err
+                    Just now -> formatApiErrorAt now err
     LoopMaxTurns turn ->
         roleError color (glyphErr <> "stopped: max turns reached")
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
     LoopNoResponseId ->
-        roleError color (glyphErr <> "transport error: response had no id")
+        roleError color
+            (glyphErr
+                <> "Provider returned an incomplete response.\n"
+                <> "Retry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")
