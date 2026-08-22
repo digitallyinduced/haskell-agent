@@ -133,6 +133,7 @@ import Agent.CLI.ProviderTransition
     )
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , clearThinking
     , emptyMarkdownStreamState
     , putTextLn
     , renderAssistantText
@@ -2195,7 +2196,10 @@ replWithDraft env@SessionEnv
                         continue
                     ReplCompact focus -> do
                         color <- resolveColor stderr
-                        result <- runProviderCompact provider tokenProvider paramsRef transcriptRef focus
+                        result <-
+                            withReplActivity "Compacting context…" $
+                                runProviderCompact provider tokenProvider
+                                    paramsRef transcriptRef focus
                         case result of
                             Left err -> do
                                 displayError err $
@@ -2570,6 +2574,17 @@ replWithDraft env@SessionEnv
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    withReplActivity message action = do
+        case fullscreen of
+            Nothing ->
+                renderEvent render (ActivityUpdated message)
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSetNotice (Just (progressNotice message)))
+        action `finally`
+            case fullscreen of
+                Nothing -> clearThinking render
+                Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
     setEffort level = do
         color <- resolveColor stdout
         setSessionEffort env level
