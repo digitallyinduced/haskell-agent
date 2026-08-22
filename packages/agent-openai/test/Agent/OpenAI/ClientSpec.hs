@@ -151,7 +151,9 @@ spec = do
                     , provider = OpenAIProvider
                     }
             withMockResponses recorded handler \baseUrl -> do
-                provider <- pure $ TokenProvider \_ -> pure (Right credential)
+                provider <- pure $
+                    tokenProvider SubscriptionBilled \_ ->
+                        pure (Right credential)
                 _ <- expectRight =<< createCodexMessageWithProviderAt
                     baseUrl
                     provider

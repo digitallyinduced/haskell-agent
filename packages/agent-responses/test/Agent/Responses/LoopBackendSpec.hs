@@ -4,9 +4,10 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop (Backend(..), TurnInput(..))
 import Agent.Provider
     ( Credential(..)
+    , BillingMode(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider(..)
+    , tokenProvider
     )
 import Agent.Responses.LoopBackend (tokenProviderStatelessResponsesBackend)
 import Agent.Responses.Types (defaultResponseCreateParams)
@@ -21,7 +22,8 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
         transcript <- newIORef []
         let first = credential "first"
             second = credential "second"
-            provider = TokenProvider \failed -> pure $ Right $ case failed of
+            provider = tokenProvider SubscriptionBilled \failed ->
+                pure $ Right $ case failed of
                 Nothing -> first
                 Just FailedCredential{} -> second
             send current _params _onEvent = do

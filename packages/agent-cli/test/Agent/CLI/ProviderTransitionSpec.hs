@@ -3,7 +3,7 @@ module Agent.CLI.ProviderTransitionSpec (spec) where
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
 import Data.Text (Text)
 import Test.Hspec
@@ -66,4 +66,5 @@ transition sessionId pending = ProviderTransition
     , transitionDraft = ""
     , transitionUnavailableProviders = [XAIProvider]
     , transitionCause = AutomaticFallback
+    , transitionAutomaticBilling = Just SubscriptionBilled
     }

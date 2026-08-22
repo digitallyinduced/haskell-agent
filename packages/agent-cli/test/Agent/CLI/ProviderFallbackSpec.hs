@@ -2,12 +2,13 @@ module Agent.CLI.ProviderFallbackSpec (spec) where
 
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.ProviderFallback
-    ( automaticCooldownRetryDelay
+    ( allowsAutomaticBillingFallback
+    , automaticCooldownRetryDelay
     , fallbackCandidates
     , rankedModels
     )
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.List (elemIndex)
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
@@ -15,6 +16,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "allowsAutomaticBillingFallback" do
+        it "blocks subscription-to-API-credit fallback" do
+            allowsAutomaticBillingFallback
+                SubscriptionBilled ApiBilled
+                `shouldBe` False
+
+        it "allows fallback between subscription accounts" do
+            allowsAutomaticBillingFallback
+                SubscriptionBilled SubscriptionBilled
+                `shouldBe` True
+
+        it "does not restrict a session already using API credits" do
+            allowsAutomaticBillingFallback
+                ApiBilled ApiBilled
+                `shouldBe` True
+
     describe "rankedModels" do
         it "prefers sol over luna" do
             let ids = map (.modelId) rankedModels

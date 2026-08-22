@@ -13,7 +13,7 @@ import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.Error (ApiError)
 import Agent.Loop (TurnInput)
-import Agent.Provider (Provider)
+import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
 import Data.Text (Text)
@@ -37,6 +37,10 @@ data ProviderTransition = ProviderTransition
     , transitionDraft :: !Text
     , transitionUnavailableProviders :: ![Provider]
     , transitionCause :: !TransitionCause
+    -- | Billing class of the session that initiated an automatic fallback.
+    -- Preserved across failed replacement providers so the whole chain obeys
+    -- the original billing boundary. Manual transitions use 'Nothing'.
+    , transitionAutomaticBilling :: !(Maybe BillingMode)
     }
 
 data TurnResult

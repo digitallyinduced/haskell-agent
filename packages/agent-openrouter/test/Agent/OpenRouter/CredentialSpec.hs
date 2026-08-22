@@ -9,7 +9,9 @@ import Test.Hspec
 spec :: Spec
 spec = describe "staticApiKeyProvider" do
     it "returns the same bearer without an account id" do
-        result <- getNextToken (staticApiKeyProvider "or-key") Nothing
+        let provider = staticApiKeyProvider "or-key"
+        tokenProviderBillingMode provider `shouldBe` ApiBilled
+        result <- getNextToken provider Nothing
         case result of
             Right credential -> do
                 credential.accessToken `shouldBe` "or-key"

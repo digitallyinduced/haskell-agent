@@ -1,6 +1,7 @@
 -- | Automatic cross-provider fallback policy.
 module Agent.CLI.ProviderFallback
-    ( automaticCooldownRetryDelay
+    ( allowsAutomaticBillingFallback
+    , automaticCooldownRetryDelay
     , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
@@ -9,7 +10,7 @@ module Agent.CLI.ProviderFallback
 
 import Agent.CLI.Models (ModelOption(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.List (nubBy, sortOn)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
 
@@ -18,6 +19,16 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
 -- making the CLI appear hung.
 maxAutomaticCooldownWait :: NominalDiffTime
 maxAutomaticCooldownWait = 120
+
+-- | Automatic fallback may use another subscription account, but must never
+-- turn subscription exhaustion into API-credit spending. Manual provider
+-- changes remain unrestricted because the user explicitly chose them.
+allowsAutomaticBillingFallback
+    :: BillingMode
+    -> BillingMode
+    -> Bool
+allowsAutomaticBillingFallback source target =
+    source /= SubscriptionBilled || target /= ApiBilled
 
 automaticCooldownRetryDelay
     :: UTCTime

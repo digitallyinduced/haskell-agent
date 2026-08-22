@@ -26,7 +26,6 @@ import Agent.CLI.Auth
     )
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
-    , ManagedBilling(..)
     , ManagedCredential(..)
     , ManagedSecret(..)
     , deleteManagedCredential
@@ -60,7 +59,7 @@ import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
-import Agent.Provider (Provider(..), providerSlug)
+import Agent.Provider (BillingMode(..), Provider(..), providerSlug)
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.XAI.Usage as XAI
 import Control.Applicative ((<|>))
@@ -323,8 +322,8 @@ managedLoginAccount now (metadata, secret) =
         , loginAccountId = metadata.managedAccountId
         , loginLabel = fromMaybe metadata.managedLabel managedAccountEmail
         , loginBilling = case metadata.managedBilling of
-            ManagedSubscription -> SubscriptionBilling Nothing
-            ManagedApiCredits -> ApiCreditsBilling
+            SubscriptionBilled -> SubscriptionBilling Nothing
+            ApiBilled -> ApiCreditsBilling
         , loginSource = "managed"
         , loginUsage = UsageNotChecked
         , loginAccessToken = accessToken
@@ -411,8 +410,8 @@ importAt color index accounts =
                             , managedAccountId = account.loginAccountId
                             , managedLabel = account.loginLabel
                             , managedBilling = case account.loginBilling of
-                                SubscriptionBilling _ -> ManagedSubscription
-                                ApiCreditsBilling -> ManagedApiCredits
+                                SubscriptionBilling _ -> SubscriptionBilled
+                                ApiCreditsBilling -> ApiBilled
                             , managedAuthKind = account.loginAuthKind
                             , managedEnabled = True
                             }
@@ -490,7 +489,7 @@ connectOpenAI color = do
                                 auth.accountId
                                 (fromMaybe "ChatGPT"
                                     (openAIAccountEmail auth))
-                                ManagedSubscription
+                                SubscriptionBilled
                                 ManagedOpenAIAuthJson
                                 (Text.decodeUtf8
                                     (LBS.toStrict (Aeson.encode authJson)))
@@ -540,7 +539,7 @@ connectXAI color = do
                             XAIProvider
                             accountId
                             label
-                            ManagedSubscription
+                            SubscriptionBilled
                             ManagedGrokAuthJson
                             (Text.decodeUtf8
                                 (LBS.toStrict (Aeson.encode authJson)))
@@ -563,7 +562,7 @@ connectOpenRouter color =
                         OpenRouterProvider
                         accountId
                         label
-                        ManagedApiCredits
+                        ApiBilled
                         ManagedBearerToken
                         apiKey
 
@@ -572,7 +571,7 @@ storeConnectedCredential
     -> Provider
     -> Text
     -> Text
-    -> ManagedBilling
+    -> BillingMode
     -> ManagedAuthKind
     -> Text
     -> IO ()

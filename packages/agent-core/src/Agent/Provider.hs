@@ -1,6 +1,9 @@
 -- | Provider-neutral credential acquisition and account failover.
 module Agent.Provider
-    ( TokenProvider(..)
+    ( BillingMode(..)
+    , TokenProvider
+    , tokenProviderBillingMode
+    , tokenProvider
     , Credential(..)
     , Provider(..)
     , providerSlug
@@ -19,6 +22,7 @@ import Agent.Error
     , ErrorType(..)
     , apiErrorRetryAfter
     )
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 
@@ -46,6 +50,27 @@ data Credential = Credential
     }
     deriving (Eq)
 
+-- | How requests made with a credential source are billed.
+--
+-- A 'TokenProvider' must only issue credentials with its declared mode. This
+-- lets callers enforce spending boundaries without knowing provider-specific
+-- authentication details.
+data BillingMode
+    = SubscriptionBilled
+    | ApiBilled
+    deriving (Eq, Show)
+
+instance Aeson.ToJSON BillingMode where
+    toJSON = Aeson.String . \case
+        SubscriptionBilled -> "subscription"
+        ApiBilled -> "api_credits"
+
+instance Aeson.FromJSON BillingMode where
+    parseJSON = Aeson.withText "BillingMode" \case
+        "subscription" -> pure SubscriptionBilled
+        "api_credits" -> pure ApiBilled
+        other -> fail ("unknown billing mode: " <> show other)
+
 instance Show Credential where
     show credential = "Credential { accountId = "
         <> show credential.accountId
@@ -67,11 +92,22 @@ data FailedCredential = FailedCredential
     }
     deriving (Eq, Show)
 
-newtype TokenProvider = TokenProvider
-    { runGetNextToken
+data TokenProvider = TokenProvider
+    { providerBillingMode :: !BillingMode
+    , runGetNextToken
         :: Maybe FailedCredential
         -> IO (Either ApiError Credential)
     }
+
+tokenProvider
+    :: BillingMode
+    -> (Maybe FailedCredential -> IO (Either ApiError Credential))
+    -> TokenProvider
+tokenProvider = TokenProvider
+
+tokenProviderBillingMode :: TokenProvider -> BillingMode
+tokenProviderBillingMode TokenProvider{providerBillingMode} =
+    providerBillingMode
 
 getNextToken
     :: TokenProvider
@@ -82,11 +118,15 @@ getNextToken provider = provider.runGetNextToken
 seedTokenProvider :: TokenProvider -> Credential -> IO TokenProvider
 seedTokenProvider provider credential = do
     seed <- newIORef (Just credential)
-    pure $ TokenProvider \failed -> case failed of
-        Just reportedFailure -> getNextToken provider (Just reportedFailure)
-        Nothing -> atomicModifyIORef' seed (\current -> (Nothing, current)) >>= \case
-            Just firstCredential -> pure (Right firstCredential)
-            Nothing -> getNextToken provider Nothing
+    pure TokenProvider
+        { providerBillingMode = tokenProviderBillingMode provider
+        , runGetNextToken = \failed -> case failed of
+            Just reportedFailure -> getNextToken provider (Just reportedFailure)
+            Nothing -> atomicModifyIORef'
+                seed (\current -> (Nothing, current)) >>= \case
+                    Just firstCredential -> pure (Right firstCredential)
+                    Nothing -> getNextToken provider Nothing
+        }
 
 runWithTokenProvider
     :: TokenProvider

@@ -27,7 +27,11 @@ import Agent.ToolDispatch
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import Agent.Provider (Provider(..), TokenProvider(..))
+import Agent.Provider
+    ( BillingMode(..)
+    , Provider(..)
+    , tokenProvider
+    )
 import Control.Exception
     ( AsyncException(..)
     , MaskingState(..)
@@ -57,7 +61,7 @@ spec = do
         it "short-circuits an empty transcript before using credentials" do
             params <- newIORef defaultResponseCreateParams
             transcript <- newIORef []
-            let provider = TokenProvider \_ ->
+            let provider = tokenProvider SubscriptionBilled \_ ->
                     error "empty compaction unexpectedly requested credentials"
             runProviderCompact OpenAIProvider (Just provider) params transcript Nothing
                 `shouldReturn` Left "nothing to compact"
@@ -213,7 +217,7 @@ spec = do
     describe "compactOpenAIWith" do
         it "uses remote compaction v2 on normal Responses" do
             requests <- newIORef []
-            let provider = TokenProvider \_ ->
+            let provider = tokenProvider SubscriptionBilled \_ ->
                     error "remote compaction unexpectedly requested credentials"
                 send _ request = do
                     modifyIORef' requests (<> [request])
@@ -253,7 +257,7 @@ spec = do
 
         it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []
-            let provider = TokenProvider \_ ->
+            let provider = tokenProvider SubscriptionBilled \_ ->
                     error "local summarization unexpectedly requested credentials"
                 send _ request = do
                     modifyIORef' requests (<> [request])
@@ -278,7 +282,7 @@ spec = do
             map (.stream) seen `shouldBe` [Just True]
 
         it "returns friendly provider errors from manual compaction" do
-            let provider = TokenProvider \_ ->
+            let provider = tokenProvider SubscriptionBilled \_ ->
                     error "compaction unexpectedly requested credentials"
                 send _ _ =
                     pure $ Left $
@@ -308,7 +312,7 @@ spec = do
         it "compacts at a configured threshold below the model default" do
             let history = [userTextItem "old"]
                 threshold = 20
-                tokenProvider = TokenProvider \_ ->
+                tokens = tokenProvider SubscriptionBilled \_ ->
                     pure (Left (ConnectionError "configured threshold fired"))
                 params =
                     withModel
@@ -322,7 +326,7 @@ spec = do
             let backend =
                     autoCompactOpenAiBackendWithThreshold
                         (Just threshold)
-                        tokenProvider
+                        tokens
                         (pure params)
                         transcript
                         contextState

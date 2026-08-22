@@ -2,6 +2,7 @@
 -- static Responses API bearer token.
 module Agent.OpenAI.Credential
     ( poolTokenProvider
+    , poolTokenProviderWithBilling
     , staticBearerProvider
     ) where
 
@@ -16,10 +17,12 @@ import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 
 poolTokenProvider :: Auth.Pool -> IO TokenProvider
-poolTokenProvider pool = do
+poolTokenProvider = poolTokenProviderWithBilling SubscriptionBilled
+
+poolTokenProviderWithBilling :: BillingMode -> Auth.Pool -> IO TokenProvider
+poolTokenProviderWithBilling billing pool = do
     authRecoveryAttempts <- newIORef Map.empty
-    pure $ TokenProvider \failed ->
-        case failed of
+    pure $ tokenProvider billing \failed -> case failed of
             Nothing -> acquireFromPool pool
             Just FailedCredential { credential, failure } ->
                 case failure of
@@ -79,8 +82,7 @@ takeAuthRecoverySlot attempts accountId = do
 -- | A single OpenAI-compatible API bearer token with no OAuth refresh or
 -- account failover.
 staticBearerProvider :: Text -> TokenProvider
-staticBearerProvider apiKey = TokenProvider \failed ->
-    case failed of
+staticBearerProvider apiKey = tokenProvider ApiBilled \failed -> case failed of
         Nothing ->
             pure $ Right Credential
                 { accessToken = apiKey

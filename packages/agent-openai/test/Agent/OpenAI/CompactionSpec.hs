@@ -214,7 +214,8 @@ spec = do
 
     describe "compactConversationAt" do
         it "rejects non-OpenAI credentials before making a request" do
-            let provider = TokenProvider \_ -> pure $ Right Credential
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    pure $ Right Credential
                     { accessToken = "xai-secret"
                     , accountId = "account"
                     , leaseId = Nothing
