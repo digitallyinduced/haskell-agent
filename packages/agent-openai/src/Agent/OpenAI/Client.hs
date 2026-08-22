@@ -126,7 +126,10 @@ retryTransientCodexResultWithPolicy policy request =
 
 makeCodexRequest :: Text -> Text -> Text -> OpenAI.ResponseCreateParams -> IO (Either ApiError OpenAI.Response)
 makeCodexRequest baseUrl accessToken accountId request = do
-    let requestBody = Aeson.toJSON request
+    -- The ChatGPT Codex HTTP endpoint only serves Responses requests as SSE
+    -- and rejects an omitted/false stream flag. WebSocket callers do not need
+    -- this field, so enforce it at the HTTP transport boundary.
+    let requestBody = Aeson.toJSON request { OpenAI.stream = Just True }
         url = Text.dropWhileEnd (== '/') baseUrl <> "/responses"
 
     case URI.parseURI (Text.unpack url) of

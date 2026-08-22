@@ -43,7 +43,12 @@ import Agent.Loop
     , runLoop
     , runLoopInputs
     )
-import Agent.OpenAI.LoopBackend (openAiBackend)
+import qualified Agent.OpenAI.Client as OpenAI
+import Agent.OpenAI.LoopBackend
+    ( openAiBackend
+    , openAiBackendWithTransportFallback
+    , statelessResponsesBackend
+    )
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
 import Agent.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider)
@@ -376,9 +381,21 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     (schemasFromAppTools OpenAIProvider tools) effort
             toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
-            let baseBackend =
+            httpFallbackActive <- newIORef False
+            let websocketBackend =
                     freshOpenAiBackend tokenProvider
                         (readIORef childParamsRef) session.subSessionTranscript
+                httpBackend =
+                    statelessResponsesBackend
+                        (\request _onEvent ->
+                            OpenAI.createCodexMessageWithProvider tokenProvider request)
+                        (readIORef childParamsRef)
+                        session.subSessionTranscript
+                baseBackend =
+                    openAiBackendWithTransportFallback
+                        httpFallbackActive
+                        websocketBackend
+                        httpBackend
                 backend =
                     withConnectionRecovery $
                         autoCompactOpenAiBackend tokenProvider

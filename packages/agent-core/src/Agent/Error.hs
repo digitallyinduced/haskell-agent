@@ -164,11 +164,12 @@ isInlineRetryableProviderError = \case
     ProviderError WebSocketConnectionLimitReached _ _ -> True
     _ -> False
 
--- | Failures repeatable on an existing connection. A broken connection must
--- escape to the connection-replacement layer.
+-- | Failures repeatable on an existing connection. A broken or saturated
+-- WebSocket must escape to the connection-replacement layer.
 isInlineRetryableProviderResponseError :: ApiError -> Bool
 isInlineRetryableProviderResponseError = \case
     ConnectionError _ -> False
+    ProviderError WebSocketConnectionLimitReached _ _ -> False
     apiError -> isInlineRetryableProviderError apiError
 
 apiErrorRetryAfter :: ApiError -> Maybe Int

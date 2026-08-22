@@ -224,9 +224,10 @@ sendWsRequestWithOptions options cc request previousResponseId =
         sendWsRequestWithEventsAndOptions options cc request previousResponseId (\_ -> pure ())
 
 -- | Retry short-lived provider responses on the current WebSocket. Connection
--- failures are deliberately excluded because a dead socket must be replaced
--- by the caller's reconnect/failover layer. The policy is injectable for
--- deterministic tests; normal requests use 5s/10s/20s backoff.
+-- failures and connection-limit responses are deliberately excluded because
+-- the caller's reconnect/failover layer must replace or bypass that socket.
+-- The policy is injectable for deterministic tests; normal requests use
+-- 5s/10s/20s backoff.
 retryTransientWsResultWithPolicy
     :: RetryPolicyM IO
     -> IO (Either ApiError value)

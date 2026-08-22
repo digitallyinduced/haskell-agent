@@ -8,6 +8,7 @@ module Agent.OpenAI.LoopBackend
     , openAiBackendWith
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
+    , openAiBackendWithTransportFallback
     , statelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
@@ -138,7 +139,54 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
 
     isDeadConnectionOrAccount = \case
         ConnectionError {} -> True
+        ProviderError WebSocketConnectionLimitReached _ _ -> True
         err -> isJust (accountFailureFromApiError err)
+
+-- | Prefer a WebSocket backend, then switch this agent session permanently to
+-- a fallback transport when the socket dies before exposing model output.
+--
+-- Independent agent sessions need their own WebSocket connections. The Codex
+-- endpoint can accept the upgrade and then close a fresh connection before its
+-- first response frame. Replaying the same logical turn over the stateless HTTP
+-- backend is safe while no text or reasoning delta has reached the caller.
+openAiBackendWithTransportFallback
+    :: IORef Bool
+    -> Backend
+    -> Backend
+    -> Backend
+openAiBackendWithTransportFallback fallbackActive primary fallback =
+    Backend \previousResponseId inputs onEvent -> do
+        active <- readIORef fallbackActive
+        if active
+            then fallback.submitTurn previousResponseId inputs onEvent
+            else tryPrimary previousResponseId inputs onEvent
+  where
+    tryPrimary previousResponseId inputs onEvent = do
+        emittedModelOutput <- newIORef False
+        result <- primary.submitTurn previousResponseId inputs \event -> do
+            if isModelOutput event
+                then writeIORef emittedModelOutput True
+                else pure ()
+            onEvent event
+        case result of
+            Left err
+                | isWebSocketTransportFailure err -> do
+                    writeIORef fallbackActive True
+                    emitted <- readIORef emittedModelOutput
+                    if emitted
+                        then pure result
+                        else fallback.submitTurn previousResponseId inputs onEvent
+            _ -> pure result
+
+    isModelOutput = \case
+        TextDelta {} -> True
+        ReasoningDelta {} -> True
+        _ -> False
+
+    isWebSocketTransportFailure = \case
+        ConnectionError {} -> True
+        ProviderError WebSocketConnectionLimitReached _ _ -> True
+        _ -> False
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
 openAiBackendWith
