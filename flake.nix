@@ -240,7 +240,7 @@
                     # Cap the long-running GHCi/agent process without forcing
                     # every command in nix develop to inherit the same limit.
                     if [ -z "''${GHCRTS:-}" ]; then
-                      export GHCRTS="-M8G -A64m"
+                      export GHCRTS="-M8G"
                     fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
