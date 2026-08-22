@@ -12,12 +12,12 @@ module Agent.XAI.LoopBackend
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
-import Agent.Responses.LoopBackend (statelessResponsesBackend)
-import Agent.Responses.Types
-import Agent.Provider
-    ( TokenProvider
-    , runWithTokenProvider
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackend
+    , tokenProviderStatelessResponsesBackend
     )
+import Agent.Responses.Types
+import Agent.Provider (TokenProvider)
 import Agent.XAI.Client (createResponseWithEvents)
 import Agent.XAI.Options (ClientOptions)
 import Data.IORef
@@ -34,9 +34,8 @@ xaiBackend
     -> IORef [ResponseItem]
     -> Backend
 xaiBackend options provider =
-    xaiBackendWith \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            createResponseWithEvents options credential params onEvent
+    tokenProviderStatelessResponsesBackend provider
+        (createResponseWithEvents options)
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests.
 xaiBackendWith

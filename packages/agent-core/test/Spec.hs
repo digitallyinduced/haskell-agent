@@ -2,10 +2,12 @@ module Main (main) where
 
 import qualified Agent.CancelSpec as CancelSpec
 import qualified Agent.ErrorSpec as ErrorSpec
+import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
+import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.SkillsSpec as SkillsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
@@ -28,10 +30,12 @@ main :: IO ()
 main = hspec do
     CancelSpec.spec
     ErrorSpec.spec
+    HttpHeaderSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
+    ProviderOptionsSpec.spec
     ResourceScopeSpec.spec
     SkillsSpec.spec
     SubagentsSpec.spec

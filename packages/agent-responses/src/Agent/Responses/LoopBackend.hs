@@ -1,6 +1,7 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
     , streamEventToLoopEvent
@@ -24,6 +25,11 @@ import Agent.Loop
     , TurnInput(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    )
+import Agent.Provider
+    ( Credential
+    , TokenProvider
+    , runWithTokenProvider
     )
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -65,6 +71,24 @@ statelessResponsesBackend send getParams transcript =
             Right response -> do
                 writeIORef transcript (requestItems <> response.output)
                 pure (Right (responseToTurnOutput response))
+
+-- | Adapt a credentialed stateless Responses transport to the loop.
+--
+-- Credential acquisition and account failover are shared across providers;
+-- the transport remains responsible only for one request with one credential.
+tokenProviderStatelessResponsesBackend
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+tokenProviderStatelessResponsesBackend provider send =
+    statelessResponsesBackend \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.

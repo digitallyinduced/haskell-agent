@@ -5,10 +5,14 @@ module Agent.OpenRouter.Options
     , clientOptionsFromEnv
     ) where
 
+import Agent.Provider.Options
+    ( lookupIntEnv
+    , lookupNonEmptyEnv
+    , parseModelOverrides
+    )
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Environment (lookupEnv)
 
 data ClientOptions = ClientOptions
     { baseUrl :: !String
@@ -38,36 +42,18 @@ defaultClientOptions = ClientOptions
 -- | Load optional transport overrides from the environment.
 clientOptionsFromEnv :: IO ClientOptions
 clientOptionsFromEnv = do
-    baseUrl <- lookupEnv "OPENROUTER_BASE_URL"
-    modelMap <- lookupEnv "OPENROUTER_MODEL_MAP"
-    defaultModel <- lookupEnv "OPENROUTER_DEFAULT_MODEL"
-    timeoutSeconds <- lookupEnv "OPENROUTER_TIMEOUT_SECONDS"
-    httpReferer <- lookupEnv "OPENROUTER_HTTP_REFERER"
-    appTitle <- lookupEnv "OPENROUTER_APP_TITLE"
+    baseUrl <- lookupNonEmptyEnv "OPENROUTER_BASE_URL"
+    modelMap <- lookupNonEmptyEnv "OPENROUTER_MODEL_MAP"
+    defaultModel <- lookupNonEmptyEnv "OPENROUTER_DEFAULT_MODEL"
+    timeoutSeconds <- lookupIntEnv "OPENROUTER_TIMEOUT_SECONDS"
+    httpReferer <- lookupNonEmptyEnv "OPENROUTER_HTTP_REFERER"
+    appTitle <- lookupNonEmptyEnv "OPENROUTER_APP_TITLE"
     pure ClientOptions
-        { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl (nonEmpty baseUrl)
-        , modelOverrides = maybe [] (parseModelMap . Text.pack) (nonEmpty modelMap)
-        , defaultModel = maybe defaultClientOptions.defaultModel Text.pack (nonEmpty defaultModel)
+        { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
+        , modelOverrides = maybe [] (parseModelOverrides . Text.pack) modelMap
+        , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
-            (nonEmpty timeoutSeconds >>= readMaybeInt)
-        , httpReferer = Text.pack <$> nonEmpty httpReferer
-        , appTitle = Text.pack <$> nonEmpty appTitle
+            timeoutSeconds
+        , httpReferer = Text.pack <$> httpReferer
+        , appTitle = Text.pack <$> appTitle
         }
-  where
-    nonEmpty (Just value) | not (null value) = Just value
-    nonEmpty _ = Nothing
-
-    readMaybeInt value = case reads value of
-        [(number, "")] -> Just number
-        _ -> Nothing
-
-parseModelMap :: Text -> [(Text, Text)]
-parseModelMap raw = Maybe.mapMaybe parseEntry (Text.splitOn "," raw)
-  where
-    parseEntry entry = case Text.breakOn "=" entry of
-        (source, target)
-            | not (Text.null (Text.strip source))
-            , Just stripped <- Text.stripPrefix "=" target
-            , not (Text.null (Text.strip stripped)) ->
-                Just (Text.strip source, Text.strip stripped)
-        _ -> Nothing
