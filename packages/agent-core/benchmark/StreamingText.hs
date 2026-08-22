@@ -10,6 +10,11 @@ import Agent.TextBuffer
 import Control.Exception (evaluate)
 import Control.Monad (forM)
 import Data.Char (chr, ord)
+import Data.IORef
+    ( modifyIORef'
+    , newIORef
+    , readIORef
+    )
 import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -22,11 +27,15 @@ import System.CPUTime (getCPUTime)
 import System.Environment (getArgs)
 import System.Exit (die)
 import System.Mem (performGC)
+import qualified TextBuilder
 import Text.Printf (printf)
 
 data Workload
     = OldAccumulate
     | NewAccumulate
+    | OldIORefAccumulate
+    | NewIORefAccumulate
+    | TextBuilderIORefAccumulate
     | NoDuplicateBuffer
     | FullscreenBaseline
     deriving (Eq, Show)
@@ -66,12 +75,16 @@ main = do
             die $
                 "usage: streaming-text-bench WORKLOAD CHUNKS CHUNK_SIZE SAMPLES\n"
                     <> "workloads: old-accumulate, new-accumulate, "
+                    <> "old-io-ref, new-io-ref, text-builder-io-ref, "
                     <> "no-duplicate-buffer, fullscreen-baseline"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "old-accumulate" -> pure OldAccumulate
     "new-accumulate" -> pure NewAccumulate
+    "old-io-ref" -> pure OldIORefAccumulate
+    "new-io-ref" -> pure NewIORefAccumulate
+    "text-builder-io-ref" -> pure TextBuilderIORefAccumulate
     "no-duplicate-buffer" -> pure NoDuplicateBuffer
     "fullscreen-baseline" -> pure FullscreenBaseline
     other -> die ("unknown workload: " <> other)
@@ -84,24 +97,46 @@ parsePositive label raw =
         _ -> die ("invalid " <> label <> ": " <> raw)
 
 runWorkload :: Workload -> [Text] -> IO Int
-runWorkload workload chunks =
-    evaluate $ case workload of
-        OldAccumulate ->
+runWorkload workload chunks = case workload of
+    OldAccumulate ->
+        evaluate $
             checksumText (foldl' (<>) "" chunks)
-        NewAccumulate ->
+    NewAccumulate ->
+        evaluate $
             checksumText $
                 textBufferToText $
                     foldl'
                         (flip appendTextBuffer)
                         emptyTextBuffer
                         chunks
-        NoDuplicateBuffer ->
+    OldIORefAccumulate -> do
+        bufferRef <- newIORef ""
+        mapM_
+            (\chunk -> modifyIORef' bufferRef (<> chunk))
+            chunks
+        checksumText <$> readIORef bufferRef
+    NewIORefAccumulate -> do
+        bufferRef <- newIORef emptyTextBuffer
+        mapM_
+            (\chunk ->
+                modifyIORef' bufferRef (appendTextBuffer chunk))
+            chunks
+        checksumText . textBufferToText <$> readIORef bufferRef
+    TextBuilderIORefAccumulate -> do
+        bufferRef <- newIORef mempty
+        mapM_
+            (\chunk ->
+                modifyIORef' bufferRef (<> TextBuilder.text chunk))
+            chunks
+        checksumText . TextBuilder.toText <$> readIORef bufferRef
+    NoDuplicateBuffer ->
+        evaluate $
             foldl'
                 (Text.foldl' checksumStep)
                 checksumSeed
                 chunks
-        FullscreenBaseline ->
-            oldFullscreen chunks
+    FullscreenBaseline ->
+        evaluate (oldFullscreen chunks)
 
 oldFullscreen :: [Text] -> Int
 oldFullscreen =

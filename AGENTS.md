@@ -155,16 +155,19 @@ CPU time and allocation across the requested sample count.
 Build and locate it with:
 
 ```
-nix develop -c cabal build agent-core:bench:streaming-text-bench
+nix develop -c cabal build --offline agent-core:bench:streaming-text-bench
 bin=$(nix develop -c cabal list-bin agent-core:bench:streaming-text-bench)
 ```
 
 Compare strict repeated append, chunked accumulation, removed-buffer overhead,
-and the fullscreen baseline with:
+the `text-builder` alternative, and the fullscreen baseline with:
 
 ```
 "$bin" old-accumulate       10000 16 7 +RTS -T
 "$bin" new-accumulate       10000 16 7 +RTS -T
+"$bin" old-io-ref           10000 16 7 +RTS -T
+"$bin" new-io-ref           10000 16 7 +RTS -T
+"$bin" text-builder-io-ref   10000 16 7 +RTS -T
 "$bin" no-duplicate-buffer  10000 16 7 +RTS -T
 "$bin" fullscreen-baseline  10000 16 7 +RTS -T
 ```
@@ -172,10 +175,12 @@ and the fullscreen baseline with:
 The positional arguments are workload, chunk count, ASCII bytes per chunk, and
 sample count. Run several chunk counts and sizes; the benchmark used for the
 streaming-buffer change covered 1,000, 2,000, 5,000, and 10,000 16-byte chunks,
-plus fixed-total-size cases with larger chunks. An attempted fullscreen
-chunk-buffer change was benchmarked separately and reverted because flattening
-the complete body for every Markdown render made it slower and allocated more
-than the strict-`Text` baseline.
+plus fixed-total-size cases with larger chunks. Alternative-buffer comparisons
+also covered 20,000, 50,000, and 100,000 chunks. The `*-io-ref` workloads model
+the actual renderer update path; keep those when evaluating alternative buffer
+implementations. An attempted fullscreen chunk-buffer change was benchmarked
+separately and reverted because flattening the complete body for every Markdown
+render made it slower and allocated more than the strict-`Text` baseline.
 
 # haskell
 - Prefer Control.Exception.Safe over Control.Exception

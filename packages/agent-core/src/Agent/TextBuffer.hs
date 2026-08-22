@@ -2,6 +2,8 @@
 --
 -- Chunks are retained in reverse arrival order so appending does not copy the
 -- accumulated prefix. Convert to strict 'Text' only at an output boundary.
+-- The streaming benchmark also compares this representation with
+-- @text-builder@ under the same 'IORef' update pattern.
 module Agent.TextBuffer
     ( TextBuffer
     , appendTextBuffer
