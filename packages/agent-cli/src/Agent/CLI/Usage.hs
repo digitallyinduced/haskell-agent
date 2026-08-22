@@ -8,13 +8,15 @@ module Agent.CLI.Usage
     , shortAccountId
     ) where
 
+import Agent.CLI.Duration (formatDuration)
+import Agent.CLI.Error (formatApiErrorInlineAt)
 import Agent.CLI.Style (roleMuted, roleSuccess, roleWarn)
 import Agent.Error (ApiError)
 import Agent.OpenAI.Usage (UsageLimit(..), UsageSnapshot(..), UsageWindow(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (NominalDiffTime, UTCTime(..), addUTCTime, diffUTCTime)
+import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 
 data AccountUsageLine = AccountUsageLine
@@ -43,7 +45,10 @@ formatAccountUsage color now line =
                 | otherwise -> Nothing
             Nothing -> Nothing
         body = case line.usageResult of
-            Left err -> [roleWarn color ("fetch failed: " <> Text.pack (show err))]
+            Left err ->
+                [ roleWarn color
+                    ("couldn't load usage: " <> formatApiErrorInlineAt now err)
+                ]
             Right snapshot ->
                 let plan = roleMuted color ("plan " <> snapshot.planType)
                     windows = case snapshot.rateLimit of
@@ -103,19 +108,6 @@ maybeToList = \case
 formatSeconds :: Int -> Text
 formatSeconds total =
     formatDuration (fromIntegral (max 0 total))
-
-formatDuration :: NominalDiffTime -> Text
-formatDuration delta =
-    let seconds = max 0 (round delta :: Int)
-        hours = seconds `div` 3600
-        minutes = (seconds `mod` 3600) `div` 60
-    in if hours >= 24
-        then Text.pack (show (hours `div` 24)) <> "d " <> Text.pack (show (hours `mod` 24)) <> "h"
-        else if hours > 0
-            then Text.pack (show hours) <> "h " <> Text.pack (show minutes) <> "m"
-            else if minutes > 0
-                then Text.pack (show minutes) <> "m"
-                else Text.pack (show seconds) <> "s"
 
 formatClock :: UTCTime -> Text
 formatClock = Text.pack . formatTime defaultTimeLocale "%Y-%m-%d %H:%M"

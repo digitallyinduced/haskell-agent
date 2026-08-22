@@ -35,6 +35,10 @@ import Agent.CLI.CredentialStore
     , setManagedCredentialEnabled
     , upsertManagedCredential
     )
+import Agent.CLI.Error
+    ( formatApiErrorInlineAt
+    , formatException
+    )
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Picker
     ( PickerKey(..)
@@ -260,7 +264,8 @@ refreshSelectedAccounts updates indices accounts =
                 Left err ->
                     pure account
                         { loginUsage =
-                            UsageUnavailable (Text.pack (show err))
+                            UsageUnavailable
+                                ("usage check failed: " <> formatException err)
                         }
                 Right result -> pure result
             writeChan updates (index, refreshed)
@@ -765,10 +770,12 @@ refreshLoginAccount account
                     }
                 else OpenAI.fetchUsage
                     account.loginAccessToken account.loginAccountId >>= \case
-                        Left err ->
+                        Left err -> do
+                            now <- getCurrentTime
                             pure account
                                 { loginUsage =
-                                    UsageUnavailable (Text.pack (show err))
+                                    UsageUnavailable
+                                        (formatApiErrorInlineAt now err)
                                 }
                         Right snapshot ->
                             pure account
@@ -782,7 +789,8 @@ refreshLoginAccount account
         XAIProvider ->
             XAI.fetchGrokUsage account.loginAccessToken >>= \case
                 Left err ->
-                    pure account { loginUsage = UsageUnavailable err }
+                    pure account
+                        { loginUsage = UsageUnavailable err }
                 Right snapshot ->
                     pure account
                         { loginUsage =
@@ -803,7 +811,8 @@ refreshLoginAccount account
         OpenRouterProvider ->
             OpenRouter.fetchOpenRouterUsage account.loginAccessToken >>= \case
                 Left err ->
-                    pure account { loginUsage = UsageUnavailable err }
+                    pure account
+                        { loginUsage = UsageUnavailable err }
                 Right snapshot ->
                     pure account
                         { loginLabel =

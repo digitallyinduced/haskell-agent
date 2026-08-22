@@ -124,6 +124,18 @@ spec = do
                 empty params transcript "why?"
                 `shouldReturn` Left BtwEmptyResponse
 
+    describe "formatBtwError" do
+        it "uses the shared provider error rendering" do
+            let rendered =
+                    formatBtwError
+                        (BtwTransport (ConnectionError "socket closed"))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "operation could not be completed"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "socket closed"
+            rendered `shouldNotSatisfy`
+                Text.isInfixOf "ConnectionError"
+
 userItem :: Text.Text -> ResponseItem
 userItem text = MessageItem ResponseMessage
     { messageId = Nothing

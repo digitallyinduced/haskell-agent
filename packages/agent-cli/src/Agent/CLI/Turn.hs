@@ -25,7 +25,10 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
     , formatElapsed
+    , formatLoopErrorAt
     , formatLoopErrorColored
+    , formatLoopErrorColoredAt
+    , formatLoopErrorPersistedAt
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
@@ -302,15 +305,16 @@ runOneTurn env@SessionEnv
                                     (UiTurnEnded BlockFailed)
                                 emitUiEvent runtime
                                     (UiErrorMessage
-                                        (Text.pack (show err)
+                                        (formatLoopErrorAt finishedAt err
                                             <> "\n"
                                             <> elapsedDetail model))
                         Nothing -> do
                             color <- resolveColor stderr
-                            putTextLn stderr (formatLoopErrorColored color err)
+                            putTextLn stderr
+                                (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderr
                                 (formatTurnStatus color "error" (elapsedDetail model))
-                    persistIncomplete (Text.pack (show err))
+                    persistIncomplete (formatLoopErrorPersistedAt finishedAt err)
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)

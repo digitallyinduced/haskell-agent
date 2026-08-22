@@ -14,6 +14,7 @@ module Agent.CLI.AgentSessions
     ) where
 
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.Error (formatException)
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionHandle(..)
@@ -188,7 +189,7 @@ launchSessionTurn manager background policy handle message =
                                     ( processes
                                     , Left
                                         ("failed to start agent session: "
-                                            <> Text.pack (show err))
+                                            <> formatException err)
                                     )
                             Right (_, _, _, process)
                                 | background ->

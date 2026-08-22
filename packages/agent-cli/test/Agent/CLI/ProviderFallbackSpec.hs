@@ -67,6 +67,10 @@ spec = do
                 (fallbackCandidates [XAIProvider] OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [OpenRouterProvider]
+            map (.modelProvider)
+                (fallbackCandidates [XAIProvider] OpenAIProvider
+                    (CredentialError "credential file is invalid"))
+                `shouldBe` [OpenRouterProvider]
 
     describe "automaticCooldownRetryDelay" do
         let now = UTCTime (fromGregorian 2026 8 21) 0

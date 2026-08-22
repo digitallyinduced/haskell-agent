@@ -48,6 +48,8 @@ library
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.CredentialStore
+                    , Agent.CLI.Duration
+                    , Agent.CLI.Error
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
                     , Agent.CLI.Interrupt
@@ -148,6 +150,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
+                    , Agent.CLI.ErrorSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec

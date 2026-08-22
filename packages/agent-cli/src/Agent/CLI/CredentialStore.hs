@@ -16,6 +16,7 @@ module Agent.CLI.CredentialStore
     , withCredentialRefreshFileLock
     ) where
 
+import Agent.CLI.Error (formatException)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
@@ -438,7 +439,7 @@ decodeFileOrEmpty path empty = do
             Left exception ->
                 pure $ Left
                     ("could not read " <> toText path <> ": "
-                        <> Text.pack (show exception))
+                        <> formatException exception)
             Right bytes -> pure case Aeson.eitherDecode bytes of
                 Left err ->
                     Left
@@ -452,7 +453,7 @@ writePrivateJson path value =
         Left exception ->
             pure $ Left
                 ("could not write " <> toText path <> ": "
-                    <> Text.pack (show exception))
+                    <> formatException exception)
         Right () -> pure (Right ())
   where
     action = do

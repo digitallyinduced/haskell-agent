@@ -2,7 +2,7 @@ module Agent.CLI.AuthSpec (spec) where
 
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error (ApiError(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -282,10 +282,10 @@ spec = do
                 , failure = AccountAuthenticationRejected
                 })
             case result of
-                Left (ProviderError AuthenticationError message _) ->
+                Left (CredentialError message) ->
                     Text.unpack message `shouldContain`
                         "reloaded credential is unchanged"
-                other -> expectationFailure ("expected AuthenticationError, got " <> show other)
+                other -> expectationFailure ("expected CredentialError, got " <> show other)
 
 openAiManagedPoolTest :: OsPath -> IO ()
 openAiManagedPoolTest _ =

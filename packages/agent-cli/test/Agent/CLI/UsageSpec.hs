@@ -1,6 +1,7 @@
 module Agent.CLI.UsageSpec (spec) where
 
 import Agent.CLI.Usage
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Usage
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -34,6 +35,23 @@ spec = do
             rendered `shouldSatisfy` ("5h  69% reserve" `Text.isInfixOf`)
             rendered `shouldSatisfy` ("7d  28% reserve" `Text.isInfixOf`)
             rendered `shouldSatisfy` ("lasts until reset" `Text.isInfixOf`)
+
+        it "uses friendly provider errors when usage cannot be loaded" do
+            let line = AccountUsageLine
+                    { usageAccountId = "acc-123"
+                    , usageCooldownUntil = Nothing
+                    , usageResult =
+                        Left
+                            (ProviderError AuthenticationError
+                                "expired token"
+                                Nothing)
+                    }
+                rendered = formatAccountUsage False epoch line
+            rendered `shouldSatisfy`
+                Text.isInfixOf "Authentication failed"
+            rendered `shouldSatisfy` Text.isInfixOf "/login"
+            rendered `shouldNotSatisfy`
+                Text.isInfixOf "ProviderError"
 
     describe "formatUsageReport" do
         it "explains an empty pool" do

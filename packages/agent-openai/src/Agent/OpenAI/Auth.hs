@@ -421,6 +421,7 @@ isAuthError :: ApiError -> Bool
 isAuthError (HttpError 401 _) = True
 isAuthError (HttpError 403 _) = True
 isAuthError (ProviderError AuthenticationError _ _) = True
+isAuthError CredentialError{} = True
 isAuthError _ = False
 
 setCooldown :: Pool -> Text -> UTCTime -> IO ()

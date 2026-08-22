@@ -118,6 +118,33 @@ spec = do
             map (.parallelToolCalls) seen `shouldBe` [Just False]
             map (.stream) seen `shouldBe` [Just True]
 
+        it "returns friendly provider errors from manual compaction" do
+            let provider = TokenProvider \_ ->
+                    error "compaction unexpectedly requested credentials"
+                send _ _ =
+                    pure $ Left $
+                        ProviderError UsageLimitReached
+                            "quota exhausted"
+                            (Just 120)
+                history = [userTextItem "old context"]
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    defaultResponseCreateParams
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> do
+                    err `shouldSatisfy`
+                        Text.isInfixOf "Usage limit reached"
+                    err `shouldSatisfy`
+                        Text.isInfixOf "Try again in 2m"
+                    err `shouldNotSatisfy`
+                        Text.isInfixOf "ProviderError"
+                Right _ ->
+                    expectationFailure "expected compaction to fail"
+
     describe "autoCompactOpenAiBackendWith" do
         it "compacts at a configured threshold below the model default" do
             let history = [userTextItem "old"]

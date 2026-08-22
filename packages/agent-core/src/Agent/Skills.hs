@@ -19,7 +19,7 @@ module Agent.Skills
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
     ( FromJSON(..)
@@ -44,7 +44,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
-import Data.Yaml (decodeEither')
+import Data.Yaml (decodeEither', prettyPrintParseException)
 import System.Directory
     ( canonicalizePath
     , doesDirectoryExist
@@ -290,13 +290,17 @@ loadSkill
 loadSkill scope origin path = do
     result <- tryAny (retryOnFileBusy (Text.readFile path))
     case result of
-        Left err -> pure $ Left (warning (Text.pack (show err)))
+        Left err ->
+            pure $ Left (warning (Text.pack (displayException err)))
         Right fileText ->
             case splitFrontmatter fileText of
                 Left err -> pure (Left (warning err))
                 Right (yamlText, body) ->
                     case decodeEither' (Text.encodeUtf8 yamlText) of
-                        Left err -> pure $ Left (warning (Text.pack (show err)))
+                        Left err ->
+                            pure $ Left
+                                (warning
+                                    (Text.pack (prettyPrintParseException err)))
                         Right frontmatter ->
                             case validateFrontmatter path frontmatter of
                                 Left err -> pure (Left (warning err))

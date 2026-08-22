@@ -134,6 +134,7 @@ accountFailureFromApiError err = case err of
     HttpError 401 _ -> authenticationRejected
     HttpError 403 _ -> authenticationRejected
     ProviderError AuthenticationError _ _ -> authenticationRejected
+    CredentialError{} -> authenticationRejected
     _ -> Nothing
   where
     rateLimited = Just $ AccountRateLimited (apiErrorRetryAfter err)

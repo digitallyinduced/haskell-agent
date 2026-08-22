@@ -90,5 +90,6 @@ isProviderUnavailable err
     | otherwise = case err of
         HttpError status _ -> status == 401 || status == 403
         ProviderError AuthenticationError _ _ -> True
+        CredentialError{} -> True
         ProviderError PermissionError _ _ -> True
         _ -> False
