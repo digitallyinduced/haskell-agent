@@ -9,7 +9,7 @@ mkDerivation {
     aeson agent-core base base64-bytestring bytestring containers
     scientific text vector
   ];
-  testHaskellDepends = [ aeson base hspec text ];
+  testHaskellDepends = [ aeson agent-core base hspec text ];
   description = "Provider-neutral OpenAI Responses protocol types and adapters";
   license = lib.licenses.bsd3;
 }

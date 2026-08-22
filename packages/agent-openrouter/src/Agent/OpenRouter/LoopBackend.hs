@@ -12,12 +12,12 @@ module Agent.OpenRouter.LoopBackend
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
-import Agent.Responses.LoopBackend (statelessResponsesBackend)
-import Agent.Responses.Types
-import Agent.Provider
-    ( TokenProvider
-    , runWithTokenProvider
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackend
+    , tokenProviderStatelessResponsesBackend
     )
+import Agent.Responses.Types
+import Agent.Provider (TokenProvider)
 import Agent.OpenRouter.Client (createResponseWithEvents)
 import Agent.OpenRouter.Options (ClientOptions)
 import Data.IORef
@@ -34,9 +34,8 @@ openRouterBackend
     -> IORef [ResponseItem]
     -> Backend
 openRouterBackend options provider =
-    openRouterBackendWith \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            createResponseWithEvents options credential params onEvent
+    tokenProviderStatelessResponsesBackend provider
+        (createResponseWithEvents options)
 
 -- | Same mapping as 'openRouterBackend', with an injectable transport for tests.
 openRouterBackendWith

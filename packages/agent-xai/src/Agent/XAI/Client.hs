@@ -8,6 +8,7 @@ module Agent.XAI.Client
     , retryTransientXaiResultWithPolicy
     ) where
 
+import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error
     ( ApiError(..)
@@ -31,7 +32,6 @@ import Control.Retry
     , retrying
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -125,13 +125,10 @@ createResponseWithEventsPolicy policy options credential request onEvent
                 Right events -> do
                     mapM_ onEvent events
                     pure (buildResponse events)
-            else pure $ Left $ classifyFailure status (retryAfterSeconds response) bodyText
-
-    retryAfterSeconds response = case getResponseHeader "Retry-After" response of
-        (value : _) -> case reads (BS8.unpack value) of
-            [(seconds, "")] -> Just (max 1 seconds)
-            _ -> Nothing
-        [] -> Nothing
+            else pure $ Left $ classifyFailure status
+                (parseRetryAfterSeconds
+                    (getResponseHeader "Retry-After" response))
+                bodyText
 
 -- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
 -- connection drops and quota errors are left to the caller. Production uses a

@@ -36,9 +36,11 @@ library
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
+                    , Agent.Provider.Options
                     , Agent.Loop
                     , Agent.JsonText
                     , Agent.OsPath
+                    , Agent.Http.Header
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.ResourceScope
@@ -104,10 +106,12 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.CancelSpec
                     , Agent.ErrorSpec
+                    , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
+                    , Agent.Provider.OptionsSpec
                     , Agent.ResourceScopeSpec
                     , Agent.SkillsSpec
                     , Agent.SubagentsSpec

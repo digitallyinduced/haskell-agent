@@ -8,6 +8,7 @@ module Agent.OpenRouter.Client
     , retryTransientOpenRouterResultWithPolicy
     ) where
 
+import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error
     ( ApiError(..)
@@ -34,7 +35,6 @@ import Control.Retry
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
@@ -128,7 +128,10 @@ createResponseWithEventsPolicy policy options credential request onEvent
                 let bodyText = Text.decodeUtf8With Text.lenientDecode
                         (LBS.toStrict body)
                 pure $ Left $
-                    classifyFailure status (retryAfterSeconds response) bodyText
+                    classifyFailure status
+                        (parseRetryAfterSeconds
+                            (getResponseHeader "Retry-After" response))
+                        bodyText
 
     consumeSse emit body = go newSseDecoder []
       where
@@ -164,12 +167,6 @@ createResponseWithEventsPolicy policy options credential request onEvent
         ResponseNestedErrorEvent {} -> True
         ResponseFailedEvent {} -> True
         _ -> False
-
-    retryAfterSeconds response = case getResponseHeader "Retry-After" response of
-        (value : _) -> case reads (BS8.unpack value) of
-            [(seconds, "")] -> Just (max 1 seconds)
-            _ -> Nothing
-        [] -> Nothing
 
 -- | Retry transient failures while replay is safe. The callback marker is
 -- written before user code runs, so callback exceptions are never retried.

@@ -5,10 +5,14 @@ module Agent.XAI.Options
     , clientOptionsFromEnv
     ) where
 
+import Agent.Provider.Options
+    ( lookupIntEnv
+    , lookupNonEmptyEnv
+    , parseModelOverrides
+    )
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Environment (lookupEnv)
 
 data ClientOptions = ClientOptions
     { baseUrl :: !String
@@ -35,34 +39,16 @@ defaultClientOptions = ClientOptions
 -- | Load optional transport overrides from the environment.
 clientOptionsFromEnv :: IO ClientOptions
 clientOptionsFromEnv = do
-    baseUrl <- lookupEnv "XAI_GROK_BASE_URL"
-    modelMap <- lookupEnv "XAI_GROK_MODEL_MAP"
-    defaultModel <- lookupEnv "XAI_GROK_DEFAULT_MODEL"
-    timeoutSeconds <- lookupEnv "XAI_GROK_TIMEOUT_SECONDS"
-    clientVersion <- lookupEnv "XAI_GROK_CLIENT_VERSION"
+    baseUrl <- lookupNonEmptyEnv "XAI_GROK_BASE_URL"
+    modelMap <- lookupNonEmptyEnv "XAI_GROK_MODEL_MAP"
+    defaultModel <- lookupNonEmptyEnv "XAI_GROK_DEFAULT_MODEL"
+    timeoutSeconds <- lookupIntEnv "XAI_GROK_TIMEOUT_SECONDS"
+    clientVersion <- lookupNonEmptyEnv "XAI_GROK_CLIENT_VERSION"
     pure ClientOptions
-        { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl (nonEmpty baseUrl)
-        , modelOverrides = maybe [] (parseModelMap . Text.pack) (nonEmpty modelMap)
-        , defaultModel = maybe defaultClientOptions.defaultModel Text.pack (nonEmpty defaultModel)
+        { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
+        , modelOverrides = maybe [] (parseModelOverrides . Text.pack) modelMap
+        , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
-            (nonEmpty timeoutSeconds >>= readMaybeInt)
-        , clientVersion = maybe defaultClientOptions.clientVersion Text.pack (nonEmpty clientVersion)
+            timeoutSeconds
+        , clientVersion = maybe defaultClientOptions.clientVersion Text.pack clientVersion
         }
-  where
-    nonEmpty (Just value) | not (null value) = Just value
-    nonEmpty _ = Nothing
-
-    readMaybeInt value = case reads value of
-        [(number, "")] -> Just number
-        _ -> Nothing
-
-parseModelMap :: Text -> [(Text, Text)]
-parseModelMap raw = Maybe.mapMaybe parseEntry (Text.splitOn "," raw)
-  where
-    parseEntry entry = case Text.breakOn "=" entry of
-        (source, target)
-            | not (Text.null (Text.strip source))
-            , Just stripped <- Text.stripPrefix "=" target
-            , not (Text.null (Text.strip stripped)) ->
-                Just (Text.strip source, Text.strip stripped)
-        _ -> Nothing
