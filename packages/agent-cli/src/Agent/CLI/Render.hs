@@ -584,6 +584,7 @@ toolChrome name = case canonicalToolName name of
     "apply_patch" -> ToolChrome "Edited" ToolDetailPath
     "run_terminal_cmd" -> ToolChromeShell
     "shell_command" -> ToolChromeShell
+    "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted

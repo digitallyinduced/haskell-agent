@@ -35,6 +35,8 @@ spec = do
                 `shouldBe` "Read src/A.hs"
             summarizeToolCall (functionToolCall "c2" "shell_command" "{\"command\":\"ls -l\"}")
                 `shouldBe` "$ ls -l"
+            summarizeToolCall (functionToolCall "c2b" "write_stdin" "{\"session_id\":7}")
+                `shouldBe` "Continued session 7"
             summarizeToolCall (functionToolCall "c3" "run_terminal_cmd" "{\"command\":\"git status\"}")
                 `shouldBe` "$ git status"
             summarizeToolCall (functionToolCall "c3b" "run_ghci" "{\"expression\":\"1 + 1\"}")
