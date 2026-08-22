@@ -1,13 +1,23 @@
 -- | Typed decoding and terminal-response assembly for xAI Responses SSE.
 module Agent.XAI.Stream
-    ( parseSseEvents
+    ( SseDecoder
+    , newSseDecoder
+    , feedSseDecoder
+    , finishSseDecoder
+    , parseSseEvents
     , buildResponse
     ) where
 
 import Agent.Error (ApiError(..), errorTypeFromText)
 import Agent.Responses.Error (mkOpenAIError)
 import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
-import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.SSE
+    ( SseDecoder
+    , feedSseDecoder
+    , finishSseDecoder
+    , newSseDecoder
+    , parseSseEvents
+    )
 import Agent.Responses.Types
 import Agent.XAI.Error (classifyStreamError)
 import qualified Data.Aeson as Aeson
@@ -17,48 +27,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
-
--- | Decode an SSE body into the canonical typed Responses event union.
--- The discriminator may be supplied by the SSE @event:@ line, by the JSON
--- @type@ member, or by both when they agree.
-parseSseEvents :: Text -> Either ApiError [ResponseStreamEvent]
-parseSseEvents sseText = Maybe.catMaybes <$> traverse parseBlock blocks
-  where
-    normalized = Text.replace "\r\n" "\n" sseText
-    blocks = filter (not . Text.null . Text.strip) (Text.splitOn "\n\n" normalized)
-
-    parseBlock block
-        | Text.null dataText = Right Nothing
-        | Text.strip dataText == "[DONE]" = Right Nothing
-        | otherwise = Just <$> decodeEvent eventType dataText
-      where
-        blockLines = Text.lines block
-        eventType = Maybe.listToMaybe
-            [ Text.strip (Text.drop 6 line)
-            | line <- blockLines
-            , "event:" `Text.isPrefixOf` line
-            ]
-        dataText = Text.intercalate "\n"
-            [ Text.strip (Text.drop 5 line)
-            | line <- blockLines
-            , "data:" `Text.isPrefixOf` line
-            ]
-
-    decodeEvent eventType dataText = do
-        value <- case Aeson.eitherDecodeStrict' (Text.encodeUtf8 dataText) of
-            Left err -> Left (decodeError (Text.pack err) dataText)
-            Right value -> Right value
-        let decoded = case eventType of
-                Just suppliedType ->
-                    ResponsesCodec.decodeResponseStreamEventWithType suppliedType value
-                Nothing -> case ResponsesCodec.decodeResponseStreamEventValue value of
-                    Aeson.Success event -> Right event
-                    Aeson.Error err -> Left err
-        case decoded of
-            Left err -> Left (decodeError (Text.pack err) dataText)
-            Right event -> Right event
-
-    decodeError message body = JsonDecodeError message (Text.take 2000 body)
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response

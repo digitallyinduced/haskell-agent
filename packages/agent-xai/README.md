@@ -4,8 +4,9 @@ xAI-specific transport package for the agent harness.
 
 - Projects canonical `ResponseCreateParams` values into the Grok subscription
   proxy dialect while keeping the request typed.
-- Decodes SSE into the canonical typed `ResponseStreamEvent` union and assembles
-  the terminal `Response`.
+- Decodes SSE incrementally into the canonical typed `ResponseStreamEvent`
+  union, delivers callbacks while the response is still arriving, and
+  assembles the terminal `Response` without retaining every stream event.
 - Implements xAI device authorization, token refresh, and account-id derivation.
 
 `Agent.XAI.LoopBackend` implements the provider-neutral `Backend` used by
@@ -14,8 +15,9 @@ local item list and resends it on each turn.
 
 The package contains no agent loop, context trimming, or credential failover.
 Those concerns belong to the harness around the provider client. The HTTP
-client does retry short-lived capacity / overload failures (30s delay, a few
-attempts) before returning them to the loop.
+client retries short-lived capacity / overload failures (30s delay, a few
+attempts) before returning them to the loop. Event-producing calls retry only
+before the first callback, so already-visible output is never replayed.
 
 OAuth login options require the application's public client id at runtime;
 `agent-xai` does not embed one in its source.
