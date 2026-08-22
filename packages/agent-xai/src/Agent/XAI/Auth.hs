@@ -82,7 +82,18 @@ data DeviceAuthorization = DeviceAuthorization
     , verificationUrl :: !Text
     , pollIntervalSeconds :: !Int
     , expiresInSeconds :: !(Maybe Int)
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+-- Device and user codes are temporary credentials, and the preferred
+-- verification URL may carry the user code in its query string.
+instance Show DeviceAuthorization where
+    show authorization =
+        "DeviceAuthorization { deviceCode = <redacted>, userCode = <redacted>"
+            <> ", verificationUrl = <redacted>"
+            <> ", pollIntervalSeconds = "
+            <> show authorization.pollIntervalSeconds
+            <> ", expiresInSeconds = " <> show authorization.expiresInSeconds
+            <> " }"
 
 instance Aeson.FromJSON DeviceAuthorization where
     parseJSON = Aeson.withObject "DeviceAuthorization" \object -> do

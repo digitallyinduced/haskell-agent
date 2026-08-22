@@ -17,6 +17,40 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "Show" do
+        it "redacts every token while retaining account metadata" do
+            let auth = AuthState
+                    { accessToken = "access-secret"
+                    , refreshToken = "refresh-secret"
+                    , accountId = "acc-visible"
+                    , idToken = Just "identity-secret"
+                    , lastRefresh = epoch
+                    }
+                rendered = show auth
+            rendered `shouldContain` "acc-visible"
+            rendered `shouldContain` show epoch
+            rendered `shouldNotContain` "access-secret"
+            rendered `shouldNotContain` "refresh-secret"
+            rendered `shouldNotContain` "identity-secret"
+
+        it "keeps AccountSnapshot token-safe through its Show instance" do
+            let auth = AuthState
+                    { accessToken = "snapshot-access-secret"
+                    , refreshToken = "snapshot-refresh-secret"
+                    , accountId = "snapshot-account"
+                    , idToken = Just "snapshot-id-secret"
+                    , lastRefresh = epoch
+                    }
+                snapshot = AccountSnapshot
+                    { snapshotAuth = auth
+                    , snapshotCooldownUntil = Just epoch
+                    }
+                rendered = show snapshot
+            rendered `shouldContain` "snapshot-account"
+            rendered `shouldNotContain` "snapshot-access-secret"
+            rendered `shouldNotContain` "snapshot-refresh-secret"
+            rendered `shouldNotContain` "snapshot-id-secret"
+
     describe "parseJwtExp" $ do
         it "parses exp claim from a well-formed JWT" $ do
             let expSeconds = 4_102_444_800 :: Int  -- 2100-01-01 00:00:00 UTC

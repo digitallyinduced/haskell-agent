@@ -45,7 +45,20 @@ data ToolCall = ToolCall
     , arguments :: !Text
     , callKind :: !ToolCallKind
     , argumentsEncrypted :: !Bool
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+instance Show ToolCall where
+    show call =
+        "ToolCall { callId = " <> show call.callId
+            <> ", name = " <> show call.name
+            <> ", arguments = " <> shownArguments
+            <> ", callKind = " <> show call.callKind
+            <> ", argumentsEncrypted = " <> show call.argumentsEncrypted
+            <> " }"
+      where
+        shownArguments
+            | call.argumentsEncrypted = "<redacted>"
+            | otherwise = show call.arguments
 
 -- | Provider-neutral result ready for a transport adapter to encode.
 data ToolCallResult = ToolCallResult

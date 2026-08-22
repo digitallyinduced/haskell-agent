@@ -784,7 +784,20 @@ data ReasoningItem = ReasoningItem
     , encryptedContent :: !(Maybe Text)
     , status           :: !(Maybe ItemStatus)
     , extraFields      :: !Aeson.Object
-    } deriving stock (Eq, Show)
+    } deriving stock (Eq)
+
+-- Keep opaque encrypted reasoning payloads out of logs while retaining enough
+-- structure to diagnose response-shape and lifecycle issues.
+instance Show ReasoningItem where
+    show item =
+        "ReasoningItem { itemId = " <> show item.itemId
+            <> ", summary = " <> show item.summary
+            <> ", content = " <> show item.content
+            <> ", encryptedContent = "
+            <> maybe "Nothing" (const "Just <redacted>") item.encryptedContent
+            <> ", status = " <> show item.status
+            <> ", extraFields = " <> show item.extraFields
+            <> " }"
 
 instance ToJSON ReasoningItem where
     toJSON ReasoningItem { itemId, summary, content, encryptedContent, status, extraFields } = objectWith extraFields
