@@ -1,7 +1,12 @@
 module Agent.OpenAI.Client
-    ( createCodexMessage
+    ( CodexRequestOptions(..)
+    , defaultCodexRequestOptions
+    , remoteCompactionV2RequestOptions
+    , createCodexMessage
     , createCodexMessageWithProvider
+    , createCodexMessageWithProviderWithOptions
     , createCodexMessageWithProviderAt
+    , createCodexMessageWithProviderAtWithOptions
     , defaultCodexBaseUrl
     , retryTransientCodexResultWithPolicy
     ) where
@@ -10,6 +15,10 @@ import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
 import Agent.OpenAI.Error (classifyHttpFailure)
+import Agent.OpenAI.Features
+    ( betaFeaturesHeaderValue
+    , remoteCompactionV2Feature
+    )
 import Agent.OpenAI.Http (decodeCodexHttpBody)
 import Agent.Provider
     ( Credential(..)
@@ -18,7 +27,7 @@ import Agent.Provider
     , runWithTokenProvider
     )
 import qualified Agent.Responses.Types as OpenAI
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import qualified Control.Exception.Safe as Exception
 import Control.Monad.Catch (Handler(..))
 import Control.Retry
@@ -46,6 +55,21 @@ import Network.Http.Client
 -- request/SSE client without the ChatGPT broker.
 defaultCodexBaseUrl :: Text
 defaultCodexBaseUrl = "https://chatgpt.com/backend-api/codex"
+
+-- | Per-request Codex transport controls that are not part of the public
+-- Responses JSON schema.
+data CodexRequestOptions = CodexRequestOptions
+    { betaFeatures :: ![Text]
+    } deriving (Eq, Show)
+
+defaultCodexRequestOptions :: CodexRequestOptions
+defaultCodexRequestOptions = CodexRequestOptions
+    { betaFeatures = [remoteCompactionV2Feature]
+    }
+
+-- | Normal Responses transport options for the @compaction_trigger@ protocol.
+remoteCompactionV2RequestOptions :: CodexRequestOptions
+remoteCompactionV2RequestOptions = defaultCodexRequestOptions
 
 -- | Send a request to the Codex Responses API and parse the response.
 -- Serialises 'OpenAI.ResponseCreateParams' via its 'ToJSON' instance, POSTs to
@@ -75,7 +99,18 @@ createCodexMessageWithProvider
     -> OpenAI.ResponseCreateParams
     -> IO (Either ApiError OpenAI.Response)
 createCodexMessageWithProvider =
-    createCodexMessageWithProviderAt defaultCodexBaseUrl
+    createCodexMessageWithProviderWithOptions defaultCodexRequestOptions
+
+-- | Provider-based REST client with Codex-specific transport options.
+createCodexMessageWithProviderWithOptions
+    :: CodexRequestOptions
+    -> TokenProvider
+    -> OpenAI.ResponseCreateParams
+    -> IO (Either ApiError OpenAI.Response)
+createCodexMessageWithProviderWithOptions options =
+    createCodexMessageWithProviderAtWithOptions
+        options
+        defaultCodexBaseUrl
 
 -- | Like 'createCodexMessageWithProvider', but POST to
 -- @{baseUrl}/responses@ instead of the ChatGPT Codex backend.
@@ -89,7 +124,18 @@ createCodexMessageWithProviderAt
     -> TokenProvider
     -> OpenAI.ResponseCreateParams
     -> IO (Either ApiError OpenAI.Response)
-createCodexMessageWithProviderAt baseUrl provider request =
+createCodexMessageWithProviderAt =
+    createCodexMessageWithProviderAtWithOptions defaultCodexRequestOptions
+
+-- | Like 'createCodexMessageWithProviderAt', with additional Codex transport
+-- headers such as @x-codex-beta-features@.
+createCodexMessageWithProviderAtWithOptions
+    :: CodexRequestOptions
+    -> Text
+    -> TokenProvider
+    -> OpenAI.ResponseCreateParams
+    -> IO (Either ApiError OpenAI.Response)
+createCodexMessageWithProviderAtWithOptions options baseUrl provider request =
     runWithTokenProvider provider \credential ->
         case credential.provider of
             XAIProvider -> pure $ Left $ ProviderError ApiErrorType
@@ -101,7 +147,12 @@ createCodexMessageWithProviderAt baseUrl provider request =
             OpenAIProvider ->
                 retryTransientCodexResultWithPolicy transientResultPolicy $
                     recovering exceptionPolicy handlers $ \_status ->
-                        makeCodexRequest baseUrl credential.accessToken credential.accountId request
+                        makeCodexRequest
+                            options
+                            baseUrl
+                            credential.accessToken
+                            credential.accountId
+                            request
   where
     exceptionPolicy = exponentialBackoff 1_000_000 <> limitRetries 3
     transientResultPolicy = exponentialBackoff 5_000_000 <> limitRetries 3
@@ -124,8 +175,14 @@ retryTransientCodexResultWithPolicy policy request =
         Left apiError | isInlineRetryableProviderError apiError -> pure True
         _ -> pure False
 
-makeCodexRequest :: Text -> Text -> Text -> OpenAI.ResponseCreateParams -> IO (Either ApiError OpenAI.Response)
-makeCodexRequest baseUrl accessToken accountId request = do
+makeCodexRequest
+    :: CodexRequestOptions
+    -> Text
+    -> Text
+    -> Text
+    -> OpenAI.ResponseCreateParams
+    -> IO (Either ApiError OpenAI.Response)
+makeCodexRequest options baseUrl accessToken accountId request = do
     -- The ChatGPT Codex HTTP endpoint only serves Responses requests as SSE
     -- and rejects an omitted/false stream flag. WebSocket callers do not need
     -- this field, so enforce it at the HTTP transport boundary.
@@ -146,6 +203,10 @@ makeCodexRequest baseUrl accessToken accountId request = do
                                 -- OpenAI-compatible proxies (llm-router) do not.
                                 when (not (Text.null (Text.strip accountId))) $
                                     Network.Http.Client.setHeader "chatgpt-account-id" (Text.encodeUtf8 accountId)
+                                forM_ (betaFeaturesHeaderValue options.betaFeatures) \features ->
+                                    Network.Http.Client.setHeader
+                                        "x-codex-beta-features"
+                                        (Text.encodeUtf8 features)
                     sendRequest conn req (jsonBody requestBody)
                     receiveResponse conn responseHandler
 

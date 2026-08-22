@@ -10,6 +10,7 @@ module Agent.OpenAI.WebSocketClient
     , CodexWsOptions(..)
     , defaultCodexWsOptions
     , buildWsPayloadWithOptions
+    , buildCodexWsHeaders
     , StreamEventCallback
     , RawStreamEventCallback
     , CodexConn
@@ -20,6 +21,7 @@ import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
+import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
@@ -139,11 +141,7 @@ runConnectionAttempt credential _action
         Nothing
 runConnectionAttempt credential action = do
     result <- Exception.try @Exception.SomeException $ do
-        let headers =
-                [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
-                , ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
-                , ("OpenAI-Beta", "responses_websockets=2026-02-06")
-                ]
+        let headers = buildCodexWsHeaders credential
         WebSocket.retryTransientWsConnectWithPolicy
             WebSocket.transientWsConnectRetryPolicy
             \connected ->
@@ -165,6 +163,15 @@ runConnectionAttempt credential action = do
             | Just authErr <- WebSocket.wsHandshakeAuthFailure exception ->
                 pure (Left authErr)
             | otherwise -> Exception.throwIO exception
+
+-- | Pure handshake-header builder exported for transport contract tests.
+buildCodexWsHeaders :: Credential -> WS.Headers
+buildCodexWsHeaders credential =
+    [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
+    , ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
+    , ("OpenAI-Beta", "responses_websockets=2026-02-06")
+    , ("x-codex-beta-features", Text.encodeUtf8 remoteCompactionV2Feature)
+    ]
 
 -- | Wraps an 'ApiError' from 'getAccessToken' so it can propagate out of
 -- 'withCodexWs' as an exception. The agent-loop's failover layer unwraps it

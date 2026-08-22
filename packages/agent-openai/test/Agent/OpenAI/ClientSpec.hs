@@ -132,6 +132,8 @@ spec = do
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer router-key"
             lookup "chatgpt-account-id" request.headers `shouldBe` Nothing
+            lookup "x-codex-beta-features" request.headers
+                `shouldBe` Just "remote_compaction_v2"
             case request.body of
                 Aeson.Object object ->
                     KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
@@ -169,6 +171,34 @@ spec = do
                     (helloRequest "hi")
                 response <- expectRight result
                 extractAssistantText response `shouldBe` Just "from-sse"
+
+        it "advertises remote compaction v2 and merges its streamed output item" do
+            recorded <- newIORef []
+            let handler _request = pure sseCompactionCompleted
+            withMockResponses recorded handler \baseUrl -> do
+                result <- createCodexMessageWithProviderAtWithOptions
+                    remoteCompactionV2RequestOptions
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    (helloRequest "compact")
+                response <- expectRight result
+                case response.output of
+                    [KnownResponseItem ItemCompaction tagged] ->
+                        KeyMap.lookup "encrypted_content" tagged.fields
+                            `shouldBe` Just (Aeson.String "opaque")
+                    other ->
+                        expectationFailure
+                            ("expected one compaction output, got " <> show other)
+
+            [request] <- readIORef recorded
+            lookup "x-codex-beta-features" request.headers
+                `shouldBe` Just "remote_compaction_v2"
+            case request.body of
+                Aeson.Object object ->
+                    KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
+                other ->
+                    expectationFailure
+                        ("expected JSON request object, got " <> show other)
 
 responseWithStatus :: Text -> Maybe Aeson.Value -> Response
 responseWithStatus status errorValue = decodeResponse (Aeson.object
@@ -237,6 +267,38 @@ sseCompleted text =
         body = "event: response.completed\ndata: "
             <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode payload))
             <> "\n\n"
+    in Wai.responseLBS HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        (LBS.fromStrict (Text.encodeUtf8 body))
+
+sseCompactionCompleted :: Wai.Response
+sseCompactionCompleted =
+    let item = Aeson.object
+            [ "type" .= ("compaction" :: Text)
+            , "encrypted_content" .= ("opaque" :: Text)
+            ]
+        done = Aeson.object
+            [ "type" .= ("response.output_item.done" :: Text)
+            , "item" .= item
+            ]
+        completed = Aeson.object
+            [ "type" .= ("response.completed" :: Text)
+            , "response" .= Aeson.object
+                [ "id" .= ("resp-compact" :: Text)
+                , "created_at" .= (0 :: Int)
+                , "model" .= ("gpt-test" :: Text)
+                , "status" .= ("completed" :: Text)
+                , "output" .= ([] :: [Aeson.Value])
+                ]
+            ]
+        body = Text.concat
+            [ "event: response.output_item.done\ndata: "
+            , Text.decodeUtf8 (LBS.toStrict (Aeson.encode done))
+            , "\n\n"
+            , "event: response.completed\ndata: "
+            , Text.decodeUtf8 (LBS.toStrict (Aeson.encode completed))
+            , "\n\n"
+            ]
     in Wai.responseLBS HTTP.status200
         [("Content-Type", "text/event-stream")]
         (LBS.fromStrict (Text.encodeUtf8 body))

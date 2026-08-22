@@ -67,7 +67,7 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
-    , autoCompactOpenAiBackend
+    , autoCompactOpenAiBackendWithThreshold
     , runProviderCompact
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
@@ -1043,6 +1043,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     Nothing -> pure ()
                                 let lockedBackend =
                                         lockedOpenAiBackend
+                                            options.optCompactThreshold
                                             wsLock
                                             loaded.loadedTokenProvider
                                             wsHealthy
@@ -3538,7 +3539,8 @@ currentSessionId = \case
 -- | Serialize turns on the root OpenAI WebSocket connection because
 -- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
-    :: MVar ()
+    :: Maybe Int
+    -> MVar ()
     -> TokenProvider
     -> IORef Bool
     -> CodexConn
@@ -3546,13 +3548,13 @@ lockedOpenAiBackend
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider connectionHealthy conn getParams transcript
-        contextTokens =
+lockedOpenAiBackend compactThreshold wsLock provider connectionHealthy conn
+        getParams transcript contextTokens =
     let Backend submit =
             openAiBackendReconnecting provider connectionHealthy conn getParams transcript
         serialized = Backend \previous inputs onEvent ->
             withMVar wsLock \_ -> submit previous inputs onEvent
-    in autoCompactOpenAiBackend provider
+    in autoCompactOpenAiBackendWithThreshold compactThreshold provider
         getParams transcript contextTokens serialized
 
 -- | Drop live conversation state without touching persisted session files.

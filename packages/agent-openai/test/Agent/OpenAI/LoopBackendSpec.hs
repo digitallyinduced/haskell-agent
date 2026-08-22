@@ -365,7 +365,7 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
-        it "starts fresh replay at the latest automatic compaction checkpoint" do
+        it "replays retained messages before an automatic compaction checkpoint" do
             seen <- newIORef []
             let checkpoint = compactionItem "opaque"
                 history =
@@ -381,7 +381,8 @@ spec = do
             [(request, previous)] <- readIORef seen
             previous `shouldBe` Nothing
             inputItems request `shouldBe`
-                [checkpoint]
+                turnInputsToItems [UserMessage "old"]
+                    <> [checkpoint]
                     <> turnInputsToItems [UserMessage "recent"]
                     <> turnInputsToItems [UserMessage "new"]
 
