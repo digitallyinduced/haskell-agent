@@ -21,7 +21,6 @@ import Agent.CLI.Auth
     , loadAuth
     , loadAuthForAccount
     , preferredOpenAiTokenProvider
-    , probeLoadedAuth
     , probeLoadedAuthCredential
     )
 import Agent.CLI.AgentViewport
@@ -161,7 +160,9 @@ import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
     , fallbackCandidates
+    , isProviderUnavailable
     )
+import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , ProviderTransition(..)
@@ -243,6 +244,7 @@ import Agent.CLI.TUI.App
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineOr
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
@@ -376,7 +378,7 @@ import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.Async (link, mapConcurrently, withAsync)
+import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -389,6 +391,7 @@ import Control.Concurrent.MVar
     , tryPutMVar
     , withMVar
     )
+import Control.Concurrent.STM (STM, retry)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe
     ( Exception
@@ -1434,7 +1437,32 @@ runAgentInitialized options transition home root resumed cwd startup = do
         markStartupStage startup "Connecting to provider…"
         withCtrlCHandler interrupt $
             withInterruptResume progName persist RunQuit do
-                case provider of
+                let shouldProbeAtStartup =
+                        isJust fullscreen
+                            && isNothing transition
+                            && isNothing resumed
+                            && isNothing options.optProvider
+                            && isNothing options.optModel
+                            && isNothing prompt
+                    withStartupAvailability action
+                        | shouldProbeAtStartup =
+                            withAsync
+                                (probeLoadedAvailability
+                                    loaded
+                                        { loadedTokenProvider =
+                                            tokenProvider
+                                        })
+                                \availability -> do
+                                    let startupUnavailable =
+                                            waitSTM availability >>= \case
+                                                Left err
+                                                    | isProviderUnavailable err ->
+                                                        pure err
+                                                _ -> retry
+                                    action (Just startupUnavailable)
+                        | otherwise = action Nothing
+                withStartupAvailability \startupUnavailable ->
+                    case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProvider tokenProvider \conn credential -> do
@@ -1676,7 +1704,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
+                                    runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -1685,11 +1713,25 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         Just active
                                             | active.transitionCause == AutomaticFallback ->
                                                 pure (RunProviderStartFailed err)
+                                        _
+                                            | shouldProbeAtStartup
+                                            , isProviderUnavailable err ->
+                                                chooseStartupProviderTransition
+                                                    fullscreen
+                                                    (tokenProviderBillingMode
+                                                        tokenProvider)
+                                                    provider
+                                                    unavailableProviders
+                                                    Nothing
+                                                    err >>= \case
+                                                        Just next ->
+                                                            pure
+                                                                (RunSwitchProvider
+                                                                    next)
+                                                        Nothing ->
+                                                            startupFailure err
                                         _ -> do
-                                            now <- getCurrentTime
-                                            startupDie startup
-                                                (Text.unpack
-                                                    (formatApiErrorAt now err))
+                                            startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
@@ -1723,7 +1765,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -1759,9 +1801,14 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
+                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+          where
+            startupFailure err = do
+                now <- getCurrentTime
+                startupDie startup
+                    (Text.unpack (formatApiErrorAt now err))
 
 trackCredentialAccount
     :: IORef Text
@@ -1893,6 +1940,7 @@ runSession
     -> Maybe PendingTurn
     -> Text
     -> [Provider]
+    -> Maybe (STM ApiError)
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
     -> [SessionTurn]
@@ -1924,7 +1972,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -1967,6 +2015,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
+    startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
@@ -2205,6 +2254,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionRender = render
             , sessionProvider = provider
             , sessionUnavailableProviders = unavailableProvidersRef
+            , sessionStartupUnavailable = startupUnavailableRef
             , sessionPrevious = previous
             , sessionPrinted = printed
             , sessionParams = paramsRef
@@ -2500,6 +2550,7 @@ replWithDraft env@SessionEnv
     , sessionCompact = compactRunner
     , sessionRender = render
     , sessionProvider = provider
+    , sessionStartupUnavailable = startupUnavailableRef
     , sessionPrevious = previous
     , sessionPrinted = printed
     , sessionParams = paramsRef
@@ -2546,11 +2597,11 @@ replWithDraft env@SessionEnv
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
     account <- readIORef accountRef
-    mline <- case fullscreen of
+    mlineResult <- case fullscreen of
         Just runtime -> do
             setFullscreenImagePreviews runtime pendingAttachments
-            readFullscreenLine runtime skillCommands
-                PromptState
+            let promptState =
+                    PromptState
                     { promptModel = currentModel params
                     , promptEffort = currentEffort params
                     , promptMode = replModeLabel idleMode
@@ -2559,8 +2610,15 @@ replWithDraft env@SessionEnv
                     , promptUsage = usage
                     , promptAttachments = length pendingAttachments
                     }
-                draft
-        Nothing -> withMVar render.renderLock \_ -> do
+            readIORef startupUnavailableRef >>= \case
+                Nothing ->
+                    Right
+                        <$> readFullscreenLine
+                            runtime skillCommands promptState draft
+                Just unavailable ->
+                    readFullscreenLineOr
+                        runtime skillCommands promptState draft unavailable
+        Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
             -- late tool event cannot be spliced into the composer row.
@@ -2612,7 +2670,31 @@ replWithDraft env@SessionEnv
             Text.putStr (endBackground stdoutColor)
             hFlush stdout
             pure result
-    case mline of
+    case mlineResult of
+        Left apiError -> do
+            -- The startup check is one-shot. If no fallback account is usable,
+            -- leave request-time error handling in charge of later submits.
+            writeIORef startupUnavailableRef Nothing
+            requestStartupProviderFallback env apiError >>= \case
+                Just providerTransition ->
+                    pure (RunSwitchProvider providerTransition)
+                Nothing -> do
+                    reportProviderUnavailable fullscreen apiError
+                    replWithDraft env ""
+        Right mline -> do
+            -- Any user action wins the startup race. In particular, a prompt
+            -- already submitted while the preflight was running proceeds on
+            -- the selected provider and leaves request-time fallback in charge.
+            writeIORef startupUnavailableRef Nothing
+            handleReplLine
+                skillCommands
+                skillInvocations
+                stdoutColor
+                planState
+                policy
+                mline
+  where
+    handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
         ReplEof -> do
             putStrLn ""
             pure RunQuit
@@ -2681,7 +2763,6 @@ replWithDraft env@SessionEnv
         ReplText line ->
             submitLine skillCommands skillInvocations
                 continue stdoutColor False line
-  where
     submitLine skillCommands skillInvocations continue color pasted line = do
         attachmentCount <- length <$> readIORef attachmentsRef
         case submissionPromptText attachmentCount line of
@@ -3969,6 +4050,23 @@ requestAutomaticProviderFallback env apiError pending = do
                 pending
                 apiError
 
+requestStartupProviderFallback
+    :: SessionEnv
+    -> ApiError
+    -> IO (Maybe ProviderTransition)
+requestStartupProviderFallback env apiError = do
+    unavailable <- readIORef env.sessionUnavailableProviders
+    case env.sessionTokenProvider of
+        Nothing -> pure Nothing
+        Just tokenProvider ->
+            chooseStartupProviderTransition
+                env.sessionFullscreen
+                (tokenProviderBillingMode tokenProvider)
+                env.sessionProvider
+                unavailable
+                Nothing
+                apiError
+
 continueAutomaticFallback
     :: Maybe FullscreenRuntime
     -> ProviderTransition
@@ -4048,6 +4146,55 @@ chooseAutomaticProviderTransition
                         , transitionAutomaticBilling = Just sourceBilling
                         }
 
+chooseStartupProviderTransition
+    :: Maybe FullscreenRuntime
+    -> BillingMode
+    -> Provider
+    -> [Provider]
+    -> Maybe Text
+    -> ApiError
+    -> IO (Maybe ProviderTransition)
+chooseStartupProviderTransition
+    fullscreen sourceBilling current unavailable0 sessionId apiError =
+    tryCandidates unavailable candidates
+  where
+    unavailable = markUnavailable current unavailable0
+    candidates = fallbackCandidates unavailable0 current apiError
+
+    tryCandidates unavailable = \case
+        [] -> pure Nothing
+        choice : rest ->
+            validateAutomaticProviderTarget sourceBilling choice >>= \case
+                Left err -> do
+                    let message =
+                            "skipping "
+                            <> providerSlug choice.modelProvider
+                            <> ": "
+                            <> err
+                    forM_ fullscreen \runtime ->
+                        emitUiEvent runtime (UiSystemMessage message)
+                    tryCandidates
+                        (markUnavailable choice.modelProvider unavailable)
+                        rest
+                Right () -> do
+                    let message =
+                            providerSlug current
+                            <> " account unavailable; switched to "
+                            <> providerSlug choice.modelProvider
+                            <> "/"
+                            <> choice.modelId
+                    forM_ fullscreen \runtime ->
+                        emitUiEvent runtime (UiSystemMessage message)
+                    pure $ Just ProviderTransition
+                        { transitionTarget = choice
+                        , transitionSessionId = sessionId
+                        , transitionPendingTurn = Nothing
+                        , transitionDraft = ""
+                        , transitionUnavailableProviders = unavailable
+                        , transitionCause = AutomaticFallback
+                        , transitionAutomaticBilling = Just sourceBilling
+                        }
+
 prepareProviderTransition
     :: TransitionCause
     -> [Provider]
@@ -4101,7 +4248,7 @@ loadValidatedProviderTarget choice =
                 <> ": "
                 <> err
         Right loaded ->
-            probeLoadedAuth loaded >>= \case
+            probeLoadedAvailability loaded >>= \case
                 Left err -> do
                     now <- getCurrentTime
                     pure $ Left $
@@ -4167,7 +4314,8 @@ prepareTransitionBackend
     -> IO Backend
 prepareTransitionBackend _ Nothing _ backend = pure backend
 prepareTransitionBackend projectRoot (Just transition) persist backend
-    | transition.transitionCause == ManualTransition = do
+    | transition.transitionCause == ManualTransition
+        || isNothing transition.transitionPendingTurn = do
         commitProviderTransition projectRoot (Just transition) persist
         pure backend
     | otherwise = do

@@ -74,6 +74,16 @@ spec = do
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
 
+        it "accepts other definitive account and billing exhaustion errors" do
+            map
+                (not . null . fallbackCandidates [] XAIProvider)
+                [ ProviderError UsageBalanceExhausted "balance exhausted" Nothing
+                , ProviderError QuotaExceeded "quota exhausted" Nothing
+                , ProviderError UsageNotIncluded "not included" Nothing
+                , ProviderError BillingError "billing unavailable" Nothing
+                ]
+                `shouldBe` replicate 4 True
+
         it "does not switch for transient capacity failures" do
             fallbackCandidates [] XAIProvider
                 (ProviderError OverloadedError "busy" (Just 30))
