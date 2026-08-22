@@ -356,7 +356,7 @@ import System.Directory.OsPath
     , setCurrentDirectory
     )
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
+import System.OsPath (OsPath, decodeFS, decodeUtf, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (ExitCode(..), die, exitFailure)
@@ -695,7 +695,8 @@ runAgent fullscreenInputs options transition = do
     stdinTty <- hIsTerminalDevice stdin
     stdoutTty <- hIsTerminalDevice stdout
     terminal <- detectTerminalCapabilities stdout
-    reportTerminalCwd terminal stdout (decodeUtfPath cwd)
+    terminalCwd <- decodeFS cwd
+    reportTerminalCwd terminal stdout terminalCwd
     useColor <- resolveColor stdout
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())

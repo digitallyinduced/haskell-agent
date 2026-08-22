@@ -1,13 +1,12 @@
 module Main where
 
 import qualified Agent.OpenAI.Login as Login
-import Control.Exception.Safe (impureThrow)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import System.Directory.OsPath (getHomeDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (die)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (decodeFS, unsafeEncodeUtf, (</>))
 
 main :: IO ()
 main = do
@@ -32,7 +31,5 @@ main = do
     completed <- Login.completeDeviceCodeLogin loginOptions deviceCode
     auth <- either (die . show) pure completed
     Login.writeAuthFile output auth
-    putStrLn ("Login successful. Credentials written to " <> decodeUtfPath output)
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf
+    outputPath <- decodeFS output
+    putStrLn ("Login successful. Credentials written to " <> outputPath)
