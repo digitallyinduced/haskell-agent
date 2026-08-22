@@ -17,7 +17,7 @@ import Agent.CLI.ReplMode
     )
 import Agent.CLI.Style (roleMuted)
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
     , PlanModeState(..)

@@ -5,13 +5,14 @@ module Agent.CLI.Prompt
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
-import Agent.OsPath (OsPath, toText)
+import Agent.OsPath (toText)
 import Agent.Provider (Provider(..))
 import Agent.Tools.Grok.Prompt (codingGrokPromptTools, grokSystemPrompt)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import System.OsPath (OsPath)
 
 defaultModelFor :: Provider -> Text
 defaultModelFor = \case

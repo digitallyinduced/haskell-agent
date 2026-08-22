@@ -1,7 +1,7 @@
 module Agent.CLI.CredentialStoreSpec (spec) where
 
 import Agent.CLI.CredentialStore
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -17,6 +17,9 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec =

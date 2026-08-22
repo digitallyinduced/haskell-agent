@@ -11,6 +11,7 @@ import Agent.CLI.Permission
     ( PermissionChoice(..)
     , promptPermission
     )
+import System.OsPath (OsPath)
 import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
@@ -21,7 +22,7 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.JsonText (jsonTextFieldDefault)
-import Agent.OsPath (OsPath, fromText)
+import Agent.OsPath (fromText)
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode

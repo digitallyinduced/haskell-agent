@@ -1,7 +1,7 @@
 module Agent.Tools.GrokSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
-import Agent.OsPath (fromFilePath, toFilePath)
+import System.OsPath (decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
@@ -36,6 +36,9 @@ import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.Temp (mkdtemp)
 import System.Directory (removeDirectoryRecursive)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.Tools.Grok" do

@@ -4,7 +4,7 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.Loop (defaultLoopDispatch)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -31,6 +31,9 @@ import Test.Hspec
 isReadOnly :: ApprovalRule -> Bool
 isReadOnly AlwaysReadOnly = True
 isReadOnly _ = False
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do

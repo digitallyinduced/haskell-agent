@@ -1,9 +1,11 @@
 module Agent.CLI.StyleSpec (spec) where
 
 import Agent.CLI.Style
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do

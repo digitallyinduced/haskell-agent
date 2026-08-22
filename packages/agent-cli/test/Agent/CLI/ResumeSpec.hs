@@ -3,11 +3,13 @@ module Agent.CLI.ResumeSpec (spec) where
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Resume
 import Agent.CLI.Session (SessionMeta(..), SessionTurn(..))
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do

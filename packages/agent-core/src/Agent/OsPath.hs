@@ -1,13 +1,9 @@
--- | Common conversions at text-oriented API boundaries.
+-- | Conversions at 'Text'-oriented API boundaries.
 --
--- Filesystem-facing code should keep paths as 'OsPath'. Conversion back to
--- 'FilePath' is reserved for libraries such as @process@ that do not yet
--- expose an 'OsPath' API, and for human-readable output.
+-- Import 'OsPath' and the standard encoding functions directly from
+-- "System.OsPath".
 module Agent.OsPath
-    ( OsPath
-    , fromFilePath
-    , fromText
-    , toFilePath
+    ( fromText
     , toText
     ) where
 
@@ -16,15 +12,14 @@ import qualified Data.Text as Text
 import System.OsPath (OsPath)
 import qualified System.OsPath as OsPath
 
-fromFilePath :: FilePath -> OsPath
-fromFilePath = OsPath.unsafeEncodeUtf
-
+-- | Pure UTF encoding for path values that originate as Unicode text.
 fromText :: Text -> OsPath
-fromText = fromFilePath . Text.unpack
+fromText = OsPath.unsafeEncodeUtf . Text.unpack
 
-toFilePath :: OsPath -> FilePath
-toFilePath path =
-    either (const (show path)) id (OsPath.decodeUtf path)
-
+-- | Render a path for human-readable output.
+--
+-- An undecodable path is represented with its escaped 'Show' form. This
+-- fallback is suitable for diagnostics, never filesystem access.
 toText :: OsPath -> Text
-toText = Text.pack . toFilePath
+toText path =
+    either (const (Text.pack (show path))) Text.pack (OsPath.decodeUtf path)

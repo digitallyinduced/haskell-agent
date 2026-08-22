@@ -7,8 +7,7 @@ module Agent.CLI.Worktree
     , worktreeRoot
     ) where
 
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
-import Control.Exception.Safe (mask, onException, tryAny)
+import Control.Exception.Safe (impureThrow, mask, onException, tryAny)
 import Control.Monad (void)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -32,9 +31,12 @@ import System.Directory.OsPath
     )
 import System.Exit (ExitCode(..))
 import System.OsPath
-    ( equalFilePath
+    ( OsPath
+    , decodeUtf
+    , equalFilePath
     , splitDirectories
     , takeFileName
+    , unsafeEncodeUtf
     , (</>)
     )
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
@@ -42,7 +44,7 @@ import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
 worktreeRoot home =
-    home </> fromFilePath ".haskell-agent" </> fromFilePath "worktrees"
+    home </> unsafeEncodeUtf ".haskell-agent" </> unsafeEncodeUtf "worktrees"
 
 -- | True when @path@ is @root@ or a subdirectory of it.
 -- Both paths should already be absolute (or otherwise comparable).
@@ -54,7 +56,7 @@ isUnderWorktreeRoot root path =
 -- | @root/repo/YYYY-MM-DD-\<hex8\>@.
 worktreePath :: OsPath -> OsPath -> Day -> String -> OsPath
 worktreePath root repoName day hex8 =
-    root </> repoName </> fromFilePath (formatDay day <> "-" <> hex8)
+    root </> repoName </> unsafeEncodeUtf (formatDay day <> "-" <> hex8)
 
 -- | Add a new worktree of @source@ under @root@. @root@ is injected so tests
 -- can use a temp directory instead of the real home.
@@ -73,9 +75,9 @@ removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
 removeWorktree source path = runExceptT do
     repo <- gitToplevel source
     void $ ExceptT $
-        git repo ["worktree", "remove", "--force", toFilePath path]
+        git repo ["worktree", "remove", "--force", decodeUtfPath path]
     void $ ExceptT $
-        git repo ["branch", "-D", toFilePath (takeFileName path)]
+        git repo ["branch", "-D", decodeUtfPath (takeFileName path)]
 
 addUnique
     :: OsPath
@@ -95,7 +97,7 @@ addUnique repo root repoName day start attempt
             then addUnique repo root repoName day start (attempt + 1)
             else do
                 added <- lift $ mask \restore ->
-                    restore (git repo ["worktree", "add", toFilePath path])
+                    restore (git repo ["worktree", "add", decodeUtfPath path])
                         `onException` cleanupWorktreeCandidate repo path
                 case added of
                     Left err
@@ -112,10 +114,10 @@ cleanupWorktreeCandidate repo path = do
     if not exists
         then pure ()
         else do
-            _ <- git repo ["worktree", "remove", "--force", toFilePath path]
+            _ <- git repo ["worktree", "remove", "--force", decodeUtfPath path]
             _ <- tryAny (removePathForcibly path)
             _ <- git repo ["worktree", "prune"]
-            _ <- git repo ["branch", "-D", toFilePath (takeFileName path)]
+            _ <- git repo ["branch", "-D", decodeUtfPath (takeFileName path)]
             pure ()
 
 gitToplevel :: OsPath -> ExceptT Text IO OsPath
@@ -123,13 +125,13 @@ gitToplevel source = do
     path <- withExceptT
         (\err -> "--worktree requires a git repository (" <> Text.strip err <> ")")
         (ExceptT (git source ["rev-parse", "--show-toplevel"]))
-    pure (fromFilePath (Text.unpack (Text.strip path)))
+    pure (unsafeEncodeUtf (Text.unpack (Text.strip path)))
 
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
     (code, out, err) <-
         readCreateProcessWithExitCode
-            (proc "git" args) { cwd = Just (toFilePath dir) }
+            (proc "git" args) { cwd = Just (decodeUtfPath dir) }
             ""
     case code of
         ExitSuccess -> pure (Right (Text.pack out))
@@ -161,3 +163,6 @@ hex8 n =
 
 formatDay :: Day -> String
 formatDay = formatTime defaultTimeLocale "%Y-%m-%d"
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

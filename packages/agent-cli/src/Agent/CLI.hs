@@ -322,7 +322,7 @@ import Agent.Tools.Types
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
-import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath, toText)
+import Agent.OsPath (fromText, toText)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -333,6 +333,7 @@ import Control.Exception.Safe
     , catchAny
     , catchAsync
     , finally
+    , impureThrow
     , throwIO
     , try
     )
@@ -363,7 +364,7 @@ import System.Directory.OsPath
     , setCurrentDirectory
     )
 import System.Environment (getArgs, getProgName, lookupEnv)
-import System.OsPath ((</>), takeDirectory, takeFileName)
+import System.OsPath (OsPath, decodeFS, decodeUtf, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (ExitCode(..), die, exitFailure)
@@ -709,7 +710,8 @@ runAgent fullscreenInputs options transition = do
     stdinTty <- hIsTerminalDevice stdin
     stdoutTty <- hIsTerminalDevice stdout
     terminal <- detectTerminalCapabilities stdout
-    reportTerminalCwd terminal stdout (toFilePath cwd)
+    terminalCwd <- decodeFS cwd
+    reportTerminalCwd terminal stdout terminalCwd
     useColor <- resolveColor stdout
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
@@ -909,8 +911,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
             | managedAgentSession = pure ()
             | otherwise = do
                 let desired =
-                        toFilePath
-                            (handle.sessionDir </> fromFilePath ".agent-running")
+                        decodeUtfPath
+                            (handle.sessionDir </> unsafeEncodeUtf ".agent-running")
                 readIORef activeSessionLock >>= \case
                     Just current | current == desired -> pure ()
                     previous ->
@@ -1124,9 +1126,9 @@ preparePersistence fullscreen options root provider model cwd effort prompt resu
             let handle = SessionHandle
                     { sessionDir = root </> fromText meta.metaId
                     , sessionMetaPath =
-                        root </> fromText meta.metaId </> fromFilePath "meta.json"
+                        root </> fromText meta.metaId </> unsafeEncodeUtf "meta.json"
                     , sessionTranscriptPath =
-                        root </> fromText meta.metaId </> fromFilePath "transcript.jsonl"
+                        root </> fromText meta.metaId </> unsafeEncodeUtf "transcript.jsonl"
                     , sessionMeta = meta
                     }
             let message = "session: " <> meta.metaId <> " (resumed)"
@@ -3423,7 +3425,7 @@ putTrailingNewline printed = do
 loadPrompt :: CliOptions -> IO (Maybe Text)
 loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     (Just text, _) -> pure (Just text)
-    (_, Just path) -> Just . Text.strip <$> Text.readFile (toFilePath path)
+    (_, Just path) -> Just . Text.strip <$> Text.readFile (decodeUtfPath path)
     _ -> pure Nothing
 
 handleResume
@@ -3557,7 +3559,7 @@ detectGitBranch cwd = do
         (try $
             readProcessWithExitCode
                 "git"
-                ["-C", toFilePath cwd, "rev-parse", "--abbrev-ref", "HEAD"]
+                ["-C", decodeUtfPath cwd, "rev-parse", "--abbrev-ref", "HEAD"]
                 "")
             :: IO (Either SomeException (ExitCode, String, String))
     pure $ case result of
@@ -3611,3 +3613,6 @@ hydrateUiHistory = foldl addTurn initialUiState
         in case turn.turnError of
             Nothing -> withAssistant
             Just err -> reduceUi (UiErrorMessage err) withAssistant
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

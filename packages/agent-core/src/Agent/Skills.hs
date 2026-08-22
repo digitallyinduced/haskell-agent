@@ -19,8 +19,8 @@ module Agent.Skills
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
-import Control.Exception.Safe (tryAny)
+import Agent.OsPath (toText)
+import Control.Exception.Safe (impureThrow, tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
     ( FromJSON(..)
@@ -30,6 +30,7 @@ import Data.Aeson
     , (.:?)
     , (.!=)
     )
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
@@ -221,9 +222,9 @@ discoverSkills options = do
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
-    projectRoot <- canonicalizePath (toFilePath options.skillsProjectRoot)
-    cwd <- canonicalizePath (toFilePath options.skillsCwd)
-    home <- canonicalizePath (toFilePath options.skillsHome)
+    projectRoot <- canonicalizePath (decodeUtfPath options.skillsProjectRoot)
+    cwd <- canonicalizePath (decodeUtfPath options.skillsCwd)
+    home <- canonicalizePath (decodeUtfPath options.skillsHome)
     let dirs = directoryChain projectRoot cwd
         projectRoots =
             [ ( RepositorySkill depth (dir == cwd)
@@ -330,15 +331,15 @@ loadSkill scope origin path = do
                                         , skillLicense = frontmatter.fmLicense
                                         , skillCompatibility = frontmatter.fmCompatibility
                                         , skillMetadata = frontmatter.fmMetadata
-                                        , skillPath = fromFilePath path
-                                        , skillDirectory = fromFilePath (takeDirectory path)
+                                        , skillPath = unsafeEncodeUtf path
+                                        , skillDirectory = unsafeEncodeUtf (takeDirectory path)
                                         , skillBody = Text.strip body
                                         , skillFileText = fileText
                                         , skillScope = scope
                                         , skillOrigin = origin
                                         }
   where
-    warning message = SkillWarning (fromFilePath path) message
+    warning message = SkillWarning (unsafeEncodeUtf path) message
 
 loadOpenAiMetadata :: FilePath -> IO (Maybe OpenAiMetadata)
 loadOpenAiMetadata dir = do
@@ -617,3 +618,6 @@ infixr 3 <|>
 (<|>) left right = case left of
     Just value -> Just value
     Nothing -> right
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

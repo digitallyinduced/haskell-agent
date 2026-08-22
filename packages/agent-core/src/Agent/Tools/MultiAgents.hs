@@ -40,7 +40,7 @@ import Agent.InterAgentMessage
     , encryptedInterAgentContent
     , plainInterAgentContent
     )
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
     , optInt

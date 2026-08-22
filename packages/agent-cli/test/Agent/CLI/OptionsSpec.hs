@@ -1,9 +1,11 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do

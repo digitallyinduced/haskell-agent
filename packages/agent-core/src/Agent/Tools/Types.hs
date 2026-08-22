@@ -17,7 +17,7 @@ module Agent.Tools.Types
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch
     ( ToolCall(..)

@@ -23,7 +23,7 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Terminal (resolveColor)
-import Agent.OsPath (OsPath, toText)
+import Agent.OsPath (toText)
 import Agent.Skills
 import Control.Monad (when)
 import Data.IORef (IORef, modifyIORef', writeIORef)
@@ -31,6 +31,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (stderr)
+import System.OsPath (OsPath)
 
 reservedSlashNames :: [Text]
 reservedSlashNames =

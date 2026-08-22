@@ -2,7 +2,7 @@ module Agent.Tools.Grok.TaskSpec (spec) where
 
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
 import Agent.InterAgentMessage (interAgentMessagePayload)
-import Agent.OsPath (OsPath, fromFilePath)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -24,6 +24,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.Grok.Task" do

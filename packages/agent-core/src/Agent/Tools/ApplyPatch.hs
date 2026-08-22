@@ -10,7 +10,6 @@ module Agent.Tools.ApplyPatch
     , applyPatchGrammar
     ) where
 
-import Agent.OsPath (OsPath, fromFilePath)
 import Agent.Tools.IO
     ( deleteTextFile
     , readTextFile
@@ -30,6 +29,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 
 
 -- | Lark grammar Codex registers for the freeform apply_patch tool.
@@ -228,7 +228,7 @@ applyHunks env hunks = go hunks [] [] []
 
 resolvePath :: ToolEnv -> FilePath -> ExceptT Text IO OsPath
 resolvePath env path =
-    ExceptT (resolveUnderCwd env (fromFilePath path))
+    ExceptT (resolveUnderCwd env (unsafeEncodeUtf path))
 
 applyChunks :: [UpdateChunk] -> [Text] -> Either Text [Text]
 applyChunks chunks start = foldl applyOne (Right start) chunks

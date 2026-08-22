@@ -1,7 +1,7 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -19,6 +19,9 @@ import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (FileMode)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.Project" do

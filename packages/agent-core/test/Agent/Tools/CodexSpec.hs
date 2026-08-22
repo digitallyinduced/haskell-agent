@@ -1,7 +1,7 @@
 module Agent.Tools.CodexSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
-import Agent.OsPath (fromFilePath, toFilePath)
+import System.OsPath (decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
@@ -35,6 +35,9 @@ import System.Directory
 import System.FilePath (takeFileName, (</>))
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.Tools.Codex" do

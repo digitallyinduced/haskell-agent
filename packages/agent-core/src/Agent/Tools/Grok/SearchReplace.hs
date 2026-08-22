@@ -1,6 +1,7 @@
 module Agent.Tools.Grok.SearchReplace (searchReplaceTool) where
 
-import Agent.OsPath (OsPath, fromText)
+import Agent.OsPath (fromText)
+import System.OsPath (OsPath)
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)

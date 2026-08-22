@@ -19,7 +19,7 @@ import Agent.CLI.Session
     , loadSession
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OsPath (OsPath, toText)
+import Agent.OsPath (toText)
 import Agent.Provider (providerSlug)
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
@@ -28,7 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Console.ANSI (getTerminalSize)
-import System.OsPath (takeFileName)
+import System.OsPath (OsPath, takeFileName)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 
 data ResumeEntry = ResumeEntry

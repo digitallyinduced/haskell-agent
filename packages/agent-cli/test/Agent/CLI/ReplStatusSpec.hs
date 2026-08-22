@@ -20,7 +20,7 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
 import Data.IORef (newIORef, readIORef)
@@ -32,6 +32,8 @@ import System.Directory
     )
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
