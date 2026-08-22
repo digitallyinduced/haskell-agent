@@ -18,6 +18,7 @@ import Agent.CLI.Terminal
     , emitTerminalSequence
     , kittyKeyboardPop
     , kittyKeyboardPush
+    , stripAnsi
     , withSynchronizedOutput
     )
 import Control.Concurrent.Async (race)
@@ -377,19 +378,6 @@ selectableRows frame = do
             '›' : ' ' : _ -> True
             ' ' : ' ' : c : _ -> c /= ' '
             _ -> False
-
-stripAnsi :: Text -> Text
-stripAnsi = Text.pack . goNormal . Text.unpack
-  where
-    goNormal = \case
-        [] -> []
-        '\ESC' : '[' : rest -> goCsi rest
-        char : rest -> char : goNormal rest
-    goCsi = \case
-        [] -> []
-        char : rest
-            | char >= '@' && char <= '~' -> goNormal rest
-            | otherwise -> goCsi rest
 
 stripPrefix :: String -> String -> Maybe String
 stripPrefix prefix value

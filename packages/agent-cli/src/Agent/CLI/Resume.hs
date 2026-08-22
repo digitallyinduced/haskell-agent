@@ -19,6 +19,12 @@ import Agent.CLI.Session
     , loadSession
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
+import Agent.CLI.TextLayout
+    ( clampSelectionIndex
+    , fitTextCell
+    , selectionWindow
+    , transcriptPreviewRows
+    )
 import Agent.OsPath (toText)
 import Agent.Provider (providerSlug)
 import Control.Monad (forM)
@@ -89,7 +95,7 @@ selectedResume state =
     case visibleResume state of
         [] -> Nothing
         opts ->
-            let i = clamp (length opts) state.resumeIndex
+            let i = clampSelectionIndex (length opts) state.resumeIndex
             in Just (opts !! i)
 
 applyResumeKey :: PickerKey -> ResumeState -> Either (Maybe ResumeEntry) ResumeState
@@ -116,18 +122,20 @@ move delta state =
     let n = length (visibleResume state)
     in if n == 0
         then state { resumeIndex = 0 }
-        else state { resumeIndex = (clamp n state.resumeIndex + delta) `mod` n }
+        else
+            state
+                { resumeIndex =
+                    (clampSelectionIndex n state.resumeIndex + delta) `mod` n
+                }
 
 clampSel :: ResumeState -> ResumeState
 clampSel state =
-    state { resumeIndex = clamp (length (visibleResume state)) state.resumeIndex }
-
-clamp :: Int -> Int -> Int
-clamp n i
-    | n <= 0 = 0
-    | i < 0 = 0
-    | i >= n = n - 1
-    | otherwise = i
+    state
+        { resumeIndex =
+            clampSelectionIndex
+                (length (visibleResume state))
+                state.resumeIndex
+        }
 
 isFilterChar :: Char -> Bool
 isFilterChar c =
@@ -153,8 +161,8 @@ renderResumeFrameFor color terminalRows terminalCols state =
     rightWidth = max 1 (cols - leftWidth - 3)
     visible = visibleResume state
     n = length visible
-    idx = clamp n state.resumeIndex
-    shown = sessionWindow bodyRows idx visible
+    idx = clampSelectionIndex n state.resumeIndex
+    shown = selectionWindow bodyRows idx visible
     selected = selectedResume state
     filterText
         | Text.null state.resumeFilter = "type to filter"
@@ -162,29 +170,34 @@ renderResumeFrameFor color terminalRows terminalCols state =
     header =
         rolePrompt color "resume"
             <> roleMuted color
-                (fitCell (max 0 (cols - 6)) (" · " <> filterText))
+                (fitTextCell (max 0 (cols - 6)) (" · " <> filterText))
     headings =
-        rolePrompt color (fitCell leftWidth "sessions")
+        rolePrompt color (fitTextCell leftWidth "sessions")
             <> divider
             <> rolePrompt color
-                (fitCell rightWidth
+                (fitTextCell rightWidth
                     ("transcript"
                         <> maybe "" (\entry -> " · " <> entry.resumeTitle) selected))
     leftRows =
         map
             (\(absoluteIndex, entry) ->
                 let prefix = if absoluteIndex == idx then "› " else "  "
-                    text = fitCell leftWidth (prefix <> entry.resumeTitle)
+                    text = fitTextCell leftWidth (prefix <> entry.resumeTitle)
                 in if absoluteIndex == idx
                     then roleSuccess color text
                     else text)
             shown
             <> repeat (Text.replicate leftWidth " ")
     rightRows = case selected of
-        Nothing -> roleMuted color (fitCell rightWidth "(no sessions)") : repeat ""
+        Nothing ->
+            roleMuted color (fitTextCell rightWidth "(no sessions)") : repeat ""
         Just entry ->
-            let preview = previewRows rightWidth bodyRows entry.resumeTranscript
-            in map (fitCell rightWidth) preview <> repeat ""
+            let preview =
+                    transcriptPreviewRows
+                        rightWidth
+                        bodyRows
+                        entry.resumeTranscript
+            in map (fitTextCell rightWidth) preview <> repeat ""
     body =
         take bodyRows $
             zipWith
@@ -193,44 +206,8 @@ renderResumeFrameFor color terminalRows terminalCols state =
                 rightRows
     footer =
         roleMuted color $
-            fitCell cols
+            fitTextCell cols
                 "↑↓/jk or scroll · click/enter resume · esc/q cancel · type to filter"
-
-sessionWindow :: Int -> Int -> [a] -> [(Int, a)]
-sessionWindow count selected xs =
-    let total = length xs
-        start = max 0 (min selected (total - count))
-    in zip [start ..] (take count (drop start xs))
-
-previewRows :: Int -> Int -> [Text] -> [Text]
-previewRows width count logicalLines =
-    let wrapped = concatMap (hardWrap width) logicalLines
-        rows
-            | null wrapped = ["(empty transcript)"]
-            | otherwise = wrapped
-    in drop (max 0 (length rows - count)) rows
-
-hardWrap :: Int -> Text -> [Text]
-hardWrap width raw
-    | Text.null raw = [""]
-    | otherwise = go raw
-  where
-    width' = max 1 width
-    go text
-        | Text.null text = []
-        | otherwise =
-            let (line, rest) = Text.splitAt width' text
-            in line : go rest
-
-fitCell :: Int -> Text -> Text
-fitCell width raw
-    | width <= 0 = ""
-    | Text.length clean <= width =
-        clean <> Text.replicate (width - Text.length clean) " "
-    | width == 1 = "…"
-    | otherwise = Text.take (width - 1) clean <> "…"
-  where
-    clean = Text.map (\c -> if c == '\t' || c == '\r' || c == '\n' then ' ' else c) raw
 
 transcriptLines :: [SessionTurn] -> [Text]
 transcriptLines = concatMap turnLines

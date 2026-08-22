@@ -15,6 +15,7 @@ module Agent.CLI.Terminal
     , osc133CommandFinished
     , synchronizedOutputBegin
     , synchronizedOutputEnd
+    , stripAnsi
     , shiftEnterCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPush
@@ -132,6 +133,20 @@ resolveColor handle = do
     isTty <- hIsTerminalDevice handle
     noColor <- lookupEnv "NO_COLOR"
     pure (isTty && maybe True (const False) noColor)
+
+-- | Remove ANSI CSI escape sequences from terminal text.
+stripAnsi :: Text -> Text
+stripAnsi = Text.pack . goNormal . Text.unpack
+  where
+    goNormal = \case
+        [] -> []
+        '\ESC' : '[' : rest -> goCsi rest
+        char : rest -> char : goNormal rest
+    goCsi = \case
+        [] -> []
+        char : rest
+            | char >= '@' && char <= '~' -> goNormal rest
+            | otherwise -> goCsi rest
 
 osc7WorkingDirectory :: FilePath -> Text
 osc7WorkingDirectory path =
