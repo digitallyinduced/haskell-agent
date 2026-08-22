@@ -4,8 +4,9 @@
 -- starts in the last cwd, sources the last @export -p@ dump, then writes
 -- those files again. No PTY.
 module Agent.Tools.Grok.Shell
-    ( GrokSession(..)
-    , PersistentShell(..)
+    ( GrokSession
+    , grokSessionEnv
+    , grokSessionEnvFile
     , newGrokSession
     , closeGrokSession
     , runForegroundStreaming
@@ -36,15 +37,25 @@ import Agent.Tools.IO
     , stopShellCommand
     )
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIOWithUnmask, threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
+import qualified Control.Exception as Exception
+import Control.Exception.Safe
+    ( SomeException
+    , finally
+    , mask
+    , onException
+    , throwIO
+    , tryAny
+    , uninterruptibleMask_
+    )
 import Control.Monad (void)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -65,18 +76,32 @@ data PersistentShell = PersistentShell
     }
 
 data BackgroundTask = BackgroundTask
-    { backgroundId :: !Text
-    , backgroundRunning :: !RunningCommand
+    { backgroundRunning :: !RunningCommand
     , backgroundResource :: !ResourceKey
+    , backgroundSnapshot :: !OsPath
     }
+
+type GrokCloseOutcome = Either SomeException ()
+
+data GrokLifecycle
+    = GrokOpen
+    | GrokClosing !(MVar GrokCloseOutcome)
 
 data GrokSession = GrokSession
     { grokEnv :: !ToolEnv
+    , grokEnvFile :: !OsPath
     , grokShell :: !(MVar PersistentShell)
     , grokTasks :: !(MVar (Map Text BackgroundTask))
     , grokNextId :: !(IORef Int)
     , grokResources :: !ResourceScope
+    , grokLifecycle :: !(MVar GrokLifecycle)
     }
+
+grokSessionEnv :: GrokSession -> ToolEnv
+grokSessionEnv session = session.grokEnv
+
+grokSessionEnvFile :: GrokSession -> OsPath
+grokSessionEnvFile session = session.grokEnvFile
 
 newGrokSession :: ToolEnv -> IO GrokSession
 newGrokSession env = do
@@ -91,65 +116,92 @@ newGrokSession env = do
             }
         tasks <- newMVar Map.empty
         nextId <- newIORef 0
+        lifecycle <- newMVar GrokOpen
         pure GrokSession
             { grokEnv = env
+            , grokEnvFile = envFile
             , grokShell = shell
             , grokTasks = tasks
             , grokNextId = nextId
             , grokResources = resources
+            , grokLifecycle = lifecycle
             }
 
 -- | Delete the env/cwd dump and interrupt leftover background tasks.
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
-closeGrokSession session = do
-    modifyMVar_ session.grokTasks (const (pure Map.empty))
-    closeResourceScope session.grokResources
+closeGrokSession session =
+    mask \restore -> do
+        done <- modifyMVar session.grokLifecycle \case
+            GrokOpen -> do
+                completed <- newEmptyMVar
+                _ <- forkIOWithUnmask \unmask -> do
+                    result <- Exception.try @SomeException $ unmask do
+                        _ <- readMVar session.grokShell
+                        modifyMVar_ session.grokTasks
+                            (const (pure Map.empty))
+                            `finally` closeResourceScope session.grokResources
+                    uninterruptibleMask_ (putMVar completed result)
+                pure (GrokClosing completed, completed)
+            closing@(GrokClosing completed) ->
+                pure (closing, completed)
+        restore (readMVar done) >>= either throwIO pure
 
+-- The snapshot callback runs while this session's operation gate is held. It
+-- must not start another shell operation or close the session.
 runForegroundStreaming
     :: GrokSession
     -> String
     -> Int
     -> (Text -> Text -> IO ())
     -> IO CommandResult
-runForegroundStreaming session command timeoutMs onSnapshot =
-    modifyMVar session.grokShell \shell -> do
+runForegroundStreaming session command timeoutMs onSnapshot = do
+    result <- withOpenGrokShell session \shell -> do
         let wrapped = bashWrap (wrapScript shell True command)
-        result <- runShellCommandStreaming
+        commandResult <- runShellCommandStreaming
             session.grokEnv
             session.grokEnv.toolCwd
             wrapped
             timeoutMs
             onSnapshot
-        next <- if result.commandTimedOut || result.commandCancelled
+        next <- if
+                commandResult.commandTimedOut
+                    || commandResult.commandCancelled
             then pure shell
             else refreshCwd session.grokEnv shell
-        pure (next, result)
+        pure (next, commandResult)
+    pure (fromMaybe closedCommandResult result)
 
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
-startBackground session command = do
-    started <- tryAny $ withMVar session.grokShell \shell ->
-        allocateResource session.grokResources
-            (acquireBackground shell)
-            cleanupBackground
-    case started of
-        Left exception ->
-            pure (Left (Text.pack (show exception)))
-        Right (resource, (running, _snapshotFile)) -> do
-            taskId <- nextTaskId session
-            let task = BackgroundTask
-                    { backgroundId = taskId
-                    , backgroundRunning = running
-                    , backgroundResource = resource
-                    }
-            modifyMVar_ session.grokTasks
-                (\tasks -> pure (Map.insert taskId task tasks))
-                `onException` releaseResource resource
-            pure $ Right $
-                "Command moved to background.\n\
-                \task_id: " <> taskId <> "\n\
-                \Use get_task_output to read output. Do not poll in a loop."
+startBackground session command =
+    mask \_ -> do
+        result <- withOpenGrokShell session startOpen
+        pure (fromMaybe (Left grokClosedMessage) result)
   where
+    startOpen shell = do
+        started <- tryAny $
+            allocateResource session.grokResources
+                (acquireBackground shell)
+                cleanupBackground
+        case started of
+            Left exception ->
+                pure (shell, Left (Text.pack (show exception)))
+            Right (resource, (running, snapshotFile)) ->
+                flip onException (releaseResource resource) do
+                    taskId <- nextTaskId session
+                    let task = BackgroundTask
+                            { backgroundRunning = running
+                            , backgroundResource = resource
+                            , backgroundSnapshot = snapshotFile
+                            }
+                    modifyMVar_ session.grokTasks
+                        (\tasks -> pure (Map.insert taskId task tasks))
+                    let response =
+                            "Command moved to background.\n\
+                            \task_id: " <> taskId <> "\n\
+                            \Use get_task_output to read output. Do not poll in a loop."
+                    pure (shell, Right response)
+
     -- The child may not source its environment until after
     -- startShellCommand returns. Give it an immutable snapshot so a later
     -- foreground command cannot change what this task observes.
@@ -179,17 +231,22 @@ startBackground session command = do
 
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
 readTaskOutput session taskId timeoutMs = do
-    tasks <- readMVar session.grokTasks
-    case Map.lookup taskId tasks of
-        Nothing -> pure $ "Unknown task_id: " <> taskId
-        Just task -> case timeoutMs of
-            Nothing -> snapshotTask task
+    background <- Map.lookup taskId <$> readMVar session.grokTasks
+    lifecycle <- readMVar session.grokLifecycle
+    let task = case lifecycle of
+            GrokClosing{} -> Left ()
+            GrokOpen -> Right background
+    case task of
+        Left () -> pure ("exit: 1\n" <> grokClosedMessage)
+        Right Nothing -> pure $ "Unknown task_id: " <> taskId
+        Right (Just background) -> case timeoutMs of
+            Nothing -> snapshotTask background
             Just ms -> do
                 raced <- race
                     (threadDelay (max 1 ms * 1000))
-                    (readMVar task.backgroundRunning.runningResult)
+                    (readMVar background.backgroundRunning.runningResult)
                 case raced of
-                    Left () -> snapshotTask task
+                    Left () -> snapshotTask background
                     Right result -> pure (formatCommandResult result)
 
 snapshotTask :: BackgroundTask -> IO Text
@@ -204,14 +261,57 @@ snapshotTask task =
                 else "still running\n" <> body
 
 killTask :: GrokSession -> Text -> IO Text
-killTask session taskId = do
-    tasks <- readMVar session.grokTasks
-    case Map.lookup taskId tasks of
-        Nothing -> pure $ "Unknown task_id: " <> taskId
-        Just task -> do
-            releaseResource task.backgroundResource
-            result <- readMVar task.backgroundRunning.runningResult
-            pure $ "killed " <> taskId <> "\n" <> formatCommandResult result
+killTask session taskId =
+    mask \restore -> do
+        result <- withOpenGrokShell session \shell -> do
+            tasks <- readMVar session.grokTasks
+            response <- case Map.lookup taskId tasks of
+                Nothing -> pure $ "Unknown task_id: " <> taskId
+                Just task -> do
+                    restore (stopShellCommand task.backgroundRunning)
+                    cleanupEnvFiles task.backgroundSnapshot
+                    releaseResource task.backgroundResource
+                    commandResult <-
+                        readMVar task.backgroundRunning.runningResult
+                    pure $
+                        "killed " <> taskId <> "\n"
+                            <> formatCommandResult commandResult
+            pure (shell, response)
+        pure (fromMaybe grokClosedMessage result)
+
+-- 'grokShell' doubles as the operation gate. The lifecycle cell is only held
+-- for the short open-to-closing transition, so close can commit while an
+-- operation is running and its detached worker uses this as a drain fence.
+withOpenGrokShell
+    :: GrokSession
+    -> (PersistentShell -> IO (PersistentShell, a))
+    -> IO (Maybe a)
+withOpenGrokShell session action = do
+    lifecycle <- readMVar session.grokLifecycle
+    case lifecycle of
+        GrokClosing{} ->
+            pure Nothing
+        GrokOpen ->
+            modifyMVar session.grokShell \shell -> do
+                admitted <- readMVar session.grokLifecycle
+                case admitted of
+                    GrokOpen -> do
+                        (next, result) <- action shell
+                        pure (next, Just result)
+                    GrokClosing{} ->
+                        pure (shell, Nothing)
+
+grokClosedMessage :: Text
+grokClosedMessage = "Grok session is closed."
+
+closedCommandResult :: CommandResult
+closedCommandResult = CommandResult
+    { commandExitCode = Just 1
+    , commandStdout = ""
+    , commandStderr = grokClosedMessage
+    , commandTimedOut = False
+    , commandCancelled = False
+    }
 
 nextTaskId :: GrokSession -> IO Text
 nextTaskId session = atomicModifyIORef' session.grokNextId \n ->

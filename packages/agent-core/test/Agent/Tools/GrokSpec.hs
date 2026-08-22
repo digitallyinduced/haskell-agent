@@ -1,7 +1,7 @@
 module Agent.Tools.GrokSpec (spec) where
 
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
-import System.OsPath (decodeUtf, unsafeEncodeUtf)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
@@ -11,11 +11,15 @@ import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
 import Agent.Tools.Ghci (GhciSession, closeGhciSession, newGhciSession)
+import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Grok.Shell
-    ( GrokSession(..)
-    , PersistentShell(..)
+    ( GrokSession
+    , grokSessionEnv
+    , grokSessionEnvFile
     , hasUnwaitedBackgroundOp
+    , killTask
     , readTaskOutput
+    , runForegroundStreaming
     , startBackground
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
@@ -23,11 +27,12 @@ import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode (PlanModeEnv, activatePlanMode, newPlanModeEnv)
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.Async as Async
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import Control.Concurrent.MVar (readMVar)
 import Control.Exception (bracket, bracket_, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,6 +49,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Posix.Files (setFileMode)
 import System.Posix.Temp (mkdtemp)
 import System.Directory (removeDirectoryRecursive)
+import System.Timeout (timeout)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -53,7 +59,7 @@ spec :: Spec
 spec = describe "Agent.Tools.Grok" do
     it "advertises grok-build wire names and not Codex names" do
         withTempSession \(session, ghci) -> do
-            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            plan <- newPlanModeEnv (sessionCwd session) Nothing
             typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
             let names = map (.appToolName) (grokTools session ghci plan Nothing typesRef)
             names `shouldBe`
@@ -78,8 +84,10 @@ spec = describe "Agent.Tools.Grok" do
                     ]
             map (map (.propertyName)) outputSchemas
                 `shouldBe` [["task_ids", "timeout_ms"]]
-            xai <- codingToolsFor XAIProvider session.grokEnv Nothing Nothing
-            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing Nothing
+            xai <- codingToolsFor XAIProvider
+                (grokSessionEnv session) Nothing Nothing
+            openrouter <- codingToolsFor OpenRouterProvider
+                (grokSessionEnv session) Nothing Nothing
             (do
                 map (.appToolName) xai.codingAppTools `shouldBe` names
                 map (.appToolName) openrouter.codingAppTools `shouldBe` names)
@@ -88,8 +96,9 @@ spec = describe "Agent.Tools.Grok" do
 
     it "registers task when a multi-agent context is provided" do
         withTempSession \(session, ghci) -> do
-            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
-            registry <- newSubagentRegistry defaultSubagentConfig session.grokEnv.toolCwd
+            plan <- newPlanModeEnv (sessionCwd session) Nothing
+            registry <- newSubagentRegistry defaultSubagentConfig
+                (sessionCwd session)
                 (\_ _ _ _ -> pure $ Left LoopNoResponseId)
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
@@ -101,7 +110,7 @@ spec = describe "Agent.Tools.Grok" do
 
     it "reads a file with grok line-number anchors" do
         withTempSession \(session, ghci) -> do
-            let path = toFilePath session.grokEnv.toolCwd </> "sample.txt"
+            let path = toFilePath (sessionCwd session) </> "sample.txt"
             Text.writeFile path (Text.unlines ["alpha", "bravo", "charlie"])
             output <- runTool session ghci "read_file" "{\"target_file\":\"sample.txt\"}"
             output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
@@ -109,7 +118,7 @@ spec = describe "Agent.Tools.Grok" do
 
     it "rejects a path that escapes cwd" do
         withTempSession \(session, ghci) -> do
-            let cwd = toFilePath session.grokEnv.toolCwd
+            let cwd = toFilePath (sessionCwd session)
                 name = takeFileName cwd <> "-outside.txt"
                 outsider = takeDirectory cwd </> name
             Text.writeFile outsider "secret"
@@ -121,15 +130,17 @@ spec = describe "Agent.Tools.Grok" do
 
     it "lists directory entries with a trailing slash for folders" do
         withTempSession \(session, ghci) -> do
-            createDirectoryIfMissing True (toFilePath session.grokEnv.toolCwd </> "sub")
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "a.txt") "x"
+            createDirectoryIfMissing True
+                (toFilePath (sessionCwd session) </> "sub")
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "a.txt") "x"
             output <- runTool session ghci "list_dir" "{\"target_directory\":\".\"}"
             output `shouldSatisfy` Text.isInfixOf "a.txt"
             output `shouldSatisfy` Text.isInfixOf "sub/"
 
     it "does not descend through directory symlinks" do
         withTempSession \(session, ghci) -> do
-            let cwd = toFilePath session.grokEnv.toolCwd
+            let cwd = toFilePath (sessionCwd session)
                 outside = cwd </> ".outside"
             createDirectoryIfMissing True outside
             Text.writeFile (outside </> "secret.txt") "secret"
@@ -143,16 +154,20 @@ spec = describe "Agent.Tools.Grok" do
             created <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"\",\"new_string\":\"hello world\\n\"}"
             created `shouldSatisfy` Text.isInfixOf "created successfully"
-            doesFileExist (toFilePath session.grokEnv.toolCwd </> "new.txt") `shouldReturn` True
+            doesFileExist
+                (toFilePath (sessionCwd session) </> "new.txt")
+                `shouldReturn` True
 
             updated <- runTool session ghci "search_replace"
                 "{\"file_path\":\"new.txt\",\"old_string\":\"hello\",\"new_string\":\"goodbye\"}"
             updated `shouldSatisfy` Text.isInfixOf "updated successfully"
-            Text.readFile (toFilePath session.grokEnv.toolCwd </> "new.txt") `shouldReturn` "goodbye world\n"
+            Text.readFile
+                (toFilePath (sessionCwd session) </> "new.txt")
+                `shouldReturn` "goodbye world\n"
 
     it "refuses a non-unique search_replace without replace_all" do
         withTempSession \(session, ghci) -> do
-            let path = toFilePath session.grokEnv.toolCwd </> "dup.txt"
+            let path = toFilePath (sessionCwd session) </> "dup.txt"
             Text.writeFile path "aaa bbb aaa\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"dup.txt\",\"old_string\":\"aaa\",\"new_string\":\"ccc\"}"
@@ -161,14 +176,20 @@ spec = describe "Agent.Tools.Grok" do
 
     it "grep finds a literal match" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "hit.txt")
+                "needle in haystack\n"
             output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "grep accepts glob before the path terminator" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.md") "needle in markdown\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "hit.txt")
+                "needle in haystack\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "hit.md")
+                "needle in markdown\n"
             output <- runTool session ghci "grep"
                 "{\"pattern\":\"needle\",\"glob\":\"*.txt\"}"
             output `shouldSatisfy` Text.isInfixOf "hit.txt"
@@ -197,29 +218,39 @@ spec = describe "Agent.Tools.Grok" do
 
     it "starts read_file from a negative offset" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "lines.txt") (Text.unlines ["a", "b", "c", "d"])
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "lines.txt")
+                (Text.unlines ["a", "b", "c", "d"])
             output <- runTool session ghci "read_file" "{\"target_file\":\"lines.txt\",\"offset\":-2}"
             output `shouldNotSatisfy` Text.isInfixOf "beyond the end"
             output `shouldSatisfy` Text.isInfixOf "d"
 
     it "wraps grep output in a workspace_result card" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "hit.txt")
+                "needle in haystack\n"
             output <- runTool session ghci "grep" "{\"pattern\":\"needle\"}"
             output `shouldSatisfy` Text.isInfixOf "<workspace_result"
             output `shouldSatisfy` Text.isInfixOf "needle"
 
     it "hints the nearest line when search_replace misses" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "near.txt") "alpha\nbravo unique\ncharlie\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "near.txt")
+                "alpha\nbravo unique\ncharlie\n"
             output <- runTool session ghci "search_replace"
                 "{\"file_path\":\"near.txt\",\"old_string\":\"xyz unique\",\"new_string\":\"x\"}"
             output `shouldSatisfy` Text.isInfixOf "Nearest match: line 2"
 
     it "refuses to edit a gitignored file" do
         withTempSession \(session, ghci) -> do
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> ".gitignore") "secret.txt\n"
-            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "secret.txt") "hidden\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> ".gitignore")
+                "secret.txt\n"
+            Text.writeFile
+                (toFilePath (sessionCwd session) </> "secret.txt")
+                "hidden\n"
             initOut <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"git init\",\"description\":\"init git\"}"
             initOut `shouldSatisfy` Text.isPrefixOf "exit: 0"
@@ -229,17 +260,19 @@ spec = describe "Agent.Tools.Grok" do
 
     it "only edits plan.md while plan mode is active" do
         withTempSession \(session, ghci) -> do
-            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            plan <- newPlanModeEnv (sessionCwd session) Nothing
             activatePlanMode plan
             blocked <- runToolWithPlan session ghci plan "search_replace"
                 "{\"file_path\":\"blocked.txt\",\"old_string\":\"\",\"new_string\":\"no\"}"
             blocked `shouldSatisfy` Text.isInfixOf "only editable file is the plan file"
-            doesFileExist (toFilePath session.grokEnv.toolCwd </> "blocked.txt")
+            doesFileExist
+                (toFilePath (sessionCwd session) </> "blocked.txt")
                 `shouldReturn` False
             allowed <- runToolWithPlan session ghci plan "search_replace"
                 "{\"file_path\":\"plan.md\",\"old_string\":\"\",\"new_string\":\"# Plan\\n\"}"
             allowed `shouldSatisfy` Text.isInfixOf "created successfully"
-            Text.readFile (toFilePath session.grokEnv.toolCwd </> "plan.md")
+            Text.readFile
+                (toFilePath (sessionCwd session) </> "plan.md")
                 `shouldReturn` "# Plan\n"
 
     it "persists cwd and exported env across run_terminal_cmd calls" do
@@ -257,7 +290,7 @@ spec = describe "Agent.Tools.Grok" do
         withTempSession \(session, ghci) -> do
             _ <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"export GROK_SESSION_VAR=before\",\"description\":\"seed env\"}"
-            let cwd = toFilePath session.grokEnv.toolCwd
+            let cwd = toFilePath (sessionCwd session)
                 shimDir = cwd </> "shim-bin"
                 shimPath = shimDir </> "bash"
                 claimPath = cwd </> "bash-shim-claim"
@@ -340,7 +373,7 @@ spec = describe "Agent.Tools.Grok" do
             started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"echo liveout; touch flag; sleep 30\",\"description\":\"live snapshot\",\"background\":true}"
             let taskId = taskIdFrom started
-            waitForFile (toFilePath session.grokEnv.toolCwd </> "flag")
+            waitForFile (toFilePath (sessionCwd session) </> "flag")
             snap <- runTool session ghci "get_task_output"
                 ("{\"task_id\":\"" <> taskId <> "\"}")
             snap `shouldSatisfy` Text.isInfixOf "liveout"
@@ -357,20 +390,145 @@ spec = describe "Agent.Tools.Grok" do
 
     it "deletes the env dump when the session closes" do
         withTempSession \(session, _ghci) -> do
-            shell <- readMVar session.grokShell
-            doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` True
+            let envFile = grokSessionEnvFile session
+            doesFileExist (toFilePath envFile) `shouldReturn` True
             closeGrokSession session
-            doesFileExist (toFilePath shell.shellEnvFile) `shouldReturn` False
+            doesFileExist (toFilePath envFile) `shouldReturn` False
 
     it "stops background commands when the session closes" do
         withTempSession \(session, ghci) -> do
-            let escaped = toFilePath session.grokEnv.toolCwd </> "escaped"
+            let escaped = toFilePath (sessionCwd session) </> "escaped"
             started <- runTool session ghci "run_terminal_cmd"
                 "{\"command\":\"sleep 1; touch escaped\",\"description\":\"cleanup test\",\"background\":true}"
             started `shouldSatisfy` Text.isInfixOf "task_id:"
             closeGrokSession session
             threadDelay 1500000
             doesFileExist escaped `shouldReturn` False
+
+    it "keeps closing after the initiating caller is cancelled" do
+        withTempSession \(session, _ghci) -> do
+            let envFile = grokSessionEnvFile session
+                cwd = toFilePath (sessionCwd session)
+                startedPath = cwd </> "foreground-started"
+                releasePath = cwd </> "foreground-release"
+                command =
+                    "touch foreground-started; "
+                        <> "while [ ! -e foreground-release ]; "
+                        <> "do sleep 0.01; done"
+            Async.withAsync
+                (runForegroundStreaming session command 10000 (\_ _ -> pure ()))
+                \foreground -> do
+                    waitForFile startedPath
+                    flip finally (Text.writeFile releasePath "") do
+                        Async.withAsync (closeGrokSession session) \closing -> do
+                            waitForClosed session
+                            Async.cancel closing
+                            Async.withAsync
+                                (closeGrokSession session)
+                                \joined -> do
+                                    premature <-
+                                        timeout 200000 (Async.wait joined)
+                                    Text.writeFile releasePath ""
+                                    result <- Async.wait foreground
+                                    result.commandExitCode `shouldBe` Just 0
+                                    Async.wait joined
+                                    premature `shouldBe` Nothing
+            doesFileExist (toFilePath envFile) `shouldReturn` False
+
+    it "rejects a background start queued before close" do
+        withTempSession \(session, _ghci) -> do
+            let cwd = toFilePath (sessionCwd session)
+                foregroundStarted = cwd </> "queue-foreground-started"
+                foregroundRelease = cwd </> "queue-foreground-release"
+                backgroundMarker = cwd </> "queued-background-ran"
+                foregroundCommand =
+                    "touch queue-foreground-started; "
+                        <> "while [ ! -e queue-foreground-release ]; "
+                        <> "do sleep 0.01; done"
+            startCalled <- newEmptyMVar
+            Async.withAsync
+                (runForegroundStreaming
+                    session foregroundCommand 10000 (\_ _ -> pure ()))
+                \foreground -> do
+                    waitForFile foregroundStarted
+                    flip finally (Text.writeFile foregroundRelease "") do
+                        Async.withAsync
+                            (putMVar startCalled ()
+                                >> startBackground
+                                    session
+                                    "touch queued-background-ran")
+                            \starting -> do
+                                takeMVar startCalled
+                                Async.withAsync
+                                    (closeGrokSession session)
+                                    \closing -> do
+                                        waitForClosed session
+                                        Text.writeFile foregroundRelease ""
+                                        foregroundResult <- Async.wait foreground
+                                        foregroundResult.commandExitCode
+                                            `shouldBe` Just 0
+                                        backgroundResult <- Async.wait starting
+                                        backgroundResult
+                                            `shouldBe`
+                                                Left "Grok session is closed."
+                                        Async.wait closing
+            threadDelay 100000
+            doesFileExist backgroundMarker `shouldReturn` False
+
+    it "keeps a task snapshot when kill is cancelled" do
+        withTempSession \(session, ghci) -> do
+            _ <- runTool session ghci "run_terminal_cmd"
+                "{\"command\":\"export GROK_SESSION_VAR=before\",\"description\":\"seed env\"}"
+            let cwd = toFilePath (sessionCwd session)
+                shimDir = cwd </> "kill-shim-bin"
+                shimPath = shimDir </> "bash"
+                startedPath = cwd </> "kill-shim-started"
+                signalPath = cwd </> "kill-shim-signal"
+                releasePath = cwd </> "kill-shim-release"
+                observedPath = cwd </> "kill-snapshot-env"
+            bashPath <- requireExecutable "bash"
+            createDirectoryIfMissing True shimDir
+            writeFile shimPath $ unlines
+                [ "#!/bin/sh"
+                , "on_signal() { touch " <> shellQuote signalPath <> "; }"
+                , "trap on_signal INT TERM"
+                , "touch " <> shellQuote startedPath
+                , "while [ ! -e " <> shellQuote releasePath
+                    <> " ]; do sleep 0.01; done"
+                , "exec " <> shellQuote bashPath <> " \"$@\""
+                ]
+            setFileMode shimPath 0o700
+
+            withPathPrefix shimDir $
+                flip finally (writeFile releasePath "") do
+                    started <- startBackground session
+                        "printf '%s' \"$GROK_SESSION_VAR\" > kill-snapshot-env"
+                    let taskId = either (error . Text.unpack) taskIdFrom started
+                    waitForFile startedPath
+                    killing <- Async.async (killTask session taskId)
+                    waitForFile signalPath
+                    Async.cancel killing
+                    writeFile releasePath ""
+                    waitForFile observedPath
+                    Text.readFile observedPath `shouldReturn` "before"
+                    _ <- readTaskOutput session taskId (Just 5000)
+                    pure ()
+
+    it "rejects shell operations after close" do
+        withTempSession \(session, _ghci) -> do
+            let marker = toFilePath (sessionCwd session) </> "after-close"
+            closeGrokSession session
+            startBackground session "touch after-close"
+                `shouldReturn` Left "Grok session is closed."
+            foreground <- runForegroundStreaming
+                session "touch after-close" 1000 (\_ _ -> pure ())
+            foreground.commandExitCode `shouldBe` Just 1
+            foreground.commandStderr `shouldBe` "Grok session is closed."
+            readTaskOutput session "t1" Nothing
+                `shouldReturn` "exit: 1\nGrok session is closed."
+            killTask session "t1"
+                `shouldReturn` "Grok session is closed."
+            doesFileExist marker `shouldReturn` False
 
     describe "hasUnwaitedBackgroundOp" do
         it "detects a trailing bare ampersand" do
@@ -389,7 +547,7 @@ spec = describe "Agent.Tools.Grok" do
 
 runTool :: GrokSession -> GhciSession -> Text -> Text -> IO Text
 runTool session ghci name arguments = do
-    plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+    plan <- newPlanModeEnv (sessionCwd session) Nothing
     runToolWithPlan session ghci plan name arguments
 
 runToolWithPlan :: GrokSession -> GhciSession -> PlanModeEnv -> Text -> Text -> IO Text
@@ -408,6 +566,19 @@ waitForFile path = go (20 :: Int)
         | otherwise = doesFileExist path >>= \case
             True -> pure ()
             False -> threadDelay 50000 >> go (n - 1)
+
+waitForClosed :: GrokSession -> IO ()
+waitForClosed session = go (100 :: Int)
+  where
+    expected = "exit: 1\nGrok session is closed."
+    go n
+        | n <= 0 =
+            expectationFailure "timed out waiting for Grok session to close"
+        | otherwise = do
+            output <- readTaskOutput session "__close_probe__" Nothing
+            if output == expected
+                then pure ()
+                else threadDelay 10000 >> go (n - 1)
 
 requireExecutable :: String -> IO FilePath
 requireExecutable name =
@@ -436,6 +607,9 @@ shellQuote path = "'" <> concatMap escape path <> "'"
   where
     escape '\'' = "'\\''"
     escape c = [c]
+
+sessionCwd :: GrokSession -> OsPath
+sessionCwd session = (grokSessionEnv session).toolCwd
 
 withTempSession :: ((GrokSession, GhciSession) -> IO a) -> IO a
 withTempSession action = do
