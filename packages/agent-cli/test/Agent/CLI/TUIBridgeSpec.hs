@@ -123,6 +123,13 @@ spec = describe "fullscreen TUI bridge" do
 
     it "falls back to root when the selected agent disappears" do
         let child = AgentChild (SubagentId "child")
-            root = AgentEntry AgentRoot "/root" "active" []
+            other = AgentChild (SubagentId "other")
+            root = AgentEntry AgentRoot "/root" "active" [] []
         normalizeAgentSelection child [root] `shouldBe` AgentRoot
         normalizeAgentSelection AgentRoot [root] `shouldBe` AgentRoot
+        reconcileAgentSelection [AgentRoot] child
+            `shouldBe` AgentRoot
+        reconcileAgentSelection [AgentRoot] AgentRoot
+            `shouldBe` AgentRoot
+        reconcileAgentSelection [AgentRoot, other] other
+            `shouldBe` other

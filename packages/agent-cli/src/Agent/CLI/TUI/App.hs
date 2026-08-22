@@ -2,6 +2,9 @@
 module Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
+    , agentEntryWindow
+    , agentPaneEntryLimit
+    , agentPaneVisible
     , emitUiEvent
     , hasQueuedFullscreenInput
     , newFullscreenInputBuffer
@@ -30,10 +33,14 @@ import Agent.CLI.Input
     , appendReplHistory
     , readReplHistory
     , terminalTextWidth
+    , truncateDisplayText
     )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
     , AgentTarget(..)
+    , agentDisplayName
     , agentEntryTreeLabel
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
@@ -135,7 +142,9 @@ data Name
     | PermissionRow !Int
     | SlashRow !Int
     | OverlayCursor
+    | AgentPane
     | AgentRow !AgentTarget
+    | AgentPopover !AgentTarget
     deriving (Eq, Ord, Show)
 
 data AppEvent
@@ -219,11 +228,19 @@ data AppState = AppState
     , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
+    , appAgentHover :: !(Maybe AgentHover)
     , appHoveredControl :: !(Maybe Name)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
     , appConversationReflowQueued :: !Bool
+    }
+
+data AgentHover = AgentHover
+    { agentHoverTarget :: !AgentTarget
+    , agentHoverUpperLeft :: !Location
+    , agentHoverPaneUpperLeft :: !Location
+    , agentHoverPaneWidth :: !Int
     }
 
 data ChoiceOverlay = ChoiceOverlay
@@ -452,6 +469,7 @@ runFullscreen runtime workerAction = do
             , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
+            , appAgentHover = Nothing
             , appHoveredControl = Nothing
             , appPressedControl = Nothing
             , appWorkerStopped = False
@@ -969,6 +987,7 @@ fullscreenApp = App
 drawApp :: AppState -> [Widget Name]
 drawApp state =
     let mainLayers = stickyPromptLayers state <> [drawMain state]
+        interactiveLayers = agentPopoverLayers state <> mainLayers
         dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
     in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
@@ -978,7 +997,7 @@ drawApp state =
             drawChoice state choice : dimmedMainLayers
         (Nothing, Nothing, Just permission) ->
             drawPermission permission : dimmedMainLayers
-        (Nothing, Nothing, Nothing) -> mainLayers
+        (Nothing, Nothing, Nothing) -> interactiveLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
@@ -1025,18 +1044,30 @@ drawImagePreviews previews =
 
 drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =
-    padTop (Pad 1) $
-        hBox $
-            [ drawConversationPane state ]
-                <> if length state.appAgentEntries <= 1
-                    then []
-                    else
-                        [ hLimit 42 $
-                            padLeft (Pad 1) $
-                                drawAgentPane
-                                    state.appAgentSelected
-                                    state.appAgentEntries
-                        ]
+    Widget Greedy Greedy do
+        context <- getContext
+        render $
+            padTop (Pad 1) $
+                hBox $
+                    [drawConversationPane state]
+                        <> if not
+                            (agentPaneVisible
+                                context.availWidth
+                                context.availHeight
+                                state.appAgentEntries)
+                            then []
+                            else
+                                [ hLimitPercent 40 $
+                                    hLimit agentPaneWidth $
+                                        padLeft (Pad 1) $
+                                            drawAgentPane
+                                                (agentPaneEntryLimit
+                                                    context.availHeight)
+                                                state.appAgentSelected
+                                                ((.agentHoverTarget)
+                                                    <$> state.appAgentHover)
+                                                state.appAgentEntries
+                                ]
 
 drawConversationPane :: AppState -> Widget Name
 drawConversationPane state
@@ -1051,37 +1082,74 @@ drawConversationPane state
             viewport ConversationViewport Vertical $
                 padLeftRight 2 (drawTranscript state)
 
-drawAgentPane :: AgentTarget -> [AgentEntry] -> Widget Name
-drawAgentPane selected entries =
-    withAttr Theme.borderAttr $
-        withBorderStyle unicodeRounded $
-            borderWithLabel (txt " Agents ") $
-                padAll 1 $
-                    vBox
-                        [ vBox agentRows
-                        , padTop (Pad 1) $
-                            withAttr Theme.footerAttr $
-                                txtWrap
-                                    ("viewing "
-                                        <> maybe "/root" (.agentPath)
-                                            selectedEntry
-                                        <> " · /agents to switch")
-                        , padTop (Pad 1) $
-                            withAttr Theme.assistantAttr $
-                                vBox (map txtWrap transcript)
-                        ]
+agentPaneWidth :: Int
+agentPaneWidth = 42
+
+agentPaneMinScreenWidth :: Int
+agentPaneMinScreenWidth = 72
+
+agentPaneMinAvailableHeight :: Int
+agentPaneMinAvailableHeight = 10
+
+agentPaneVisible :: Int -> Int -> [AgentEntry] -> Bool
+agentPaneVisible width height entries =
+    width >= agentPaneMinScreenWidth
+        && height >= agentPaneMinAvailableHeight
+        && length entries > 1
+
+agentPaneEntryLimit :: Int -> Int
+agentPaneEntryLimit availableHeight =
+    -- Reserve the outer top pad, six pane chrome rows (border, padding,
+    -- footer), and two possible truncation indicators above and below.
+    max 1 (min 12 (availableHeight - 9))
+
+drawAgentPane
+    :: Int
+    -> AgentTarget
+    -> Maybe AgentTarget
+    -> [AgentEntry]
+    -> Widget Name
+drawAgentPane entryLimit selected hovered entries =
+    clickable AgentPane $
+        withAttr Theme.borderAttr $
+            withBorderStyle unicodeRounded $
+                borderWithLabel
+                    (txt
+                        (" Agents · "
+                            <> Text.pack (show childCount)
+                            <> " ")) $
+                    padAll 1 $
+                        vBox
+                            [ vBox agentRows
+                            , padTop (Pad 1) $
+                                withAttr Theme.footerAttr $
+                                    txt "hover preview · /agents switch"
+                            ]
   where
     ordered = sortOn (.agentPath) entries
-    selectedEntry =
-        find ((== selected) . (.agentTarget)) ordered
-    shownEntries = agentEntryWindow 12 selected ordered
-    hiddenCount = max 0 (length ordered - length shownEntries)
+    childCount =
+        length
+            [ ()
+            | entry <- ordered
+            , entry.agentTarget /= AgentRoot
+            ]
+    (hiddenBefore, shownEntries, hiddenAfter) =
+        agentEntryWindow entryLimit selected ordered
     agentRows =
-        map drawEntry shownEntries
-            <> [ withAttr Theme.mutedAttr $
-                    txt ("  … " <> Text.pack (show hiddenCount) <> " more")
-               | hiddenCount > 0
+        [ drawHidden hiddenBefore "above"
+        | hiddenBefore > 0
+        ]
+            <> map drawEntry shownEntries
+            <> [ drawHidden hiddenAfter "below"
+               | hiddenAfter > 0
                ]
+    drawHidden count direction =
+        withAttr Theme.mutedAttr $
+            txt
+                ("  … "
+                    <> Text.pack (show count)
+                    <> " "
+                    <> direction)
     drawEntry entry =
         let
             index =
@@ -1089,38 +1157,190 @@ drawAgentPane selected entries =
                     findIndex ((== entry.agentTarget) . (.agentTarget)) ordered
             marker =
                 if entry.agentTarget == selected then "› " else "  "
-            row =
-                txt
-                    (marker
-                        <> agentEntryTreeLabel ordered index entry)
+            row = hBox
+                [ txt (marker <> agentEntryTreeLabel ordered index entry)
+                , fill ' '
+                ]
             styled =
-                if entry.agentTarget == selected
-                    then withAttr Theme.successAttr row
-                    else row
-        in clickable (AgentRow entry.agentTarget) styled
-    transcript = case selectedEntry of
-        Nothing -> ["(agent unavailable)"]
-        Just entry ->
-            let rows =
-                    filter (not . Text.null . Text.strip)
-                        entry.agentTranscript
-            in if null rows
-                then ["(no transcript)"]
-                else drop (max 0 (length rows - 12)) rows
+                if hovered == Just entry.agentTarget
+                    then withAttr Theme.controlLinkHoverAttr row
+                    else if entry.agentTarget == selected
+                        then withAttr Theme.successAttr row
+                        else row
+        in clickable (AgentRow entry.agentTarget) (vLimit 1 styled)
 
-agentEntryWindow :: Int -> AgentTarget -> [AgentEntry] -> [AgentEntry]
+agentPopoverLayers :: AppState -> [Widget Name]
+agentPopoverLayers state =
+    case (length state.appAgentEntries > 1, state.appAgentHover) of
+        (False, _) -> []
+        (_, Nothing) -> []
+        (True, Just hover) ->
+            case find
+                ((== hover.agentHoverTarget) . (.agentTarget))
+                state.appAgentEntries of
+                Nothing -> []
+                Just entry -> [positionAgentPopover hover entry]
+
+agentPopoverPreferredWidth :: Int
+agentPopoverPreferredWidth = 40
+
+agentPopoverMinWidth :: Int
+agentPopoverMinWidth = 24
+
+agentPopoverHeight :: Int
+agentPopoverHeight = 9
+
+agentPopoverGap :: Int
+agentPopoverGap = 1
+
+positionAgentPopover :: AgentHover -> AgentEntry -> Widget Name
+positionAgentPopover hover entry =
+    Widget Fixed Fixed do
+        context <- getContext
+        let screenWidth = max 0 context.availWidth
+            screenHeight = max 0 context.availHeight
+            Location (_, anchorY) = hover.agentHoverUpperLeft
+            Location (paneX, _) = hover.agentHoverPaneUpperLeft
+            paneRight = paneX + max 1 hover.agentHoverPaneWidth
+            leftAvailable = max 0 (paneX - agentPopoverGap)
+            rightAvailable =
+                max 0 (screenWidth - paneRight - agentPopoverGap)
+            placeLeft =
+                leftAvailable >= agentPopoverMinWidth
+                    || leftAvailable >= rightAvailable
+            available =
+                if placeLeft then leftAvailable else rightAvailable
+            width = min agentPopoverPreferredWidth available
+            height = min agentPopoverHeight screenHeight
+            x
+                | placeLeft =
+                    max 0 (paneX - agentPopoverGap - width)
+                | otherwise =
+                    min
+                        (max 0 (screenWidth - width - agentPopoverGap))
+                        paneRight
+            y = max 0 (min anchorY (screenHeight - height))
+        if screenWidth < agentPaneMinScreenWidth
+            || width < agentPopoverMinWidth
+            || height < 5
+            then render emptyWidget
+            else
+                render $
+                    translateBy (Location (x, y)) $
+                        drawAgentPopover placeLeft width height entry
+
+drawAgentPopover :: Bool -> Int -> Int -> AgentEntry -> Widget Name
+drawAgentPopover placeLeft width height entry =
+    clickable (AgentPopover entry.agentTarget) surface
+  where
+    surface
+        | placeLeft = hBox [popover, bridge]
+        | otherwise = hBox [bridge, popover]
+    bridge =
+        hLimit agentPopoverGap $
+            vLimit height (fill ' ')
+    popover =
+        hLimit width $
+            vLimit height $
+                withAttr Theme.baseAttr $
+                    overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                        withBorderStyle unicodeRounded $
+                            borderWithLabel
+                                (withAttr Theme.headingAttr $
+                                    txt
+                                        (" "
+                                            <> truncateDisplayText
+                                                (max 1 (width - 6))
+                                                (agentDisplayName entry.agentPath)
+                                            <> " ")) $
+                                padAll 1 $
+                                    vBox
+                                        ( intersperse
+                                            (vLimit 1 (fill ' '))
+                                            (map
+                                                (drawAgentStep
+                                                    (max 1 (width - 4)))
+                                                steps)
+                                            <> [fill ' ']
+                                        )
+    steps =
+        case take 2 entry.agentSteps of
+            [] ->
+                [ AgentStep
+                    { agentStepState = AgentStepInfo
+                    , agentStepTitle = "No recent activity"
+                    , agentStepDetail = Just entry.agentStatus
+                    }
+                ]
+            recent -> recent
+
+drawAgentStep :: Int -> AgentStep -> Widget Name
+drawAgentStep width step =
+    vLimit 2 $
+        vBox
+            [ hBox
+                [ withAttr (agentStepAttr step.agentStepState) $
+                    txt (agentStepGlyph step.agentStepState)
+                , txt " "
+                , withAttr Theme.assistantAttr $
+                    txt
+                        (truncateDisplayText
+                            (max 1 (width - 2))
+                            step.agentStepTitle)
+                ]
+            , padLeft (Pad 2) $
+                withAttr Theme.mutedAttr $
+                    txt
+                        (truncateDisplayText
+                            (max 1 (width - 2))
+                            (fromMaybe
+                                (agentStepStateLabel step.agentStepState)
+                                step.agentStepDetail))
+            ]
+
+agentStepGlyph :: AgentStepState -> Text
+agentStepGlyph = \case
+    AgentStepRunning -> "●"
+    AgentStepCompleted -> "✓"
+    AgentStepFailed -> "✕"
+    AgentStepInfo -> "◆"
+
+agentStepStateLabel :: AgentStepState -> Text
+agentStepStateLabel = \case
+    AgentStepRunning -> "running"
+    AgentStepCompleted -> "completed"
+    AgentStepFailed -> "failed"
+    AgentStepInfo -> "recent activity"
+
+agentStepAttr :: AgentStepState -> AttrName
+agentStepAttr = \case
+    AgentStepRunning -> Theme.thinkingAttr
+    AgentStepCompleted -> Theme.successAttr
+    AgentStepFailed -> Theme.errorAttr
+    AgentStepInfo -> Theme.toolAttr
+
+agentEntryWindow
+    :: Int
+    -> AgentTarget
+    -> [AgentEntry]
+    -> (Int, [AgentEntry], Int)
 agentEntryWindow count selected entries
-    | count <= 0 = []
-    | length entries <= count = entries
+    | count <= 0 = (0, [], length entries)
+    | length entries <= count = (0, entries, 0)
     | otherwise =
-        take count (drop start entries)
+        ( start
+        , take count (drop start entries)
+        , length entries - start - count
+        )
   where
     selectedIndex =
         maybe 0 id $
             findIndex ((== selected) . (.agentTarget)) entries
     start =
         max 0 $
-            min selectedIndex (length entries - count)
+            min
+                (selectedIndex - count `div` 2)
+                (length entries - count)
 
 drawHeader :: UiState -> Widget Name
 drawHeader state =
@@ -2106,6 +2326,21 @@ handleEvent event = case event of
                     current
                         { appAgentSelected = normalized
                         , appAgentEntries = entries
+                        , appAgentHover =
+                            if normalized /= current.appAgentSelected
+                                || length entries <= 1
+                                || agentLayoutTargets entries
+                                    /= agentLayoutTargets
+                                        current.appAgentEntries
+                                then Nothing
+                                else
+                                    current.appAgentHover >>= \hover ->
+                                        if any
+                                            ((== hover.agentHoverTarget)
+                                                . (.agentTarget))
+                                            entries
+                                            then Just hover
+                                            else Nothing
                         }
                 when
                     ((length state.appAgentEntries > 1)
@@ -2124,6 +2359,7 @@ handleEvent event = case event of
             state
                 { appUi = reduceUi (UiPermissionShown summary) state.appUi
                 , appPermissionReply = Just reply
+                , appAgentHover = Nothing
                 }
     AppEvent (AppAskChoice title body initial rows reply) -> do
         modify' \state ->
@@ -2136,6 +2372,7 @@ handleEvent event = case event of
                     , choiceRows = rows
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
+                , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppAskText title body initial reply) -> do
@@ -2148,6 +2385,7 @@ handleEvent event = case event of
                     , textCursor = Text.length initial
                     }
                 , appTextReply = Just reply
+                , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
     AppEvent (AppSuspend action reply) -> do
@@ -2155,8 +2393,9 @@ handleEvent event = case event of
         suspendAndResume do
             result <- tryAny action
             atomically (putTMVar reply result)
-            pure state
+            pure state { appAgentHover = Nothing }
     MouseDown name button _ _ -> do
+        unless (isAgentHoverSurface name) clearAgentHover
         state <- get
         case ( state.appTextPrompt
              , state.appChoice
@@ -2190,6 +2429,13 @@ handleEvent event = case event of
                     (SlashRow _, V.BScrollDown) ->
                         handleComposerKey (V.EvKey V.KDown [])
                     (AgentRow target, V.BLeft) -> do
+                        clearAgentHover
+                        liftIO
+                            (state.appRuntime.runtimeAgentSelect target)
+                        modify' \current ->
+                            current { appAgentSelected = target }
+                    (AgentPopover target, V.BLeft) -> do
+                        keepAgentHover target
                         liftIO
                             (state.appRuntime.runtimeAgentSelect target)
                         modify' \current ->
@@ -2219,29 +2465,41 @@ handleEvent event = case event of
                     _ -> pure ()
     -- The patched vty-unix backend represents no-button pointer motion as
     -- MouseUp Nothing so Brick can route it through clickable extents.
+    MouseUp (AgentRow target) Nothing _ ->
+        rememberAgentHover target
+    MouseUp (AgentPopover target) Nothing _ ->
+        keepAgentHover target
+    MouseUp AgentPane Nothing _ ->
+        pure ()
     MouseUp name button _
         | isInteractiveControl name
-        , button == Just V.BLeft || button == Nothing ->
+        , button == Just V.BLeft || button == Nothing -> do
+            clearAgentHover
             handleControlMouseUp name (activateControl name)
     MouseUp _ Nothing _ ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
+                , appAgentHover = Nothing
                 }
     VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
+                , appAgentHover = Nothing
                 }
     VtyEvent (V.EvMouseUp _ _ _) ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
                 , appPressedControl = Nothing
+                , appAgentHover = Nothing
                 }
-    VtyEvent V.EvResize{} ->
+    VtyEvent V.EvResize{} -> do
+        clearAgentHover
         invalidateCache
     VtyEvent vtyEvent -> do
+        clearAgentHover
         state <- get
         case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
             (Just _, _, _) -> handleTextPromptKey vtyEvent
@@ -2359,6 +2617,63 @@ activateSlashAt index = do
                     current { appSlashIndex = index }
                 handleComposerKey (V.EvKey V.KEnter [])
         _ -> pure ()
+
+rememberAgentHover :: AgentTarget -> EventM Name AppState ()
+rememberAgentHover target = do
+    rowExtent <- lookupExtent (AgentRow target)
+    paneExtent <- lookupExtent AgentPane
+    case rowExtent of
+        Nothing -> pure ()
+        Just extent ->
+            let Location (rowX, rowY) = extent.extentUpperLeft
+                fallbackPaneUpperLeft =
+                    Location (max 0 (rowX - 2), max 0 (rowY - 2))
+                fallbackPaneWidth = extentWidth extent + 4
+            in
+            modify' \state ->
+                state
+                    { appAgentHover =
+                        Just AgentHover
+                            { agentHoverTarget = target
+                            , agentHoverUpperLeft = extent.extentUpperLeft
+                            , agentHoverPaneUpperLeft =
+                                maybe
+                                    fallbackPaneUpperLeft
+                                    (.extentUpperLeft)
+                                    paneExtent
+                            , agentHoverPaneWidth =
+                                maybe
+                                    fallbackPaneWidth
+                                    extentWidth
+                                    paneExtent
+                            }
+                    }
+  where
+    extentWidth extent = fst extent.extentSize
+
+keepAgentHover :: AgentTarget -> EventM Name AppState ()
+keepAgentHover target = do
+    state <- get
+    case state.appAgentHover of
+        Just hover
+            | hover.agentHoverTarget == target -> pure ()
+        _ -> rememberAgentHover target
+
+clearAgentHover :: EventM Name AppState ()
+clearAgentHover =
+    modify' \state ->
+        state { appAgentHover = Nothing }
+
+isAgentHoverSurface :: Name -> Bool
+isAgentHoverSurface = \case
+    AgentPane -> True
+    AgentRow _ -> True
+    AgentPopover _ -> True
+    _ -> False
+
+agentLayoutTargets :: [AgentEntry] -> [AgentTarget]
+agentLayoutTargets =
+    map (.agentTarget) . sortOn (.agentPath)
 
 handleMouseDown :: Name -> V.Button -> EventM Name AppState ()
 handleMouseDown name button =

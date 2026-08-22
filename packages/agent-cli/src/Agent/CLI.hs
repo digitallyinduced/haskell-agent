@@ -18,12 +18,15 @@ import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Auth (LoadedAuth(..), loadAuth, probeLoadedAuth)
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
+    , AgentStep
     , AgentTarget(..)
     , AgentViewportEnv(..)
+    , agentStepsForStatus
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
     , responseItemPreviewLines
+    , responseItemStepPreviews
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -212,6 +215,7 @@ import Agent.CLI.TUI.App
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
+import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
     ( PromptState(..)
     , UiEvent(..)
@@ -364,6 +368,7 @@ import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.Exit (ExitCode(..), die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
+import System.Mem.StableName (StableName, makeStableName)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
@@ -381,6 +386,12 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
+
+data AgentStepCache = AgentStepCache
+    { cachedTranscript :: !(StableName [ResponseItem])
+    , cachedVariant :: !(Maybe SubagentStatus)
+    , cachedSteps :: ![AgentStep]
+    }
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
@@ -1280,12 +1291,44 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
-    let loadAgentEntries includeSummaries = do
-            selected <- readIORef selectedAgent
+    agentStepCache <- newIORef (Map.empty :: Map AgentTarget AgentStepCache)
+    let cachedAgentSteps target variant items build = do
+            transcriptName <- makeStableName items
+            cache <- readIORef agentStepCache
+            case Map.lookup target cache of
+                Just cached
+                    | cached.cachedTranscript == transcriptName
+                    , cached.cachedVariant == variant ->
+                        pure cached.cachedSteps
+                _ -> do
+                    let steps = build items
+                    atomicModifyIORef' agentStepCache \current ->
+                        ( Map.insert target (AgentStepCache
+                            { cachedTranscript = transcriptName
+                            , cachedVariant = variant
+                            , cachedSteps = steps
+                            })
+                            current
+                        , ()
+                        )
+                    pure steps
+        loadAgentSnapshot includeSummaries = do
             rootItems <- readIORef transcriptRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
+            let availableTargets =
+                    AgentRoot
+                        : [ AgentChild agentId
+                          | (_, agentId, _) <- agents
+                          ]
+            selected <-
+                atomicModifyIORef' selectedAgent \current ->
+                    let reconciled =
+                            TuiBridge.reconcileAgentSelection
+                                availableTargets
+                                current
+                    in (reconciled, reconciled)
             sessions <- readIORef subagentSessions
             let previewCount target =
                     if null agents
@@ -1295,10 +1338,19 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                             else if includeSummaries
                                 then Just 0
                                 else Nothing
+            rootSteps <-
+                if null agents
+                    then pure []
+                    else cachedAgentSteps
+                        AgentRoot
+                        Nothing
+                        rootItems
+                        (responseItemStepPreviews 2)
             let rootEntry = AgentEntry
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
                     , agentStatus = "active"
+                    , agentSteps = rootSteps
                     , agentTranscript = case previewCount AgentRoot of
                         Nothing -> []
                         Just count ->
@@ -1307,32 +1359,37 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             children <- mapM
                 (materializeChild previewCount sessions)
                 agents
-            pure (rootEntry : children)
+            pure (selected, rootEntry : children)
           where
             materializeChild previewCount sessions (path, agentId, status) = do
                 let target = AgentChild agentId
-                transcript <- case previewCount target of
+                items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
-                    Just count -> do
-                        stored <- case Map.lookup agentId sessions of
-                            Nothing ->
-                                pure ["(" <> formatAgentStatus status <> ")"]
-                            Just session ->
-                                responseItemPreviewLines count
-                                    <$> readIORef session.subSessionTranscript
-                        pure $
+                    Just session -> readIORef session.subSessionTranscript
+                steps <- cachedAgentSteps
+                    target
+                    (Just status)
+                    items
+                    (agentStepsForStatus 2 status)
+                let transcript = case previewCount target of
+                        Nothing -> []
+                        Just count ->
                             compactAgentPreview count $
-                                stored <> case status of
-                                    Completed (Just result)
-                                        | not (Text.null (Text.strip result)) ->
-                                            ["assistant: " <> Text.strip result]
-                                    Errored message ->
-                                        ["error: " <> Text.strip message]
-                                    _ -> []
+                                (if null items
+                                    then ["(" <> formatAgentStatus status <> ")"]
+                                    else responseItemPreviewLines count items)
+                                    <> case status of
+                                        Completed (Just result)
+                                            | not (Text.null (Text.strip result)) ->
+                                                ["assistant: " <> Text.strip result]
+                                        Errored message ->
+                                            ["error: " <> Text.strip message]
+                                        _ -> []
                 pure AgentEntry
                     { agentTarget = target
                     , agentPath = taskPathText path
                     , agentStatus = formatAgentStatus status
+                    , agentSteps = steps
                     , agentTranscript = transcript
                     }
             compactAgentPreview count rows
@@ -1344,10 +1401,10 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                             : drop (max 0 (length rows - count)) rows
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
-            , viewportEntries = loadAgentEntries True
+            , viewportEntries = snd <$> loadAgentSnapshot True
             }
     writeIORef startup.startupAgentSnapshot
-        ((,) <$> readIORef selectedAgent <*> loadAgentEntries False)
+        (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
@@ -1356,6 +1413,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
+            writeIORef agentStepCache Map.empty
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()

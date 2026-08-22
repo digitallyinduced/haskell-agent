@@ -4,6 +4,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -26,10 +27,10 @@ spec = do
                 `shouldBe`
                     Text.intercalate "\n"
                         [ "agents"
-                        , "  ▾ root  active"
-                        , "  ├─ alpha  running"
-                        , "› │  └─ gamma  done"
-                        , "  └─ beta  running"
+                        , "  ▾ root  ● active"
+                        , "  ├─ alpha  ● running"
+                        , "› │  └─ gamma  ✓ done"
+                        , "  └─ beta  ● running"
                         , "  viewing /root/alpha/gamma · /agents to switch"
                         ]
 
@@ -115,12 +116,122 @@ spec = do
                 ]
                 `shouldBe` ["user: request"]
 
+    describe "responseItemStepPreviews" do
+        it "coalesces tool calls with their outputs and returns newest first" do
+            let steps =
+                    responseItemStepPreviews 2
+                        [ messageItem RoleUser "fix it"
+                        , functionCallItem
+                            "call-1"
+                            "shell_command"
+                            "{\"command\":\"cabal test\"}"
+                            Nothing
+                        , functionOutputItem
+                            "call-1"
+                            (Just ItemCompleted)
+                        , messageItem
+                            RoleAssistant
+                            "Updated the retry policy\nFocused tests pass"
+                        ]
+            case steps of
+                [latest, tool] -> do
+                    map (.agentStepState) steps
+                        `shouldBe` [AgentStepCompleted, AgentStepCompleted]
+                    latest.agentStepTitle
+                        `shouldBe` "Updated the retry policy"
+                    latest.agentStepDetail
+                        `shouldBe` Just "Focused tests pass"
+                    tool.agentStepTitle
+                        `shouldSatisfy` Text.isInfixOf "cabal test"
+                _ -> expectationFailure
+                    ("expected exactly two semantic steps, got " <> show steps)
+
+        it "keeps a call running until its matching output arrives" do
+            let preview status =
+                    responseItemStepPreviews 1
+                        [ functionCallItem
+                            "call-1"
+                            "shell_command"
+                            "{\"command\":\"sleep 5\"}"
+                            (Just status)
+                        ]
+            map
+                (map (.agentStepState) . preview)
+                [ItemInProgress, ItemCompleted]
+                `shouldBe`
+                    [ [AgentStepRunning]
+                    , [AgentStepRunning]
+                    ]
+
+        it "treats production tool outputs without status as neutral" do
+            responseItemStepPreviews 1
+                [ functionCallItem
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"false\"}"
+                    (Just ItemCompleted)
+                , functionOutputItem "call-1" Nothing
+                ]
+                `shouldSatisfy`
+                    \case
+                        [step] ->
+                            step.agentStepState == AgentStepInfo
+                                && step.agentStepDetail == Just "finished"
+                        _ -> False
+
+        it "keeps the newest status when a call has multiple outputs" do
+            responseItemStepPreviews 1
+                [ functionCallItem
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"cabal test\"}"
+                    (Just ItemCompleted)
+                , functionOutputItem
+                    "call-1"
+                    (Just ItemIncomplete)
+                , functionOutputItem
+                    "call-1"
+                    (Just ItemCompleted)
+                ]
+                `shouldSatisfy`
+                    \case
+                        [step] ->
+                            step.agentStepState == AgentStepCompleted
+                        _ -> False
+
+        it "adds live and terminal lifecycle steps for subagents" do
+            agentStepsForStatus 2 Running []
+                `shouldBe`
+                    [AgentStep AgentStepRunning "Working…" Nothing]
+            agentStepsForStatus 2 Running
+                [ functionCallItem
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"sleep 5\"}"
+                    (Just ItemCompleted)
+                ]
+                `shouldSatisfy`
+                    \case
+                        step : _ ->
+                            step.agentStepState == AgentStepRunning
+                                && "sleep 5"
+                                    `Text.isInfixOf` step.agentStepTitle
+                        _ -> False
+            agentStepsForStatus 2 (Errored "websocket disconnected") []
+                `shouldBe`
+                    [ AgentStep
+                        AgentStepFailed
+                        "Agent failed"
+                        (Just "websocket disconnected")
+                    ]
+
 rootEntry :: AgentEntry
 rootEntry =
     AgentEntry
         { agentTarget = AgentRoot
         , agentPath = "/root"
         , agentStatus = "active"
+        , agentSteps = []
         , agentTranscript = ["user: hello", "assistant: ready"]
         }
 
@@ -130,6 +241,7 @@ child agentId path status =
         { agentTarget = AgentChild (SubagentId agentId)
         , agentPath = path
         , agentStatus = status
+        , agentSteps = []
         , agentTranscript = ["assistant: working"]
         }
 
@@ -142,6 +254,32 @@ messageItem role text = MessageItem ResponseMessage
     , phase = Nothing
     , extraFields = KeyMap.empty
     }
+
+functionCallItem
+    :: Text
+    -> Text
+    -> Text
+    -> Maybe ItemStatus
+    -> ResponseItem
+functionCallItem callId name arguments status =
+    FunctionCallItem FunctionCall
+        { itemId = Nothing
+        , callId
+        , name
+        , arguments
+        , status
+        , extraFields = KeyMap.empty
+        }
+
+functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
+functionOutputItem callId status =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId
+        , output = Aeson.String "ok"
+        , status
+        , extraFields = KeyMap.empty
+        }
 
 rightState :: Either (Maybe AgentTarget) AgentViewportState -> IO AgentViewportState
 rightState result = case result of
