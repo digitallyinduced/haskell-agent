@@ -12,6 +12,10 @@ import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint
     , userTextItem
     )
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    )
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -108,6 +112,57 @@ spec = do
                 Just (25, length compactedHistory)
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
+
+        it "defers compaction while completed tool outputs are still pending" do
+            let danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , arguments = "{}"
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory = [userTextItem "run it", danglingCall]
+                toolResult = ToolCallResult
+                    { callId = "call-1"
+                    , output = "done"
+                    , callKind = FunctionCallKind
+                    }
+            transcript <- newIORef oldHistory
+            contextState <- newIORef
+                (Just (codexAutoCompactTokenLimit, length oldHistory))
+            compactCalls <- newIORef (0 :: Int)
+            seenPrevious <- newIORef []
+            seenInputs <- newIORef []
+            let compactAction = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure $ Right CompactOutcome
+                        { compactBeforeTokens = codexAutoCompactTokenLimit
+                        , compactAfterTokens = 10
+                        , compactHistory = [userTextItem "compacted"]
+                        , compactSummary = "checkpoint"
+                        }
+                base = Backend \previous inputs _ -> do
+                    modifyIORef' seenPrevious (<> [previous])
+                    modifyIORef' seenInputs (<> [inputs])
+                    pure $ Right TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend = autoCompactOpenAiBackendWith compactAction
+                    transcript contextState base
+                inputs = [CompletedTool toolResult]
+            result <- backend.submitTurn (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
+            readIORef seenInputs `shouldReturn` [inputs]
+            readIORef transcript `shouldReturn` oldHistory
+            readIORef contextState `shouldReturn`
+                Just (25, length oldHistory)
 
 summaryResponse :: Text -> Response
 summaryResponse summary =

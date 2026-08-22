@@ -13,6 +13,7 @@ import Agent.Loop
     ( Backend(..)
     , LoopEvent(..)
     , TokenUsage(..)
+    , TurnInput(..)
     , TurnOutput(..)
     )
 import qualified Agent.OpenAI.Client as OpenAI
@@ -224,9 +225,20 @@ autoCompactOpenAiBackendWith compactAction transcriptRef contextTokensRef
             Just (tokens, observedLength)
                 | observedLength == historyLength
                 , tokens >= codexAutoCompactTokenLimit ->
-                    compactThenSubmit contextState inputs onEvent
+                    if any isCompletedTool inputs
+                        then submitAndTrack contextState previous inputs onEvent
+                        else compactThenSubmit contextState inputs onEvent
             _ -> submitAndTrack contextState previous inputs onEvent
   where
+    -- Tool results are appended by the wrapped backend as part of the next
+    -- request. Before that request, the transcript ends with the originating
+    -- calls and is therefore not valid input for a compaction request.
+    -- Defer compaction until the next non-tool continuation, by which point
+    -- the call/output pairs have been committed to the transcript.
+    isCompletedTool = \case
+        CompletedTool{} -> True
+        _ -> False
+
     compactThenSubmit oldTokens inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
         compactAction >>= \case
