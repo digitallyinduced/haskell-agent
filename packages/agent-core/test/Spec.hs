@@ -14,6 +14,7 @@ import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
+import qualified Agent.TextBufferSpec as TextBufferSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
@@ -44,6 +45,7 @@ main = hspec do
     SkillsSpec.spec
     SubagentsSpec.spec
     TaskPathSpec.spec
+    TextBufferSpec.spec
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
     ToolDSLSpec.spec

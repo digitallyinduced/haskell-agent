@@ -325,6 +325,10 @@
                         packages.agent-openrouter
                     ];
                     withHoogle = false;
+                    doBenchmark = true;
+                    extraDependencies = packages: {
+                        benchmarkHaskellDepends = [ packages.text-builder ];
+                    };
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                     '';
