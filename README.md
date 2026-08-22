@@ -2,6 +2,15 @@
 
 A universal coding-agent harness written in Haskell.
 
+## Quick start
+
+With [Nix](https://nixos.org/download/) installed, run the agent directly from
+GitHub:
+
+```console
+nix run github:digitallyinduced/haskell-agent
+```
+
 ## Packages
 
 - `agent-cli` is the command-line entry point (`-p` for one-shot, otherwise a REPL).
