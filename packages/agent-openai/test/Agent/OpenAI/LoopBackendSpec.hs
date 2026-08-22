@@ -1,6 +1,10 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , ErrorType(..)
+    , isInlineRetryableProviderError
+    )
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
@@ -12,6 +16,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -442,6 +447,197 @@ spec = do
             reverse observedEvents `shouldBe` [TextDelta "partial"]
 
     describe "openAiBackendWithConnectionRecovery" do
+        it "keeps auxiliary requests on the healthy reusable connection" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            let response = testResponse "resp-current" [assistantItem "ok"]
+                sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure (Right response)
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure (Right (testResponse "resp-fresh" [assistantItem "no"]))
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Right response
+            readIORef healthy `shouldReturn` True
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 0
+
+        it "exposes the same current/fresh recovery to auxiliary requests" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            failures <- newIORef []
+            healthy <- newIORef True
+            let connectionFailure = ConnectionError "socket closed"
+            let sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure (Left connectionFailure)
+                sendFresh failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    modifyIORef' failures (<> [failure])
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            first <- sender baseParams Nothing (const (pure ()))
+            second <- sender baseParams Nothing (const (pure ()))
+            first `shouldBe`
+                Right (testResponse "resp-fresh" [assistantItem "ok"])
+            second `shouldBe`
+                Right (testResponse "resp-fresh" [assistantItem "ok"])
+            readIORef healthy `shouldReturn` False
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 2
+            readIORef failures `shouldReturn`
+                [Just connectionFailure, Nothing]
+
+        it "does not replay auxiliary requests after an output item arrived" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            let connectionFailure = ConnectionError "socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendCurrent _request _previous onEvent = do
+                    onEvent outputEvent
+                    pure (Left connectionFailure)
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left
+                    (replayUnsafeAuxiliaryFailure connectionFailure)
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 0
+
+        it "does not replay after a terminal auxiliary response arrived" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            let connectionFailure = ConnectionError "decode failed"
+                completedEvent = ResponseCompletedEvent
+                    { response =
+                        testResponse "resp-completed" [assistantItem "done"]
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendCurrent _request _previous onEvent = do
+                    onEvent completedEvent
+                    pure (Left connectionFailure)
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right
+                        (testResponse "resp-fresh" [assistantItem "duplicate"])
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left
+                    (replayUnsafeAuxiliaryFailure connectionFailure)
+            readIORef freshCalls `shouldReturn` 0
+
+        it "does not replay a failed auxiliary response with partial output" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            let connectionFailure = ConnectionError "failed response"
+                failedEvent = ResponseFailedEvent
+                    { response =
+                        testResponse "resp-failed" [assistantItem "partial"]
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendCurrent _request _previous onEvent = do
+                    onEvent failedEvent
+                    pure (Left connectionFailure)
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right
+                        (testResponse "resp-fresh" [assistantItem "duplicate"])
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left
+                    (replayUnsafeAuxiliaryFailure connectionFailure)
+            readIORef freshCalls `shouldReturn` 0
+
+        it "marks output from an initially fresh auxiliary connection as replay-unsafe" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef False
+            let connectionFailure = ConnectionError "fresh socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    pure (Left (ConnectionError "unexpected current request"))
+                sendFresh _failure _request _previous onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    onEvent outputEvent
+                    pure (Left connectionFailure)
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left
+                    (replayUnsafeAuxiliaryFailure connectionFailure)
+            readIORef currentCalls `shouldReturn` 0
+            readIORef freshCalls `shouldReturn` 1
+
+        it "marks fresh auxiliary output after a pre-output current failure" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            let currentFailure = ConnectionError "current socket closed"
+                freshFailure = ConnectionError "fresh socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendCurrent _request _previous _onEvent =
+                    pure (Left currentFailure)
+                sendFresh failure _request _previous onEvent = do
+                    failure `shouldBe` Just currentFailure
+                    modifyIORef' freshCalls (+ 1)
+                    onEvent outputEvent
+                    pure (Left freshFailure)
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left
+                    (replayUnsafeAuxiliaryFailure freshFailure)
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 1
+
         it "replays on a fresh connection when the reusable socket dies before output" do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
@@ -573,6 +769,45 @@ spec = do
                         <> turnInputsToItems [UserMessage "new"]
                   , Nothing
                   )
+                ]
+
+    describe "openAiResponseSenderWithRetryPolicy" do
+        it "retries a pre-output fresh connection failure" $
+            shouldRetryFreshAuxiliaryFailure
+                (ConnectionError "fresh socket closed")
+
+        it "retries a pre-output fresh websocket-limit failure" $
+            shouldRetryFreshAuxiliaryFailure
+                (ProviderError WebSocketConnectionLimitReached
+                    "too many websocket connections"
+                    Nothing)
+
+        it "returns the final pre-output failure after exhausting retries" do
+            attempts <- newIORef (0 :: Int)
+            let failure = ConnectionError "still offline"
+                send _request _previous _onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    pure (Left failure)
+                sender =
+                    openAiResponseSenderWithRetryPolicy
+                        (constantDelay 0 <> limitRetries 1)
+                        isAuxiliaryOutputEvent
+                        send
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Left failure
+            readIORef attempts `shouldReturn` 2
+
+        it "marks every post-output auxiliary failure as non-retryable" do
+            mapM_ shouldMarkPostOutputAuxiliaryFailure
+                [ ConnectionError "socket closed"
+                , ProviderError WebSocketConnectionLimitReached
+                    "too many websocket connections"
+                    Nothing
+                , ProviderError OverloadedError "busy" Nothing
+                , ProviderError ServiceUnavailableError "unavailable" Nothing
+                , ProviderError ApiErrorType "server error" Nothing
+                , ProviderError UsageLimitReached "usage exhausted" (Just 120)
+                , HttpError 503 "unavailable"
                 ]
 
     describe "openAiBackendWithTransportFallback" do
@@ -818,3 +1053,82 @@ inputItems :: ResponseCreateParams -> [ResponseItem]
 inputItems request = case request.input of
     Just (ResponseInputItems items) -> items
     _ -> []
+
+shouldRetryFreshAuxiliaryFailure :: ApiError -> Expectation
+shouldRetryFreshAuxiliaryFailure initialFailure = do
+    healthy <- newIORef False
+    currentCalls <- newIORef (0 :: Int)
+    freshCalls <- newIORef (0 :: Int)
+    let response = testResponse "resp-retried" [assistantItem "ok"]
+        sendCurrent _request _previous _onEvent = do
+            modifyIORef' currentCalls (+ 1)
+            pure (Left (ConnectionError "unexpected reusable request"))
+        sendFresh _failure _request _previous _onEvent = do
+            attempt <- atomicModifyIORef' freshCalls \count ->
+                let next = count + 1
+                in (next, next)
+            pure $
+                if attempt == 1
+                    then Left initialFailure
+                    else Right response
+        reconnecting =
+            openAiAuxiliaryResponseSenderWithConnectionRecovery
+                healthy
+                sendCurrent
+                sendFresh
+        sender =
+            openAiResponseSenderWithRetryPolicy
+                (constantDelay 0 <> limitRetries 1)
+                isAuxiliaryOutputEvent
+                reconnecting
+    sender baseParams Nothing (const (pure ()))
+        `shouldReturn` Right response
+    readIORef currentCalls `shouldReturn` 0
+    readIORef freshCalls `shouldReturn` 2
+
+shouldMarkPostOutputAuxiliaryFailure :: ApiError -> Expectation
+shouldMarkPostOutputAuxiliaryFailure failure = do
+    healthy <- newIORef True
+    currentCalls <- newIORef (0 :: Int)
+    freshCalls <- newIORef (0 :: Int)
+    let outputEvent = ResponseOutputItemDoneEvent
+            { item = assistantItem "partial"
+            , outputIndex = 0
+            , sequenceNumber = Nothing
+            , eventExtraFields = KeyMap.empty
+            }
+        sendCurrent _request _previous onEvent = do
+            modifyIORef' currentCalls (+ 1)
+            onEvent outputEvent
+            pure (Left failure)
+        sendFresh _failure _request _previous _onEvent = do
+            modifyIORef' freshCalls (+ 1)
+            pure $ Right (testResponse "resp-fresh" [assistantItem "duplicate"])
+        sender =
+            openAiAuxiliaryResponseSenderWithConnectionRecovery
+                healthy
+                sendCurrent
+                sendFresh
+        expected = replayUnsafeAuxiliaryFailure failure
+    sender baseParams Nothing (const (pure ()))
+        `shouldReturn` Left expected
+    isInlineRetryableProviderError expected `shouldBe` False
+    readIORef currentCalls `shouldReturn` 1
+    readIORef freshCalls `shouldReturn` 0
+
+isAuxiliaryOutputEvent :: ResponseStreamEvent -> Bool
+isAuxiliaryOutputEvent = \case
+    ResponseCompletedEvent{} -> True
+    ResponseFailedEvent{response} -> not (null response.output)
+    ResponseIncompleteEvent{} -> True
+    ResponseOutputItemAddedEvent{} -> True
+    ResponseOutputItemDoneEvent{} -> True
+    _ -> False
+
+replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
+replayUnsafeAuxiliaryFailure failure =
+    ProviderError (UnknownErrorType "replay_unsafe")
+        ( "provider failed after auxiliary response output; refusing to replay: "
+            <> Text.pack (show failure)
+        )
+        Nothing

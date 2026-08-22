@@ -6,6 +6,7 @@ module Agent.CLI.SessionEnv
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
@@ -26,6 +27,7 @@ import Data.Text (Text)
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
     , sessionBtwBackend :: !BtwBackendFactory
+    , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
     , sessionUnavailableProviders :: !(IORef [Provider])

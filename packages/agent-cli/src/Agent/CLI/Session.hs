@@ -12,6 +12,7 @@ module Agent.CLI.Session
     , appendTurn
     , appendTurnWithMetaUpdate
     , appendTurnKeepTitle
+    , addSessionUsage
     , loadSession
     , isValidSessionId
     , listSessions
@@ -293,6 +294,25 @@ appendTurnWithMetaUpdate handle turn updateMeta = do
         finalMeta = updateMeta meta
     writeSessionMeta handle.sessionMetaPath finalMeta
     pure handle { sessionMeta = finalMeta }
+
+-- | Persist provider usage that is not represented by its own transcript
+-- turn, such as an inline compaction request. Session metadata is the
+-- authoritative aggregate used when resuming.
+addSessionUsage :: TokenUsage -> SessionHandle -> IO SessionHandle
+addSessionUsage usage handle = do
+    now <- getCurrentTime
+    let meta0 = handle.sessionMeta
+        meta = meta0
+            { metaUpdatedAt = now
+            , metaInputTokens =
+                meta0.metaInputTokens + usage.inputTokens
+            , metaOutputTokens =
+                meta0.metaOutputTokens + usage.outputTokens
+            , metaCachedTokens =
+                meta0.metaCachedTokens + usage.cachedTokens
+            }
+    writeSessionMeta handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
 
 sessionConversationText :: [SessionTurn] -> Text
 sessionConversationText =

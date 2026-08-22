@@ -67,8 +67,10 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
-    , autoCompactOpenAiBackendWithThreshold
-    , runProviderCompact
+    , OpenAiCompactionSender
+    , autoCompactOpenAiBackendWithSender
+    , installCompactOutcome
+    , runProviderCompactWith
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Error
@@ -272,7 +274,11 @@ import Agent.OpenAI.Compaction
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.LoopBackend (openAiBackendReconnecting)
+import Agent.OpenAI.LoopBackend
+    ( openAiAuxiliaryResponseSenderReconnecting
+    , openAiBackendWith
+    , openAiResponseSenderReconnecting
+    )
 import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
@@ -338,6 +344,7 @@ import Control.Exception.Safe
     , catchAny
     , catchAsync
     , finally
+    , mask_
     , throwIO
     , try
     )
@@ -993,6 +1000,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                 }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
+        previousRef <- newIORef initialPrevious
         writeIORef subagentForkSource (Just transcriptRef)
         prompt <- loadPrompt options
         let titleHint = case resumed of
@@ -1017,6 +1025,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        let recordCompactionUsage usage =
+                when (usage /= emptyTokenUsage) $
+                    mask_ do
+                        case persist of
+                            PersistenceDisabled -> pure ()
+                            PersistenceEnabled slotRef -> do
+                                handle <- ensureSession slotRef
+                                claimCurrentSession handle
+                                updated <- addSessionUsage usage handle
+                                writeIORef slotRef (PersistenceActive updated)
+                        modifyIORef' usageRef (`addTokenUsage` usage)
         case persist of
             PersistenceEnabled slotRef -> do
                 slot <- readIORef slotRef
@@ -1044,8 +1063,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                                 loaded.loadedTokenProvider
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
-                                let lockedBackend =
-                                        lockedOpenAiBackend
+                                let (compactSender, lockedBackend) =
+                                        lockedOpenAiSession
                                             options.optCompactThreshold
                                             wsLock
                                             loaded.loadedTokenProvider
@@ -1055,19 +1074,34 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             (readIORef paramsRef)
                                             transcriptRef
                                             contextTokensRef
+                                            recordCompactionUsage
                                     noticingBackend =
-                                        withPendingInputs pendingNotices $
-                                            withConnectionRecovery lockedBackend
+                                        withPendingInputs pendingNotices
+                                            lockedBackend
                                     btwBackend privateParams privateTranscript =
                                         freshOpenAiBackend
                                             loaded.loadedTokenProvider
                                             (readIORef privateParams)
                                             privateTranscript
+                                    compactRunner focus =
+                                        withMVar wsLock \_ ->
+                                            installCompactOutcome
+                                                previousRef
+                                                transcriptRef
+                                                (Just contextTokensRef)
+                                                (runProviderCompactWith
+                                                    (Just compactSender)
+                                                    recordCompactionUsage
+                                                    provider
+                                                    (Just loaded.loadedTokenProvider)
+                                                    paramsRef
+                                                    transcriptRef)
+                                                focus
                                 activeBackend <-
                                     prepareTransitionBackend transition persist noticingBackend
                                 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                                    initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend)
+                                    previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1100,11 +1134,20 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             btwBackend privateParams privateTranscript =
                                 xaiBackend xaiOptions loaded.loadedTokenProvider
                                     (readIORef privateParams) privateTranscript
+                            compactRunner =
+                                installCompactOutcome previousRef transcriptRef Nothing $
+                                    runProviderCompactWith
+                                        Nothing
+                                        recordCompactionUsage
+                                        provider
+                                        (Just loaded.loadedTokenProvider)
+                                        paramsRef
+                                        transcriptRef
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1125,11 +1168,20 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             btwBackend privateParams privateTranscript =
                                 openRouterBackend openRouterOptions loaded.loadedTokenProvider
                                     (readIORef privateParams) privateTranscript
+                            compactRunner =
+                                installCompactOutcome previousRef transcriptRef Nothing $
+                                    runProviderCompactWith
+                                        Nothing
+                                        recordCompactionUsage
+                                        provider
+                                        (Just loaded.loadedTokenProvider)
+                                        paramsRef
+                                        transcriptRef
                         activeBackend <-
                             prepareTransitionBackend transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders paramsRef transcriptRef initialTurns
-                            initialPrevious persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession activeBackend btwBackend
+                            previousRef persist projectRoot home cwd (Just loaded.loadedTokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef claimCurrentSession compactRunner activeBackend btwBackend
 
 preparePersistence
     :: Maybe FullscreenRuntime
@@ -1247,7 +1299,7 @@ runSession
     -> IORef ResponseCreateParams
     -> IORef [ResponseItem]
     -> [SessionTurn]
-    -> Maybe Text
+    -> IORef (Maybe Text)
     -> Persistence
     -> OsPath
     -> OsPath
@@ -1266,10 +1318,12 @@ runSession
     -> SubagentStoreRoot
     -> IORef TokenUsage
     -> (SessionHandle -> IO ())
+    -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns initialPrevious persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef onPersisted compactRunner backend btwBackend = do
+  initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
@@ -1312,7 +1366,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     restartEffortRef <- newIORef Nothing
-    previous <- newIORef initialPrevious
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     agentStepCache <- newIORef (Map.empty :: Map AgentTarget AgentStepCache)
@@ -1542,6 +1595,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
+            , sessionCompact = compactRunner
             , sessionRender = render
             , sessionProvider = provider
             , sessionUnavailableProviders = unavailableProvidersRef
@@ -1804,6 +1858,7 @@ repl env = replWithDraft env ""
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionBtwBackend = btwBackend
+    , sessionCompact = compactRunner
     , sessionRender = render
     , sessionProvider = provider
     , sessionPrevious = previous
@@ -2277,16 +2332,13 @@ replWithDraft env@SessionEnv
                         color <- resolveColor stderr
                         result <-
                             withReplActivity "Compacting context…" $
-                                runProviderCompact provider tokenProvider
-                                    paramsRef transcriptRef focus
+                                compactRunner focus
                         case result of
                             Left err -> do
                                 displayError err $
                                     Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
-                                writeIORef transcriptRef outcome.compactHistory
-                                writeIORef previous Nothing
                                 fullscreenEvent UiConversationCleared
                                 fullscreenEvent
                                     (UiSystemMessage outcome.compactSummary)
@@ -2317,16 +2369,19 @@ replWithDraft env@SessionEnv
                                                 , turnError = Nothing
                                                 , turnResponseId = Nothing
                                                 , turnItems = outcome.compactHistory
+                                                -- Compaction response usage is
+                                                -- recorded immediately by
+                                                -- compactRunner, including
+                                                -- response-level failures.
                                                 , turnUsage = Nothing
                                                 }
-                                        handle' <- appendTurn handle turn
-                                        let meta = handle'.sessionMeta
-                                                { metaLastResponseId = Nothing
-                                                , metaUpdatedAt = now
-                                                }
-                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        handle' <-
+                                            appendTurnWithMetaUpdate handle turn
+                                                \meta -> meta
+                                                    { metaLastResponseId = Nothing
+                                                    }
                                         writeIORef slotRef
-                                            (PersistenceActive handle'{sessionMeta = meta})
+                                            (PersistenceActive handle')
                                 continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
@@ -3552,9 +3607,12 @@ currentSessionId = \case
             PersistencePending _ -> Nothing
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
--- | Serialize turns on the root OpenAI WebSocket connection because
--- 'receiveWsResponse' is not multiplexed.
-lockedOpenAiBackend
+-- | Build a root OpenAI backend plus an unlocked sender for manual compaction.
+-- Callers hold the same lock around the entire manual compact/install
+-- transition. A normal logical turn holds it across automatic compaction and
+-- its continuation because the active WebSocket is not multiplexed and
+-- transcript mutation must not interleave between those two requests.
+lockedOpenAiSession
     :: Maybe Int
     -> MVar ()
     -> TokenProvider
@@ -3564,16 +3622,41 @@ lockedOpenAiBackend
     -> IO ResponseCreateParams
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
-    -> Backend
-lockedOpenAiBackend compactThreshold wsLock provider credential connectionHealthy
-        conn getParams transcript contextTokens =
-    let Backend submit =
-            openAiBackendReconnecting
-                provider credential connectionHealthy conn getParams transcript
-        serialized = Backend \previous inputs onEvent ->
-            withMVar wsLock \_ -> submit previous inputs onEvent
-    in autoCompactOpenAiBackendWithThreshold compactThreshold provider
-        getParams transcript contextTokens serialized
+    -> (TokenUsage -> IO ())
+    -> (OpenAiCompactionSender, Backend)
+lockedOpenAiSession compactThreshold wsLock provider credential
+        connectionHealthy conn getParams transcript contextTokens
+        recordCompactionUsage =
+    let sendResponse =
+            openAiResponseSenderReconnecting
+                provider
+                credential
+                connectionHealthy
+                conn
+        sendAuxiliary =
+            openAiAuxiliaryResponseSenderReconnecting
+                provider
+                credential
+                connectionHealthy
+                conn
+        baseBackend =
+            withConnectionRecovery $
+                openAiBackendWith sendResponse getParams transcript
+        compactSender request =
+            sendAuxiliary request Nothing (const (pure ()))
+        compactingBackend =
+            autoCompactOpenAiBackendWithSender
+                compactThreshold
+                compactSender
+                recordCompactionUsage
+                getParams
+                transcript
+                contextTokens
+                baseBackend
+        serializedBackend = Backend \previous inputs onEvent ->
+            withMVar wsLock \_ ->
+                compactingBackend.submitTurn previous inputs onEvent
+    in (compactSender, serializedBackend)
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation

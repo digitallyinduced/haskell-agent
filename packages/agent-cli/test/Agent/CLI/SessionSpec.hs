@@ -157,6 +157,109 @@ spec = describe "Agent.CLI.Session" do
                         meta `shouldBe` handle'.sessionMeta
                         turns `shouldBe` [turn]
 
+        it "commits a compact marker with a cleared response id" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                let completedTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "before compact"
+                        , turnAssistantText = Just "done"
+                        , turnError = Nothing
+                        , turnResponseId = Just "resp-old"
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        }
+                    compactTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "/compact"
+                        , turnAssistantText =
+                            Just "Context compacted remotely."
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        }
+                withResponse <- appendTurn handle completedTurn
+                final <-
+                    appendTurnWithMetaUpdate withResponse compactTurn
+                        \meta -> meta { metaLastResponseId = Nothing }
+
+                final.sessionMeta.metaLastResponseId `shouldBe` Nothing
+                loadSession root final.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta.metaLastResponseId `shouldBe` Nothing
+                        turns `shouldBe` [completedTurn, compactTurn]
+
+        it "adds auxiliary usage without appending a transcript turn" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                updated <- addSessionUsage TokenUsage
+                    { inputTokens = 90
+                    , outputTokens = 7
+                    , cachedTokens = 40
+                    }
+                    handle
+                updated.sessionMeta.metaInputTokens `shouldBe` 90
+                updated.sessionMeta.metaOutputTokens `shouldBe` 7
+                updated.sessionMeta.metaCachedTokens `shouldBe` 40
+                doesFileExist updated.sessionTranscriptPath
+                    `shouldReturn` False
+
+                loadSession root updated.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        turns `shouldBe` []
+                        sessionUsageFromTurns meta turns `shouldBe` TokenUsage
+                            { inputTokens = 90
+                            , outputTokens = 7
+                            , cachedTokens = 40
+                            }
+
+        it "combines auxiliary and turn usage exactly once on resume" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                withCompaction <- addSessionUsage TokenUsage
+                    { inputTokens = 90
+                    , outputTokens = 7
+                    , cachedTokens = 40
+                    }
+                    handle
+                let compactTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "/compact"
+                        , turnAssistantText = Just "Context compacted remotely."
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnItems = []
+                        , turnUsage = Nothing
+                        }
+                    normalTurn = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "continue"
+                        , turnAssistantText = Just "done"
+                        , turnError = Nothing
+                        , turnResponseId = Just "resp-next"
+                        , turnItems = []
+                        , turnUsage = Just TokenUsage
+                            { inputTokens = 10
+                            , outputTokens = 4
+                            , cachedTokens = 2
+                            }
+                        }
+                withMarker <- appendTurn withCompaction compactTurn
+                final <- appendTurn withMarker normalTurn
+
+                loadSession root final.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        turns `shouldBe` [compactTurn, normalTurn]
+                        sessionUsageFromTurns meta turns `shouldBe` TokenUsage
+                            { inputTokens = 100
+                            , outputTokens = 11
+                            , cachedTokens = 42
+                            }
+
         it "rejects unsupported schema versions" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)
