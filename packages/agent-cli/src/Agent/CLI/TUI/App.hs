@@ -1827,8 +1827,12 @@ handleUiEvents uiEvents = do
                 queueConversationReflow
             Nothing ->
                 vScrollToEnd (viewportScroll ConversationViewport)
+    -- An idle tick is the only batch that can leave the presentation
+    -- unchanged. Avoid comparing complete 'UiState' values here: that walks
+    -- the full conversation, including large streamed block bodies, on every
+    -- animation tick.
     when
-        (all (== UiTick) uiEvents && final.appUi == initial.appUi)
+        (all (== UiTick) uiEvents && not (uiNeedsTick initial.appUi))
         continueWithoutRedraw
   where
     applyOne
