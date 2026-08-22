@@ -2532,6 +2532,7 @@ handleEvent event = case event of
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
+        queueConversationReflow
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
@@ -2627,8 +2628,6 @@ handleNormalKey event
         handleComposerKey event
     | otherwise = do
         case event of
-            V.EvResize _ _ ->
-                queueConversationReflow
             V.EvMouseDown _ _ V.BScrollUp _ ->
                 scrollConversationBy (-mouseScrollLines)
             V.EvMouseDown _ _ V.BScrollDown _ ->
