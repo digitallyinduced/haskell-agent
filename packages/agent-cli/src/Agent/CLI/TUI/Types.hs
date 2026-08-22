@@ -8,6 +8,7 @@ module Agent.CLI.TUI.Types
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
     , FullscreenRuntime(..)
+    , FullscreenSessionActions(..)
     , Name(..)
     , PendingAppEvent(..)
     , PendingUiEvent(..)
@@ -125,6 +126,18 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeColor :: !Bool
     , runtimeSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     , runtimeInitial :: !UiState
+    , runtimeSessionActions :: !(IORef FullscreenSessionActions)
+    }
+
+-- | Provider/session-scoped actions behind one long-lived terminal runtime.
+-- Replacing the record atomically prevents the retained UI from calling into
+-- resources belonging to a backend that has already shut down.
+data FullscreenSessionActions = FullscreenSessionActions
+    { sessionCancel :: !(IO ())
+    , sessionRestartEffort :: !(Text -> IO ())
+    , sessionCtrlC :: !(IO CtrlCDecision)
+    , sessionAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
+    , sessionAgentSelect :: !(AgentTarget -> IO ())
     }
 
 data AppState = AppState

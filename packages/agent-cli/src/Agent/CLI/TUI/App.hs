@@ -18,6 +18,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     , runFullscreen
+    , setFullscreenSessionActions
     , fullscreenVtyConfig
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
@@ -168,20 +169,34 @@ newFullscreenRuntime
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        sessionActions <- newIORef FullscreenSessionActions
+            { sessionCancel = cancelAction
+            , sessionRestartEffort = restartEffortAction
+            , sessionCtrlC = ctrlCAction
+            , sessionAgentSnapshot = agentSnapshot
+            , sessionAgentSelect = agentSelect
+            }
         syntaxHighlighter <-
             either (const Nothing) Just <$> loadSyntaxHighlighter
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
             , runtimeInput = inputBuffer
-            , runtimeCancel = cancelAction
-            , runtimeRestartEffort = restartEffortAction
-            , runtimeCtrlC = ctrlCAction
+            , runtimeCancel =
+                readIORef sessionActions >>= (.sessionCancel)
+            , runtimeRestartEffort = \level ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionRestartEffort level
+            , runtimeCtrlC =
+                readIORef sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
             , runtimeNativeProgress = nativeProgress
-            , runtimeAgentSnapshot = agentSnapshot
-            , runtimeAgentSelect = agentSelect
+            , runtimeAgentSnapshot =
+                readIORef sessionActions >>= (.sessionAgentSnapshot)
+            , runtimeAgentSelect = \target ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionAgentSelect target
             , runtimeFirstFrame = firstFrame
             , runtimeRunning = running
             , runtimeImagePreviews = imagePreviews
@@ -194,6 +209,30 @@ newFullscreenRuntime
             , runtimeColor = color
             , runtimeSyntaxHighlighter = syntaxHighlighter
             , runtimeInitial = initial
+            , runtimeSessionActions = sessionActions
+            }
+
+setFullscreenSessionActions
+    :: FullscreenRuntime
+    -> IO ()
+    -> (Text -> IO ())
+    -> IO CtrlCDecision
+    -> IO (AgentTarget, [AgentEntry])
+    -> (AgentTarget -> IO ())
+    -> IO ()
+setFullscreenSessionActions
+    runtime
+    cancelAction
+    restartEffortAction
+    ctrlCAction
+    agentSnapshot
+    agentSelect =
+        writeIORef runtime.runtimeSessionActions FullscreenSessionActions
+            { sessionCancel = cancelAction
+            , sessionRestartEffort = restartEffortAction
+            , sessionCtrlC = ctrlCAction
+            , sessionAgentSnapshot = agentSnapshot
+            , sessionAgentSelect = agentSelect
             }
 
 emitUiEvent :: FullscreenRuntime -> UiEvent -> IO ()

@@ -6,13 +6,16 @@ import Agent.CLI.TUI.App
     ( emitUiEvent
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
+import Agent.CLI.TUI.Types (FullscreenRuntime(..))
 import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (functionToolCall)
 import Control.Monad (replicateM_)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.Timeout (timeout)
 import qualified Graphics.Vty as V
 import Test.Hspec
@@ -104,6 +107,38 @@ spec = describe "fullscreen TUI bridge" do
                 emitUiEvent runtime (UiLoop (TextDelta "x"))
                 emitUiEvent runtime (UiLoop TurnStarted)
         completed `shouldBe` Just ()
+
+    it "rebinds provider-specific actions without replacing the runtime" do
+        calls <- newIORef ([] :: [String])
+        input <- newFullscreenInputBuffer
+        runtime <- newFullscreenRuntime
+            input
+            (modifyIORef' calls (<> ["old cancel"]))
+            (const (pure ()))
+            (pure WarnExit)
+            (const (pure True))
+            (const (pure ()))
+            (const (pure ()))
+            (pure (AgentRoot, []))
+            (const (pure ()))
+            (pure ())
+            False
+            initialUiState
+        runtime.runtimeCancel
+        setFullscreenSessionActions
+            runtime
+            (modifyIORef' calls (<> ["new cancel"]))
+            (const (modifyIORef' calls (<> ["new effort"])))
+            (pure SoftCancel)
+            (pure (AgentRoot, []))
+            (const (modifyIORef' calls (<> ["new agent"])))
+        runtime.runtimeCancel
+        runtime.runtimeRestartEffort "high"
+        runtime.runtimeAgentSelect AgentRoot
+        decision <- runtime.runtimeCtrlC
+        readIORef calls `shouldReturn`
+            ["old cancel", "new cancel", "new effort", "new agent"]
+        decision `shouldBe` SoftCancel
 
     it "moves through history and restores the original draft" do
         historyMove 1 ["new", "old"] Nothing "draft" ""
