@@ -10,6 +10,10 @@ import Agent.ToolDispatch
     , customToolCall
     , functionToolCall
     )
+import Agent.TextBuffer
+    ( emptyTextBuffer
+    , textBufferToText
+    )
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
@@ -269,6 +273,25 @@ spec = do
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 
+        it "accumulates many small reasoning deltas without losing order" do
+            withRenderConfig True False \config handle path -> do
+                let chunks = replicate 5000 "x"
+                mapM_ (renderEvent config . ReasoningDelta) chunks
+                buffered <- readIORef config.renderReasoningBuffer
+                textBufferToText buffered
+                    `shouldBe` Text.replicate 5000 "x"
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                readIORef config.renderReasoningBuffer
+                    `shouldReturn` emptyTextBuffer
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "Thought for"
+
         it "commits the thinking block before the first tool" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
@@ -302,8 +325,6 @@ spec = do
                 renderEvent config (TextDelta "say **")
                 renderEvent config (TextDelta "hello")
                 renderEvent config (TextDelta "** there")
-                buffered <- readIORef config.renderTextBuffer
-                buffered `shouldBe` "say **hello** there"
                 live <- readIORef config.renderLiveActive
                 live `shouldBe` True
                 printed <- readIORef config.renderPrintedText
@@ -362,7 +383,6 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` Text.isInfixOf "src"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
-                readIORef config.renderTextBuffer `shouldReturn` ""
 
         it "paints assistantText on TurnFinished when no deltas arrived" do
             withRenderConfig False True \config handle path -> do
@@ -494,11 +514,10 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
     printed <- newIORef False
     thinking <- newIORef False
     spinner <- newIORef Nothing
-    reasoningBuffer <- newIORef ""
+    reasoningBuffer <- newIORef emptyTextBuffer
     modelRef <- newIORef "test-model"
     activityRef <- newIORef "Thinking…"
     startedAt <- newIORef Nothing
-    textBuffer <- newIORef ""
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     toolCalls <- newIORef mempty
@@ -514,7 +533,6 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
                 , renderReasoningBuffer = reasoningBuffer
                 , renderColor = color
                 , renderPrintedText = printed
-                , renderTextBuffer = textBuffer
                 , renderMarkdownState = markdownState
                 , renderLiveActive = liveActive
                 , renderLock = lock

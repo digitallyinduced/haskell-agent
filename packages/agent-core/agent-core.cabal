@@ -57,6 +57,7 @@ library
                     , Agent.Subagents.Registry
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
+                    , Agent.TextBuffer
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
@@ -109,6 +110,16 @@ library
                     , websockets
                     , yaml
 
+benchmark streaming-text-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          StreamingText.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , text
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -127,6 +138,7 @@ test-suite agent-core-test
                     , Agent.SkillsSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
+                    , Agent.TextBufferSpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodexSpec

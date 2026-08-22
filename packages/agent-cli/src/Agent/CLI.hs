@@ -334,6 +334,7 @@ import Agent.Subagents
     )
 import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
+import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -1564,12 +1565,11 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
-    textBuffer <- newIORef ""
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
-    reasoningBuffer <- newIORef ""
+    reasoningBuffer <- newIORef emptyTextBuffer
     activityRef <- newIORef "Thinking…"
     startedAtRef <- newIORef Nothing
     toolCallsRef <- newIORef Map.empty
@@ -1735,7 +1735,6 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , renderReasoningBuffer = reasoningBuffer
             , renderColor = useColor
             , renderPrintedText = printed
-            , renderTextBuffer = textBuffer
             , renderMarkdownState = markdownState
             , renderLiveActive = liveActive
             , renderLock = ioLock

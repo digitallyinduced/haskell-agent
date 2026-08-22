@@ -75,6 +75,12 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , canonicalToolName
     )
+import Agent.TextBuffer
+    ( TextBuffer
+    , appendTextBuffer
+    , emptyTextBuffer
+    , textBufferToText
+    )
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
@@ -109,10 +115,9 @@ data RenderConfig = RenderConfig
     , renderThinkingVisible :: !(IORef Bool)
     , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
     -- | Accumulated reasoning-summary text for the current model round.
-    , renderReasoningBuffer :: !(IORef Text)
+    , renderReasoningBuffer :: !(IORef TextBuffer)
     , renderColor :: !Bool
     , renderPrintedText :: !(IORef Bool)
-    , renderTextBuffer :: !(IORef Text)
     , renderMarkdownState :: !(IORef MarkdownStreamState)
     -- | True after assistant text has been streamed for the current round.
     , renderLiveActive :: !(IORef Bool)
@@ -149,7 +154,6 @@ renderEventUnlocked config = \case
         commitThinkingUnlocked config
         if config.renderColor
             then do
-                modifyIORef' config.renderTextBuffer (<> delta)
                 streamAssistantDelta config delta
             else do
                 writeIORef config.renderPrintedText True
@@ -166,10 +170,9 @@ renderEventUnlocked config = \case
                 then startThinkingSpinnerUnlocked config
                 else putTextLn config.renderStderr (roleMuted config.renderColor activity)
     TurnStarted -> do
-        writeIORef config.renderTextBuffer ""
         writeIORef config.renderMarkdownState emptyMarkdownStreamState
         writeIORef config.renderLiveActive False
-        writeIORef config.renderReasoningBuffer ""
+        writeIORef config.renderReasoningBuffer emptyTextBuffer
         writeIORef config.renderActivityRef "Thinking…"
         writeIORef config.renderToolCalls Map.empty
         now <- getCurrentTime
@@ -246,12 +249,11 @@ streamAssistantDelta config delta
             hFlush config.renderStdout
 
 -- | End-of-turn: keep live paint when deltas already drew; otherwise paint
--- once from the buffer or completed 'assistantText' (non-streaming backends).
+-- once from the pending fragment or completed 'assistantText'
+-- (non-streaming backends).
 -- Returns whether anything was written.
 finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
-    buffered <- readIORef config.renderTextBuffer
-    writeIORef config.renderTextBuffer ""
     (pending, context) <-
         atomicModifyIORef' config.renderMarkdownState \state ->
             (emptyMarkdownStreamState, (state.pending, state.context))
@@ -269,7 +271,7 @@ finalizeAssistantBuffer config assistantText = do
             pure True
         else do
             let raw
-                    | not (Text.null buffered) = buffered
+                    | not (Text.null pending) = pending
                     | otherwise = fromMaybe "" assistantText
             if Text.null raw
                 then pure False
@@ -399,14 +401,16 @@ appendReasoningUnlocked config delta
     | otherwise =
         -- Keep the one-line spinner while buffering. Repainting even a bounded
         -- multi-line preview can scroll old frames into terminal scrollback.
-        modifyIORef' config.renderReasoningBuffer (<> delta)
+        modifyIORef' config.renderReasoningBuffer
+            (appendTextBuffer delta)
 
 commitThinkingUnlocked :: RenderConfig -> IO ()
 commitThinkingUnlocked config = do
     stopThinkingSpinnerUnlocked config
     emitNativeProgress config False
-    buffered <- readIORef config.renderReasoningBuffer
-    writeIORef config.renderReasoningBuffer ""
+    buffered <- textBufferToText
+        <$> readIORef config.renderReasoningBuffer
+    writeIORef config.renderReasoningBuffer emptyTextBuffer
     if Text.null (Text.strip buffered)
         then pure ()
         else do
