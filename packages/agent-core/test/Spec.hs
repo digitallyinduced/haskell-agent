@@ -9,6 +9,7 @@ import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
+import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
@@ -37,6 +38,7 @@ main = hspec do
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec
     ResourceScopeSpec.spec
+    RetrySpec.spec
     SkillsSpec.spec
     SubagentsSpec.spec
     TaskPathSpec.spec

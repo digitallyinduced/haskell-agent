@@ -50,6 +50,7 @@ library
                     , Agent.Http.Url
                     , Agent.ProjectInstructions
                     , Agent.ResourceScope
+                    , Agent.Retry
                     , Agent.Skills
                     , Agent.Subagents
                     , Agent.Subagents.Format
@@ -90,6 +91,7 @@ library
                     , async
                     , bytestring
                     , containers
+                    , crypton-connection
                     , directory
                     , filepath
                     , process
@@ -100,6 +102,7 @@ library
                     , stm
                     , text
                     , time
+                    , tls
                     , transformers
                     , unix
                     , vector
@@ -120,6 +123,7 @@ test-suite agent-core-test
                     , Agent.ProjectInstructionsSpec
                     , Agent.Provider.OptionsSpec
                     , Agent.ResourceScopeSpec
+                    , Agent.RetrySpec
                     , Agent.SkillsSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
@@ -148,7 +152,9 @@ test-suite agent-core-test
                     , stm
                     , text
                     , time
+                    , tls
                     , bytestring
+                    , crypton-connection
                     , unix
                     , websockets
                     , yaml

@@ -155,29 +155,22 @@ runConnectionAttempt credential _action
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
 runConnectionAttempt credential action = do
-    result <- Exception.try @Exception.SomeException $ do
-        let headers = buildCodexWsHeaders credential
-        WebSocket.retryTransientWsConnectWithPolicy
-            WebSocket.transientWsConnectRetryPolicy
-            \connected ->
-                Wuss.runSecureClientWith
-                    wsHost
-                    443
-                    wsPath
-                    WS.defaultConnectionOptions
-                    headers
-                    \conn -> do
-                        connected
-                        WebSocket.withWebSocketSession
-                            WebSocket.defaultWebSocketSessionOptions
-                            conn
-                            (\session -> action (CodexWsConn session) credential)
-    case result of
-        Right value -> pure value
-        Left exception
-            | Just authErr <- WebSocket.wsHandshakeAuthFailure exception ->
-                pure (Left authErr)
-            | otherwise -> Exception.throwIO exception
+    let headers = buildCodexWsHeaders credential
+    WebSocket.retryTransientWsConnectWithPolicy
+        WebSocket.transientWsConnectRetryPolicy
+        \connected ->
+            Wuss.runSecureClientWith
+                wsHost
+                443
+                wsPath
+                WS.defaultConnectionOptions
+                headers
+                \conn -> do
+                    connected
+                    WebSocket.withWebSocketSession
+                        WebSocket.defaultWebSocketSessionOptions
+                        conn
+                        (\session -> action (CodexWsConn session) credential)
 
 -- | Pure handshake-header builder exported for transport contract tests.
 buildCodexWsHeaders :: Credential -> WS.Headers
