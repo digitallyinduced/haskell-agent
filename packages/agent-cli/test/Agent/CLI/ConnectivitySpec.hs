@@ -62,6 +62,23 @@ spec = describe "withConnectionRecovery" do
         result `shouldBe` Left expected
         readIORef waits `shouldReturn` []
 
+    it "recovers from a WebSocket frame parse disconnect" do
+        attempts <- newIORef (0 :: Int)
+        let backend = withConnectionRecoveryUsing
+                (const (pure ()))
+                (Backend \_ _ _ -> do
+                    attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
+                    pure $
+                        if attempt == 1
+                            then Left $ ConnectionError
+                                "WebSocket receive error: ParseException \"not enough bytes\""
+                            else Right
+                                (emptyTurnOutput "response" [] (Just "done")))
+        result <- backend.submitTurn Nothing [] (const (pure ()))
+        result `shouldBe`
+            Right (emptyTurnOutput "response" [] (Just "done"))
+        readIORef attempts `shouldReturn` 2
+
     it "does not replay a submission after visible output streamed" do
         attempts <- newIORef (0 :: Int)
         waits <- newIORef []

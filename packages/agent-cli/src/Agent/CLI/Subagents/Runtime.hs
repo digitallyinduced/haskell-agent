@@ -15,6 +15,7 @@ module Agent.CLI.Subagents.Runtime
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction (autoCompactOpenAiBackend)
+import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
     , CliOptions(..)
@@ -379,11 +380,12 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     freshOpenAiBackend tokenProvider
                         (readIORef childParamsRef) session.subSessionTranscript
                 backend =
-                    autoCompactOpenAiBackend tokenProvider
-                        (readIORef childParamsRef)
-                        session.subSessionTranscript
-                        session.subSessionContextTokens
-                        baseBackend
+                    withConnectionRecovery $
+                        autoCompactOpenAiBackend tokenProvider
+                            (readIORef childParamsRef)
+                            session.subSessionTranscript
+                            session.subSessionContextTokens
+                            baseBackend
                 config = LoopConfig
                     { loopBackend = backend
                     , loopTools = toolRegistry
@@ -481,7 +483,9 @@ runHttpSubagent runtime provider mkBackend =
                     (schemasFromAppTools provider tools) effort
             toolRegistry <- requireToolRegistry tools
             childParamsRef <- newIORef childParams
-            let backend = mkBackend childParamsRef session.subSessionTranscript
+            let backend =
+                    withConnectionRecovery $
+                        mkBackend childParamsRef session.subSessionTranscript
                 config = LoopConfig
                     { loopBackend = backend
                     , loopTools = toolRegistry
