@@ -59,7 +59,13 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (partitionEithers)
 import Data.Function (on)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import Data.List (find, nubBy)
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
@@ -232,17 +238,42 @@ loadOpenRouter = do
 
 loadOpenAi :: ExceptT Text IO LoadedAuth
 loadOpenAi = do
-    managedResult <- lift loadManagedCredentials
-    fromEnvToken <- lift (lookupNonEmpty "CODEX_ACCESS_TOKEN")
-    fromEnvJson <- lift (lookupNonEmpty "CODEX_AUTH_JSON")
-    home <- lift getHomeDirectory
+    (errors, accounts) <- lift loadOpenAiAccounts
+    when (null accounts) $
+        throwE $ case errors of
+            [] -> noAuthHint
+            accountErrors ->
+                "no valid OpenAI credentials found: "
+                    <> Text.intercalate "; " accountErrors
+    clientId <-
+        lift $
+            openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    refreshLock <- lift (newMVar ())
+    accountSources <- lift (newIORef accounts)
+    pool <- lift $ OpenAI.newDiscoveringPool
+        (map (.openAiState) accounts)
+        (refreshOpenAiAccount refreshLock clientId accountSources)
+        (discoverOpenAiAccounts accountSources)
+    tokenProvider <- lift (OpenAICredential.poolTokenProvider pool)
+    pure LoadedAuth
+        { loadedProvider = OpenAIProvider
+        , loadedTokenProvider = tokenProvider
+        , loadedOpenAiPool = Just pool
+        }
+
+loadOpenAiAccounts :: IO ([Text], [OpenAiAccount])
+loadOpenAiAccounts = do
+    managedResult <- loadManagedCredentials
+    fromEnvToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
+    fromEnvJson <- lookupNonEmpty "CODEX_AUTH_JSON"
+    home <- getHomeDirectory
     let filePath =
             home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json"
-    fileExists <- lift (doesFileExist filePath)
+    fileExists <- doesFileExist filePath
     fileBytes <- if fileExists
-        then lift (Just <$> retryOnFileBusy (LBS.readFile (decodeUtfPath filePath)))
+        then Just <$> retryOnFileBusy (LBS.readFile (decodeUtfPath filePath))
         else pure Nothing
-    now <- lift getCurrentTime
+    now <- getCurrentTime
     let (storeErrors, managed) = case managedResult of
             Left err -> ([err], [])
             Right credentials ->
@@ -252,7 +283,7 @@ loadOpenAi = do
                   , metadata.managedProvider == OpenAIProvider
                   ]
                 )
-    envTokenAccount <- lift $ traverse (openAiStaticAccount now) fromEnvToken
+    envTokenAccount <- traverse (openAiStaticAccount now) fromEnvToken
     let enabledManaged =
             [ credential
             | credential@(metadata, _) <- managed
@@ -278,25 +309,27 @@ loadOpenAi = do
                 (catMaybes [envTokenAccount, envJsonAccount, fileAccount])
         accounts = deduplicateOpenAiAccounts
             (managedAccounts <> externalAccounts)
-    when (null accounts) $
-        throwE $ case storeErrors <> managedErrors of
-            [] -> noAuthHint
-            errors ->
-                "no valid OpenAI credentials found: "
-                    <> Text.intercalate "; " errors
-    clientId <-
-        lift $
-            openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
-    refreshLock <- lift (newMVar ())
-    pool <- lift $ OpenAI.newPool
-        (map (.openAiState) accounts)
-        (refreshOpenAiAccount refreshLock clientId accounts)
-    tokenProvider <- lift (OpenAICredential.poolTokenProvider pool)
-    pure LoadedAuth
-        { loadedProvider = OpenAIProvider
-        , loadedTokenProvider = tokenProvider
-        , loadedOpenAiPool = Just pool
-        }
+    pure (storeErrors <> managedErrors, accounts)
+
+discoverOpenAiAccounts
+    :: IORef [OpenAiAccount]
+    -> [Text]
+    -> IO (Either ApiError [OpenAI.AuthState])
+discoverOpenAiAccounts accountSources knownAccountIds = do
+    (errors, accounts) <- loadOpenAiAccounts
+    let additional =
+            filter
+                (\account ->
+                    account.openAiState.accountId `notElem` knownAccountIds)
+                accounts
+    if null additional
+        then pure $ case errors of
+            [] -> Right []
+            _ -> Left (ConnectionError (Text.intercalate "; " errors))
+        else do
+            atomicModifyIORef' accountSources \knownSources ->
+                (deduplicateOpenAiAccounts (knownSources <> additional), ())
+            pure (Right (map (.openAiState) additional))
 
 data OpenAiCredentialSource
     = OpenAiManagedOAuth !Text
@@ -368,11 +401,12 @@ deduplicateOpenAiAccounts =
 refreshOpenAiAccount
     :: MVar ()
     -> Text
-    -> [OpenAiAccount]
+    -> IORef [OpenAiAccount]
     -> OpenAI.AuthState
     -> IO (Either ApiError OpenAI.AuthState)
-refreshOpenAiAccount lock clientId accounts stale =
-    withMVar lock \_ ->
+refreshOpenAiAccount lock clientId accountSources stale =
+    withMVar lock \_ -> do
+        accounts <- readIORef accountSources
         case find
             ((== stale.accountId) . (.accountId) . (.openAiState))
             accounts of
