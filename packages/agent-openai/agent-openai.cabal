@@ -52,6 +52,8 @@ library
                     , Agent.OpenAI.Login
                     , Agent.OpenAI.Usage
                     , Agent.OpenAI.Client
+                    , Agent.OpenAI.Features
+                    , Agent.OpenAI.ModelMetadata
                     , Agent.OpenAI.ResponseMerge
                     , Agent.OpenAI.WebSocketClient
                     , Agent.OpenAI.LoopBackend

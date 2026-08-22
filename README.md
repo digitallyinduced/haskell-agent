@@ -59,6 +59,10 @@ Without `-p` / `--prompt-file` the CLI starts a REPL. Credentials come from
 `CODEX_ACCESS_TOKEN` (OpenAI), or `OPENROUTER_API_KEY` (OpenRouter).
 `--provider` overrides auto-detection.
 
+OpenAI sessions compact automatically at the selected model's default context
+threshold. Pass `--compact-threshold N` to override it in estimated tokens, for
+example `--model gpt-5.6-luna --compact-threshold 120000`.
+
 Ghostty receives native progress, notifications, semantic turn boundaries,
 working-directory updates, inline images, synchronized picker redraws, and
 terminal clipboard support. See `docs/ghostty.md`; run `/terminal` inside the

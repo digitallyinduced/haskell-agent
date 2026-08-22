@@ -3,13 +3,17 @@ module Agent.CLI.CompactionSpec (spec) where
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , autoCompactOpenAiBackendWith
+    , autoCompactOpenAiBackendWithApi
+    , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
     , runProviderCompact
     )
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
 import Agent.OpenAI.Compaction
-    ( hasCompactionCheckpoint
+    ( compactionTriggerItem
+    , hasCompactionCheckpoint
     , userTextItem
     )
 import Agent.ToolDispatch
@@ -23,6 +27,7 @@ import Agent.Provider (Provider(..), TokenProvider(..))
 import Data.IORef
 import Control.Monad.Trans.Except (runExceptT)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -47,7 +52,47 @@ spec = do
                 `shouldReturn` Left "nothing to compact"
 
     describe "compactOpenAIWith" do
-        it "uses normal Responses summarization directly" do
+        it "uses remote compaction v2 on normal Responses" do
+            requests <- newIORef []
+            let provider = TokenProvider \_ ->
+                    error "remote compaction unexpectedly requested credentials"
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                history = [userTextItem "old context"]
+                params = defaultResponseCreateParams
+                    { instructions = Just "keep these instructions"
+                    , tools = Just []
+                    , stream = Just False
+                    }
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    params
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome -> do
+                    outcome.compactSummary
+                        `shouldBe` "Context compacted remotely."
+                    outcome.compactHistory
+                        `shouldSatisfy` hasCompactionCheckpoint
+            seen <- readIORef requests
+            length seen `shouldBe` 1
+            map (.instructions) seen `shouldBe` [Just "keep these instructions"]
+            map (.tools) seen `shouldBe` [Just []]
+            map (.parallelToolCalls) seen `shouldBe` [Just True]
+            map (.previousResponseId) seen `shouldBe` [Nothing]
+            map (.store) seen `shouldBe` [Just False]
+            map (.stream) seen `shouldBe` [Just True]
+            map (.toolChoice) seen
+                `shouldBe` [Just (ToolChoiceMode ToolChoiceAuto)]
+            map requestItems seen
+                `shouldBe` [history <> [compactionTriggerItem]]
+
+        it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []
             let provider = TokenProvider \_ ->
                     error "local summarization unexpectedly requested credentials"
@@ -58,10 +103,10 @@ spec = do
             result <- runExceptT $
                 compactOpenAIWith send
                     (Just provider)
-                    defaultResponseCreateParams { stream = Just False }
+                    defaultResponseCreateParams
                     history
                     100
-                    Nothing
+                    (Just "focus on auth")
             case result of
                 Left err -> expectationFailure (show err)
                 Right outcome -> do
@@ -69,12 +114,38 @@ spec = do
                     outcome.compactHistory
                         `shouldSatisfy` hasCompactionCheckpoint
             seen <- readIORef requests
-            length seen `shouldBe` 1
             map (.tools) seen `shouldBe` [Nothing]
             map (.parallelToolCalls) seen `shouldBe` [Just False]
             map (.stream) seen `shouldBe` [Just True]
 
     describe "autoCompactOpenAiBackendWith" do
+        it "compacts at a configured threshold below the model default" do
+            let history = [userTextItem "old"]
+                threshold = 20
+                tokenProvider = TokenProvider \_ ->
+                    pure (Left (ConnectionError "configured threshold fired"))
+                params =
+                    withModel
+                        (Just "gpt-5.6-luna")
+                        defaultResponseCreateParams
+                base = Backend \_ _ _ ->
+                    error "configured compaction threshold should run first"
+            transcript <- newIORef history
+            contextState <- newIORef
+                (Just (threshold, length history))
+            let backend =
+                    autoCompactOpenAiBackendWithThreshold
+                        (Just threshold)
+                        tokenProvider
+                        (pure params)
+                        transcript
+                        contextState
+                        base
+            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+                `shouldReturn`
+                    Left (ConnectionError
+                        "automatic compaction failed: configured threshold fired")
+
         it "compacts before the next request at the Codex token limit" do
             let oldHistory = [userTextItem "old"]
                 compactedHistory = [userTextItem "compacted"]
@@ -113,7 +184,7 @@ spec = do
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
 
-        it "defers compaction while completed tool outputs are still pending" do
+        it "compacts when a pending tool output crosses the limit" do
             let danglingCall = FunctionCallItem FunctionCall
                     { itemId = Nothing
                     , callId = "call-1"
@@ -123,19 +194,22 @@ spec = do
                     , extraFields = mempty
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
+                toolOutputText = Text.replicate 400 "x"
                 toolResult = ToolCallResult
                     { callId = "call-1"
-                    , output = "done"
+                    , output = toolOutputText
                     , callKind = FunctionCallKind
                     }
             transcript <- newIORef oldHistory
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit, length oldHistory))
+                (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
             compactCalls <- newIORef (0 :: Int)
+            historyAtCompact <- newIORef []
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
             let compactAction = do
                     modifyIORef' compactCalls (+ 1)
+                    readIORef transcript >>= writeIORef historyAtCompact
                     pure $ Right CompactOutcome
                         { compactBeforeTokens = codexAutoCompactTokenLimit
                         , compactAfterTokens = 10
@@ -157,12 +231,96 @@ spec = do
             result <- backend.submitTurn (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 0
-            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
-            readIORef seenInputs `shouldReturn` [inputs]
-            readIORef transcript `shouldReturn` oldHistory
+            readIORef compactCalls `shouldReturn` 1
+            compactInput <- readIORef historyAtCompact
+            compactInput `shouldSatisfy` \items ->
+                case reverse items of
+                    FunctionCallOutputItem output : _ ->
+                        output.callId == "call-1"
+                            && output.output == Aeson.String toolOutputText
+                    _ -> False
+            readIORef seenPrevious `shouldReturn` [Nothing]
+            readIORef seenInputs `shouldReturn` [[]]
+            readIORef transcript `shouldReturn` [userTextItem "compacted"]
             readIORef contextState `shouldReturn`
-                Just (25, length oldHistory)
+                Just (25, 1)
+
+        it "preserves typed provider failures from automatic compaction" do
+            let history = [userTextItem "old"]
+                compactError =
+                    ProviderError UsageLimitReached "quota exhausted" (Just 120)
+            transcript <- newIORef history
+            contextState <- newIORef
+                (Just (codexAutoCompactTokenLimit, length history))
+            let compactAction =
+                    pure (Left compactError)
+                base = Backend \_ _ _ ->
+                    error "failed compaction should not submit a model request"
+                backend = autoCompactOpenAiBackendWithApi compactAction
+                    transcript contextState base
+            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+                `shouldReturn`
+                    Left (ProviderError UsageLimitReached
+                        "automatic compaction failed: quota exhausted"
+                        (Just 120))
+
+        it "estimates resumed history when no provider token snapshot exists" do
+            let history =
+                    [ userTextItem
+                        (Text.replicate
+                            (codexAutoCompactTokenLimit * 4)
+                            "x")
+                    ]
+            transcript <- newIORef history
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            let compactAction = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure $ Right CompactOutcome
+                        { compactBeforeTokens = codexAutoCompactTokenLimit
+                        , compactAfterTokens = 10
+                        , compactHistory = [userTextItem "compacted"]
+                        , compactSummary = "checkpoint"
+                        }
+                base = Backend \_ _ _ ->
+                    pure $ Right TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend = autoCompactOpenAiBackendWith compactAction
+                    transcript contextState base
+            result <- backend.submitTurn Nothing [UserMessage "new"]
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+
+requestItems :: ResponseCreateParams -> [ResponseItem]
+requestItems request = case request.input of
+    Just (ResponseInputItems items) -> items
+    _ -> []
+
+remoteCompactionResponse :: Response
+remoteCompactionResponse =
+    case Aeson.fromJSON $ Aeson.object
+        [ "id" .= ("resp-compact" :: Text)
+        , "created_at" .= (0 :: Int)
+        , "status" .= ("completed" :: Text)
+        , "model" .= ("gpt-test" :: Text)
+        , "output" .=
+            [ Aeson.object
+                [ "type" .= ("compaction" :: Text)
+                , "encrypted_content" .= ("opaque" :: Text)
+                ]
+            ]
+        ] of
+        Aeson.Success response -> response
+        Aeson.Error err -> error err
+
+withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withModel nextModel ResponseCreateParams { model = _, .. } =
+    ResponseCreateParams { model = nextModel, .. }
 
 summaryResponse :: Text -> Response
 summaryResponse summary =

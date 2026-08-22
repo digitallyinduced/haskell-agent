@@ -3,15 +3,154 @@ module Agent.OpenAI.CompactionSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.CompactClient
 import Agent.OpenAI.Compaction
+import Agent.OpenAI.ModelMetadata
 import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
 import Agent.Provider
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "remote compaction v2" do
+        it "builds an exact final compaction trigger and preserves request controls" do
+            let reasoningConfig = ReasoningConfig
+                    { context = Nothing
+                    , effort = Just "high"
+                    , generateSummary = Nothing
+                    , reasoningMode = Nothing
+                    , summary = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                params = defaultResponseCreateParams
+                    { instructions = Just "instructions"
+                    , tools = Just []
+                    , reasoning = Just reasoningConfig
+                    , previousResponseId = Just "old-response"
+                    , parallelToolCalls = Just False
+                    , store = Just True
+                    , stream = Just False
+                    }
+                history = [user "hello"]
+                request = buildRemoteCompactionRequest params history
+            request.instructions `shouldBe` Just "instructions"
+            request.tools `shouldBe` Just []
+            request.reasoning `shouldBe` Just reasoningConfig
+            request.previousResponseId `shouldBe` Nothing
+            request.parallelToolCalls `shouldBe` Just True
+            request.store `shouldBe` Just False
+            request.stream `shouldBe` Just True
+            request.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceAuto)
+            requestItems request `shouldBe` history <> [compactionTriggerItem]
+            Aeson.toJSON compactionTriggerItem
+                `shouldBe` Aeson.object ["type" .= ("compaction_trigger" :: Text.Text)]
+
+        it "accepts exactly one compaction item alongside unrelated output" do
+            let opaque = checkpoint "opaque"
+                response = completedResponse [assistant "ignored", opaque]
+            extractRemoteCompactionItem response `shouldBe` Right opaque
+
+        it "rejects zero or multiple compaction output items" do
+            extractRemoteCompactionItem (completedResponse [assistant "none"])
+                `shouldSatisfy` isLeft
+            extractRemoteCompactionItem
+                (completedResponse [checkpoint "one", checkpoint "two"])
+                `shouldSatisfy` isLeft
+
+        it "installs retained user messages before the opaque checkpoint" do
+            let opaque = checkpoint "opaque"
+                call = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , arguments = "{}"
+                    , status = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                history =
+                    [ user "old"
+                    , assistant "discard me"
+                    , call
+                    , user "recent"
+                    ]
+            buildRemoteCompactedHistory 64_000 history opaque
+                `shouldBe` [user "old", user "recent", opaque]
+
+        it "drops harness-generated user-role context wrappers" do
+            let opaque = checkpoint "opaque"
+                history =
+                    [ user "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>generated</INSTRUCTIONS>"
+                    , user "# Skill instructions: example\n\n<SKILL_INSTRUCTIONS>generated</SKILL_INSTRUCTIONS>"
+                    , user "<subagent_notification>\nstatus: completed\n</subagent_notification>"
+                    , user "real user request"
+                    ]
+            buildRemoteCompactedHistory 64_000 history opaque
+                `shouldBe` [user "real user request", opaque]
+
+        it "retains task agent messages but drops descendant progress and completions" do
+            let opaque = checkpoint "opaque"
+                task = agentMessage "root" "root/child"
+                    "Message Type: NEW_TASK\nPayload:\ndo it"
+                progress = agentMessage "root/child/grandchild" "root/child"
+                    "Message Type: MESSAGE\nPayload:\nworking"
+                completion = agentMessage "root/child" "root"
+                    "Message Type: FINAL_ANSWER\nPayload:\ndone"
+            buildRemoteCompactedHistory 64_000
+                [task, progress, completion]
+                opaque
+                `shouldBe` [task, opaque]
+
+        it "uses the retained budget newest-first and truncates the boundary user" do
+            let opaque = checkpoint "opaque"
+                old = Text.replicate 40 "o"
+                recent = "recent"
+                compacted =
+                    buildRemoteCompactedHistory 3
+                        [user old, user recent]
+                        opaque
+                retainedTexts =
+                    [ userOnly message
+                    | MessageItem message <- compacted
+                    , message.role == RoleUser
+                    ]
+            retainedTexts `shouldBe` [Text.take 8 old, recent]
+            last compacted `shouldBe` opaque
+
+        it "rewrites a trailing oversized tool output to fit the request window" do
+            let oversized = FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = "call-1"
+                    , output = Aeson.String (Text.replicate 10_000 "x")
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        100
+                        Nothing
+                        [user "keep", oversized]
+            case reverse trimmed of
+                FunctionCallOutputItem output : _ ->
+                    output.output `shouldBe` Aeson.String
+                        "Output exceeded the available model context and was truncated"
+                other ->
+                    expectationFailure
+                        ("expected rewritten tool output, got " <> show other)
+
+    describe "Codex model metadata" do
+        it "derives the 90% auto-compaction limit for curated 272k models" do
+            codexModelMetadata "gpt-5.6-luna"
+                `shouldBe` Just CodexModelMetadata
+                    { modelContextWindow = 272_000
+                    , modelEffectiveContextWindow = 258_400
+                    , modelAutoCompactTokenLimit = 244_800
+                    }
+            codexAutoCompactTokenLimitFor (Just "gpt-5.6-sol")
+                `shouldBe` 244_800
+
     describe "buildLocalCompactedHistory" do
         it "keeps recent user texts and an assistant summary" do
             let history =
@@ -36,24 +175,18 @@ spec = do
             texts `shouldBe` ["keep me"]
 
     describe "compactTranscriptAtLastCheckpoint" do
-        it "preserves history without a checkpoint" do
-            let history = [user "one", assistant "two"]
-            compactTranscriptAtLastCheckpoint history `shouldBe` history
-
-        it "keeps the latest checkpoint and following items" do
+        it "retains its legacy raw-checkpoint behavior for API compatibility" do
             let first = checkpoint "first"
                 latest = checkpoint "latest"
-                history = [user "old", first, assistant "middle", latest, user "recent"]
+                history =
+                    [ user "old"
+                    , first
+                    , assistant "middle"
+                    , latest
+                    , user "recent"
+                    ]
             compactTranscriptAtLastCheckpoint history
                 `shouldBe` [latest, user "recent"]
-
-        it "does not treat a compaction trigger as a checkpoint" do
-            let trigger = KnownResponseItem ItemCompactionTrigger TaggedObject
-                    { tag = "compaction_trigger"
-                    , fields = KeyMap.empty
-                    }
-                history = [user "old", trigger, user "recent"]
-            compactTranscriptAtLastCheckpoint history `shouldBe` history
 
     describe "hasCompactionCheckpoint" do
         it "recognizes remote and local compaction snapshots" do
@@ -133,6 +266,34 @@ spec = do
         MessageContentParts (InputTextPart text _ _ : _) -> text
         MessageContentText text -> text
         _ -> ""
+    requestItems request = case request.input of
+        Just (ResponseInputItems items) -> items
+        _ -> []
+    completedResponse output =
+        case Aeson.fromJSON $ Aeson.object
+            [ "id" .= ("resp-compact" :: Text.Text)
+            , "created_at" .= (0 :: Int)
+            , "status" .= ("completed" :: Text.Text)
+            , "model" .= ("gpt-test" :: Text.Text)
+            , "output" .= output
+            ] of
+            Aeson.Success response -> response
+            Aeson.Error err -> error err
+    agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
+    agentMessage author recipient text =
+        KnownResponseItem ItemAgentMessage TaggedObject
+            { tag = "agent_message"
+            , fields = KeyMap.fromList
+                [ ("author", Aeson.String author)
+                , ("recipient", Aeson.String recipient)
+                , ("content", Aeson.toJSON
+                    [ Aeson.object
+                        [ "type" .= ("input_text" :: Text.Text)
+                        , "text" .= text
+                        ]
+                    ])
+                ]
+            }
     checkpoint name = KnownResponseItem ItemCompaction TaggedObject
         { tag = "compaction"
         , fields = KeyMap.fromList [("name", Aeson.String name)]

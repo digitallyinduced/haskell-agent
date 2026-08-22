@@ -2,6 +2,7 @@ module Agent.OpenAI.WebSocketClientSpec (spec) where
 
 import Test.Hspec
 import Agent.Error
+import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
@@ -13,6 +14,17 @@ import Data.Text (Text)
 
 spec :: Spec
 spec = do
+  describe "buildCodexWsHeaders" do
+    it "advertises remote compaction v2 on the session handshake" do
+        let credential = Credential
+                { accessToken = "token"
+                , accountId = "account"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+        lookup "x-codex-beta-features" (buildCodexWsHeaders credential)
+            `shouldBe` Just "remote_compaction_v2"
+
   describe "buildWsPayloadWithOptions" do
     it "forces store=false for the Codex WebSocket contract" do
         let request = sampleRequest { store = Just True }

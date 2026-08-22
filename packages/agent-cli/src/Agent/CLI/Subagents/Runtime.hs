@@ -14,7 +14,7 @@ module Agent.CLI.Subagents.Runtime
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction (autoCompactOpenAiBackend)
+import Agent.CLI.Compaction (autoCompactOpenAiBackendWithThreshold)
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -398,7 +398,9 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         httpBackend
                 backend =
                     withConnectionRecovery $
-                        autoCompactOpenAiBackend tokenProvider
+                        autoCompactOpenAiBackendWithThreshold
+                            runtime.subagentOptions.optCompactThreshold
+                            tokenProvider
                             (readIORef childParamsRef)
                             session.subSessionTranscript
                             session.subSessionContextTokens
