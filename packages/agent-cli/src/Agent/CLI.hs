@@ -67,7 +67,7 @@ import Agent.CLI.Clipboard
 import Agent.CLI.Command
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
-    , autoCompactOpenAiBackend
+    , autoCompactOpenAiBackendWithThreshold
     , runProviderCompact
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
@@ -1043,6 +1043,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                     Nothing -> pure ()
                                 let lockedBackend =
                                         lockedOpenAiBackend
+                                            options.optCompactThreshold
                                             wsLock
                                             loaded.loadedTokenProvider
                                             credential
@@ -3539,7 +3540,8 @@ currentSessionId = \case
 -- | Serialize turns on the root OpenAI WebSocket connection because
 -- 'receiveWsResponse' is not multiplexed.
 lockedOpenAiBackend
-    :: MVar ()
+    :: Maybe Int
+    -> MVar ()
     -> TokenProvider
     -> Credential
     -> IORef Bool
@@ -3548,14 +3550,14 @@ lockedOpenAiBackend
     -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
-lockedOpenAiBackend wsLock provider credential connectionHealthy conn getParams transcript
-        contextTokens =
+lockedOpenAiBackend compactThreshold wsLock provider credential connectionHealthy
+        conn getParams transcript contextTokens =
     let Backend submit =
             openAiBackendReconnecting
                 provider credential connectionHealthy conn getParams transcript
         serialized = Backend \previous inputs onEvent ->
             withMVar wsLock \_ -> submit previous inputs onEvent
-    in autoCompactOpenAiBackend provider
+    in autoCompactOpenAiBackendWithThreshold compactThreshold provider
         getParams transcript contextTokens serialized
 
 -- | Drop live conversation state without touching persisted session files.
@@ -3590,20 +3592,21 @@ detectGitBranch cwd = do
 
 -- | Apply compact turns as full transcript replacements when resuming.
 foldSessionItems :: [SessionTurn] -> [ResponseItem]
-foldSessionItems = go []
+foldSessionItems =
+    concat . reverse . foldl' addTurn []
   where
-    go acc [] = acc
-    go acc (turn:rest)
+    addTurn chunks turn
         | isTranscriptResetTurn turn.turnUserText =
             -- /clear and /new store an empty snapshot; /compact stores the
             -- rebuilt history. Either way, turnItems replaces prior history.
-            go turn.turnItems rest
+            [turn.turnItems]
         | hasCompactionCheckpoint turn.turnItems =
-            go turn.turnItems rest
-        | otherwise = go (acc <> turn.turnItems) rest
+            [turn.turnItems]
+        | otherwise =
+            turn.turnItems : chunks
 
 hydrateUiHistory :: [SessionTurn] -> UiState
-hydrateUiHistory = foldl addTurn initialUiState
+hydrateUiHistory = foldl' addTurn initialUiState
   where
     addTurn state turn
         | isTranscriptResetTurn turn.turnUserText =

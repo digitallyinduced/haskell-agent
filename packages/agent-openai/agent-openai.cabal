@@ -52,6 +52,8 @@ library
                     , Agent.OpenAI.Login
                     , Agent.OpenAI.Usage
                     , Agent.OpenAI.Client
+                    , Agent.OpenAI.Features
+                    , Agent.OpenAI.ModelMetadata
                     , Agent.OpenAI.ResponseMerge
                     , Agent.OpenAI.WebSocketClient
                     , Agent.OpenAI.LoopBackend
@@ -122,6 +124,7 @@ test-suite agent-openai-test
                     , agent-core
                     , agent-openai
                     , agent-responses
+                    , async
                     , hspec
                     , aeson
                     , retry >= 0.9.3.1 && < 0.10

@@ -10,4 +10,14 @@ data AuthState = AuthState
     , accountId    :: !Text
     , idToken      :: !(Maybe Text)
     , lastRefresh  :: !UTCTime
-    } deriving (Show)
+    }
+
+-- Keep bearer, refresh, and identity tokens out of logs and test failures.
+instance Show AuthState where
+    show state =
+        "AuthState { accessToken = <redacted>, refreshToken = <redacted>"
+            <> ", accountId = " <> show state.accountId
+            <> ", idToken = "
+            <> maybe "Nothing" (const "Just <redacted>") state.idToken
+            <> ", lastRefresh = " <> show state.lastRefresh
+            <> " }"

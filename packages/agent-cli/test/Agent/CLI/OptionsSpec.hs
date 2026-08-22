@@ -23,6 +23,7 @@ spec = do
                 , "--cwd", "/tmp/work"
                 , "--yolo"
                 , "--max-turns", "3"
+                , "--compact-threshold", "1200"
                 , "--effort", "high"
                 , "-p", "hello"
                 ]
@@ -32,6 +33,7 @@ spec = do
                     , optCwd = Just (fromFilePath "/tmp/work")
                     , optYolo = True
                     , optMaxTurns = 3
+                    , optCompactThreshold = Just 1200
                     , optEffort = Just "high"
                     , optPrompt = Just "hello"
                     })
@@ -71,6 +73,11 @@ spec = do
 
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
+
+        it "requires a positive compaction threshold" do
+            parseArgs ["--compact-threshold", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--compact-threshold", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--compact-threshold", "nope"] `shouldSatisfy` isLeft
 
         it "opens the credential manager without starting an agent" do
             parseArgs ["login"] `shouldBe` Right Login

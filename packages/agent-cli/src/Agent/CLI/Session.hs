@@ -10,6 +10,7 @@ module Agent.CLI.Session
     , newActivePersistence
     , createSession
     , appendTurn
+    , appendTurnWithMetaUpdate
     , appendTurnKeepTitle
     , loadSession
     , isValidSessionId
@@ -258,7 +259,17 @@ ensureSession slotRef = do
             pure handle
 
 appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
-appendTurn handle turn = do
+appendTurn handle turn =
+    appendTurnWithMetaUpdate handle turn id
+
+-- | Append one transcript turn, then apply an additional metadata transition
+-- before the append's single metadata write.
+appendTurnWithMetaUpdate
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO SessionHandle
+appendTurnWithMetaUpdate handle turn updateMeta = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
@@ -279,8 +290,9 @@ appendTurn handle turn = do
             , metaCachedTokens =
                 meta0.metaCachedTokens + maybe 0 (.cachedTokens) turn.turnUsage
             }
-    writeSessionMeta handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+        finalMeta = updateMeta meta
+    writeSessionMeta handle.sessionMetaPath finalMeta
+    pure handle { sessionMeta = finalMeta }
 
 sessionConversationText :: [SessionTurn] -> Text
 sessionConversationText =

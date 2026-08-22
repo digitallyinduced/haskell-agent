@@ -36,6 +36,7 @@ import Control.Concurrent.MVar (newMVar, withMVar)
 import Control.Exception (SomeException)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -43,7 +44,14 @@ import qualified Data.Text as Text
 data ImageAttachment = ImageAttachment
     { imageMime :: !Text
     , imageBytes :: !ByteString
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+instance Show ImageAttachment where
+    show image =
+        "ImageAttachment { imageMime = " <> show image.imageMime
+            <> ", imageBytes = <redacted>"
+            <> ", imageByteLength = " <> show (ByteString.length image.imageBytes)
+            <> " }"
 
 data TurnInput
     = UserMessage Text

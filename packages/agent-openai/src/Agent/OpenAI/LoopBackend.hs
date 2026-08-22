@@ -24,7 +24,6 @@ import Agent.Error
     , isInlineRetryableProviderResponseError
     )
 import Agent.Loop (Backend(..), LoopEvent(..))
-import Agent.OpenAI.Compaction (compactTranscriptAtLastCheckpoint)
 import Agent.OpenAI.Error (isPreviousResponseIdError)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
@@ -235,8 +234,11 @@ openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
         history <- readIORef transcript
         let newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
-            replayHistory = compactTranscriptAtLastCheckpoint history
-            fullRequest = withRequestInput baseParams (replayHistory <> newItems)
+            -- Live and resumed transcripts already apply compaction snapshots
+            -- as full replacements. Remote v2 intentionally keeps retained
+            -- messages before its opaque checkpoint, so replay the complete
+            -- replacement instead of trimming that retained prefix.
+            fullRequest = withRequestInput baseParams (history <> newItems)
             emit event = mapM_ onLoopEvent (streamEventToLoopEvent event)
             (initialRequest, initialPrevious) =
                 case previousResponseId of

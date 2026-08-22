@@ -68,6 +68,8 @@ data CliOptions = CliOptions
     , optYolo :: !Bool
     , optNoYolo :: !Bool
     , optMaxTurns :: !Int
+    , optCompactThreshold :: !(Maybe Int)
+      -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
     , optEffort :: !(Maybe Text)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optPrompt :: !(Maybe Text)
@@ -90,6 +92,7 @@ defaultCliOptions = CliOptions
     , optYolo = False
     , optNoYolo = False
     , optMaxTurns = 500
+    , optCompactThreshold = Nothing
     , optEffort = Nothing
     , optPrompt = Nothing
     , optPromptFile = Nothing
@@ -168,6 +171,9 @@ parseOptions options = \case
     "--max-turns" : value : rest -> do
         turns <- parseInt "--max-turns" value
         parseOptions options { optMaxTurns = turns } rest
+    "--compact-threshold" : value : rest -> do
+        threshold <- parseInt "--compact-threshold" value
+        parseOptions options { optCompactThreshold = Just threshold } rest
     "--effort" : value : rest -> do
         effort <- parseEffort (Text.pack value)
         parseOptions options { optEffort = Just effort } rest
@@ -254,6 +260,9 @@ usage = unlines
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
+    , "      --compact-threshold N"
+    , "                          OpenAI auto-compaction threshold in tokens"
+    , "                          (default: model-specific, currently 244800)"
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: high for xai/grok, medium otherwise)"
     , "      --version           Print the agent-cli version"

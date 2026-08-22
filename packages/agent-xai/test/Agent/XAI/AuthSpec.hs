@@ -18,6 +18,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "DeviceAuthorization Show" do
+        it "redacts codes and code-bearing verification URLs" do
+            let authorization = DeviceAuthorization
+                    { deviceCode = "device-secret"
+                    , userCode = "USER-SECRET"
+                    , verificationUrl =
+                        "https://accounts.example/activate?code=USER-SECRET"
+                    , pollIntervalSeconds = 7
+                    , expiresInSeconds = Just 600
+                    }
+                rendered = show authorization
+            rendered `shouldContain` "pollIntervalSeconds = 7"
+            rendered `shouldContain` "expiresInSeconds = Just 600"
+            rendered `shouldNotContain` "device-secret"
+            rendered `shouldNotContain` "USER-SECRET"
+            rendered `shouldNotContain` "https://accounts.example"
+
     describe "requestDeviceAuthorization" do
         it "posts the configured client id and scopes, and prefers the complete verification URL" do
             recorded <- newIORef []

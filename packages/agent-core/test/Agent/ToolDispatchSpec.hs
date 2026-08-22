@@ -18,6 +18,24 @@ instance FromJSON EchoArgs where
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    it "keeps plaintext tool arguments useful in Show output" do
+        let rendered =
+                show (functionToolCall "call-visible" "echo" "{\"message\":\"hello\"}")
+        rendered `shouldContain` "call-visible"
+        rendered `shouldContain` "echo"
+        rendered `shouldContain` "message"
+        rendered `shouldContain` "hello"
+
+    it "redacts encrypted tool arguments from Show output" do
+        let secret = "encrypted-tool-argument"
+            call = (functionToolCall "call-secret" "collaboration.spawn_agent" secret)
+                { argumentsEncrypted = True }
+            rendered = show call
+        rendered `shouldContain` "call-secret"
+        rendered `shouldContain` "collaboration.spawn_agent"
+        rendered `shouldContain` "<redacted>"
+        rendered `shouldNotContain` "encrypted-tool-argument"
+
     it "decodes typed tool arguments before running the handler" do
         result <- dispatchToolCall testConfig
             [ typedTool "echo" \(EchoArgs message) ->

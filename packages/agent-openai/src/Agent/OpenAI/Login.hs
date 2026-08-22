@@ -46,7 +46,16 @@ data DeviceCode = DeviceCode
     , userCode :: !Text
     , deviceAuthId :: !Text
     , pollIntervalSeconds :: !Int
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+-- Device authorization values grant access while the login flow is pending.
+-- In particular, verification URLs may embed the user code.
+instance Show DeviceCode where
+    show code =
+        "DeviceCode { verificationUrl = <redacted>, userCode = <redacted>"
+            <> ", deviceAuthId = <redacted>"
+            <> ", pollIntervalSeconds = " <> show code.pollIntervalSeconds
+            <> " }"
 
 data Tokens = Tokens
     { idToken :: !Text
