@@ -77,9 +77,17 @@ spec = describe "Agent.ProjectInstructions" do
             withTempDir \dir -> do
                 createDirectoryIfMissing True (dir </> ".git")
                 writeFile (dir </> "AGENTS.md") "ééa"
+                let options = defaultDiscoverOptions { discoverMaxBytes = 3 }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) loaded.loadedProject `shouldBe` ["é"]
+
+        it "drops an incomplete trailing UTF-8 code point" do
+            withTempDir \dir -> do
+                createDirectoryIfMissing True (dir </> ".git")
+                writeFile (dir </> "AGENTS.md") "a😀b"
                 let options = defaultDiscoverOptions { discoverMaxBytes = 4 }
                 loaded <- discoverProjectInstructions options (fromFilePath dir)
-                map (.instructionContent) loaded.loadedProject `shouldBe` ["éé"]
+                map (.instructionContent) loaded.loadedProject `shouldBe` ["a"]
 
         it "disables discovery when max bytes is zero" do
             withTempDir \dir -> do
