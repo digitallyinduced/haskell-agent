@@ -37,6 +37,7 @@ import Agent.CLI.Input
     ( ReplLine(..)
     , appendReplHistory
     , displayEditorText
+    , submissionPromptText
     , terminalCharWidth
     , terminalTextWidth
     )
@@ -497,7 +498,9 @@ drawComposerStatus state =
                 <> [ modeControl
                    | not (Text.null mode)
                    ]
-                <> [ withAttr Theme.mutedAttr (txt account)
+                <> [ if prompt.promptAccountSelectable
+                        then accountControl
+                        else withAttr Theme.mutedAttr (txt account)
                    | not (Text.null account)
                    ]
   where
@@ -523,6 +526,11 @@ drawComposerStatus state =
             forceAttr
                 (controlAttr state ComposerMode (modeAttr mode))
                 (txt mode)
+    accountControl =
+        clickable ComposerAccount $
+            forceAttr
+                (controlAttr state ComposerAccount Theme.controlLinkAttr)
+                (txt account)
 
 handlePromptControlClick
     :: ApplyLocalUiEvent
@@ -789,9 +797,11 @@ handleComposerKey
     submitDraft = do
         state <- get
         let draft = state.appUi.uiDraft
-        if Text.null (Text.strip draft)
-            then pure ()
-            else submitText state draft state.appPasted
+            attachmentCount =
+                state.appUi.uiPrompt.promptAttachments
+        case submissionPromptText attachmentCount draft of
+            Nothing -> pure ()
+            Just text -> submitText state text state.appPasted
 
     submitText state text pasted = do
         liftIO (appendReplHistory text)

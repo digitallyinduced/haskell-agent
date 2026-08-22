@@ -4,6 +4,7 @@ module Agent.CLI.Usage
     , formatAccountUsage
     , formatDuration
     , formatUsageReport
+    , formatUsageSummary
     , formatUsageWindow
     , shortAccountId
     ) where
@@ -70,6 +71,44 @@ formatAccountUsage color now line =
                                     else []
                 in plan : windows
     in Text.intercalate "\n  " (header : maybe id (:) cooldown body)
+
+-- | Compact usage detail suitable for a one-line account picker row.
+formatUsageSummary
+    :: UTCTime
+    -> Maybe UTCTime
+    -> Either ApiError UsageSnapshot
+    -> Text
+formatUsageSummary now cooldownUntil result =
+    Text.intercalate " · " $
+        cooldown <> case result of
+            Left _ -> ["usage unavailable"]
+            Right snapshot ->
+                plan snapshot <> windows snapshot <> limit snapshot
+  where
+    cooldown = case cooldownUntil of
+        Just until_
+            | until_ > now ->
+                ["pacing " <> formatDuration (diffUTCTime until_ now)]
+        _ -> []
+    plan snapshot
+        | Text.null (Text.strip snapshot.planType) = []
+        | otherwise = [snapshot.planType]
+    windows snapshot = case snapshot.rateLimit of
+        Nothing -> []
+        Just usageLimit ->
+            catWindows
+                [ summarizeWindow "5h" <$> usageLimit.primaryWindow
+                , summarizeWindow "7d" <$> usageLimit.secondaryWindow
+                ]
+    limit snapshot = case snapshot.rateLimit of
+        Just usageLimit
+            | usageLimit.limitReached -> ["limit reached"]
+        _ -> []
+    summarizeWindow label window =
+        label
+            <> " "
+            <> Text.pack (show (max 0 (100 - window.usedPercent)))
+            <> "% left"
 
 formatUsageWindow :: Bool -> UsageWindow -> Text
 formatUsageWindow color window =

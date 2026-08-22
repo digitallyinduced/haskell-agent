@@ -68,8 +68,16 @@ import Agent.CLI.Style
     , motionGlyphSet
     , style
     )
-import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.TUI.Presentation
+    ( SearchReplaceAction(..)
+    , SearchReplaceDiff(..)
+    , SearchReplaceLine(..)
+    , formatToolOutput
+    , parseSearchReplaceDiff
+    , summarizeToolCall
+    , toolDetail
+    )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -79,16 +87,11 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Foldable as Foldable
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Word (Word64)
@@ -527,12 +530,6 @@ putTextLn handle text = do
     Text.hPutStr handle (text <> "\n")
     hFlush handle
 
-summarizeToolCall :: ToolCall -> Text
-summarizeToolCall call =
-    let verb = toolVerb call.name
-        detail = toolDetail call
-    in if Text.null detail then verb else verb <> " " <> detail
-
 -- | Colored tool-start line for stderr chrome.
 --
 -- Known coding tools use English verbs (Read / Listed / $) instead of
@@ -599,11 +596,6 @@ toolChrome name = case canonicalToolName name of
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
     _ -> ToolChrome name ToolDetailMuted
 
-toolVerb :: Text -> Text
-toolVerb name = case toolChrome name of
-    ToolChromeShell -> "$"
-    ToolChrome verb _ -> verb
-
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case canonicalToolName call.name of
     "search_replace" -> formatSearchReplaceDiff color call.arguments
@@ -612,29 +604,30 @@ formatToolBody color call = case canonicalToolName call.name of
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
 formatSearchReplaceDiff color arguments =
-    let path = jsonTextFieldDefault "file_path" arguments
-        oldText = jsonTextFieldDefault "old_string" arguments
-        newText = jsonTextFieldDefault "new_string" arguments
-        header = case (Text.null oldText, Text.null newText) of
-            (True, False) ->
-                roleMuted color "  create " <> renderToolPath color path
-            (False, True) ->
-                roleMuted color "  delete " <> renderToolPath color path
+    let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
+            parseSearchReplaceDiff arguments
+        header = case diffAction of
+            Just SearchReplaceCreate ->
+                roleMuted color "  create " <> renderToolPath color diffPath
+            Just SearchReplaceDelete ->
+                roleMuted color "  delete " <> renderToolPath color diffPath
             _ -> ""
-        oldLines = Text.lines oldText
-        newLines = Text.lines newText
-        minus = map (\line -> style color [SetRGBColor Foreground solarizedRed] ("  -" <> line)) oldLines
-        plus = map (\line -> style color [SetRGBColor Foreground solarizedGreen] ("  +" <> line)) newLines
-        raw = minus <> plus
-        (shown, hidden)
-            | length raw <= 20 = (raw, 0)
-            | otherwise = (take 20 raw, length raw - 20)
+        shown = map paintLine diffLines
         more =
-            if hidden == 0
+            if diffHiddenLines == 0
                 then []
-                else [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
+                else
+                    [ roleMuted color
+                        ("  … " <> Text.pack (show diffHiddenLines) <> " more")
+                    ]
         body = shown <> more
     in Text.intercalate "\n" (filter (not . Text.null) (header : body))
+  where
+    paintLine = \case
+        SearchReplaceRemoved line ->
+            style color [SetRGBColor Foreground solarizedRed] ("  -" <> line)
+        SearchReplaceAdded line ->
+            style color [SetRGBColor Foreground solarizedGreen] ("  +" <> line)
 
 renderToolPath :: Bool -> Text -> Text
 renderToolPath color path =
@@ -642,90 +635,6 @@ renderToolPath color path =
     in if "/" `Text.isPrefixOf` path
         then osc8Link color (fileUri (Text.unpack path)) styled
         else styled
-
-toolDetail :: ToolCall -> Text
-toolDetail call = case canonicalToolName call.name of
-    "read_file" -> jsonTextFieldDefault "target_file" call.arguments
-    "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
-    "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
-    "grep" -> jsonTextFieldDefault "pattern" call.arguments
-    "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
-    "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
-    "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
-    "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
-    "update_plan" -> "plan"
-    "enter_plan_mode" -> "enter"
-    "exit_plan_mode" -> "exit"
-    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
-    "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
-    "send_message" -> jsonTextFieldDefault "target" call.arguments
-    "followup_task" -> jsonTextFieldDefault "target" call.arguments
-    "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
-    "list_agents" ->
-        maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
-    _ -> ""
-
--- | Turn structured collaboration results into compact terminal text. The
--- provider still receives the original JSON result; this is display-only.
-formatToolOutput :: ToolCall -> Text -> Text
-formatToolOutput call output = case canonicalToolName call.name of
-    "spawn_agent" ->
-        maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
-    "wait_agent" ->
-        fromMaybe output (nonEmptyJsonText "message" output)
-    "list_agents" ->
-        fromMaybe output (formatAgentList output)
-    "interrupt_agent" ->
-        maybe output ("Previous status: " <>)
-            (nonEmptyJsonText "previous_status" output)
-    _ -> output
-
-nonEmptyJsonText :: Text -> Text -> Maybe Text
-nonEmptyJsonText key input = jsonTextField key input >>= \value ->
-    let stripped = Text.strip value
-    in if Text.null stripped then Nothing else Just stripped
-
-formatAgentList :: Text -> Maybe Text
-formatAgentList output = do
-    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
-    Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
-    let rows = mapMaybeAgent (Foldable.toList agents)
-    pure $ case rows of
-        [] -> "(no live agents)"
-        _ -> Text.intercalate "\n" rows
-  where
-    mapMaybeAgent = foldr
-        (\value rest ->
-            case value of
-                Aeson.Object agent ->
-                    case
-                        ( jsonObjectText "agent_name" agent
-                        , jsonObjectText "agent_status" agent
-                        ) of
-                        (Just name, Just status) ->
-                            (name <> " · " <> status) : rest
-                        (Just name, Nothing) -> name : rest
-                        _ -> rest
-                _ -> rest)
-        []
-
-jsonObjectText :: Text -> Aeson.Object -> Maybe Text
-jsonObjectText key object =
-    case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value)
-            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
-        _ -> Nothing
-
-firstPatchPath :: Text -> Maybe Text
-firstPatchPath patch =
-    case
-        [ Text.drop (Text.length prefix) line
-        | line <- Text.lines patch
-        , prefix <- ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
-        , prefix `Text.isPrefixOf` line
-        ] of
-        (path : _) | not (Text.null path) -> Just path
-        _ -> Nothing
 
 truncateToolOutput :: Text -> Text
 truncateToolOutput output =
@@ -744,9 +653,6 @@ truncateToolOutput output =
                 <> if rest > 0
                     then "\n" <> glyphToolAccent <> glyphToolOut <> "… " <> Text.pack (show rest) <> " more"
                     else ""
-
-firstLine :: Text -> Text
-firstLine = Text.takeWhile (/= '\n')
 
 formatLoopError :: LoopError -> Text
 formatLoopError = formatLoopErrorColored False

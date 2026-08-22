@@ -8,18 +8,24 @@ module Agent.CLI.Login
     , UsageState(..)
     , UsageWindow(..)
     , applyLoginKey
+    , connectProviderAccount
     , discoverLoginAccounts
+    , discoverSelectableLoginAccounts
     , formatLoginAccounts
     , initialLoginState
+    , loginAccountSelectionId
+    , refreshLoginAccount
     , renderLoginFrame
     , runLoginManager
     ) where
 
 import Agent.CLI.Auth
     ( GrokAuthState(..)
+    , externalAuthSelectionId
     , grokAuthStateToJson
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
+    , managedAuthSelectionId
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
@@ -70,7 +76,7 @@ import Control.Concurrent.Async
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Exception.Safe (bracket, tryAny)
-import Control.Monad (join)
+import Control.Monad (join, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nubBy)
@@ -232,7 +238,7 @@ runLoginManager color = do
             Just (LoginRefresh index, state') ->
                 loop [index] state'
             Just (LoginAdd, _) -> do
-                connectAccount color
+                void (connectAccount color)
                 rediscover
             Just (LoginToggle index, state') -> do
                 toggleAt color index state'.loginAccounts
@@ -284,6 +290,35 @@ replaceAt index replacement accounts =
 
 discoverLoginAccounts :: IO [LoginAccount]
 discoverLoginAccounts = do
+    accounts <- discoverLoginAccountSources
+    pure (nubBy sameAccount accounts)
+  where
+    sameAccount left right =
+        left.loginProvider == right.loginProvider
+            && left.loginAccountId == right.loginAccountId
+
+-- | Accounts that can be selected in a live session. Unlike the login
+-- dashboard, disabled managed entries do not shadow usable external sources,
+-- and distinct managed credentials remain separately addressable.
+discoverSelectableLoginAccounts :: IO [LoginAccount]
+discoverSelectableLoginAccounts = do
+    accounts <- filter (.loginEnabled) <$> discoverLoginAccountSources
+    pure (nubBy sameSelection accounts)
+  where
+    sameSelection left right =
+        loginAccountSelectionId left == loginAccountSelectionId right
+
+loginAccountSelectionId :: LoginAccount -> Text
+loginAccountSelectionId account =
+    case account.loginManagedId of
+        Just managedId -> managedAuthSelectionId managedId
+        Nothing ->
+            externalAuthSelectionId
+                account.loginProvider
+                account.loginSource
+
+discoverLoginAccountSources :: IO [LoginAccount]
+discoverLoginAccountSources = do
     home <- getHomeDirectory
     now <- getCurrentTime
     openaiEnv <- discoverOpenAIEnv
@@ -297,7 +332,7 @@ discoverLoginAccounts = do
     let managedAccounts = case managed of
             Left _ -> []
             Right entries -> map (managedLoginAccount now) entries
-    pure $ nubBy sameAccount $
+    pure $
         managedAccounts
             <> catMaybes
                 [ openaiEnv
@@ -306,10 +341,6 @@ discoverLoginAccounts = do
                 , grokFile
                 , openRouter
                 ]
-  where
-    sameAccount left right =
-        left.loginProvider == right.loginProvider
-            && left.loginAccountId == right.loginAccountId
 
 managedLoginAccount
     :: UTCTime
@@ -428,13 +459,22 @@ accountAt index accounts =
         account : _ -> Just account
         [] -> Nothing
 
-connectAccount :: Bool -> IO ()
+connectAccount :: Bool -> IO (Maybe (Provider, Text))
 connectAccount color =
     pickConnectProvider color >>= \case
-        Nothing -> pure ()
-        Just OpenAIProvider -> connectOpenAI color
-        Just XAIProvider -> connectXAI color
-        Just OpenRouterProvider -> connectOpenRouter color
+        Nothing -> pure Nothing
+        Just provider ->
+            fmap
+                (fmap (\accountId -> (provider, accountId)))
+                (connectProviderAccount color provider)
+
+-- | Connect one account for the requested provider and return its provider
+-- account id after it has been stored successfully.
+connectProviderAccount :: Bool -> Provider -> IO (Maybe Text)
+connectProviderAccount color = \case
+    OpenAIProvider -> connectOpenAI color
+    XAIProvider -> connectXAI color
+    OpenRouterProvider -> connectOpenRouter color
 
 pickConnectProvider :: Bool -> IO (Maybe Provider)
 pickConnectProvider color =
@@ -460,13 +500,13 @@ pickConnectProvider color =
             Right ((index + 1) `mod` length providers)
         _ -> Right index
 
-connectOpenAI :: Bool -> IO ()
+connectOpenAI :: Bool -> IO (Maybe Text)
 connectOpenAI color = do
     clientId <-
         openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
     let options = OpenAILogin.defaultLoginOptions clientId
     OpenAILogin.requestDeviceCode options >>= \case
-        Left err -> printLoginMessage color False err
+        Left err -> printLoginMessage color False err >> pure Nothing
         Right device -> do
             Text.hPutStrLn stderr $
                 roleMuted color "Open "
@@ -476,13 +516,14 @@ connectOpenAI color = do
                     <> rolePrompt color device.userCode
             hFlush stderr
             OpenAILogin.completeDeviceCodeLogin options device >>= \case
-                Left err -> printLoginMessage color False err
+                Left err -> printLoginMessage color False err >> pure Nothing
                 Right authJson -> do
                     now <- getCurrentTime
                     case openaiAuthStateFromJson now (Aeson.encode authJson) of
                         Nothing ->
                             printLoginMessage color False
                                 "OpenAI login returned invalid account data"
+                                >> pure Nothing
                         Just auth ->
                             storeConnectedCredential color
                                 OpenAIProvider
@@ -493,14 +534,19 @@ connectOpenAI color = do
                                 ManagedOpenAIAuthJson
                                 (Text.decodeUtf8
                                     (LBS.toStrict (Aeson.encode authJson)))
+                                >>= \stored ->
+                                    pure $
+                                        if stored
+                                            then Just auth.accountId
+                                            else Nothing
 
-connectXAI :: Bool -> IO ()
+connectXAI :: Bool -> IO (Maybe Text)
 connectXAI color = do
     clientId <-
         xaiOAuthClientId <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
     let options = XAIAuth.defaultOAuthOptions clientId
     XAIAuth.requestDeviceAuthorization options >>= \case
-        Left err -> printLoginMessage color False err
+        Left err -> printLoginMessage color False err >> pure Nothing
         Right device -> do
             Text.hPutStrLn stderr $
                 roleMuted color "Open "
@@ -510,11 +556,12 @@ connectXAI color = do
                     <> rolePrompt color device.userCode
             hFlush stderr
             XAIAuth.completeDeviceAuthorization options device >>= \case
-                Left err -> printLoginMessage color False err
+                Left err -> printLoginMessage color False err >> pure Nothing
                 Right tokens
                     | Nothing <- tokens.refreshToken ->
                         printLoginMessage color False
                             "Grok login did not return a refresh token; reconnect with offline access"
+                            >> pure Nothing
                     | otherwise -> do
                         now <- getCurrentTime
                         let accountId =
@@ -543,16 +590,22 @@ connectXAI color = do
                             ManagedGrokAuthJson
                             (Text.decodeUtf8
                                 (LBS.toStrict (Aeson.encode authJson)))
+                            >>= \stored ->
+                                pure $
+                                    if stored
+                                        then Just accountId
+                                        else Nothing
 
-connectOpenRouter :: Bool -> IO ()
+connectOpenRouter :: Bool -> IO (Maybe Text)
 connectOpenRouter color =
     readSecretLine "OpenRouter API key: " >>= \case
-        Nothing -> pure ()
+        Nothing -> pure Nothing
         Just apiKey ->
             OpenRouter.fetchOpenRouterUsage apiKey >>= \case
                 Left err ->
                     printLoginMessage color False
                         ("OpenRouter rejected the key: " <> err)
+                        >> pure Nothing
                 Right usage -> do
                     let accountId =
                             fromMaybe "openrouter" usage.keyLabel
@@ -565,6 +618,11 @@ connectOpenRouter color =
                         ApiBilled
                         ManagedBearerToken
                         apiKey
+                        >>= \stored ->
+                            pure $
+                                if stored
+                                    then Just accountId
+                                    else Nothing
 
 storeConnectedCredential
     :: Bool
@@ -574,10 +632,10 @@ storeConnectedCredential
     -> BillingMode
     -> ManagedAuthKind
     -> Text
-    -> IO ()
+    -> IO Bool
 storeConnectedCredential color provider accountId label billing authKind payload = do
     credentialId <- newManagedCredentialId provider accountId
-    upsertManagedCredential
+    result <- upsertManagedCredential
         ManagedCredential
             { managedId = credentialId
             , managedProvider = provider
@@ -591,8 +649,12 @@ storeConnectedCredential color provider accountId label billing authKind payload
             { secretManagedId = credentialId
             , secretPayload = payload
             }
-        >>= printStoreResult color
-            "credential connected; restart or reload auth to use it"
+    printStoreResult color
+        "credential connected"
+        result
+    pure $ case result of
+        Left _ -> False
+        Right () -> True
 
 readSecretLine :: Text -> IO (Maybe Text)
 readSecretLine prompt = do

@@ -1,6 +1,7 @@
 module Agent.CLI.TextLayoutSpec (spec) where
 
 import Agent.CLI.TextLayout
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -52,3 +53,34 @@ spec = do
             fitTextCell 4 "abcde" `shouldBe` "abc…"
             fitTextCell 1 "ab" `shouldBe` "…"
             fitTextCell 0 "ab" `shouldBe` ""
+
+    describe "renderSplitPaneFrame" do
+        it "keeps the selected item visible and previews its transcript" do
+            let frame = renderSplitPaneFrame SplitPaneFrame
+                    { splitPaneMinColumns = 20
+                    , splitPaneColumns = 20
+                    , splitPaneBodyRows = 2
+                    , splitPaneLeftMinWidth = 6
+                    , splitPaneLeftMaxWidth = 6
+                    , splitPaneDivider = " │ "
+                    , splitPaneTitle = "pick"
+                    , splitPaneHeaderDetail =
+                        \count -> Text.pack (show count) <> " items"
+                    , splitPaneLeftHeading = "items"
+                    , splitPaneRightHeading =
+                        maybe "preview" ("preview " <>)
+                    , splitPaneItems = ["one", "two", "three"]
+                    , splitPaneSelectedIndex = 2
+                    , splitPaneLeftLabel = \_ item -> item
+                    , splitPaneTranscript = \item -> [item <> " transcript"]
+                    , splitPaneEmptyTranscript = "(none)"
+                    , splitPaneFooter = "keys"
+                    , splitPanePromptStyle = id
+                    , splitPaneMutedStyle = id
+                    , splitPaneSelectedStyle = ("selected:" <>)
+                    }
+            frame `shouldSatisfy` Text.isInfixOf "  two "
+            frame `shouldSatisfy` Text.isInfixOf "selected:› thr…"
+            frame `shouldSatisfy` Text.isInfixOf "three trans"
+            frame `shouldSatisfy` Text.isInfixOf "cript"
+            length (Text.lines frame) `shouldBe` 5

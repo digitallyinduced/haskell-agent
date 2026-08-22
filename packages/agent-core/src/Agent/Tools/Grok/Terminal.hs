@@ -11,7 +11,10 @@ import Agent.Tools.Grok.Shell
     , runForegroundStreaming
     , startBackground
     )
-import Agent.Tools.IO (CommandResult(..))
+import Agent.Tools.IO
+    ( combineCommandOutput
+    , formatCommandResult
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -76,22 +79,6 @@ runTerminal session emitOutput args
             session
             (Text.unpack args.command)
             timeoutMs
-            (\out err -> emitOutput (stripAnsi (combinePipes out err)))
-        let body = stripAnsi (combinedOutput result)
-        if result.commandCancelled
-            then pure $ Right $ "exit: cancelled\n" <> body
-            else if result.commandTimedOut
-                then pure $ Right $ "exit: killed (timeout)\n" <> body
-                else
-                    let code = fromMaybe 1 result.commandExitCode
-                    in pure $ Right $ "exit: " <> Text.pack (show code) <> "\n" <> body
-
-combinedOutput :: CommandResult -> Text
-combinedOutput result =
-    combinePipes result.commandStdout result.commandStderr
-
-combinePipes :: Text -> Text -> Text
-combinePipes out err
-    | Text.null err = out
-    | Text.null out = err
-    | otherwise = out <> "\n" <> err
+            (\out err ->
+                emitOutput (stripAnsi (combineCommandOutput out err)))
+        pure $ Right $ stripAnsi (formatCommandResult result)

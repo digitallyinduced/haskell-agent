@@ -10,6 +10,9 @@ import System.OsPath (unsafeEncodeUtf)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
+    , combineCommandOutput
+    , commandResultOutput
+    , formatCommandResult
     , readTextFile
     , resolveUnderCwd
     , runShellCommand
@@ -47,6 +50,46 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.IO" do
+    describe "command result formatting" do
+        it "combines stdout and stderr without redundant separators" do
+            combineCommandOutput "out" "" `shouldBe` "out"
+            combineCommandOutput "" "err" `shouldBe` "err"
+            combineCommandOutput "out" "err" `shouldBe` "out\nerr"
+
+        it "renders success, timeout, and cancellation consistently" do
+            let result = CommandResult
+                    { commandExitCode = Just 3
+                    , commandStdout = "out"
+                    , commandStderr = "err"
+                    , commandTimedOut = False
+                    , commandCancelled = False
+                    }
+            commandResultOutput result `shouldBe` "out\nerr"
+            formatCommandResult result `shouldBe` "exit: 3\nout\nerr"
+            formatCommandResult
+                result
+                    { commandExitCode = Nothing
+                    , commandTimedOut = True
+                    }
+                `shouldBe` "exit: killed (timeout)\nout\nerr"
+            formatCommandResult
+                result
+                    { commandExitCode = Nothing
+                    , commandTimedOut = True
+                    , commandCancelled = True
+                    }
+                `shouldBe` "exit: cancelled\nout\nerr"
+
+        it "defaults a missing ordinary exit code to one" do
+            formatCommandResult CommandResult
+                { commandExitCode = Nothing
+                , commandStdout = ""
+                , commandStderr = ""
+                , commandTimedOut = False
+                , commandCancelled = False
+                }
+                `shouldBe` "exit: 1\n"
+
     it "retries only resource-busy IO exceptions" do
         attempts <- newIORef (0 :: Int)
         retryOnFileBusy do

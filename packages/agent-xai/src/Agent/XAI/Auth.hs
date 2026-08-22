@@ -31,11 +31,11 @@ module Agent.XAI.Auth
 
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Auth.JWT (decodeJwtPayload)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
-import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -251,7 +251,7 @@ parseTokens = decodeResponse "token response"
 -- namespaces accounts, it grants nothing.
 accountIdFromAccessToken :: Text -> Maybe Text
 accountIdFromAccessToken accessToken = do
-    payload <- decodeJwtPayload accessToken
+    payload <- decodeJwtPayload @JwtClaims accessToken
     payload.subject
         `orElse` payload.principalIdSnake
         `orElse` payload.principalIdCamel
@@ -262,7 +262,7 @@ accountIdFromAccessToken accessToken = do
 
 emailFromToken :: Text -> Maybe Text
 emailFromToken token = do
-    payload <- decodeJwtPayload token
+    payload <- decodeJwtPayload @JwtClaims token
     email <- payload.email
     let trimmed = Text.strip email
     if Text.null trimmed then Nothing else Just trimmed
@@ -280,25 +280,6 @@ instance Aeson.FromJSON JwtClaims where
         <*> object Aeson..:? "principal_id"
         <*> object Aeson..:? "principalId"
         <*> object Aeson..:? "email"
-
-decodeJwtPayload :: Text -> Maybe JwtClaims
-decodeJwtPayload token = do
-    payloadB64 <- case Text.splitOn "." token of
-        (_ : payload : _) -> Just payload
-        _ -> Nothing
-    let padded = base64UrlToBase64 payloadB64
-    payloadBytes <- either (const Nothing) Just (Base64.decode (Text.encodeUtf8 padded))
-    Aeson.decode (LBS.fromStrict payloadBytes)
-
-base64UrlToBase64 :: Text -> Text
-base64UrlToBase64 input = padded
-  where
-    replaced = Text.map replace input
-    replace '-' = '+'
-    replace '_' = '/'
-    replace c = c
-    padding = (4 - Text.length replaced `mod` 4) `mod` 4
-    padded = replaced <> Text.replicate padding "="
 
 --------------------------------------------------------------------------------
 -- Small helpers

@@ -18,7 +18,7 @@ import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import System.OsPath (OsPath)
-import Agent.Provider (Provider, TokenProvider)
+import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
@@ -60,6 +60,11 @@ data SessionEnv = SessionEnv
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)
+    , sessionAccountId :: !(IORef Text)
+    , sessionAccountSelectionId :: !(IORef Text)
+    , sessionAccountLabel :: !(Credential -> IO Text)
+    , sessionSelectAccount
+        :: !(Maybe (Text -> IO (Either ApiError Text)))
     , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)

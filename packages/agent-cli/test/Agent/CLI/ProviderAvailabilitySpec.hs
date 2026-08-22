@@ -113,6 +113,7 @@ spec = do
                         staticCredentialProvider SubscriptionBilled credential
                     , loadedAccountLabel = const (pure "account")
                     , loadedOpenAiPool = Nothing
+                    , loadedSelectionId = Nothing
                     }
             probeLoadedAvailabilityWith (const (pure Nothing)) loaded >>= \case
                 Left err ->
@@ -135,6 +136,7 @@ spec = do
                         staticCredentialProvider SubscriptionBilled credential
                     , loadedAccountLabel = const (pure "account")
                     , loadedOpenAiPool = Nothing
+                    , loadedSelectionId = Nothing
                     }
             result <- probeLoadedAvailabilityWith
                 (const

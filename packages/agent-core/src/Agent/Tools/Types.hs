@@ -6,6 +6,7 @@ module Agent.Tools.Types
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
+    , jsonTool
     , jsonAppTool
     , jsonAppToolWithExecution
     , freeformApplyPatchAppTool
@@ -91,6 +92,21 @@ defaultToolEnv cwd = do
         , toolStdoutCap = 100000
         , toolCancel = cancel
         }
+
+-- | Construct a JSON tool whose approval is selected from a simple read-only
+-- flag. This is the common convenience shape used by provider tool surfaces.
+jsonTool
+    :: Text
+    -> Text
+    -> [PropertySchema]
+    -> Bool
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+jsonTool name description parameters readOnly execution =
+    jsonAppToolWithExecution name description parameters
+        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
+        execution
 
 -- | Construct a JSON tool with the conservative turn-sequential default.
 jsonAppTool

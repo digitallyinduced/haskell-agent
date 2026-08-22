@@ -34,12 +34,11 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolHandler, typedTool)
+import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
     ( AppTool
-    , ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , jsonAppToolWithExecution
+    , jsonTool
     )
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
@@ -170,19 +169,6 @@ isPlanFileEditTarget planPath target =
 --------------------------------------------------------------------------------
 -- Grok-build tools
 --------------------------------------------------------------------------------
-
-jsonTool
-    :: Text
-    -> Text
-    -> [PropertySchema]
-    -> Bool
-    -> ToolExecutionPolicy
-    -> ToolHandler
-    -> AppTool
-jsonTool name description parameters readOnly execution =
-    jsonAppToolWithExecution name description parameters
-        (if readOnly then AlwaysReadOnly else AlwaysPrompt)
-        execution
 
 data EnterPlanArgs = EnterPlanArgs
     { explanation :: Maybe Text

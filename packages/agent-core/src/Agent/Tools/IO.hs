@@ -2,6 +2,9 @@
 module Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
+    , combineCommandOutput
+    , commandResultOutput
+    , formatCommandResult
     , resolveUnderCwd
     , readTextFile
     , writeTextFile
@@ -55,6 +58,7 @@ import Control.Exception.Safe
 import Control.Monad (unless, void, when)
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -89,6 +93,33 @@ data CommandResult = CommandResult
     , commandTimedOut :: !Bool
     , commandCancelled :: !Bool
     } deriving (Eq, Show)
+
+-- | Combine captured stdout and stderr without introducing a blank line when
+-- either stream is empty.
+combineCommandOutput :: Text -> Text -> Text
+combineCommandOutput out err
+    | Text.null err = out
+    | Text.null out = err
+    | otherwise = out <> "\n" <> err
+
+-- | Combined captured output from a completed command.
+commandResultOutput :: CommandResult -> Text
+commandResultOutput result =
+    combineCommandOutput result.commandStdout result.commandStderr
+
+-- | Render the stable terminal-tool result format shared by foreground and
+-- background commands.
+formatCommandResult :: CommandResult -> Text
+formatCommandResult result
+    | result.commandCancelled = "exit: cancelled\n" <> body
+    | result.commandTimedOut = "exit: killed (timeout)\n" <> body
+    | otherwise =
+        "exit: "
+            <> Text.pack (show (fromMaybe 1 result.commandExitCode))
+            <> "\n"
+            <> body
+  where
+    body = commandResultOutput result
 
 data RunningCommand = RunningCommand
     { runningHandle :: !ProcessHandle

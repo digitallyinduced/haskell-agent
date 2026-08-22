@@ -272,7 +272,20 @@ appendTurnWithMetaUpdate
     -> SessionTurn
     -> (SessionMeta -> SessionMeta)
     -> IO SessionHandle
-appendTurnWithMetaUpdate handle turn updateMeta = do
+appendTurnWithMetaUpdate handle turn updateMeta =
+    appendTurnWithMetaTransition handle turn
+        (updateMeta . applyTurnMetadata turn)
+
+-- | Append a transcript turn and persist one metadata transition. Timestamp
+-- and response-id updates are common to every kind of turn; the supplied
+-- transition controls whether title, usage, or caller-specific metadata is
+-- changed.
+appendTurnWithMetaTransition
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO SessionHandle
+appendTurnWithMetaTransition handle turn transition = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
@@ -282,20 +295,25 @@ appendTurnWithMetaUpdate handle turn updateMeta = do
         meta = meta0
             { metaUpdatedAt = now
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
-            , metaTitle =
-                if meta0.metaTitle == "untitled" && not (Text.null turn.turnUserText)
-                    then sessionTitleFromPrompt turn.turnUserText
-                    else meta0.metaTitle
-            , metaInputTokens =
-                meta0.metaInputTokens + maybe 0 (.inputTokens) turn.turnUsage
-            , metaOutputTokens =
-                meta0.metaOutputTokens + maybe 0 (.outputTokens) turn.turnUsage
-            , metaCachedTokens =
-                meta0.metaCachedTokens + maybe 0 (.cachedTokens) turn.turnUsage
             }
-        finalMeta = updateMeta meta
+        finalMeta = transition meta
     writeSessionMeta handle.sessionMetaPath finalMeta
     pure handle { sessionMeta = finalMeta }
+
+applyTurnMetadata :: SessionTurn -> SessionMeta -> SessionMeta
+applyTurnMetadata turn meta =
+    meta
+        { metaTitle =
+            if meta.metaTitle == "untitled" && not (Text.null turn.turnUserText)
+                then sessionTitleFromPrompt turn.turnUserText
+                else meta.metaTitle
+        , metaInputTokens =
+            meta.metaInputTokens + maybe 0 (.inputTokens) turn.turnUsage
+        , metaOutputTokens =
+            meta.metaOutputTokens + maybe 0 (.outputTokens) turn.turnUsage
+        , metaCachedTokens =
+            meta.metaCachedTokens + maybe 0 (.cachedTokens) turn.turnUsage
+        }
 
 -- | Persist provider usage that is not represented by its own transcript
 -- turn, such as an inline compaction request. Session metadata is the
@@ -337,22 +355,11 @@ sessionTitleTurnCountFromSlot = \case
             PersistencePending _ -> pure 0
             PersistenceActive handle -> pure handle.sessionMeta.metaTitleUserTurns
 
--- | Like 'appendTurn', but never derives the session title from this turn.
--- Used for synthetic markers such as @/new@ and @/clear@.
+-- | Append a synthetic marker without deriving a title or aggregating usage.
+-- Used for markers such as @/new@ and @/clear@.
 appendTurnKeepTitle :: SessionHandle -> SessionTurn -> IO SessionHandle
-appendTurnKeepTitle handle turn = do
-    let path = handle.sessionTranscriptPath
-    existed <- doesFileExist path
-    appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (unsafeToFilePath path) 0o600
-    now <- getCurrentTime
-    let meta0 = handle.sessionMeta
-        meta = meta0
-            { metaUpdatedAt = now
-            , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
-            }
-    writeSessionMeta handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+appendTurnKeepTitle handle turn =
+    appendTurnWithMetaTransition handle turn id
 
 
 loadSession :: OsPath -> Text -> IO (Either Text (SessionMeta, [SessionTurn]))

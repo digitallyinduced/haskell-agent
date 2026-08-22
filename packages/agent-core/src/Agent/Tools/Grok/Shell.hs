@@ -27,6 +27,8 @@ import Agent.ResourceScope
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
+    , combineCommandOutput
+    , formatCommandResult
     , resolveUnderCwd
     , runShellCommandStreaming
     , runningLiveOutput
@@ -42,7 +44,6 @@ import Control.Monad (void)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -183,15 +184,15 @@ readTaskOutput session taskId timeoutMs = do
                     (readMVar task.backgroundRunning.runningResult)
                 case raced of
                     Left () -> snapshotTask task
-                    Right result -> pure (formatExit result)
+                    Right result -> pure (formatCommandResult result)
 
 snapshotTask :: BackgroundTask -> IO Text
 snapshotTask task =
     tryReadMVar task.backgroundRunning.runningResult >>= \case
-        Just result -> pure (formatExit result)
+        Just result -> pure (formatCommandResult result)
         Nothing -> do
             (out, err) <- runningLiveOutput task.backgroundRunning
-            let body = combinePipes out err
+            let body = combineCommandOutput out err
             pure $ if Text.null body
                 then "still running"
                 else "still running\n" <> body
@@ -204,7 +205,7 @@ killTask session taskId = do
         Just task -> do
             releaseResource task.backgroundResource
             result <- readMVar task.backgroundRunning.runningResult
-            pure $ "killed " <> taskId <> "\n" <> formatExit result
+            pure $ "killed " <> taskId <> "\n" <> formatCommandResult result
 
 nextTaskId :: GrokSession -> IO Text
 nextTaskId session = atomicModifyIORef' session.grokNextId \n ->
@@ -265,20 +266,6 @@ removeIfExists path = do
     if exists
         then void $ tryAny (removeFile path)
         else pure ()
-
-formatExit :: CommandResult -> Text
-formatExit result
-    | result.commandCancelled = "exit: cancelled\n" <> body
-    | result.commandTimedOut = "exit: killed (timeout)\n" <> body
-    | otherwise = "exit: " <> Text.pack (show (fromMaybe 1 result.commandExitCode)) <> "\n" <> body
-  where
-    body = combinePipes result.commandStdout result.commandStderr
-
-combinePipes :: Text -> Text -> Text
-combinePipes out err
-    | Text.null err = out
-    | Text.null out = err
-    | otherwise = out <> "\n" <> err
 
 -- | True when a foreground command would background itself with @&@.
 hasUnwaitedBackgroundOp :: Text -> Bool

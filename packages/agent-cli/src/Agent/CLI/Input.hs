@@ -19,6 +19,7 @@ module Agent.CLI.Input
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , isShiftEnterCsiBody
+    , submissionPromptText
     , appendReplHistory
     , readReplHistory
     , replHistoryPath
@@ -53,6 +54,7 @@ import Agent.CLI.Terminal
     , stripAnsi
     )
 import Agent.Loop (ImageAttachment)
+import Agent.TUI.TextWidth (charCellWidth)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
 import Data.Bits ((.&.))
@@ -134,8 +136,19 @@ data ReplLine
     -- ^ Fullscreen status click: open the model selector and keep the draft.
     | ReplChooseEffort Text
     -- ^ Fullscreen status click: open the effort selector and keep the draft.
+    | ReplChooseAccount Text
+    -- ^ Fullscreen status click: open the account selector and keep the draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
+
+-- | Keep empty composers inert unless they have queued image attachments.
+-- Providers expect a non-empty text part alongside image parts, so image-only
+-- submissions receive a small synthetic prompt.
+submissionPromptText :: Int -> Text -> Maybe Text
+submissionPromptText attachmentCount text
+    | not (Text.null (Text.strip text)) = Just text
+    | attachmentCount > 0 = Just "The user attached an image."
+    | otherwise = Nothing
 
 -- | Strip terminal bracketed-paste wrappers (raw @CSI 200~@ / @CSI 201~@,
 -- or the printable sentinels used by older history/input versions) and decide
@@ -337,31 +350,7 @@ textColumns :: Text -> Int
 textColumns = sum . map charColumns . Text.unpack
 
 charColumns :: Char -> Int
-charColumns char
-    | category `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
-    | category `elem` [Control, Surrogate, NotAssigned] = 0
-    | isWideCharacter char = 2
-    | otherwise = 1
-  where
-    category = generalCategory char
-
-isWideCharacter :: Char -> Bool
-isWideCharacter char =
-    let code = ord char
-    in code >= 0x1100
-        && ( code <= 0x115f
-            || code == 0x2329
-            || code == 0x232a
-            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
-            || (code >= 0xac00 && code <= 0xd7a3)
-            || (code >= 0xf900 && code <= 0xfaff)
-            || (code >= 0xfe10 && code <= 0xfe19)
-            || (code >= 0xfe30 && code <= 0xfe6f)
-            || (code >= 0xff00 && code <= 0xff60)
-            || (code >= 0xffe0 && code <= 0xffe6)
-            || (code >= 0x1f300 && code <= 0x1faff)
-            || (code >= 0x20000 && code <= 0x3fffd)
-           )
+charColumns = charCellWidth
 
 cellsWidth :: [DisplayCell] -> Int
 cellsWidth = sum . map (.displayCellWidth)
