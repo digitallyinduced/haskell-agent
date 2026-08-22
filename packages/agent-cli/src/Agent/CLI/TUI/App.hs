@@ -82,7 +82,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
-import Brick.Widgets.Center (center, centerLayer)
+import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -989,7 +989,10 @@ fullscreenApp = App
 drawApp :: AppState -> [Widget Name]
 drawApp state =
     let mainLayers = stickyPromptLayers state <> [drawMain state]
-        interactiveLayers = agentPopoverLayers state <> mainLayers
+        interactiveLayers =
+            agentPopoverLayers state
+                <> imagePreviewLayers state.appImagePreviews
+                <> mainLayers
         dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
     in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
@@ -1008,7 +1011,6 @@ drawMain state =
             [ drawHeader state.appUi
             , drawWorkspace state
             , drawNotice state.appUi
-            , drawImagePreviews state.appImagePreviews
             , drawQueuedInputs state.appUi
             , drawSlashMenu state
             , drawFollowStatus state.appUi
@@ -1016,33 +1018,57 @@ drawMain state =
             , drawFooter state
             ]
 
-drawImagePreviews :: [TuiImagePreview] -> Widget Name
-drawImagePreviews previews =
+imagePreviewLayers :: [TuiImagePreview] -> [Widget Name]
+imagePreviewLayers previews =
     case takeLast 3 previews of
-        [] -> emptyWidget
-        shown ->
-            padLeftRight 2 $
-                padBottom (Pad 1) $
-                    hBox $
-                        intersperse (padLeft (Pad 2) emptyWidget)
-                            (map drawPreview shown)
+        [] -> []
+        shown -> [centerLayer (drawImagePreviews shown)]
   where
-    drawPreview preview =
-        vBox
-            [ renderTuiImagePreview preview
-            , withAttr Theme.mutedAttr $
-                txt $
-                    "🖼 "
-                        <> preview.previewMime
-                        <> " · "
-                        <> Text.pack (show preview.previewSourceWidth)
-                        <> "×"
-                        <> Text.pack (show preview.previewSourceHeight)
-                        <> " · "
-                        <> formatImageSize preview.previewBytes
-            ]
     takeLast count values =
         drop (max 0 (length values - count)) values
+
+drawImagePreviews :: [TuiImagePreview] -> Widget Name
+drawImagePreviews previews =
+    Widget Fixed Fixed do
+        context <- getContext
+        let maxWidth = viewportPreviewSize context.availWidth
+            maxHeight = viewportPreviewSize context.availHeight
+            gaps = max 0 (length previews - 1) * previewGap
+            previewWidth =
+                max 1 ((maxWidth - gaps) `div` max 1 (length previews))
+            previewHeight = max 1 (maxHeight - 1)
+            content =
+                hBox $
+                    intersperse
+                        (hLimit previewGap (fill ' '))
+                        (map (drawPreview previewWidth previewHeight) previews)
+        render $
+            hLimit maxWidth $
+                vLimit maxHeight content
+  where
+    previewGap = 2
+
+    drawPreview maxWidth maxHeight preview =
+        hLimit maxWidth $
+            vBox
+                [ hCenter $
+                    renderTuiImagePreview maxWidth maxHeight preview
+                , hCenter $
+                    withAttr Theme.mutedAttr $
+                        txt $
+                            "🖼 "
+                                <> preview.previewMime
+                                <> " · "
+                                <> Text.pack (show preview.previewSourceWidth)
+                                <> "×"
+                                <> Text.pack (show preview.previewSourceHeight)
+                                <> " · "
+                                <> formatImageSize preview.previewBytes
+                ]
+
+viewportPreviewSize :: Int -> Int
+viewportPreviewSize available =
+    max 1 (available * 3 `div` 5)
 
 drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =

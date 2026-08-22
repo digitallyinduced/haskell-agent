@@ -3,6 +3,7 @@ module Agent.CLI.TUIImagePreviewSpec (spec) where
 import Agent.CLI.TUI.ImagePreview
     ( TuiImagePreview(..)
     , prepareTuiImagePreview
+    , previewCellSize
     )
 import Agent.Loop (ImageAttachment(..))
 import Codec.Picture
@@ -36,8 +37,23 @@ spec =
                 Right preview -> do
                     preview.previewSourceWidth `shouldBe` 4
                     preview.previewSourceHeight `shouldBe` 2
-                    length preview.previewCells `shouldBe` 1
-                    map length preview.previewCells `shouldBe` [4]
+                    previewCellSize 80 24 preview `shouldBe` (4, 1)
+
+        it "uses the available preview area while preserving aspect ratio" do
+            let source =
+                    generateImage
+                        (\_ _ -> PixelRGB8 10 20 30)
+                        1600
+                        900
+                attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = LBS.toStrict (encodePng source)
+                    }
+            case prepareTuiImagePreview attachment of
+                Left err -> expectationFailure (show err)
+                Right preview -> do
+                    previewCellSize 72 23 preview `shouldBe` (72, 20)
+                    previewCellSize 48 12 preview `shouldBe` (42, 12)
 
         it "composites alpha instead of exposing hidden transparent RGB" do
             let transparentSource =
@@ -64,8 +80,12 @@ spec =
                     prepareTuiImagePreview (attachment transparentSource)
                 compositedPreview =
                     prepareTuiImagePreview (attachment compositedSource)
-            (.previewCells) <$> transparentPreview
-                `shouldBe` (.previewCells) <$> compositedPreview
+            case (transparentPreview, compositedPreview) of
+                (Right transparent, Right composited) ->
+                    transparent.previewSample == composited.previewSample
+                        `shouldBe` True
+                (Left err, _) -> expectationFailure (show err)
+                (_, Left err) -> expectationFailure (show err)
 
         it "rejects invalid image bytes without crashing the TUI" do
             prepareTuiImagePreview
