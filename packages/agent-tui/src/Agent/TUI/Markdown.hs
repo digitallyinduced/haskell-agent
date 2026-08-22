@@ -28,7 +28,6 @@ import Data.Char
     ( isDigit
     , isSpace
     )
-import Data.List (transpose)
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -250,39 +249,192 @@ takeTable (rawHeader : separator : rest)
         let
             (body, after) = span isTableRow rest
             rows = map splitRow (rawHeader : body)
-            headerCells = splitRow rawHeader
-            widths = map (maximum . (0 :) . map Text.length) (transpose rows)
-            renderRow headerRow cells =
-                hBox $
-                    [withAttr Theme.mutedAttr (txt "│")]
-                        <> concat
-                            [ [ padLeftRight 1 $
-                                    (if headerRow
-                                        then withAttr Theme.headingAttr
-                                        else id)
-                                    (hLimit width
-                                        (inlineWidget (parseInline cell)))
-                              , withAttr Theme.mutedAttr (txt "│")
-                              ]
-                            | (width, cell) <- zip widths
-                                (cells <> repeat "")
-                            ]
-            divider =
-                withAttr Theme.mutedAttr $
-                    txt $
-                        "├"
-                            <> Text.intercalate "┼"
-                                [ Text.replicate (width + 2) "─"
-                                | width <- widths
-                                ]
-                            <> "┤"
-        in Just
-            (vBox
-                (renderRow True headerCells
-                    : divider
-                    : map (renderRow False) (drop 1 rows))
-            , after)
+        in Just (tableWidget rows, after)
 takeTable _ = Nothing
+
+-- | Render a table against the width Brick actually gives it. Natural column
+-- widths are only preferences: short columns keep their size while verbose
+-- columns share the remaining space and wrap inside it.
+tableWidget :: [[Text]] -> Widget n
+tableWidget [] = emptyWidget
+tableWidget rows =
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        borderAttr <- B.lookupAttrName Theme.mutedAttr
+        headerAttr <- B.lookupAttrName Theme.headingAttr
+        bodyAttr <- B.lookupAttrName Theme.assistantAttr
+        styledRows <-
+            traverse
+                (\(rowIndex, cells) ->
+                    traverse
+                        (traverse
+                            (resolveInlineSpan
+                                (if rowIndex == 0
+                                    then Theme.headingAttr
+                                    else Theme.assistantAttr))
+                            . parseInline)
+                        cells)
+                (zip [0 :: Int ..] normalizedRows)
+        let availableWidth = max 1 context.availWidth
+            horizontalPadding =
+                if availableWidth >= 4 * columnCount + 1
+                    then 1
+                    else 0
+            chromeWidth =
+                columnCount + 1
+                    + 2 * horizontalPadding * columnCount
+            contentBudget =
+                max columnCount (availableWidth - chromeWidth)
+            widths = fitColumnWidths contentBudget naturalWidths
+            top = tableRule borderAttr horizontalPadding '┌' '┬' '┐' widths
+            divider =
+                tableRule borderAttr horizontalPadding '├' '┼' '┤' widths
+            bottom =
+                tableRule borderAttr horizontalPadding '└' '┴' '┘' widths
+            renderedRows =
+                case styledRows of
+                    [] -> []
+                    header : body ->
+                        renderTableRow
+                            borderAttr headerAttr horizontalPadding widths header
+                            : divider
+                            : map
+                                (renderTableRow
+                                    borderAttr bodyAttr horizontalPadding widths)
+                                body
+            image =
+                V.vertCat (top : renderedRows <> [bottom])
+            boundedImage
+                | V.imageWidth image > availableWidth =
+                    V.cropRight availableWidth image
+                | otherwise = image
+        pure B.emptyResult { B.image = boundedImage }
+  where
+    columnCount = maximum (0 : map length rows)
+    normalizedRows =
+        [ take columnCount (cells <> repeat "")
+        | cells <- rows
+        ]
+    naturalWidths =
+        [ maximum
+            (1
+                : [ cellDisplayWidth cell
+                  | row <- normalizedRows
+                  , cell <- take 1 (drop columnIndex row)
+                  ])
+        | columnIndex <- [0 .. columnCount - 1]
+        ]
+
+cellDisplayWidth :: Text -> Int
+cellDisplayWidth =
+    Text.foldl' (\width char -> width + terminalCharWidth char) 0
+        . inlinePlainText
+        . parseInline
+
+-- | Fairly distribute a fixed content budget. Each column starts at one cell;
+-- columns that reach their natural width drop out while the longer columns
+-- continue growing.
+fitColumnWidths :: Int -> [Int] -> [Int]
+fitColumnWidths budget naturalWidths
+    | null naturalWidths = []
+    | sum preferred <= budget = preferred
+    | otherwise =
+        grow (replicate (length preferred) 1)
+            (max 0 (budget - length preferred))
+  where
+    preferred = map (max 1) naturalWidths
+
+    grow widths remaining
+        | remaining <= 0 = widths
+        | otherwise =
+            let (remaining', widths') =
+                    List.mapAccumL grant remaining (zip preferred widths)
+            in if remaining' == remaining
+                then widths
+                else grow widths' remaining'
+
+    grant remaining (wanted, current)
+        | remaining > 0
+        , current < wanted =
+            (remaining - 1, current + 1)
+        | otherwise =
+            (remaining, current)
+
+tableRule
+    :: V.Attr
+    -> Int
+    -> Char
+    -> Char
+    -> Char
+    -> [Int]
+    -> V.Image
+tableRule attr horizontalPadding left middle right widths =
+    V.text' attr $
+        Text.singleton left
+            <> Text.intercalate
+                (Text.singleton middle)
+                [ Text.replicate
+                    (width + 2 * horizontalPadding)
+                    "─"
+                | width <- widths
+                ]
+            <> Text.singleton right
+
+renderTableRow
+    :: V.Attr
+    -> V.Attr
+    -> Int
+    -> [Int]
+    -> [[(V.Attr, Text)]]
+    -> V.Image
+renderTableRow borderAttr paddingAttr horizontalPadding widths cells =
+    V.vertCat
+        [ V.horizCat $
+            V.char borderAttr '│'
+                : concat
+                    [ [ renderTableCell
+                            paddingAttr horizontalPadding width fragments
+                      , V.char borderAttr '│'
+                      ]
+                    | (width, fragments) <- zip widths rowFragments
+                    ]
+        | rowFragments <- physicalRows
+        ]
+  where
+    wrappedCells =
+        zipWith
+            (\width spans -> wrapStyledWords (max 1 width) spans)
+            widths
+            (cells <> repeat [])
+    rowHeight = maximum (1 : map length wrappedCells)
+    physicalRows =
+        List.transpose
+            [ take rowHeight (wrapped <> repeat [])
+            | wrapped <- wrappedCells
+            ]
+
+renderTableCell
+    :: V.Attr
+    -> Int
+    -> Int
+    -> [(V.Attr, Text)]
+    -> V.Image
+renderTableCell paddingAttr horizontalPadding width fragments =
+    V.horizCat
+        [ blank horizontalPadding
+        , content
+        , blank (max 0 (width - V.imageWidth content))
+        , blank horizontalPadding
+        ]
+  where
+    content =
+        V.horizCat
+            [ V.text attr (LazyText.fromStrict text)
+            | (attr, text) <- fragments
+            ]
+    blank count
+        | count <= 0 = V.emptyImage
+        | otherwise = V.charFill paddingAttr ' ' count 1
 
 isTableRow :: Text -> Bool
 isTableRow line =
@@ -424,7 +576,7 @@ inlineWidget :: [InlineSpan] -> Widget n
 inlineWidget spans =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
-        styled <- traverse resolve spans
+        styled <- traverse (resolveInlineSpan Theme.assistantAttr) spans
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
             rendered =
@@ -436,16 +588,24 @@ inlineWidget spans =
                     | row <- rows
                     ]
         pure B.emptyResult { B.image = rendered }
-  where
-    resolve InlineSpan{inlineStyle, inlineText} = do
-        attr <- B.lookupAttrName (styleAttr inlineStyle)
-        pure
-            ( case inlineStyle of
-                InlineLink url
-                    | not (Text.null url) -> attr `V.withURL` url
-                _ -> attr
-            , inlineText
-            )
+
+resolveInlineSpan
+    :: AttrName
+    -> InlineSpan
+    -> B.RenderM n (V.Attr, Text)
+resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
+    attr <-
+        B.lookupAttrName $
+            case inlineStyle of
+                InlinePlain -> plainAttr
+                _ -> styleAttr inlineStyle
+    pure
+        ( case inlineStyle of
+            InlineLink url
+                | not (Text.null url) -> attr `V.withURL` url
+            _ -> attr
+        , inlineText
+        )
 
 styleAttr :: InlineStyle -> AttrName
 styleAttr = \case
@@ -497,3 +657,69 @@ wrapStyled width spans =
                         . reverse)
                     (reverse rows)
         in if null ordered then [[]] else ordered
+
+-- | Table cells prefer word boundaries, but still hard-wrap an individual
+-- token that is wider than its column.
+wrapStyledWords :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
+wrapStyledWords width spans =
+    map groupCells (wrapCells cells)
+  where
+    width' = max 1 width
+    cells =
+        [ (attr, character)
+        | (attr, text) <- spans
+        , character <- Text.unpack text
+        ]
+
+    wrapCells [] = [[]]
+    wrapCells remaining =
+        let (fitting, overflow) = takeFitting remaining
+        in case overflow of
+            [] -> [dropTrailingSpace fitting]
+            _ ->
+                case lastSpaceIndex fitting of
+                    Just index
+                        | index > 0 ->
+                            let (line, carried) = splitAt index fitting
+                                next =
+                                    dropWhile (isSpace . snd)
+                                        (carried <> overflow)
+                            in dropTrailingSpace line : wrapCells next
+                    _ -> fitting : wrapCells overflow
+
+    takeFitting = go 0 []
+      where
+        go _ taken [] = (reverse taken, [])
+        go used taken allCells@((attr, character) : rest)
+            | used > 0
+            , used + cellWidth > width' =
+                (reverse taken, allCells)
+            | otherwise =
+                go (used + cellWidth) ((attr, character) : taken) rest
+          where
+            cellWidth = terminalCharWidth character
+
+    lastSpaceIndex =
+        List.foldl'
+            (\found (index, (_, character)) ->
+                if isSpace character then Just index else found)
+            Nothing
+            . zip [0 :: Int ..]
+
+    dropTrailingSpace =
+        reverse . dropWhile (isSpace . snd) . reverse
+
+    groupCells =
+        map
+            (\(attr, text) ->
+                (attr, LazyText.toStrict (Builder.toLazyText text)))
+            . reverse
+            . List.foldl' appendCell []
+
+    appendCell grouped (attr, character) =
+        case grouped of
+            (previousAttr, previousText) : rest
+                | previousAttr == attr ->
+                    (previousAttr, previousText <> Builder.singleton character)
+                        : rest
+            _ -> (attr, Builder.singleton character) : grouped

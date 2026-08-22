@@ -42,6 +42,19 @@ spec = describe "fullscreen Markdown inline parsing" do
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
 
+    it "wraps long table cells instead of clipping later columns" do
+        let widget :: Widget ()
+            widget =
+                markdownWidget $
+                    Text.unlines
+                        [ "| Product | Description | Difference |"
+                        , "| --- | --- | --- |"
+                        , "| Codex | short description | 0123456789ABCDEFVISIBLE |"
+                        ]
+            rendered = show (renderWidget Nothing [widget] (48, 20))
+        rendered `shouldSatisfy` isInfixOf "VISIBLE"
+        rendered `shouldSatisfy` isInfixOf "description"
+
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
