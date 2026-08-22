@@ -8,7 +8,6 @@ module Agent.Tools.Grok.Shell
     , PersistentShell(..)
     , newGrokSession
     , closeGrokSession
-    , runForeground
     , runForegroundStreaming
     , startBackground
     , readTaskOutput
@@ -16,7 +15,7 @@ module Agent.Tools.Grok.Shell
     , hasUnwaitedBackgroundOp
     ) where
 
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ResourceScope
     ( ResourceKey
     , ResourceScope
@@ -38,7 +37,7 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (impureThrow, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (mask, onException, throwIO, tryAny)
 import Control.Monad (void)
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -54,7 +53,7 @@ import System.Directory.OsPath
     , removeFile
     )
 import System.IO (hClose)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (<.>), (</>))
+import System.OsPath (OsPath, unsafeEncodeUtf, (<.>), (</>))
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
 import System.Posix.Temp (mkstemp)
 
@@ -100,7 +99,7 @@ newGrokSession env = do
         mask \restore -> do
             tmp <- getTemporaryDirectory
             (envFileRaw, handle) <- restore $
-                mkstemp (decodeUtfPath (tmp </> unsafeEncodeUtf "agent-grok-env"))
+                mkstemp (unsafeToFilePath (tmp </> unsafeEncodeUtf "agent-grok-env"))
             let envFile = unsafeEncodeUtf envFileRaw
             let rollback = do
                     void $ tryAny (hClose handle)
@@ -121,10 +120,6 @@ closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
     modifyMVar_ session.grokTasks (const (pure Map.empty))
     closeResourceScope session.grokResources
-
-runForeground :: GrokSession -> String -> Int -> IO CommandResult
-runForeground session command timeoutMs =
-    runForegroundStreaming session command timeoutMs (\_ _ -> pure ())
 
 runForegroundStreaming
     :: GrokSession
@@ -243,7 +238,7 @@ cwdFile shell = shell.shellEnvFile <.> unsafeEncodeUtf "cwd"
 
 refreshCwd :: ToolEnv -> PersistentShell -> IO PersistentShell
 refreshCwd env shell = do
-    contents <- tryAny (Text.readFile (decodeUtfPath (cwdFile shell)))
+    contents <- tryAny (Text.readFile (unsafeToFilePath (cwdFile shell)))
     case contents of
         Left _ -> pure shell
         Right raw -> do
@@ -256,7 +251,7 @@ refreshCwd env shell = do
                     Right resolved -> pure shell { shellCwd = resolved }
 
 quote :: OsPath -> String
-quote = quoteString . decodeUtfPath
+quote = quoteString . unsafeToFilePath
 
 quoteString :: String -> String
 quoteString path = "'" <> concatMap escape path <> "'"
@@ -320,6 +315,3 @@ containsBareAmp text = go (' ' : Text.unpack text)
         | a `notElem` ("&<>|" :: String) && b `notElem` ("&>" :: String) = True
         | otherwise = go ('&' : b : rest)
     go (_ : rest) = go rest
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

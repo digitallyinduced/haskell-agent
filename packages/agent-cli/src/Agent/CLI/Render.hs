@@ -20,7 +20,6 @@ module Agent.CLI.Render
     , summarizeToolCall
     , thinkingMaxWidth
     , truncateToolOutput
-    , visibleDisplayRows
     , wrapThinkingLines
     ) where
 
@@ -261,53 +260,6 @@ finalizeAssistantBuffer config assistantText = do
                     Text.hPutStr config.renderStdout (renderAssistantText True raw)
                     hFlush config.renderStdout
                     pure True
-
--- | How many terminal rows a painted assistant block occupies, accounting for
--- soft wrap at @width@. ANSI/OSC sequences do not consume columns.
--- Kept for tests / diagnostics; live redraw no longer depends on it.
-visibleDisplayRows :: Int -> Text -> Int
-visibleDisplayRows width painted
-    | Text.null painted = 0
-    | otherwise =
-        let width' = max 1 width
-            endsWithNewline = Text.isSuffixOf "\n" painted
-            parts = Text.splitOn "\n" painted
-            logical
-                | endsWithNewline && not (null parts) = init parts
-                | otherwise = parts
-            rowCount line =
-                let cols = Text.length (stripAnsiOsc line)
-                in if cols == 0
-                    then 1
-                    else max 1 ((cols + width' - 1) `div` width')
-        in sum (map rowCount logical)
-
--- | Drop CSI and OSC-8 hyperlink wrappers so length matches visible cells.
-stripAnsiOsc :: Text -> Text
-stripAnsiOsc = go
-  where
-    go t
-        | Text.null t = t
-        | Text.isPrefixOf "\ESC[" t =
-            let rest = Text.drop 2 t
-                (_, after) = Text.break isCsiFinal rest
-            in go (Text.drop 1 after)
-        | Text.isPrefixOf "\ESC]8;" t =
-            case Text.breakOn "\ESC\\" (Text.drop 4 t) of
-                (_params, rest)
-                    | Text.isPrefixOf "\ESC\\" rest -> go (Text.drop 2 rest)
-                    | otherwise ->
-                        case Text.break (== '\a') (Text.drop 4 t) of
-                            (_params, rest2)
-                                | Text.isPrefixOf "\a" rest2 -> go (Text.drop 1 rest2)
-                                | otherwise -> go (Text.drop 1 t)
-        | Text.head t == '\ESC' = go (Text.drop 1 t)
-        | otherwise =
-            let (plain, rest) = Text.break (== '\ESC') t
-            in plain <> go rest
-
-isCsiFinal :: Char -> Bool
-isCsiFinal c = c >= '@' && c <= '~'
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
 -- Commits a streamed reasoning block first so cancel/error still leave the

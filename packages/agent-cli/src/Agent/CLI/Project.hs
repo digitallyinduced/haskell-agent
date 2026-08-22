@@ -9,8 +9,8 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.OsPath (unsafeToFilePath)
 import Control.Exception (try)
-import Control.Exception.Safe (impureThrow)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -23,7 +23,7 @@ import System.Directory.OsPath
     , doesFileExist
     )
 import System.Exit (ExitCode(..))
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
@@ -82,7 +82,7 @@ loadProjectSettings projectRoot = do
     if not exists
         then pure defaultProjectSettings
         else do
-            result <- try @IOError (retryOnFileBusy (LBS.readFile (decodeUtfPath path)))
+            result <- try @IOError (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
             pure $ case result of
                 Left _ -> defaultProjectSettings
                 Right bytes ->
@@ -97,7 +97,7 @@ saveProjectAutoApprove projectRoot autoApprove = do
         path = projectSettingsPath projectRoot
         settings = defaultProjectSettings { settingsAutoApprove = autoApprove }
     createDirectoryIfMissing True dir
-    _ <- try @IOError (setFileMode (decodeUtfPath dir) 0o700)
+    _ <- try @IOError (setFileMode (unsafeToFilePath dir) 0o700)
     writeLazyFileAtomically path 0o600 (Aeson.encode settings)
 
 gitToplevel :: OsPath -> IO (Maybe OsPath)
@@ -105,7 +105,7 @@ gitToplevel dir = do
     result <- try @IOError $
         readCreateProcessWithExitCode
             (proc "git" ["rev-parse", "--show-toplevel"])
-                { cwd = Just (decodeUtfPath dir) }
+                { cwd = Just (unsafeToFilePath dir) }
             ""
     pure $ case result of
         Left _ -> Nothing
@@ -116,6 +116,3 @@ gitToplevel dir = do
 
 trim :: String -> String
 trim = dropWhileEnd isSpace . dropWhile isSpace
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

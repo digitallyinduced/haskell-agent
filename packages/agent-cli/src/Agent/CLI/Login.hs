@@ -53,7 +53,7 @@ import Agent.CLI.Style
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Login as OpenAILogin
-import Agent.OsPath (toText)
+import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.Provider (Provider(..), providerSlug)
@@ -66,7 +66,7 @@ import Control.Concurrent.Async
     , withAsync
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
-import Control.Exception.Safe (bracket, impureThrow, tryAny)
+import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (join)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -80,7 +80,7 @@ import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.Environment (lookupEnv)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.IO
     ( hFlush
     , hGetEcho
@@ -648,7 +648,7 @@ discoverOpenAIFile now path = do
     if not exists
         then pure Nothing
         else do
-            bytes <- retryOnFileBusy (LBS.readFile (decodeUtfPath path))
+            bytes <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
             pure $ do
                 auth <- openaiAuthStateFromJson now bytes
                 pure $ subscriptionAccount
@@ -679,7 +679,7 @@ discoverGrokFile path = do
         then pure Nothing
         else do
             raw <- Text.decodeUtf8 . LBS.toStrict
-                <$> retryOnFileBusy (LBS.readFile (decodeUtfPath path))
+                <$> retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
             pure $ do
                 token <- grokCredentialFromAuthJson raw
                 pure (grokAccount token (toText path)
@@ -945,6 +945,3 @@ lookupNonEmpty name = do
     pure case value of
         Just text | not (null text) -> Just (Text.pack text)
         _ -> Nothing
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

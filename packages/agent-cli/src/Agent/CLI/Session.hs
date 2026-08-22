@@ -34,11 +34,11 @@ import Agent.FileRetry
     , writeLazyFileAtomically
     )
 import Agent.Loop (TokenUsage(..))
-import Agent.OsPath (toText)
+import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (impureThrow, tryIO)
+import Control.Exception.Safe (tryIO)
 import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -69,7 +69,7 @@ import System.Directory.OsPath
     , doesFileExist
     , listDirectory
     )
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 
 sessionSchemaVersion :: Int
@@ -107,7 +107,7 @@ instance ToJSON SessionMeta where
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
         , "model" .= meta.metaModel
-        , "cwd" .= decodeUtfPath meta.metaCwd
+        , "cwd" .= unsafeToFilePath meta.metaCwd
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
         , "titleIsManual" .= meta.metaTitleIsManual
@@ -273,7 +273,7 @@ appendTurnWithMetaUpdate handle turn updateMeta = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (decodeUtfPath path) 0o600
+    if existed then pure () else setFileMode (unsafeToFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -322,7 +322,7 @@ appendTurnKeepTitle handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (decodeUtfPath path) 0o600
+    if existed then pure () else setFileMode (unsafeToFilePath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -458,7 +458,7 @@ allocateSessionDir root now = go (0 :: Int)
             case result of
                 Left _ -> go (attempt + 1)
                 Right () -> do
-                    setFileMode (decodeUtfPath dir) 0o700
+                    setFileMode (unsafeToFilePath dir) 0o700
                     pure (sessionId, dir)
 
 hex8 :: Integer -> String
@@ -469,7 +469,7 @@ hex8 n =
 ensurePrivateDir :: OsPath -> IO ()
 ensurePrivateDir path = do
     createDirectoryIfMissing True path
-    _ <- tryIO (setFileMode (decodeUtfPath path) 0o700)
+    _ <- tryIO (setFileMode (unsafeToFilePath path) 0o700)
     pure ()
 
 loadTranscript :: OsPath -> ExceptT Text IO [SessionTurn]
@@ -478,7 +478,7 @@ loadTranscript path = do
     if not exists
         then pure []
         else do
-            raw <- lift (retryOnFileBusy (Text.readFile (decodeUtfPath path)))
+            raw <- lift (retryOnFileBusy (Text.readFile (unsafeToFilePath path)))
             let linesOf = filter (not . Text.null) (Text.lines raw)
             except (mapM decodeTurnLine linesOf)
 
@@ -493,7 +493,7 @@ decodeFileEither path = do
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("missing file: " <> toText path)
-    bytes <- lift (retryOnFileBusy (LBS.readFile (decodeUtfPath path)))
+    bytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
     case Aeson.eitherDecode' bytes of
         Left err -> throwE (toText path <> ": " <> Text.pack err)
         Right value -> pure value
@@ -508,6 +508,3 @@ readMetaQuiet root name = do
         Right (Right meta)
             | meta.metaVersion == sessionSchemaVersion -> Just meta
             | otherwise -> Nothing
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

@@ -2,7 +2,7 @@ module Agent.CLI.SessionTitleSpec (spec) where
 
 import Agent.CLI.SessionTitle
 import Agent.Loop (Backend(..), emptyTurnOutput)
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Control.Concurrent
     ( newEmptyMVar
     , putMVar

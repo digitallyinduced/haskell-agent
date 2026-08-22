@@ -21,7 +21,7 @@ OAuth login options require the application's public client id at runtime;
 `agent-xai` does not embed one in its source.
 
 ```haskell
-import Agent.OpenAI.Responses.Types
+import Agent.Responses.Types
 import Agent.XAI
 
 request = defaultResponseCreateParams

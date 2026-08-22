@@ -11,7 +11,6 @@ module Agent.Skills
     , discoverSkills
     , buildSkillInvocations
     , modelVisibleSkills
-    , userInvocableSkills
     , formatSkillCatalogContext
     , formatSkillActivation
     , resolveSkillInvocation
@@ -19,8 +18,8 @@ module Agent.Skills
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (toText)
-import Control.Exception.Safe (impureThrow, tryAny)
+import Agent.OsPath (toText, unsafeToFilePath)
+import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
     ( FromJSON(..)
@@ -30,7 +29,7 @@ import Data.Aeson
     , (.:?)
     , (.!=)
     )
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
@@ -222,9 +221,9 @@ discoverSkills options = do
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
-    projectRoot <- canonicalizePath (decodeUtfPath options.skillsProjectRoot)
-    cwd <- canonicalizePath (decodeUtfPath options.skillsCwd)
-    home <- canonicalizePath (decodeUtfPath options.skillsHome)
+    projectRoot <- canonicalizePath (unsafeToFilePath options.skillsProjectRoot)
+    cwd <- canonicalizePath (unsafeToFilePath options.skillsCwd)
+    home <- canonicalizePath (unsafeToFilePath options.skillsHome)
     let dirs = directoryChain projectRoot cwd
         projectRoots =
             [ ( RepositorySkill depth (dir == cwd)
@@ -407,10 +406,6 @@ skillSortKey skill =
 modelVisibleSkills :: SkillCatalog -> [Skill]
 modelVisibleSkills catalog =
     filter (.skillModelInvocable) catalog.catalogSkills
-
-userInvocableSkills :: SkillCatalog -> [Skill]
-userInvocableSkills catalog =
-    filter (.skillUserInvocable) catalog.catalogSkills
 
 buildSkillInvocations :: [Text] -> SkillCatalog -> [SkillInvocation]
 buildSkillInvocations reserved catalog =
@@ -618,6 +613,3 @@ infixr 3 <|>
 (<|>) left right = case left of
     Just value -> Just value
     Nothing -> right
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

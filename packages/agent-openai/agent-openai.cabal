@@ -40,9 +40,7 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.OpenAI.Responses.Types
-                    , Agent.OpenAI.Responses.Codec
-                    , Agent.OpenAI.Error
+    exposed-modules:  Agent.OpenAI.Error
                     , Agent.OpenAI.Http
                     , Agent.OpenAI.Auth
                     , Agent.OpenAI.Auth.JWT
@@ -54,7 +52,6 @@ library
                     , Agent.OpenAI.Client
                     , Agent.OpenAI.Features
                     , Agent.OpenAI.ModelMetadata
-                    , Agent.OpenAI.ResponseMerge
                     , Agent.OpenAI.WebSocketClient
                     , Agent.OpenAI.LoopBackend
                     , Agent.OpenAI.CompactClient
@@ -68,10 +65,8 @@ library
                     , bytestring
                     , aeson                 >= 2.0
                     , http-client
-                    , http-client-tls
                     , http-conduit
                     , http-streams
-                    , http-types
                     , HsOpenSSL
                     , io-streams
                     , network-uri
@@ -82,13 +77,10 @@ library
                     , exceptions
                     , safe-exceptions
                     , containers
-                    , hashable
                     , vector
-                    , scientific
                     , time
                     , directory
                     , filepath
-                    , unix
 
 executable agent-openai-login
     import:           common-opts
@@ -115,7 +107,6 @@ test-suite agent-openai-test
                     , Agent.OpenAI.LoopBackendSpec
                     , Agent.OpenAI.CompactionSpec
                     , Agent.OpenAI.ResponsesSpec
-                    , Agent.OpenAI.ResponseMergeSpec
                     , Agent.OpenAI.ToolDSLSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec

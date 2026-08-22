@@ -60,6 +60,7 @@
                     root = ./packages/agent-responses;
                     include = [
                         "src"
+                        "test"
                         "agent-responses.cabal"
                         "LICENSE"
                         "README.md"

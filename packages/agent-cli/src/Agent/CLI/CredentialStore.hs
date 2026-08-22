@@ -17,10 +17,10 @@ module Agent.CLI.CredentialStore
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.OsPath (toText)
+import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (bracket, bracket_, impureThrow, tryIO)
+import Control.Exception.Safe (bracket, bracket_, tryIO)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LBS
@@ -33,7 +33,7 @@ import System.Directory.OsPath
     , doesFileExist
     , getHomeDirectory
     )
-import System.OsPath (OsPath, decodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.IO (SeekMode(AbsoluteSeek))
 import System.Posix.Files (setFileMode)
 import System.Posix.IO
@@ -206,12 +206,12 @@ withCredentialRefreshFileLockUnlocked action = do
     let directory = takeDirectory (managedSecretsPath home)
         lockPath = directory </> unsafeEncodeUtf "refresh.lock"
     createDirectoryIfMissing True directory
-    setFileMode (decodeUtfPath directory) 0o700
+    setFileMode (unsafeToFilePath directory) 0o700
     bracket
-        (openFd (decodeUtfPath lockPath) ReadWrite lockFlags)
+        (openFd (unsafeToFilePath lockPath) ReadWrite lockFlags)
         closeFd
         \fd -> do
-            setFileMode (decodeUtfPath lockPath) 0o600
+            setFileMode (unsafeToFilePath lockPath) 0o600
             waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
             action
   where
@@ -415,9 +415,9 @@ withCredentialStoreFileLock home action = do
             , cloexec = True
             }
     createDirectoryIfMissing True directoryPath
-    setFileMode (decodeUtfPath directoryPath) 0o700
+    setFileMode (unsafeToFilePath directoryPath) 0o700
     bracket
-        (openFd (decodeUtfPath path) ReadWrite flags)
+        (openFd (unsafeToFilePath path) ReadWrite flags)
         closeFd
         (\fd ->
             bracket_
@@ -434,7 +434,7 @@ decodeFileOrEmpty path empty = do
     exists <- doesFileExist path
     if not exists
         then pure (Right empty)
-        else tryIO (retryOnFileBusy (LBS.readFile (decodeUtfPath path))) >>= \case
+        else tryIO (retryOnFileBusy (LBS.readFile (unsafeToFilePath path))) >>= \case
             Left exception ->
                 pure $ Left
                     ("could not read " <> toText path <> ": "
@@ -457,12 +457,9 @@ writePrivateJson path value =
   where
     action = do
         createDirectoryIfMissing True (takeDirectory path)
-        setFileMode (decodeUtfPath (takeDirectory path)) 0o700
+        setFileMode (unsafeToFilePath (takeDirectory path)) 0o700
         writeLazyFileAtomically path 0o600 (Aeson.encode value)
 
 upsertBy :: Eq key => (value -> key) -> value -> [value] -> [value]
 upsertBy keyOf value values =
     value : filter ((/= keyOf value) . keyOf) values
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

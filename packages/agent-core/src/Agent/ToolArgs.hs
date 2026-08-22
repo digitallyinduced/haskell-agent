@@ -5,21 +5,15 @@ module Agent.ToolArgs
     , extractIntOr
     , extractMaybeText
     , extractMaybeInt
-    , extractMaybePositiveInt
     , extractMaybeBool
     , objectArgs
     , objectArgsLenient
-    , rawValue
     , reqText
-    , reqDouble
     , reqTextList
-    , rawOptText
     , optText
     , optInt
-    , optPosInt
     , optBool
     , intOr
-    , textOr
     , optList
     , stripAesonPrefix
     ) where
@@ -83,10 +77,6 @@ extractMaybeInt (Object obj) key =
         _ -> Nothing
 extractMaybeInt _ _ = Nothing
 
--- | Like 'extractMaybeInt' but treats a non-positive number as "not provided".
-extractMaybePositiveInt :: Value -> Text -> Maybe Int
-extractMaybePositiveInt v key = extractMaybeInt v key >>= \n -> if n > 0 then Just n else Nothing
-
 -- | Accept a real JSON boolean as well as the stringy forms LLMs sometimes
 -- emit ("true"/"false"/"1"/"0", case-insensitive, whitespace-tolerant).
 extractMaybeBool :: Value -> Text -> Maybe Bool
@@ -119,24 +109,12 @@ objectArgsLenient :: (Object -> Parser a) -> Value -> Parser a
 objectArgsLenient f (Object obj) = f obj
 objectArgsLenient f _            = f KeyMap.empty
 
--- | The raw JSON value under a key, untouched.
-rawValue :: Object -> Text -> Parser (Maybe Value)
-rawValue obj key = pure (look obj key)
-
 -- | Required string. Mirrors 'extractText'.
 reqText :: Object -> Text -> Parser Text
 reqText obj key =
     case look obj key of
         Just (String t) -> pure t
         Just _ -> failText ("Expected string for key: " <> key)
-        Nothing -> failText ("Missing parameter: " <> key)
-
--- | Required JSON number as a 'Double'.
-reqDouble :: Object -> Text -> Parser Double
-reqDouble obj key =
-    case look obj key of
-        Just (Number n) -> pure (realToFrac n)
-        Just _ -> failText ("Expected number for key: " <> key)
         Nothing -> failText ("Missing parameter: " <> key)
 
 -- | Required array-of-strings, tolerating a single bare string.
@@ -151,12 +129,6 @@ reqTextList obj key =
         Just _ -> failText ("Expected array for key: " <> key)
         Nothing -> failText ("Missing parameter: " <> key)
 
--- | Optional string, returned verbatim when present (even @""@).
-rawOptText :: Object -> Text -> Parser (Maybe Text)
-rawOptText obj key = pure $ case look obj key of
-    Just (String t) -> Just t
-    _ -> Nothing
-
 -- | Optional string; an empty string counts as absent.
 optText :: Object -> Text -> Parser (Maybe Text)
 optText obj key = pure $ case look obj key of
@@ -168,12 +140,6 @@ optInt :: Object -> Text -> Parser (Maybe Int)
 optInt obj key = pure $ case look obj key of
     Just (Number n) -> Just (round n)
     _ -> Nothing
-
--- | Optional integer where a non-positive value counts as absent.
-optPosInt :: Object -> Text -> Parser (Maybe Int)
-optPosInt obj key = do
-    mb <- optInt obj key
-    pure (mb >>= \n -> if n > 0 then Just n else Nothing)
 
 -- | Optional boolean accepting stringy forms.
 optBool :: Object -> Text -> Parser (Maybe Bool)
@@ -192,12 +158,6 @@ optBool obj key = pure $ case look obj key of
 intOr :: Object -> Text -> Int -> Parser Int
 intOr obj key def = pure $ case look obj key of
     Just (Number n) -> round n
-    _ -> def
-
--- | String with a default.
-textOr :: Object -> Text -> Text -> Parser Text
-textOr obj key def = pure $ case look obj key of
-    Just (String t) -> t
     _ -> def
 
 -- | Optional array field decoded element-wise via 'FromJSON'. Absent key

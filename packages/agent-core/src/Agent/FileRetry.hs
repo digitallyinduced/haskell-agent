@@ -6,7 +6,8 @@ module Agent.FileRetry
     , writeLazyFileAtomically
     ) where
 
-import Control.Exception.Safe (bracket, bracketOnError, impureThrow, throwIO, tryIO)
+import Agent.OsPath (unsafeToFilePath)
+import Control.Exception.Safe (bracket, bracketOnError, throwIO, tryIO)
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -22,7 +23,7 @@ import System.IO
     , openBinaryTempFile
     )
 import System.IO.Error (isAlreadyInUseError)
-import System.OsPath (OsPath, decodeUtf, takeDirectory, takeFileName, unsafeEncodeUtf)
+import System.OsPath (OsPath, takeDirectory, takeFileName, unsafeEncodeUtf)
 import System.Posix.Files (setFileMode)
 import System.Posix.Types (FileMode)
 
@@ -44,7 +45,7 @@ retryOnFileBusy action = do
 appendLazyFileRetryingOpen :: OsPath -> LBS.ByteString -> IO ()
 appendLazyFileRetryingOpen path bytes =
     bracket
-        (retryOnFileBusy (openBinaryFile (decodeUtfPath path) AppendMode))
+        (retryOnFileBusy (openBinaryFile (unsafeToFilePath path) AppendMode))
         hClose
         (`LBS.hPut` bytes)
 
@@ -66,12 +67,9 @@ writeLazyFileAtomically path mode bytes =
     acquire =
         retryOnFileBusy $
             openBinaryTempFile
-                (decodeUtfPath (takeDirectory path))
-                (decodeUtfPath (takeFileName path) <> ".tmp")
+                (unsafeToFilePath (takeDirectory path))
+                (unsafeToFilePath (takeFileName path) <> ".tmp")
     cleanup (temporary, handle) = do
         _ <- tryIO (hClose handle)
         _ <- tryIO (removeFile (unsafeEncodeUtf temporary))
         pure ()
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

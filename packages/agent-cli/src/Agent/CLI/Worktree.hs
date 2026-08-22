@@ -7,7 +7,8 @@ module Agent.CLI.Worktree
     , worktreeRoot
     ) where
 
-import Control.Exception.Safe (impureThrow, mask, onException, tryAny)
+import Agent.OsPath (unsafeToFilePath)
+import Control.Exception.Safe (mask, onException, tryAny)
 import Control.Monad (void)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -32,7 +33,6 @@ import System.Directory.OsPath
 import System.Exit (ExitCode(..))
 import System.OsPath
     ( OsPath
-    , decodeUtf
     , equalFilePath
     , splitDirectories
     , takeFileName
@@ -75,9 +75,9 @@ removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
 removeWorktree source path = runExceptT do
     repo <- gitToplevel source
     void $ ExceptT $
-        git repo ["worktree", "remove", "--force", decodeUtfPath path]
+        git repo ["worktree", "remove", "--force", unsafeToFilePath path]
     void $ ExceptT $
-        git repo ["branch", "-D", decodeUtfPath (takeFileName path)]
+        git repo ["branch", "-D", unsafeToFilePath (takeFileName path)]
 
 addUnique
     :: OsPath
@@ -97,7 +97,7 @@ addUnique repo root repoName day start attempt
             then addUnique repo root repoName day start (attempt + 1)
             else do
                 added <- lift $ mask \restore ->
-                    restore (git repo ["worktree", "add", decodeUtfPath path])
+                    restore (git repo ["worktree", "add", unsafeToFilePath path])
                         `onException` cleanupWorktreeCandidate repo path
                 case added of
                     Left err
@@ -114,10 +114,10 @@ cleanupWorktreeCandidate repo path = do
     if not exists
         then pure ()
         else do
-            _ <- git repo ["worktree", "remove", "--force", decodeUtfPath path]
+            _ <- git repo ["worktree", "remove", "--force", unsafeToFilePath path]
             _ <- tryAny (removePathForcibly path)
             _ <- git repo ["worktree", "prune"]
-            _ <- git repo ["branch", "-D", decodeUtfPath (takeFileName path)]
+            _ <- git repo ["branch", "-D", unsafeToFilePath (takeFileName path)]
             pure ()
 
 gitToplevel :: OsPath -> ExceptT Text IO OsPath
@@ -131,7 +131,7 @@ git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
     (code, out, err) <-
         readCreateProcessWithExitCode
-            (proc "git" args) { cwd = Just (decodeUtfPath dir) }
+            (proc "git" args) { cwd = Just (unsafeToFilePath dir) }
             ""
     case code of
         ExitSuccess -> pure (Right (Text.pack out))
@@ -163,6 +163,3 @@ hex8 n =
 
 formatDay :: Day -> String
 formatDay = formatTime defaultTimeLocale "%Y-%m-%d"
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf

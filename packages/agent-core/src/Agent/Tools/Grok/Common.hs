@@ -8,6 +8,7 @@ module Agent.Tools.Grok.Common
 import Agent.ToolArgs (optInt, optText)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolHandler)
+import Agent.OsPath (unsafeToFilePath)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
@@ -18,11 +19,10 @@ import Data.Aeson (Object)
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Control.Exception.Safe (impureThrow)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
-import System.OsPath (OsPath, decodeUtf)
+import System.OsPath (OsPath)
 
 jsonTool
     :: Text
@@ -40,7 +40,7 @@ isGitIgnored cwd path = findExecutable "git" >>= \case
     Nothing -> pure False
     Just git -> do
         (code, _, _) <- readProcessWithExitCode git
-            ["-C", decodeUtfPath cwd, "check-ignore", "-q", "--", decodeUtfPath path] ""
+            ["-C", unsafeToFilePath cwd, "check-ignore", "-q", "--", unsafeToFilePath path] ""
         pure (code == ExitSuccess)
 
 optionalTimeout :: Object -> Parser (Maybe Int)
@@ -71,6 +71,3 @@ stripAnsi = Text.concat . go
                     _ -> before : "\ESC" : go afterEsc
 
     isCsiFinal c = c >= '@' && c <= '~'
-
-decodeUtfPath :: OsPath -> FilePath
-decodeUtfPath = either impureThrow id . decodeUtf
