@@ -4,6 +4,7 @@ import qualified Agent.CancelSpec as CancelSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
+import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.SkillsSpec as SkillsSpec
@@ -29,6 +30,7 @@ main = hspec do
     ErrorSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec
+    OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ResourceScopeSpec.spec
     SkillsSpec.spec

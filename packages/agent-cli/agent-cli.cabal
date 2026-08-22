@@ -191,6 +191,7 @@ test-suite agent-cli-test
                     , aeson
                     , ansi-terminal
                     , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
                     , bytestring
                     , colour
                     , containers

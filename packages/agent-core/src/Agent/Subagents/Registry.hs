@@ -67,7 +67,7 @@ import Agent.InterAgentMessage
     , plainInterAgentContent
     )
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.Subagents.Format (formatCompletionNotice, isFinalStatus)
 import Agent.Subagents.Types
     ( RunSubagent

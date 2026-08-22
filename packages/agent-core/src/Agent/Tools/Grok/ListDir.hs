@@ -1,6 +1,6 @@
 module Agent.Tools.Grok.ListDir (listDirTool) where
 
-import Agent.OsPath (OsPath, fromText, toText)
+import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
-import System.OsPath (takeExtension, (</>))
+import System.OsPath (OsPath, takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 

@@ -9,8 +9,8 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Control.Exception (try)
+import Control.Exception.Safe (impureThrow)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -23,7 +23,7 @@ import System.Directory.OsPath
     , doesFileExist
     )
 import System.Exit (ExitCode(..))
-import System.OsPath ((</>))
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
@@ -34,8 +34,8 @@ settingsSchemaVersion = 1
 projectSettingsPath :: OsPath -> OsPath
 projectSettingsPath projectRoot =
     projectRoot
-        </> fromFilePath ".haskell-agent"
-        </> fromFilePath "settings.json"
+        </> unsafeEncodeUtf ".haskell-agent"
+        </> unsafeEncodeUtf "settings.json"
 
 data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
@@ -82,7 +82,7 @@ loadProjectSettings projectRoot = do
     if not exists
         then pure defaultProjectSettings
         else do
-            result <- try @IOError (retryOnFileBusy (LBS.readFile (toFilePath path)))
+            result <- try @IOError (retryOnFileBusy (LBS.readFile (decodeUtfPath path)))
             pure $ case result of
                 Left _ -> defaultProjectSettings
                 Right bytes ->
@@ -93,11 +93,11 @@ loadProjectSettings projectRoot = do
 -- | Persist the project-wide auto-approve flag, creating @.haskell-agent@ as needed.
 saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove = do
-    let dir = projectRoot </> fromFilePath ".haskell-agent"
+    let dir = projectRoot </> unsafeEncodeUtf ".haskell-agent"
         path = projectSettingsPath projectRoot
         settings = defaultProjectSettings { settingsAutoApprove = autoApprove }
     createDirectoryIfMissing True dir
-    _ <- try @IOError (setFileMode (toFilePath dir) 0o700)
+    _ <- try @IOError (setFileMode (decodeUtfPath dir) 0o700)
     writeLazyFileAtomically path 0o600 (Aeson.encode settings)
 
 gitToplevel :: OsPath -> IO (Maybe OsPath)
@@ -105,14 +105,17 @@ gitToplevel dir = do
     result <- try @IOError $
         readCreateProcessWithExitCode
             (proc "git" ["rev-parse", "--show-toplevel"])
-                { cwd = Just (toFilePath dir) }
+                { cwd = Just (decodeUtfPath dir) }
             ""
     pure $ case result of
         Left _ -> Nothing
         Right (ExitSuccess, out, _) ->
             let trimmed = trim out
-            in if null trimmed then Nothing else Just (fromFilePath trimmed)
+            in if null trimmed then Nothing else Just (unsafeEncodeUtf trimmed)
         Right _ -> Nothing
 
 trim :: String -> String
 trim = dropWhileEnd isSpace . dropWhile isSpace
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

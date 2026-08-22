@@ -33,11 +33,11 @@ import Agent.FileRetry
     , writeLazyFileAtomically
     )
 import Agent.Loop (TokenUsage(..))
-import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
+import Agent.OsPath (toText)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (tryIO)
+import Control.Exception.Safe (impureThrow, tryIO)
 import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -68,7 +68,7 @@ import System.Directory.OsPath
     , doesFileExist
     , listDirectory
     )
-import System.OsPath ((</>))
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 
 sessionSchemaVersion :: Int
@@ -77,7 +77,7 @@ sessionSchemaVersion = 1
 -- | @~/.haskell-agent/sessions@ given the user's home directory.
 sessionsRoot :: OsPath -> OsPath
 sessionsRoot home =
-    home </> fromFilePath ".haskell-agent" </> fromFilePath "sessions"
+    home </> unsafeEncodeUtf ".haskell-agent" </> unsafeEncodeUtf "sessions"
 
 data SessionMeta = SessionMeta
     { metaVersion :: !Int
@@ -106,7 +106,7 @@ instance ToJSON SessionMeta where
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
         , "model" .= meta.metaModel
-        , "cwd" .= toFilePath meta.metaCwd
+        , "cwd" .= decodeUtfPath meta.metaCwd
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
         , "titleIsManual" .= meta.metaTitleIsManual
@@ -131,7 +131,7 @@ instance FromJSON SessionMeta where
             <*> o .: "updatedAt"
             <*> pure provider
             <*> o .: "model"
-            <*> (fromFilePath <$> o .: "cwd")
+            <*> (unsafeEncodeUtf <$> o .: "cwd")
             <*> o .: "effort"
             <*> o .: "title"
             <*> (o .:? "titleIsManual" .!= False)
@@ -239,8 +239,8 @@ createSession spec = do
             }
         handle = SessionHandle
             { sessionDir = dir
-            , sessionMetaPath = dir </> fromFilePath "meta.json"
-            , sessionTranscriptPath = dir </> fromFilePath "transcript.jsonl"
+            , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
+            , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
             , sessionMeta = meta
             }
     writeSessionMeta handle.sessionMetaPath meta
@@ -262,7 +262,7 @@ appendTurn handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (toFilePath path) 0o600
+    if existed then pure () else setFileMode (decodeUtfPath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -310,7 +310,7 @@ appendTurnKeepTitle handle turn = do
     let path = handle.sessionTranscriptPath
     existed <- doesFileExist path
     appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (toFilePath path) 0o600
+    if existed then pure () else setFileMode (decodeUtfPath path) 0o600
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -325,9 +325,9 @@ loadSession :: OsPath -> Text -> IO (Either Text (SessionMeta, [SessionTurn]))
 loadSession root sessionId = runExceptT do
     unless (isValidSessionId sessionId) $
         throwE "invalid session id"
-    let dir = root </> fromFilePath (Text.unpack sessionId)
-        metaPath = dir </> fromFilePath "meta.json"
-        transcriptPath = dir </> fromFilePath "transcript.jsonl"
+    let dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
+        metaPath = dir </> unsafeEncodeUtf "meta.json"
+        transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
     exists <- lift (doesDirectoryExist dir)
     unless exists $
         throwE ("session not found: " <> sessionId)
@@ -441,12 +441,12 @@ allocateSessionDir root now = go (0 :: Int)
         | otherwise = do
             let hex = hex8 (start + fromIntegral attempt)
                 sessionId = Text.pack (day <> "-" <> hex)
-                dir = root </> fromFilePath (Text.unpack sessionId)
+                dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
             result <- tryIO (createDirectory dir)
             case result of
                 Left _ -> go (attempt + 1)
                 Right () -> do
-                    setFileMode (toFilePath dir) 0o700
+                    setFileMode (decodeUtfPath dir) 0o700
                     pure (sessionId, dir)
 
 hex8 :: Integer -> String
@@ -457,7 +457,7 @@ hex8 n =
 ensurePrivateDir :: OsPath -> IO ()
 ensurePrivateDir path = do
     createDirectoryIfMissing True path
-    _ <- tryIO (setFileMode (toFilePath path) 0o700)
+    _ <- tryIO (setFileMode (decodeUtfPath path) 0o700)
     pure ()
 
 loadTranscript :: OsPath -> ExceptT Text IO [SessionTurn]
@@ -466,7 +466,7 @@ loadTranscript path = do
     if not exists
         then pure []
         else do
-            raw <- lift (retryOnFileBusy (Text.readFile (toFilePath path)))
+            raw <- lift (retryOnFileBusy (Text.readFile (decodeUtfPath path)))
             let linesOf = filter (not . Text.null) (Text.lines raw)
             except (mapM decodeTurnLine linesOf)
 
@@ -481,14 +481,14 @@ decodeFileEither path = do
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("missing file: " <> toText path)
-    bytes <- lift (retryOnFileBusy (LBS.readFile (toFilePath path)))
+    bytes <- lift (retryOnFileBusy (LBS.readFile (decodeUtfPath path)))
     case Aeson.eitherDecode' bytes of
         Left err -> throwE (toText path <> ": " <> Text.pack err)
         Right value -> pure value
 
 readMetaQuiet :: OsPath -> OsPath -> IO (Maybe SessionMeta)
 readMetaQuiet root name = do
-    let path = root </> name </> fromFilePath "meta.json"
+    let path = root </> name </> unsafeEncodeUtf "meta.json"
     result <- tryIO (runExceptT (decodeFileEither path))
     pure $ case result of
         Left _ -> Nothing
@@ -496,3 +496,6 @@ readMetaQuiet root name = do
         Right (Right meta)
             | meta.metaVersion == sessionSchemaVersion -> Just meta
             | otherwise -> Nothing
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

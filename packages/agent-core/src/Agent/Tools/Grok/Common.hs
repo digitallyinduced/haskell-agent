@@ -5,7 +5,6 @@ module Agent.Tools.Grok.Common
     , stripAnsi
     ) where
 
-import Agent.OsPath (OsPath, toFilePath)
 import Agent.ToolArgs (optInt, optText)
 import Agent.ToolDSL (PropertySchema)
 import Agent.ToolDispatch (ToolHandler)
@@ -19,9 +18,11 @@ import Data.Aeson (Object)
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Control.Exception.Safe (impureThrow)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
+import System.OsPath (OsPath, decodeUtf)
 
 jsonTool
     :: Text
@@ -39,7 +40,7 @@ isGitIgnored cwd path = findExecutable "git" >>= \case
     Nothing -> pure False
     Just git -> do
         (code, _, _) <- readProcessWithExitCode git
-            ["-C", toFilePath cwd, "check-ignore", "-q", "--", toFilePath path] ""
+            ["-C", decodeUtfPath cwd, "check-ignore", "-q", "--", decodeUtfPath path] ""
         pure (code == ExitSuccess)
 
 optionalTimeout :: Object -> Parser (Maybe Int)
@@ -70,3 +71,6 @@ stripAnsi = Text.concat . go
                     _ -> before : "\ESC" : go afterEsc
 
     isCsiFinal c = c >= '@' && c <= '~'
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

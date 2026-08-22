@@ -5,12 +5,14 @@ module Agent.CLI.TUI.App
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , conversationScrollbarRenderer
     , emitUiEvent
     , hasQueuedFullscreenInput
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , repositoryHeaderText
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
@@ -73,7 +75,7 @@ import Brick.BChan
 import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
-import Brick.Widgets.Center (center, centerLayer)
+import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -721,7 +723,10 @@ fullscreenApp = App
 drawApp :: AppState -> [Widget Name]
 drawApp state =
     let mainLayers = stickyPromptLayers state <> [drawMain state]
-        interactiveLayers = agentPopoverLayers state <> mainLayers
+        interactiveLayers =
+            agentPopoverLayers state
+                <> imagePreviewLayers state.appImagePreviews
+                <> mainLayers
         dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
     in
     case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
@@ -740,7 +745,6 @@ drawMain state =
             [ drawHeader state.appUi
             , drawWorkspace state
             , drawNotice state.appUi
-            , drawImagePreviews state.appImagePreviews
             , Composer.drawQueuedInputs state.appUi
             , Composer.drawSlashMenu state
             , drawFollowStatus state.appUi
@@ -748,33 +752,57 @@ drawMain state =
             , drawFooter state
             ]
 
-drawImagePreviews :: [TuiImagePreview] -> Widget Name
-drawImagePreviews previews =
+imagePreviewLayers :: [TuiImagePreview] -> [Widget Name]
+imagePreviewLayers previews =
     case takeLast 3 previews of
-        [] -> emptyWidget
-        shown ->
-            padLeftRight 2 $
-                padBottom (Pad 1) $
-                    hBox $
-                        intersperse (padLeft (Pad 2) emptyWidget)
-                            (map drawPreview shown)
+        [] -> []
+        shown -> [centerLayer (drawImagePreviews shown)]
   where
-    drawPreview preview =
-        vBox
-            [ renderTuiImagePreview preview
-            , withAttr Theme.mutedAttr $
-                txt $
-                    "🖼 "
-                        <> preview.previewMime
-                        <> " · "
-                        <> Text.pack (show preview.previewSourceWidth)
-                        <> "×"
-                        <> Text.pack (show preview.previewSourceHeight)
-                        <> " · "
-                        <> formatImageSize preview.previewBytes
-            ]
     takeLast count values =
         drop (max 0 (length values - count)) values
+
+drawImagePreviews :: [TuiImagePreview] -> Widget Name
+drawImagePreviews previews =
+    Widget Fixed Fixed do
+        context <- getContext
+        let maxWidth = viewportPreviewSize context.availWidth
+            maxHeight = viewportPreviewSize context.availHeight
+            gaps = max 0 (length previews - 1) * previewGap
+            previewWidth =
+                max 1 ((maxWidth - gaps) `div` max 1 (length previews))
+            previewHeight = max 1 (maxHeight - 1)
+            content =
+                hBox $
+                    intersperse
+                        (hLimit previewGap (fill ' '))
+                        (map (drawPreview previewWidth previewHeight) previews)
+        render $
+            hLimit maxWidth $
+                vLimit maxHeight content
+  where
+    previewGap = 2
+
+    drawPreview maxWidth maxHeight preview =
+        hLimit maxWidth $
+            vBox
+                [ hCenter $
+                    renderTuiImagePreview maxWidth maxHeight preview
+                , hCenter $
+                    withAttr Theme.mutedAttr $
+                        txt $
+                            "🖼 "
+                                <> preview.previewMime
+                                <> " · "
+                                <> Text.pack (show preview.previewSourceWidth)
+                                <> "×"
+                                <> Text.pack (show preview.previewSourceHeight)
+                                <> " · "
+                                <> formatImageSize preview.previewBytes
+                ]
+
+viewportPreviewSize :: Int -> Int
+viewportPreviewSize available =
+    max 1 (available * 3 `div` 5)
 
 drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =
@@ -812,9 +840,27 @@ drawConversationPane state
                 , drawEmptyConversation (state.appUi.uiFrame `div` 2)
                 ]
     | otherwise =
-        withVScrollBars OnRight $
-            viewport ConversationViewport Vertical $
-                padLeftRight 2 (drawTranscript state)
+        withVScrollBarRenderer conversationScrollbarRenderer $
+            withVScrollBars OnRight $
+                viewport ConversationViewport Vertical $
+                    padLeftRight 2 (drawTranscript state)
+
+-- Brick's default scrollbar uses a full block for the thumb and a blank
+-- space for the trough. During rapid viewport reflow, some terminals can
+-- leave the old full-block cells behind because the replacement trough is
+-- visually identical to the surrounding background. A visible one-column
+-- trough makes every old thumb position get explicitly repainted.
+conversationScrollbarRenderer :: VScrollbarRenderer n
+conversationScrollbarRenderer =
+    VScrollbarRenderer
+        { renderVScrollbar =
+            withAttr Theme.mutedAttr (fill '┃')
+        , renderVScrollbarTrough =
+            withAttr Theme.borderAttr (fill '│')
+        , renderVScrollbarHandleBefore = emptyWidget
+        , renderVScrollbarHandleAfter = emptyWidget
+        , scrollbarWidthAllocation = 1
+        }
 
 agentPaneWidth :: Int
 agentPaneWidth = 42
@@ -1081,14 +1127,26 @@ drawHeader state =
     withAttr Theme.headerAttr $
         padLeftRight 2 $
             hBox
-                [ hLimitPercent 68 (txt left)
+                [ hLimitPercent 68 (drawRepositoryHeader state)
                 , vLimit 1 (fill ' ')
                 , drawHeaderRight state
                 ]
-  where
-    left =
-        (if Text.null state.uiBranch then "" else "git " <> state.uiBranch <> "  ")
-            <> state.uiCwd
+
+drawRepositoryHeader :: UiState -> Widget Name
+drawRepositoryHeader state
+    | Text.null state.uiBranch =
+        withAttr Theme.mutedAttr (txt state.uiCwd)
+    | otherwise =
+        hBox
+            [ txt "\xE0A0 "
+            , withAttr Theme.mutedAttr $
+                txt (repositoryHeaderText state.uiBranch state.uiCwd)
+            ]
+
+repositoryHeaderText :: Text -> Text -> Text
+repositoryHeaderText branch cwd =
+    Text.intercalate "  " $
+        filter (not . Text.null) [branch, cwd]
 
 drawHeaderRight :: UiState -> Widget Name
 drawHeaderRight state =
@@ -1878,7 +1936,9 @@ handleEvent event = case event of
                 when
                     ((length state.appAgentEntries > 1)
                         /= (length entries > 1))
-                    invalidateCache
+                    do
+                        invalidateCache
+                        queueConversationReflow
     AppEvent (AppUi uiEvent) ->
         handleUiEvents (uiEvent :| [])
     AppEvent (AppUiBatch uiEvents) ->

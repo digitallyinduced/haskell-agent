@@ -3,7 +3,7 @@ module Agent.SubagentsSpec (spec) where
 import Agent.Cancel (isCancelled, waitCancel)
 import Agent.InterAgentMessage
 import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.Subagents.TaskPath
     ( TaskPath
@@ -72,6 +72,8 @@ runNestedRouting registry parentRelease childRelease childSpawned noticeSeen env
 blockingRunner started cleanedUp _ _ _ _ =
     (atomically (putTMVar started ()) >> atomically retry)
         `finally` atomically (putTMVar cleanedUp ())
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Subagents" do

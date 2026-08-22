@@ -17,7 +17,7 @@ module Agent.Subagents.Types
 import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopError, LoopEvent, LoopResult)
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.Subagents.TaskPath (TaskPath)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)

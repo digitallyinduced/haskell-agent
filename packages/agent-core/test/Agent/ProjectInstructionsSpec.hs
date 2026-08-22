@@ -1,7 +1,7 @@
 module Agent.ProjectInstructionsSpec (spec) where
 
 import Agent.ProjectInstructions
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception.Safe (bracket)
@@ -15,6 +15,8 @@ import System.FilePath ((</>))
 import System.IO (IOMode(AppendMode), hClose, openFile)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.ProjectInstructions" do

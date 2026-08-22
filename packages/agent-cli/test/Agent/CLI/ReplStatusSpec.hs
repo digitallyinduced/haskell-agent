@@ -7,6 +7,7 @@ import Agent.CLI
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
+    , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
     , withRestoredCurrentDirectory
@@ -20,7 +21,7 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
 import Data.IORef (newIORef, readIORef)
@@ -32,6 +33,8 @@ import System.Directory
     )
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
@@ -129,6 +132,19 @@ spec = do
                 ]
                 `shouldBe`
                     "startup: first frame 42ms · Loading tools… 400ms · ready 1.25s"
+
+    describe "formatRepositoryPath" do
+        it "abbreviates paths below the home directory" do
+            formatRepositoryPath
+                (fromFilePath "/Users/marc")
+                (fromFilePath "/Users/marc/src/haskell-agent")
+                `shouldBe` "~/src/haskell-agent"
+
+        it "keeps paths outside the home directory absolute" do
+            formatRepositoryPath
+                (fromFilePath "/Users/marc")
+                (fromFilePath "/tmp/haskell-agent")
+                `shouldBe` "/tmp/haskell-agent"
 
     describe "cycleReplMode" do
         it "walks ask → plan → always-approve → ask" do

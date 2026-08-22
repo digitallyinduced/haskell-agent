@@ -1,12 +1,13 @@
 module Agent.Tools.Grok.Grep (grepTool) where
 
-import Agent.OsPath (OsPath, fromText, toFilePath, toText)
+import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Grok.Common (jsonTool)
 import Agent.Tools.IO (resolveUnderCwd)
 import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Control.Exception.Safe (impureThrow)
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -14,6 +15,7 @@ import qualified Data.Text as Text
 import System.Directory (findExecutable)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
+import System.OsPath (OsPath, decodeUtf)
 
 data GrepOutputMode = GrepContent | GrepFilesWithMatches | GrepCount
     deriving (Eq, Show)
@@ -127,7 +129,7 @@ runRipgrep rgPath path args = do
             , ["-i" | args.caseInsensitive]
             , maybe [] (\t -> ["--type", Text.unpack t]) args.fileType
             , if args.multiline then ["-U", "--multiline-dotall"] else []
-            , ["--regexp", Text.unpack args.pattern, "--", toFilePath path]
+            , ["--regexp", Text.unpack args.pattern, "--", decodeUtfPath path]
             ]
     (code, stdout, stderr) <- readProcessWithExitCode rgPath rgArgs ""
     let raw = Text.pack stdout
@@ -159,3 +161,6 @@ formatGrepCard cwd raw limit
             <> body
             <> footer
             <> "</workspace_result>"
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

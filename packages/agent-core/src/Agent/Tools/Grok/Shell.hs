@@ -16,7 +16,7 @@ module Agent.Tools.Grok.Shell
     , hasUnwaitedBackgroundOp
     ) where
 
-import Agent.OsPath (OsPath, fromFilePath, fromText, toFilePath)
+import Agent.OsPath (fromText)
 import Agent.ResourceScope
     ( ResourceKey
     , ResourceScope
@@ -38,7 +38,7 @@ import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (impureThrow, mask, onException, throwIO, tryAny)
 import Control.Monad (void)
 import Data.IORef
 import Data.Map.Strict (Map)
@@ -54,7 +54,7 @@ import System.Directory.OsPath
     , removeFile
     )
 import System.IO (hClose)
-import System.OsPath ((<.>), (</>))
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (<.>), (</>))
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
 import System.Posix.Temp (mkstemp)
 
@@ -100,8 +100,8 @@ newGrokSession env = do
         mask \restore -> do
             tmp <- getTemporaryDirectory
             (envFileRaw, handle) <- restore $
-                mkstemp (toFilePath (tmp </> fromFilePath "agent-grok-env"))
-            let envFile = fromFilePath envFileRaw
+                mkstemp (decodeUtfPath (tmp </> unsafeEncodeUtf "agent-grok-env"))
+            let envFile = unsafeEncodeUtf envFileRaw
             let rollback = do
                     void $ tryAny (hClose handle)
                     removeIfExists envFile
@@ -113,7 +113,7 @@ newGrokSession env = do
                 pure envFile
     cleanupEnvFiles envFile = do
         removeIfExists envFile
-        removeIfExists (envFile <.> fromFilePath "cwd")
+        removeIfExists (envFile <.> unsafeEncodeUtf "cwd")
 
 -- | Delete the env/cwd dump and interrupt leftover background tasks.
 -- Call this when the CLI/session ends, including after exceptions.
@@ -239,11 +239,11 @@ wrapScript shell persist command =
         ]
 
 cwdFile :: PersistentShell -> OsPath
-cwdFile shell = shell.shellEnvFile <.> fromFilePath "cwd"
+cwdFile shell = shell.shellEnvFile <.> unsafeEncodeUtf "cwd"
 
 refreshCwd :: ToolEnv -> PersistentShell -> IO PersistentShell
 refreshCwd env shell = do
-    contents <- tryAny (Text.readFile (toFilePath (cwdFile shell)))
+    contents <- tryAny (Text.readFile (decodeUtfPath (cwdFile shell)))
     case contents of
         Left _ -> pure shell
         Right raw -> do
@@ -256,7 +256,7 @@ refreshCwd env shell = do
                     Right resolved -> pure shell { shellCwd = resolved }
 
 quote :: OsPath -> String
-quote = quoteString . toFilePath
+quote = quoteString . decodeUtfPath
 
 quoteString :: String -> String
 quoteString path = "'" <> concatMap escape path <> "'"
@@ -320,3 +320,6 @@ containsBareAmp text = go (' ' : Text.unpack text)
         | a `notElem` ("&<>|" :: String) && b `notElem` ("&>" :: String) = True
         | otherwise = go ('&' : b : rest)
     go (_ : rest) = go rest
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

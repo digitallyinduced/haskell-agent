@@ -12,7 +12,7 @@ module Agent.OpenAI.Login
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.OpenAI.Auth (deriveAccountId)
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (unless)

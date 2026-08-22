@@ -9,12 +9,12 @@ module Agent.Tools.Grok.Prompt
     , grokSystemPrompt
     ) where
 
-import Agent.OsPath (OsPath, toText)
+import Agent.OsPath (toText)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.OsPath (dropTrailingPathSeparator)
+import System.OsPath (OsPath, dropTrailingPathSeparator)
 
 -- | Model-facing names for the grok-build tool kinds we currently advertise.
 data GrokPromptTools = GrokPromptTools

@@ -50,7 +50,7 @@ module Agent.CLI.Style
     , setCliWindowTitle
     ) where
 
-import Agent.OsPath (OsPath, toText)
+import Agent.OsPath (toText)
 import Data.Colour (Colour)
 import Data.Colour.SRGB (RGB(..), sRGB24, toSRGB24)
 import Data.Text (Text)
@@ -67,7 +67,7 @@ import System.Console.ANSI.Codes
     , setSGRCode
     )
 import System.Environment (lookupEnv)
-import System.OsPath (takeFileName)
+import System.OsPath (OsPath, takeFileName)
 import System.IO (Handle)
 import System.IO.Unsafe (unsafePerformIO)
 

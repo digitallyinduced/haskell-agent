@@ -2,7 +2,7 @@ module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Cancel (requestCancel, resetCancel)
 import Agent.Loop (defaultLoopDispatch)
-import Agent.OsPath (fromFilePath, toFilePath)
+import System.OsPath (decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
@@ -36,6 +36,9 @@ import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (ProcessID)
 import System.Timeout (timeout)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.Tools.Ghci" do

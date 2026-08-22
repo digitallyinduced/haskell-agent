@@ -1,6 +1,6 @@
 module Agent.ToolDSLSpec (spec) where
 
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.ToolDSL
 import Agent.Tools.Grok.Prompt
 import qualified Data.Aeson as Aeson
@@ -10,6 +10,8 @@ import Data.Time.Calendar (fromGregorian)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do

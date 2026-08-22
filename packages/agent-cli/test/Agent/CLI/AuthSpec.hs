@@ -3,7 +3,7 @@ module Agent.CLI.AuthSpec (spec) where
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Provider
@@ -42,6 +42,9 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = do

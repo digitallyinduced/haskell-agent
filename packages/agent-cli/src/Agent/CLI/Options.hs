@@ -16,7 +16,7 @@ module Agent.CLI.Options
     , usage
     ) where
 
-import Agent.OsPath (OsPath, fromFilePath)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Provider (Provider(..), parseProvider)
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -158,7 +158,7 @@ parseOptions options = \case
     "--model" : value : rest ->
         parseOptions options { optModel = Just (Text.pack value) } rest
     "--cwd" : value : rest ->
-        parseOptions options { optCwd = Just (fromFilePath value) } rest
+        parseOptions options { optCwd = Just (unsafeEncodeUtf value) } rest
     "--worktree" : rest ->
         parseOptions options { optWorktree = True } rest
     "--yolo" : rest ->
@@ -176,7 +176,7 @@ parseOptions options = \case
     "--prompt" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt-file" : value : rest ->
-        parseOptions options { optPromptFile = Just (fromFilePath value) } rest
+        parseOptions options { optPromptFile = Just (unsafeEncodeUtf value) } rest
     "--resume" : value : rest ->
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->

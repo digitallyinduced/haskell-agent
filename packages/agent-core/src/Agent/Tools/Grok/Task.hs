@@ -20,7 +20,7 @@ module Agent.Tools.Grok.Task
     ) where
 
 import Agent.InterAgentMessage (plainInterAgentContent)
-import Agent.OsPath (OsPath, fromText, toText)
+import Agent.OsPath (fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
@@ -59,7 +59,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesDirectoryExist)
-import System.OsPath (isAbsolute, normalise, (</>))
+import System.OsPath (OsPath, isAbsolute, normalise, (</>))
 
 defaultSubagentType :: Text
 defaultSubagentType = "general-purpose"

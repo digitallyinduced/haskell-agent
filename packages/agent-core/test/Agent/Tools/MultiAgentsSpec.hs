@@ -7,7 +7,7 @@ import Agent.Loop
     , defaultLoopDispatch
     , emptyTokenUsage
     )
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
 import Agent.ToolDispatch
@@ -27,6 +27,8 @@ import Control.Monad (unless)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do

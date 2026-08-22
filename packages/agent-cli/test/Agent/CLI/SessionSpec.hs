@@ -3,7 +3,7 @@ module Agent.CLI.SessionSpec (spec) where
 import Agent.CLI.Session
 import Agent.Loop (TokenUsage(..))
 import Agent.Responses.Types
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
@@ -22,6 +22,9 @@ import qualified System.FilePath as FilePath
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.Session" do

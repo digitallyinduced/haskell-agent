@@ -6,7 +6,7 @@ import Agent.FileRetry
     , retryOnFileBusy
     , writeLazyFileAtomically
     )
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
@@ -42,6 +42,8 @@ import System.IO (IOMode(..), hClose, openFile)
 import System.IO.Error (alreadyInUseErrorType, mkIOError)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.IO" do

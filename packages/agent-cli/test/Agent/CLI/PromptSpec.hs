@@ -1,11 +1,13 @@
 module Agent.CLI.PromptSpec (spec) where
 
 import Agent.CLI.Prompt
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "systemPrompt" do
