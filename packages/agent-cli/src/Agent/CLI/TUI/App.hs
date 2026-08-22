@@ -11,6 +11,7 @@ module Agent.CLI.TUI.App
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , repositoryHeaderText
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
@@ -1348,14 +1349,26 @@ drawHeader state =
     withAttr Theme.headerAttr $
         padLeftRight 2 $
             hBox
-                [ hLimitPercent 68 (txt left)
+                [ hLimitPercent 68 (drawRepositoryHeader state)
                 , vLimit 1 (fill ' ')
                 , drawHeaderRight state
                 ]
-  where
-    left =
-        (if Text.null state.uiBranch then "" else "git " <> state.uiBranch <> "  ")
-            <> state.uiCwd
+
+drawRepositoryHeader :: UiState -> Widget Name
+drawRepositoryHeader state
+    | Text.null state.uiBranch =
+        withAttr Theme.mutedAttr (txt state.uiCwd)
+    | otherwise =
+        hBox
+            [ txt "\xE0A0 "
+            , withAttr Theme.mutedAttr $
+                txt (repositoryHeaderText state.uiBranch state.uiCwd)
+            ]
+
+repositoryHeaderText :: Text -> Text -> Text
+repositoryHeaderText branch cwd =
+    Text.intercalate "  " $
+        filter (not . Text.null) [branch, cwd]
 
 drawHeaderRight :: UiState -> Widget Name
 drawHeaderRight state =

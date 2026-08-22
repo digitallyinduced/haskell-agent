@@ -7,6 +7,7 @@ import Agent.CLI
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
+    , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
     , withRestoredCurrentDirectory
@@ -131,6 +132,19 @@ spec = do
                 ]
                 `shouldBe`
                     "startup: first frame 42ms · Loading tools… 400ms · ready 1.25s"
+
+    describe "formatRepositoryPath" do
+        it "abbreviates paths below the home directory" do
+            formatRepositoryPath
+                (fromFilePath "/Users/marc")
+                (fromFilePath "/Users/marc/src/haskell-agent")
+                `shouldBe` "~/src/haskell-agent"
+
+        it "keeps paths outside the home directory absolute" do
+            formatRepositoryPath
+                (fromFilePath "/Users/marc")
+                (fromFilePath "/tmp/haskell-agent")
+                `shouldBe` "/tmp/haskell-agent"
 
     describe "cycleReplMode" do
         it "walks ask → plan → always-approve → ask" do
