@@ -22,6 +22,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
     , fullscreenVtyConfig
@@ -61,6 +62,25 @@ import Agent.CLI.Command
     ( SkillCommand
     )
 import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Resume
+    ( ResumeBrowser(..)
+    , ResumeEntry(..)
+    , beginResumeSearch
+    , cycleResumeSource
+    , endResumeSearch
+    , groupResumeEntries
+    , insertResumeSearch
+    , moveResumeBrowser
+    , removeResumeEntry
+    , replaceResumeEntry
+    , resumeRelativeAge
+    , resumeSourceLabel
+    , selectedResumeBrowser
+    , setResumeDeletePending
+    , setResumeNotice
+    , toggleResumeExpanded
+    , visibleResumeBrowser
+    )
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
@@ -129,6 +149,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
+import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.IORef
     ( modifyIORef'
@@ -145,7 +166,9 @@ import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
@@ -324,6 +347,18 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
         (AppAskChoice title body initial rows reply)
     atomically (readTMVar reply)
 
+requestFullscreenResume
+    :: FullscreenRuntime
+    -> ResumeBrowser
+    -> (Text -> IO (Either Text ResumeEntry))
+    -> (Text -> IO (Either Text ()))
+    -> IO (Maybe ResumeEntry)
+requestFullscreenResume runtime browser loadEntry deleteEntry = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskResume browser loadEntry deleteEntry reply)
+    atomically (readTMVar reply)
+
 requestFullscreenText
     :: FullscreenRuntime
     -> Text
@@ -372,6 +407,10 @@ runFullscreen runtime workerAction = do
             , appSlashIndex = 0
             , appChoice = Nothing
             , appChoiceReply = Nothing
+            , appResume = Nothing
+            , appResumeReply = Nothing
+            , appResumeLoad = Nothing
+            , appResumeDelete = Nothing
             , appTextPrompt = Nothing
             , appTextReply = Nothing
             , appSlashDismissed = False
@@ -675,6 +714,7 @@ userActionPending :: AppState -> Bool
 userActionPending state =
     isJust state.appTextPrompt
         || isJust state.appChoice
+        || isJust state.appResume
         || isJust state.appUi.uiPermission
 
 progressNoticeActive :: UiState -> Bool
@@ -827,6 +867,217 @@ pendingUiEvent = \case
     PendingReasoningDeltas deltas ->
         UiLoop (ReasoningDelta (Text.concat (toList deltas)))
 
+handleResumeKey :: V.Event -> EventM Name AppState ()
+handleResumeKey event = do
+    state <- get
+    case state.appResume of
+        Nothing -> pure ()
+        Just overlay ->
+            let browser = overlay.resumeOverlayBrowser
+            in case browser.resumeBrowserDeletePending of
+                Just sessionId -> handleDeleteConfirmation state browser sessionId event
+                Nothing
+                    | browser.resumeBrowserSearching ->
+                        handleResumeSearch browser event
+                    | otherwise ->
+                        handleResumeNormal browser event
+
+handleDeleteConfirmation
+    :: AppState
+    -> ResumeBrowser
+    -> Text
+    -> V.Event
+    -> EventM Name AppState ()
+handleDeleteConfirmation state browser sessionId = \case
+    V.EvKey (V.KChar 'y') [] ->
+        case state.appResumeDelete of
+            Nothing ->
+                setBrowser (setResumeNotice (Just "Session deletion is unavailable.") browser)
+            Just deleteEntry -> do
+                result <- liftIO (deleteEntry sessionId)
+                case result of
+                    Left err -> setBrowser (setResumeNotice (Just err) browser)
+                    Right () -> do
+                        setBrowser (removeResumeEntry sessionId browser)
+                        revealSelectedResume
+    V.EvKey (V.KChar 'n') [] ->
+        setBrowser (setResumeDeletePending Nothing browser)
+    V.EvKey V.KEsc [] ->
+        setBrowser (setResumeDeletePending Nothing browser)
+    _ -> pure ()
+
+handleResumeSearch :: ResumeBrowser -> V.Event -> EventM Name AppState ()
+handleResumeSearch browser = \case
+    V.EvKey V.KEsc [] ->
+        setBrowser (endResumeSearch browser)
+    V.EvKey V.KEnter [] ->
+        setBrowser (endResumeSearch browser)
+    V.EvKey V.KUp [] ->
+        moveAndReveal (-1) browser
+    V.EvKey V.KDown [] ->
+        moveAndReveal 1 browser
+    V.EvKey V.KPageUp [] ->
+        moveAndReveal (-10) browser
+    V.EvKey V.KPageDown [] ->
+        moveAndReveal 10 browser
+    V.EvMouseDown _ _ V.BScrollUp _ ->
+        moveAndReveal (-mouseScrollLines) browser
+    V.EvMouseDown _ _ V.BScrollDown _ ->
+        moveAndReveal mouseScrollLines browser
+    V.EvKey V.KBS [] ->
+        setAndReveal $
+            insertResumeSearch ""
+                browser
+                    { resumeBrowserQuery =
+                        Text.dropEnd 1 browser.resumeBrowserQuery
+                    , resumeBrowserIndex = 0
+                    }
+    V.EvKey (V.KChar 'u') modifiers
+        | V.MCtrl `elem` modifiers ->
+            setAndReveal $
+                insertResumeSearch ""
+                    browser
+                        { resumeBrowserQuery = ""
+                        , resumeBrowserIndex = 0
+                        }
+    V.EvKey (V.KChar char) []
+        | not (isControl char) ->
+            setAndReveal (insertResumeSearch (Text.singleton char) browser)
+    _ -> pure ()
+
+handleResumeNormal :: ResumeBrowser -> V.Event -> EventM Name AppState ()
+handleResumeNormal browser = \case
+    V.EvKey V.KUp [] ->
+        moveAndReveal (-1) browser
+    V.EvKey V.KDown [] ->
+        moveAndReveal 1 browser
+    V.EvKey V.KPageUp [] ->
+        moveAndReveal (-10) browser
+    V.EvKey V.KPageDown [] ->
+        moveAndReveal 10 browser
+    V.EvMouseDown _ _ V.BScrollUp _ ->
+        moveAndReveal (-mouseScrollLines) browser
+    V.EvMouseDown _ _ V.BScrollDown _ ->
+        moveAndReveal mouseScrollLines browser
+    V.EvKey V.KEnter [] ->
+        resolveResume True
+    V.EvKey V.KEsc [] ->
+        resolveResume False
+    V.EvKey (V.KChar 'e') [] ->
+        expandSelectedResume browser
+    V.EvKey (V.KChar 'f') [] -> do
+        setBrowser (cycleResumeSource browser)
+        revealSelectedResume
+    V.EvKey (V.KChar 'd') [] ->
+        case selectedResumeBrowser browser of
+            Nothing -> pure ()
+            Just entry ->
+                setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
+    V.EvKey (V.KChar '/') [] ->
+        setBrowser (beginResumeSearch browser)
+    V.EvKey (V.KChar char) []
+        | not (isControl char) ->
+            setAndReveal
+                (insertResumeSearch
+                    (Text.singleton char)
+                    (beginResumeSearch browser))
+    _ -> pure ()
+
+expandSelectedResume :: ResumeBrowser -> EventM Name AppState ()
+expandSelectedResume browser =
+    case selectedResumeBrowser browser of
+        Nothing -> pure ()
+        Just entry
+            | browser.resumeBrowserExpanded == Just entry.resumeId ->
+                setBrowser (toggleResumeExpanded browser)
+            | entry.resumeLoaded ->
+                setBrowser (toggleResumeExpanded browser)
+            | otherwise -> do
+                state <- get
+                case state.appResumeLoad of
+                    Nothing ->
+                        setBrowser
+                            (setResumeNotice
+                                (Just "Session details are unavailable.")
+                                browser)
+                    Just loadEntry -> do
+                        loaded <- liftIO (loadEntry entry.resumeId)
+                        case loaded of
+                            Left err ->
+                                setBrowser (setResumeNotice (Just err) browser)
+                            Right fullEntry ->
+                                setBrowser $
+                                    toggleResumeExpanded
+                                        (replaceResumeEntry fullEntry browser)
+
+moveAndReveal :: Int -> ResumeBrowser -> EventM Name AppState ()
+moveAndReveal delta browser = do
+    setBrowser (moveResumeBrowser delta browser)
+    revealSelectedResume
+
+revealSelectedResume :: EventM Name AppState ()
+revealSelectedResume = do
+    state <- get
+    case state.appResume >>= selectedResumeBrowser . (.resumeOverlayBrowser) of
+        Nothing -> pure ()
+        Just entry -> makeVisible (ResumeRow entry.resumeId)
+
+setBrowser :: ResumeBrowser -> EventM Name AppState ()
+setBrowser browser =
+    modify' \state ->
+        state
+            { appResume =
+                (\overlay -> overlay { resumeOverlayBrowser = browser })
+                    <$> state.appResume
+            }
+
+setAndReveal :: ResumeBrowser -> EventM Name AppState ()
+setAndReveal browser = do
+    setBrowser browser
+    revealSelectedResume
+
+resolveResume :: Bool -> EventM Name AppState ()
+resolveResume confirmed = do
+    state <- get
+    case state.appResumeReply of
+        Nothing -> pure ()
+        Just reply ->
+            liftIO $ atomically $
+                putTMVar reply $
+                    if confirmed
+                        then state.appResume
+                            >>= selectedResumeBrowser . (.resumeOverlayBrowser)
+                        else Nothing
+    modify' \current ->
+        current
+            { appResume = Nothing
+            , appResumeReply = Nothing
+            , appResumeLoad = Nothing
+            , appResumeDelete = Nothing
+            }
+    resumeNativeProgressIfRunning
+
+confirmResumeId :: Text -> EventM Name AppState ()
+confirmResumeId sessionId = do
+    state <- get
+    case state.appResume of
+        Nothing -> pure ()
+        Just overlay ->
+            case
+                find
+                    ((== sessionId) . (.resumeId))
+                    (visibleResumeBrowser overlay.resumeOverlayBrowser)
+            of
+                Nothing -> pure ()
+                Just _ -> do
+                    let visible = visibleResumeBrowser overlay.resumeOverlayBrowser
+                        index = fromMaybe 0 (findIndex ((== sessionId) . (.resumeId)) visible)
+                    setBrowser
+                        overlay.resumeOverlayBrowser
+                            { resumeBrowserIndex = index
+                            }
+                    resolveResume True
+
 handleChoiceKey :: V.Event -> EventM Name AppState ()
 handleChoiceKey = \case
     V.EvKey V.KUp [] -> moveChoice (-1)
@@ -891,6 +1142,8 @@ activateControl = \case
             ReplCycleMode
     ChoiceRow index ->
         confirmChoiceAt index
+    ResumeRow sessionId ->
+        confirmResumeId sessionId
     CodeCopy blockId codeIndex ->
         copyCodeBlock blockId codeIndex
     _ ->
@@ -902,6 +1155,7 @@ isInteractiveControl = \case
     ComposerEffort -> True
     ComposerMode -> True
     ChoiceRow _ -> True
+    ResumeRow _ -> True
     CodeCopy _ _ -> True
     _ -> False
 
@@ -1059,14 +1313,18 @@ drawApp state =
                 <> mainLayers
         dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
     in
-    case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-        (Just prompt, _, _) ->
-            drawTextPrompt state prompt : dimmedMainLayers
-        (Nothing, Just choice, _) ->
-            drawChoice state choice : dimmedMainLayers
-        (Nothing, Nothing, Just permission) ->
-            drawPermission state permission : dimmedMainLayers
-        (Nothing, Nothing, Nothing) -> interactiveLayers
+    case state.appResume of
+        Just resume ->
+            drawResume state resume : dimmedMainLayers
+        Nothing ->
+            case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                (Just prompt, _, _) ->
+                    drawTextPrompt state prompt : dimmedMainLayers
+                (Nothing, Just choice, _) ->
+                    drawChoice state choice : dimmedMainLayers
+                (Nothing, Nothing, Just permission) ->
+                    drawPermission state permission : dimmedMainLayers
+                (Nothing, Nothing, Nothing) -> interactiveLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
@@ -2154,6 +2412,167 @@ permissionRow selected index label =
                 else widget
     in clickable (PermissionRow index) styled
 
+drawResume :: AppState -> ResumeOverlay -> Widget Name
+drawResume state overlay =
+    centerLayer $
+        hLimitPercent 82 $
+            vLimitPercent 82 $
+                overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                    withBorderStyle unicodeRounded $
+                        borderWithLabel
+                            (waitingOverlayLabel state "Resume session") $
+                            vBox
+                                [ padLeftRight 1 (resumeHeader browser)
+                                , Border.hBorder
+                                , withVScrollBarRenderer conversationScrollbarRenderer $
+                                    withVScrollBars OnRight $
+                                        viewport ResumeViewport Vertical $
+                                            padLeftRight 1 (resumeList browser)
+                                , Border.hBorder
+                                , padLeftRight 1 (resumeFooter browser)
+                                ]
+  where
+    browser = overlay.resumeOverlayBrowser
+
+resumeHeader :: ResumeBrowser -> Widget Name
+resumeHeader browser =
+    hBox
+        [ search
+        , vLimit 1 (fill ' ')
+        , withAttr Theme.mutedAttr $
+            txt (resumeSourceLabel browser.resumeBrowserSource <> "  f")
+        ]
+  where
+    prefix
+        | browser.resumeBrowserSearching = "search: "
+        | Text.null browser.resumeBrowserQuery = "/ to search"
+        | otherwise = "search: "
+    search
+        | browser.resumeBrowserSearching =
+            showCursor
+                ResumeSearchCursor
+                (Location
+                    (Text.length prefix + Text.length browser.resumeBrowserQuery, 0))
+                (txt (prefix <> browser.resumeBrowserQuery <> " "))
+        | Text.null browser.resumeBrowserQuery =
+            withAttr Theme.mutedAttr (txt prefix)
+        | otherwise =
+            txt (prefix <> browser.resumeBrowserQuery)
+
+resumeList :: ResumeBrowser -> Widget Name
+resumeList browser =
+    case visibleResumeBrowser browser of
+        [] ->
+            padTop (Pad 1) $
+                withAttr Theme.mutedAttr (txt "  No matches")
+        entries ->
+            vBox $
+                intersperse (txt "") $
+                    map (resumeGroup browser selectedId) (groupResumeEntries entries)
+  where
+    selectedId = (.resumeId) <$> selectedResumeBrowser browser
+
+resumeGroup
+    :: ResumeBrowser
+    -> Maybe Text
+    -> (Text, [ResumeEntry])
+    -> Widget Name
+resumeGroup browser selectedId (project, entries) =
+    vBox
+        [ hBox
+            [ withAttr Theme.mutedAttr $
+                txt (" " <> project <> " ")
+            , withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
+            ]
+        , vBox (map (resumeRow browser selectedId) entries)
+        ]
+
+resumeRow :: ResumeBrowser -> Maybe Text -> ResumeEntry -> Widget Name
+resumeRow browser selectedId entry =
+    clickable (ResumeRow entry.resumeId) $
+        if selected
+            then forceAttr Theme.selectedAttr body
+            else body
+  where
+    selected = selectedId == Just entry.resumeId
+    expanded = browser.resumeBrowserExpanded == Just entry.resumeId
+    marker
+        | expanded = "◆ "
+        | otherwise = "› "
+    summary =
+        hBox
+            [ hLimitPercent 78 (txt (marker <> entry.resumeTitle))
+            , vLimit 1 (fill ' ')
+            , withAttr Theme.mutedAttr $
+                txt (resumeRelativeAge browser.resumeBrowserNow entry.resumeUpdatedAt)
+            ]
+    body
+        | expanded =
+            vBox
+                [ summary
+                , padLeft (Pad 4) $
+                    vBox
+                        [ resumeDetail "ID" entry.resumeId
+                        , resumeDetail "CWD" entry.resumeCwd
+                        , resumeDetail "Model" entry.resumeModel
+                        , resumeDetail
+                            "Created"
+                            (resumeAbsoluteTime entry.resumeCreatedAt)
+                        , resumeDetail
+                            "Updated"
+                            (resumeAbsoluteTime entry.resumeUpdatedAt)
+                        , resumeDetail
+                            "Source"
+                            ("local · " <> entry.resumeProvider)
+                        , resumeDetail
+                            "Messages"
+                            (Text.pack (show entry.resumeMessageCount))
+                        , resumeDetail
+                            "Turns"
+                            ( Text.pack (show entry.resumeTurnCount)
+                                <> "    Tools  "
+                                <> Text.pack (show entry.resumeToolCount)
+                            )
+                        , resumeDetail
+                            "Prompt"
+                            (if Text.null entry.resumePrompt
+                                then "(none)"
+                                else entry.resumePrompt)
+                        ]
+                ]
+        | otherwise = summary
+
+resumeDetail :: Text -> Text -> Widget Name
+resumeDetail label value =
+    hBox
+        [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
+        , txtWrap value
+        ]
+
+resumeAbsoluteTime :: UTCTime -> Text
+resumeAbsoluteTime =
+    Text.pack . formatTime defaultTimeLocale "%b %e, %Y %H:%M UTC"
+
+resumeFooter :: ResumeBrowser -> Widget Name
+resumeFooter browser =
+    withAttr attr (txt footer)
+  where
+    hasRows = not (null (visibleResumeBrowser browser))
+    (attr, footer) =
+        case browser.resumeBrowserNotice of
+            Just notice -> (Theme.errorAttr, notice)
+            Nothing
+                | isJust browser.resumeBrowserDeletePending ->
+                    (Theme.thinkingAttr, "y confirm delete  │  n cancel")
+                | browser.resumeBrowserSearching ->
+                    (Theme.footerAttr, "type to search  │  Enter/Esc done  │  ↑↓ nav")
+                | not hasRows ->
+                    (Theme.footerAttr, "f filter  │  / search  │  Esc cancel")
+                | otherwise ->
+                    ( Theme.footerAttr
+                    , "↑↓ nav  │  Enter resume  │  e expand  │  / search  │  f filter  │  d delete  │  Esc cancel"
+                    )
+
 drawChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawChoice appState choice =
     centerLayer $
@@ -2503,6 +2922,7 @@ handleEvent event = do
     let visible =
             isNothing state.appTextPrompt
                 && isNothing state.appChoice
+                && isNothing state.appResume
                 && isNothing state.appUi.uiPermission
                 && isNothing state.appAgentHover
     liftIO do
@@ -2667,6 +3087,20 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
+    AppEvent (AppAskResume browser loadEntry deleteEntry reply) -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        modify' \state ->
+            state
+                { appResume = Just ResumeOverlay
+                    { resumeOverlayBrowser = browser
+                    }
+                , appResumeReply = Just reply
+                , appResumeLoad = Just loadEntry
+                , appResumeDelete = Just deleteEntry
+                , appAgentHover = Nothing
+                }
+        vScrollToBeginning (viewportScroll ResumeViewport)
     AppEvent (AppAskText title body initial reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
@@ -2694,85 +3128,99 @@ handleEventInner event = case event of
     MouseDown name button _ _ -> do
         unless (isAgentHoverSurface name) clearAgentHover
         state <- get
-        case ( state.appTextPrompt
-             , state.appChoice
-             , state.appUi.uiPermission
-             ) of
-            (Just _, _, _) ->
-                case button of
-                    V.BScrollUp ->
-                        vScrollBy
-                            (viewportScroll OverlayViewport)
-                            (-mouseScrollLines)
-                    V.BScrollDown ->
-                        vScrollBy
-                            (viewportScroll OverlayViewport)
-                            mouseScrollLines
-                    _ -> pure ()
-            (Nothing, Nothing, Nothing) ->
+        case state.appResume of
+            Just _ ->
                 case (name, button) of
-                    (ComposerModel, V.BLeft) ->
-                        Composer.handleControlMouseDown ComposerModel
-                    (ComposerEffort, V.BLeft) ->
-                        Composer.handleControlMouseDown ComposerEffort
-                    (ComposerMode, V.BLeft) ->
-                        Composer.handleControlMouseDown ComposerMode
-                    (CodeCopy blockId codeIndex, V.BLeft) ->
+                    (ResumeRow sessionId, V.BLeft) ->
                         Composer.handleControlMouseDown
-                            (CodeCopy blockId codeIndex)
-                    (SlashRow index, V.BLeft) ->
-                        Composer.activateSlashAt
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            index
-                    (SlashRow _, V.BScrollUp) ->
-                        Composer.handleComposerKey
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            (V.EvKey V.KUp [])
-                    (SlashRow _, V.BScrollDown) ->
-                        Composer.handleComposerKey
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            (V.EvKey V.KDown [])
-                    (AgentRow target, V.BLeft) -> do
-                        clearAgentHover
-                        liftIO
-                            (state.appRuntime.runtimeAgentSelect target)
-                        modify' \current ->
-                            current { appAgentSelected = target }
-                    (AgentPopover target, V.BLeft) -> do
-                        keepAgentHover target
-                        liftIO
-                            (state.appRuntime.runtimeAgentSelect target)
-                        modify' \current ->
-                            current { appAgentSelected = target }
-                    _ -> handleMouseDown name button
-            (Nothing, Just _, _) ->
-                case (name, button) of
-                    (ChoiceRow index, V.BLeft) ->
-                        Composer.handleControlMouseDown (ChoiceRow index)
-                    (ChoiceRow _, V.BScrollUp) ->
-                        handleChoiceKey (V.EvKey V.KUp [])
-                    (ChoiceRow _, V.BScrollDown) ->
-                        handleChoiceKey (V.EvKey V.KDown [])
+                            (ResumeRow sessionId)
                     (_, V.BScrollUp) ->
-                        vScrollBy
-                            (viewportScroll OverlayViewport)
-                            (-mouseScrollLines)
+                        handleResumeKey
+                            (V.EvMouseDown 0 0 V.BScrollUp [])
                     (_, V.BScrollDown) ->
-                        vScrollBy
-                            (viewportScroll OverlayViewport)
-                            mouseScrollLines
+                        handleResumeKey
+                            (V.EvMouseDown 0 0 V.BScrollDown [])
                     _ -> pure ()
-            (Nothing, Nothing, Just _) ->
-                case (name, button) of
-                    (PermissionRow index, V.BLeft) ->
-                        resolvePermission (permissionChoiceAt index)
-                    _ -> pure ()
+            Nothing ->
+                case ( state.appTextPrompt
+                     , state.appChoice
+                     , state.appUi.uiPermission
+                     ) of
+                    (Just _, _, _) ->
+                        case button of
+                            V.BScrollUp ->
+                                vScrollBy
+                                    (viewportScroll OverlayViewport)
+                                    (-mouseScrollLines)
+                            V.BScrollDown ->
+                                vScrollBy
+                                    (viewportScroll OverlayViewport)
+                                    mouseScrollLines
+                            _ -> pure ()
+                    (Nothing, Nothing, Nothing) ->
+                        case (name, button) of
+                            (ComposerModel, V.BLeft) ->
+                                Composer.handleControlMouseDown ComposerModel
+                            (ComposerEffort, V.BLeft) ->
+                                Composer.handleControlMouseDown ComposerEffort
+                            (ComposerMode, V.BLeft) ->
+                                Composer.handleControlMouseDown ComposerMode
+                            (CodeCopy blockId codeIndex, V.BLeft) ->
+                                Composer.handleControlMouseDown
+                                    (CodeCopy blockId codeIndex)
+                            (SlashRow index, V.BLeft) ->
+                                Composer.activateSlashAt
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    index
+                            (SlashRow _, V.BScrollUp) ->
+                                Composer.handleComposerKey
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    (V.EvKey V.KUp [])
+                            (SlashRow _, V.BScrollDown) ->
+                                Composer.handleComposerKey
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    (V.EvKey V.KDown [])
+                            (AgentRow target, V.BLeft) -> do
+                                clearAgentHover
+                                liftIO
+                                    (state.appRuntime.runtimeAgentSelect target)
+                                modify' \current ->
+                                    current { appAgentSelected = target }
+                            (AgentPopover target, V.BLeft) -> do
+                                keepAgentHover target
+                                liftIO
+                                    (state.appRuntime.runtimeAgentSelect target)
+                                modify' \current ->
+                                    current { appAgentSelected = target }
+                            _ -> handleMouseDown name button
+                    (Nothing, Just _, _) ->
+                        case (name, button) of
+                            (ChoiceRow index, V.BLeft) ->
+                                Composer.handleControlMouseDown (ChoiceRow index)
+                            (ChoiceRow _, V.BScrollUp) ->
+                                handleChoiceKey (V.EvKey V.KUp [])
+                            (ChoiceRow _, V.BScrollDown) ->
+                                handleChoiceKey (V.EvKey V.KDown [])
+                            (_, V.BScrollUp) ->
+                                vScrollBy
+                                    (viewportScroll OverlayViewport)
+                                    (-mouseScrollLines)
+                            (_, V.BScrollDown) ->
+                                vScrollBy
+                                    (viewportScroll OverlayViewport)
+                                    mouseScrollLines
+                            _ -> pure ()
+                    (Nothing, Nothing, Just _) ->
+                        case (name, button) of
+                            (PermissionRow index, V.BLeft) ->
+                                resolvePermission (permissionChoiceAt index)
+                            _ -> pure ()
     -- The patched vty-unix backend represents no-button pointer motion as
     -- MouseUp Nothing so Brick can route it through clickable extents.
     MouseUp (AgentRow target) Nothing _ ->
@@ -2812,11 +3260,14 @@ handleEventInner event = case event of
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
-        case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-            (Just _, _, _) -> handleTextPromptKey vtyEvent
-            (Nothing, Just _, _) -> handleChoiceKey vtyEvent
-            (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
-            (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
+        case state.appResume of
+            Just _ -> handleResumeKey vtyEvent
+            Nothing ->
+                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                    (Just _, _, _) -> handleTextPromptKey vtyEvent
+                    (Nothing, Just _, _) -> handleChoiceKey vtyEvent
+                    (Nothing, Nothing, Just _) -> handlePermissionKey vtyEvent
+                    (Nothing, Nothing, Nothing) -> handleNormalKey vtyEvent
     _ -> pure ()
 
 handlePermissionKey :: V.Event -> EventM Name AppState ()

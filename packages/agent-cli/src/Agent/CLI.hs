@@ -114,7 +114,13 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Resume (pickResumeSession)
+import Agent.CLI.Resume
+    ( ResumeEntry(..)
+    , initialResumeBrowser
+    , loadResumeEntry
+    , pickResumeSession
+    , resumeEntryFromMeta
+    )
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
@@ -216,6 +222,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
     , setFullscreenImagePreviews
@@ -3558,7 +3565,8 @@ handleResume fullscreen maybeId persist = do
         Just sessionId -> resume sessionId
         Nothing -> do
             sessions <- listSessions root
-            pickResumeChoice fullscreen color root sessions >>= \case
+            currentId <- currentSessionId persist
+            pickResumeChoice fullscreen color root currentId sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
@@ -3566,25 +3574,26 @@ pickResumeChoice
     :: Maybe FullscreenRuntime
     -> Bool
     -> OsPath
+    -> Maybe Text
     -> [SessionMeta]
     -> IO (Maybe Text)
-pickResumeChoice fullscreen color root sessions = case fullscreen of
+pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
     Nothing -> pickResumeSession color root sessions
-    Just runtime ->
-        requestFullscreenChoice
-            runtime
-            "Resume session"
-            0
-            [ ( meta.metaTitle
-              , providerSlug meta.metaProvider
-                    <> "/"
-                    <> meta.metaModel
-                    <> " · "
-                    <> toText meta.metaCwd
-              )
-            | meta <- sessions
-            ]
-            >>= pure . (>>= (`atMay` map (.metaId) sessions))
+    Just runtime -> do
+        now <- getCurrentTime
+        let browser =
+                initialResumeBrowser now (map resumeEntryFromMeta sessions)
+            deleteEntry sessionId
+                | currentId == Just sessionId =
+                    pure (Left "cannot delete the current session")
+                | otherwise =
+                    deleteSession root sessionId
+        fmap (.resumeId)
+            <$> requestFullscreenResume
+                runtime
+                browser
+                (loadResumeEntry root)
+                deleteEntry
 
 pickAgentChoice
     :: Maybe FullscreenRuntime
