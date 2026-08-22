@@ -16,9 +16,18 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , appToolHandlers
     )
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( forkFinally
+    , killThread
+    , newEmptyMVar
+    , putMVar
+    , readMVar
+    , threadDelay
+    )
 import Control.Exception.Safe (bracket)
+import Control.Monad (void)
 import Data.IORef
+import qualified Data.List as List
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
@@ -26,6 +35,7 @@ import qualified System.Directory as Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
+import System.Timeout (timeout)
 import Test.Hspec
 
 isReadOnly :: ApprovalRule -> Bool
@@ -133,6 +143,85 @@ spec = describe "Agent.CLI.AgentSessions" do
                 closeSessionProcessManager manager
                 waitForFile marker
 
+    it "keeps the manager responsive and foreground cleanup child-owned" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let startedPath = toFilePath root FilePath.</> "started"
+                releasePath = toFilePath root FilePath.</> "release"
+            script <- writeFakeAgentBody root $
+                "#!/bin/sh\n"
+                    <> "printf started > " <> shellQuote startedPath <> "\n"
+                    <> "while [ ! -f " <> shellQuote releasePath
+                    <> " ]; do sleep 0.02; done\n"
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                finished <- newEmptyMVar
+                let release = writeFile releasePath ""
+                    joinLauncher = void (readMVar finished)
+                    lockPath =
+                        toFilePath handle.sessionDir
+                            FilePath.</> ".agent-running"
+                bracket
+                    (forkFinally
+                        (launchSessionTurn
+                            manager False ApproveAll handle "one")
+                        (putMVar finished))
+                    (\launcher -> do
+                        killThread launcher
+                        release
+                        joinLauncher
+                        waitForMissingDirectory lockPath)
+                    \launcher -> do
+                        waitForFile startedPath
+                        status <- timeout 500000 $
+                            sessionProcessStatus manager "unrelated"
+                        status `shouldBe` Just "idle"
+
+                        killThread launcher
+                        readMVar finished >>= \case
+                            Left _ -> pure ()
+                            Right result -> expectationFailure
+                                ("foreground launcher was not cancelled: "
+                                    <> show result)
+                        Directory.doesDirectoryExist lockPath
+                            `shouldReturn` True
+                        second <- launchSessionTurn
+                            manager True ApproveAll handle "two"
+                        second `shouldSatisfy` \case
+                            Left err ->
+                                "already running" `Text.isInfixOf` err
+                            Right _ -> False
+
+                        release
+                        waitForMissingDirectory lockPath
+                closeSessionProcessManager manager
+
+    it "releases launch resources when process creation fails" $
+        withTempDir "agent-session-runtime-" \root -> do
+            script <- writeFakeAgent root
+            withExecutableOverride script do
+                let missingCwd =
+                        fromFilePath
+                            (toFilePath root FilePath.</> "missing-cwd")
+                handle <- createSession (testCreateAt root missingCwd)
+                manager <- newSessionProcessManager root
+                result <- launchSessionTurn
+                    manager False ApproveAll handle "one"
+                result `shouldSatisfy` \case
+                    Left err ->
+                        "failed to start agent session: "
+                            `Text.isPrefixOf` err
+                    Right _ -> False
+                let lockPath =
+                        toFilePath handle.sessionDir
+                            FilePath.</> ".agent-running"
+                Directory.doesDirectoryExist lockPath `shouldReturn` False
+                entries <- Directory.listDirectory
+                    (toFilePath handle.sessionDir)
+                filter (".agent-prompt-" `List.isPrefixOf`) entries
+                    `shouldBe` []
+                closeSessionProcessManager manager
+
 runTool :: AgentSessionToolsEnv -> Text.Text -> Text.Text -> IO Text.Text
 runTool env name arguments = do
     result <- dispatchToolCall defaultLoopDispatch
@@ -213,6 +302,16 @@ waitForSessionStatus manager sessionId expected = go (100 :: Int)
             if actual == expected
                 then pure ()
                 else threadDelay 20000 >> go (attempts - 1)
+
+waitForMissingDirectory :: FilePath -> IO ()
+waitForMissingDirectory path = go (50 :: Int)
+  where
+    go 0 = expectationFailure ("timed out waiting for removal of " <> path)
+    go attempts = do
+        exists <- Directory.doesDirectoryExist path
+        if exists
+            then threadDelay 20000 >> go (attempts - 1)
+            else pure ()
 
 shellQuote :: FilePath -> String
 shellQuote path = "'" <> concatMap escape path <> "'"

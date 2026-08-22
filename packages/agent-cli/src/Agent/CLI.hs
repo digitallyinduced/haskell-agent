@@ -364,6 +364,7 @@ import Control.Exception.Safe
     , mask_
     , throwIO
     , try
+    , uninterruptibleMask_
     )
 import Control.Monad (forM_, when)
 import qualified Data.ByteString as BS
@@ -1113,7 +1114,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         Nothing -> pure ()
     let claimCurrentSession handle
             | managedAgentSession = pure ()
-            | otherwise = do
+            | otherwise = mask_ do
                 let desired =
                         unsafeToFilePath
                             (handle.sessionDir </> unsafeEncodeUtf ".agent-running")
@@ -1124,7 +1125,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             Left err -> throwIO (userError (Text.unpack err))
                             Right lockPath -> do
                                 writeIORef activeSessionLock (Just lockPath)
-                                mapM_ releaseSessionLock previous
+                                mapM_
+                                    (uninterruptibleMask_ . releaseSessionLock)
+                                    previous
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root
             , toolsProvider = provider
