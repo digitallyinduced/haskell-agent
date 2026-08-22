@@ -83,13 +83,12 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.ImagePreview
-                    , Agent.CLI.TUI.Markdown
-                    , Agent.CLI.TUI.Theme
-                    , Agent.CLI.UI.Model
+                    , Agent.CLI.TUI.Scroll
                     , Agent.CLI.Turn
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
@@ -174,14 +173,15 @@ test-suite agent-cli-test
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIImagePreviewSpec
-                    , Agent.CLI.TUIMarkdownSpec
-                    , Agent.CLI.UIModelSpec
+                    , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-tui
                     , agent-openai
                     , agent-responses
+                    , agent-xai
                     , aeson
                     , ansi-terminal
                     , base >= 4.17 && < 5
@@ -197,4 +197,6 @@ test-suite agent-cli-test
                     , safe-exceptions
                     , text
                     , time
+                    , transformers
                     , unix
+                    , vty >= 6.4 && < 7

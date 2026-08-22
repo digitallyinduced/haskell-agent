@@ -1,14 +1,18 @@
 -- | Renderer-independent state for the retained terminal UI.
-module Agent.CLI.UI.Model
+module Agent.TUI.Model
     ( BlockId(..)
     , BlockKind(..)
     , BlockState(..)
     , Focus(..)
+    , NoticeKind(..)
     , PermissionOverlay(..)
     , PromptState(..)
     , UiBlock(..)
     , UiEvent(..)
+    , UiNotice(..)
     , UiState(..)
+    , errorNotice
+    , infoNotice
     , initialUiState
     , deleteToLineStart
     , deleteToLineEnd
@@ -19,10 +23,13 @@ module Agent.CLI.UI.Model
     , moveWordRight
     , reduceUi
     , selectedBlockIndex
+    , progressNotice
+    , successNotice
+    , uiNeedsTick
+    , warningNotice
     ) where
 
-import Agent.CLI.ReplMode (ReplMode(..))
-import Agent.CLI.Render
+import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
     , summarizeToolCall
@@ -54,6 +61,21 @@ data BlockKind
     | BlockEdit
     | BlockSystem
     | BlockError
+    deriving (Eq, Show)
+
+data NoticeKind
+    = NoticeInfo
+    | NoticeSuccess
+    | NoticeWarning
+    | NoticeProgress
+    | NoticeError
+    deriving (Eq, Show)
+
+data UiNotice = UiNotice
+    { noticeKind :: !NoticeKind
+    , noticeText :: !Text
+    , noticeTransient :: !Bool
+    }
     deriving (Eq, Show)
 
 data BlockState
@@ -92,7 +114,7 @@ data PermissionOverlay = PermissionOverlay
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
-    , promptMode :: !ReplMode
+    , promptMode :: !Text
     , promptUsage :: !TokenUsage
     , promptAttachments :: !Int
     }
@@ -103,6 +125,7 @@ data UiState = UiState
     , uiNextBlockId :: !Int
     , uiDraft :: !Text
     , uiCursor :: !Int
+    , uiQueuedInputs :: !(Seq Text)
     , uiFocus :: !Focus
     , uiSelectedBlock :: !(Maybe BlockId)
     , uiFollow :: !Bool
@@ -113,9 +136,11 @@ data UiState = UiState
     , uiBranch :: !Text
     , uiCwd :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
-    , uiNotice :: !(Maybe Text)
+    , uiNotice :: !(Maybe UiNotice)
+    , uiNoticeTicks :: !Int
     , uiFrame :: !Int
     , uiElapsedTenths :: !Int
+    , uiCompletionTicks :: !Int
     , uiTurnStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text ToolCall)
     }
@@ -124,11 +149,16 @@ data UiState = UiState
 data UiEvent
     = UiLoop !LoopEvent
     | UiUserSubmitted !Text
+    | UiDraftSubmitted
+    | UiInputQueued !Text
+    | UiInputPromoted !Text
+    | UiQueuedInputStarted
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
+    | UiSetPromptEffort !Text
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
-    | UiSetNotice !(Maybe Text)
+    | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
     | UiToggleSelected
@@ -143,6 +173,7 @@ data UiEvent
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
+    | UiTurnRestarted
     | UiTick
     deriving (Eq, Show)
 
@@ -152,6 +183,7 @@ initialUiState = UiState
     , uiNextBlockId = 1
     , uiDraft = ""
     , uiCursor = 0
+    , uiQueuedInputs = Seq.empty
     , uiFocus = FocusComposer
     , uiSelectedBlock = Nothing
     , uiFollow = True
@@ -161,7 +193,7 @@ initialUiState = UiState
     , uiPrompt = PromptState
         { promptModel = ""
         , promptEffort = ""
-        , promptMode = ReplModeNormal
+        , promptMode = "ask"
         , promptUsage = emptyTokenUsage
         , promptAttachments = 0
         }
@@ -169,8 +201,10 @@ initialUiState = UiState
     , uiCwd = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiNoticeTicks = 0
     , uiFrame = 0
     , uiElapsedTenths = 0
+    , uiCompletionTicks = 0
     , uiTurnStartBlock = 0
     , uiToolCalls = Map.empty
     }
@@ -181,12 +215,40 @@ reduceUi event state = case event of
     UiUserSubmitted text ->
         appendBlock BlockUser "You" text "" BlockComplete Nothing
             state
-                { uiDraft = ""
-                , uiCursor = 0
-                , uiAwaitingInput = False
+                { uiAwaitingInput = False
                 , uiFollow = True
                 , uiNotice = Nothing
                 }
+    UiDraftSubmitted ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
+    UiInputQueued text ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiQueuedInputs = state.uiQueuedInputs Seq.|> text
+            , uiNotice = Nothing
+            }
+    UiInputPromoted text ->
+        state
+            { uiDraft = ""
+            , uiCursor = 0
+            , uiQueuedInputs = text Seq.<| state.uiQueuedInputs
+            , uiNotice =
+                Just $
+                    warningNotice
+                        "Cancelling the current turn; sending this prompt next…"
+            }
+    UiQueuedInputStarted ->
+        state
+            { uiQueuedInputs = Seq.drop 1 state.uiQueuedInputs
+            , uiAwaitingInput = False
+            , uiNotice = Nothing
+            }
     UiSetDraft text cursor ->
         state
             { uiDraft = text
@@ -194,16 +256,23 @@ reduceUi event state = case event of
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
+    UiSetPromptEffort effort ->
+        state
+            { uiPrompt = state.uiPrompt { promptEffort = effort }
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
             , uiRunning = if awaiting then False else state.uiRunning
-            , uiActivity = if awaiting then "Ready" else state.uiActivity
+            , uiActivity =
+                if awaiting && state.uiCompletionTicks == 0
+                    then "Ready"
+                    else state.uiActivity
             }
     UiSetRepository branch cwd ->
         state { uiBranch = branch, uiCwd = cwd }
     UiSetNotice notice ->
-        state { uiNotice = notice }
+        state { uiNotice = notice, uiNoticeTicks = 0 }
     UiMoveSelection delta ->
         moveSelection delta state
     UiSelectBlock ident ->
@@ -265,14 +334,54 @@ reduceUi event state = case event of
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
-    UiTick ->
+    UiTurnRestarted ->
         state
-            { uiFrame = (state.uiFrame + 1) `mod` 10
-            , uiElapsedTenths =
-                if state.uiRunning
-                    then state.uiElapsedTenths + 1
-                    else state.uiElapsedTenths
+            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            , uiRunning = False
+            , uiActivity = "Restarting…"
+            , uiNotice =
+                Just (progressNotice "Restarting current turn…")
+            , uiNoticeTicks = 0
+            , uiCompletionTicks = 0
+            , uiToolCalls = Map.empty
             }
+    UiTick ->
+        if not (uiNeedsTick state)
+            then state
+            else
+                let completionTicks =
+                        max 0 (state.uiCompletionTicks - 1)
+                    noticeTicks = state.uiNoticeTicks + 1
+                    notice
+                        | noticeTicks >= 30
+                        , maybe False (.noticeTransient) state.uiNotice =
+                            Nothing
+                        | otherwise = state.uiNotice
+                in state
+                    { uiFrame = (state.uiFrame + 1) `mod` 10
+                    , uiElapsedTenths =
+                        if state.uiRunning
+                            then state.uiElapsedTenths + 1
+                            else state.uiElapsedTenths
+                    , uiActivity =
+                        if state.uiCompletionTicks == 1
+                            then "Ready"
+                            else state.uiActivity
+                    , uiCompletionTicks = completionTicks
+                    , uiNotice = notice
+                    , uiNoticeTicks =
+                        if notice == Nothing then 0 else noticeTicks
+                    }
+
+uiNeedsTick :: UiState -> Bool
+uiNeedsTick state =
+    state.uiRunning
+        || state.uiCompletionTicks > 0
+        || maybe False noticeNeedsTick state.uiNotice
+  where
+    noticeNeedsTick notice =
+        notice.noticeTransient
+            || notice.noticeKind == NoticeProgress
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -283,6 +392,7 @@ reduceLoop event state = case event of
             , uiActivity = "Thinking…"
             , uiNotice = Nothing
             , uiElapsedTenths = 0
+            , uiCompletionTicks = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
             , uiToolCalls = Map.empty
             }
@@ -299,14 +409,18 @@ reduceLoop event state = case event of
             kind = toolBlockKind call.name
             body = case call.name of
                 "search_replace" ->
-                    formatSearchReplaceDiff False call.arguments
+                    formatSearchReplaceDiff call.arguments
                 _ -> ""
         in appendBlock kind (summarizeToolCall call) body ""
             BlockRunning (Just call.callId)
             state
-                { uiActivity = summarizeToolCall call
+                { uiRunning = True
+                , uiAwaitingInput = False
+                , uiActivity = summarizeToolCall call
                 , uiToolCalls = Map.insert call.callId call state.uiToolCalls
                 }
+    ToolOutputUpdated callId output ->
+        updateToolOutput callId output state
     ToolFinished result ->
         let displayed = case Map.lookup result.callId state.uiToolCalls of
                 Nothing -> result
@@ -314,11 +428,14 @@ reduceLoop event state = case event of
                     result
                         { output = formatToolOutput call result.output }
         in completeTool displayed state
-            { uiActivity = "Thinking…"
+            { uiRunning = True
+            , uiAwaitingInput = False
+            , uiActivity = "Thinking…"
             , uiToolCalls = Map.delete result.callId state.uiToolCalls
             }
     TurnFinished output ->
         let finalized = finalizeStreams state
+            continuing = not (null output.toolCalls)
             withFallback = case output.assistantText of
                 Just text
                     | not (Text.null (Text.strip text))
@@ -330,8 +447,13 @@ reduceLoop event state = case event of
                             BlockComplete Nothing finalized
                 _ -> finalized
         in withFallback
-            { uiRunning = False
-            , uiActivity = "Ready"
+            { uiRunning = continuing
+            , uiActivity =
+                if continuing
+                    then "Running tools…"
+                    else "Finished"
+            , uiCompletionTicks =
+                if continuing then 0 else 10
             }
 
 appendOrExtend
@@ -397,6 +519,19 @@ completeTool result state =
                 state.uiBlocks
         }
 
+updateToolOutput :: Text -> Text -> UiState -> UiState
+updateToolOutput callId output state =
+    state
+        { uiBlocks =
+            fmap
+                (\block ->
+                    if block.blockCallId == Just callId
+                        && block.blockState == BlockRunning
+                        then block { blockBody = output }
+                        else block)
+                state.uiBlocks
+        }
+
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
     state
@@ -410,8 +545,32 @@ finalizeTurn terminalState state =
                         else block)
                 state.uiBlocks
         , uiRunning = False
-        , uiActivity = "Ready"
+        , uiActivity =
+            if terminalState == BlockComplete
+                then "Finished"
+                else "Ready"
+        , uiCompletionTicks =
+            if terminalState == BlockComplete then 10 else 0
         }
+
+infoNotice, successNotice, warningNotice, progressNotice, errorNotice
+    :: Text -> UiNotice
+infoNotice = transientNotice NoticeInfo
+successNotice = transientNotice NoticeSuccess
+warningNotice = transientNotice NoticeWarning
+errorNotice = transientNotice NoticeError
+progressNotice text = UiNotice
+    { noticeKind = NoticeProgress
+    , noticeText = text
+    , noticeTransient = False
+    }
+
+transientNotice :: NoticeKind -> Text -> UiNotice
+transientNotice kind text = UiNotice
+    { noticeKind = kind
+    , noticeText = text
+    , noticeTransient = True
+    }
 
 finalizeStreams :: UiState -> UiState
 finalizeStreams state =

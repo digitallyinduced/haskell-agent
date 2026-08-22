@@ -1,0 +1,59 @@
+cabal-version:      3.0
+name:               agent-tui
+version:            0.1.0.0
+synopsis:           Retained terminal UI for the universal agent harness
+description:        Presentation state and Brick widgets for the agent terminal UI.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Wincomplete-record-updates
+                      -Wincomplete-uni-patterns
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.TUI.Markdown
+                    , Agent.TUI.Model
+                    , Agent.TUI.Presentation
+                    , Agent.TUI.Theme
+    build-depends:    agent-core >= 0.1 && < 0.2
+                    , aeson >= 2.0 && < 3
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , containers >= 0.6 && < 0.8
+                    , text >= 2.0 && < 2.2
+                    , vty >= 6.4 && < 7
+
+test-suite agent-tui-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.TUI.MarkdownSpec
+                    , Agent.TUI.ModelSpec
+    build-depends:    agent-tui
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , hspec >= 2.11 && < 2.12
+                    , text

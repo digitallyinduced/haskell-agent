@@ -9,6 +9,7 @@ module Agent.Tools.Grok.Shell
     , newGrokSession
     , closeGrokSession
     , runForeground
+    , runForegroundStreaming
     , startBackground
     , readTaskOutput
     , killTask
@@ -28,7 +29,7 @@ import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
     , resolveUnderCwd
-    , runShellCommand
+    , runShellCommandStreaming
     , runningLiveOutput
     , startShellCommand
     , stopShellCommand
@@ -123,9 +124,23 @@ closeGrokSession session = do
 
 runForeground :: GrokSession -> String -> Int -> IO CommandResult
 runForeground session command timeoutMs =
+    runForegroundStreaming session command timeoutMs (\_ _ -> pure ())
+
+runForegroundStreaming
+    :: GrokSession
+    -> String
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO CommandResult
+runForegroundStreaming session command timeoutMs onSnapshot =
     modifyMVar session.grokShell \shell -> do
         let wrapped = bashWrap (wrapScript shell True command)
-        result <- runShellCommand session.grokEnv session.grokEnv.toolCwd wrapped timeoutMs
+        result <- runShellCommandStreaming
+            session.grokEnv
+            session.grokEnv.toolCwd
+            wrapped
+            timeoutMs
+            onSnapshot
         next <- if result.commandTimedOut || result.commandCancelled
             then pure shell
             else refreshCwd session.grokEnv shell

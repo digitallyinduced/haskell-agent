@@ -49,7 +49,7 @@ spec = describe "Agent.Tools.Grok.Task" do
         map (\entry -> entry.modelOverride) specs `shouldBe` [Just "grok-4.5-mini"]
         closeSubagentRegistry registry
 
-    it "records overrides before the child worker starts" do
+    it "records overrides before the child supervisor starts" do
         typesRef <- newIORef Map.empty
         observed <- newEmptyMVar
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -81,22 +81,28 @@ spec = describe "Agent.Tools.Grok.Task" do
             names = map (.appToolName) (filterGrokToolsForType "general-purpose" tools)
         names `shouldBe` ["read_file"]
 
-    it "uses the host worktree hook for isolated children" do
+    it "keeps an isolated worktree until its child is closed" do
+        cleaned <- newIORef False
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let createIsolated _ = pure $ Right SubagentWorktree
-                { subagentWorktreePath = fromFilePath "/tmp"
-                , subagentWorktreeCleanup = pure (Right ())
-                }
+        let createIsolated = cleanupLease cleaned
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
                 Nothing (Just createIsolated) Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
                 "{\"prompt\":\"x\",\"description\":\"y\",\"isolation\":\"worktree\"}")
-        result.output `shouldSatisfy` Text.isInfixOf "worktree_path: /tmp"
+        result.output `shouldSatisfy` Text.isInfixOf "worktree_path: /tmp/isolate"
+        agents <- listAgents registry Nothing
+        case agents of
+            [(_, agentId, _)] -> do
+                _ <- waitSubagents registry [agentId] 15000
+                readIORef cleaned `shouldReturn` False
+                _ <- closeSubagent registry agentId
+                readIORef cleaned `shouldReturn` True
+            _ -> expectationFailure "expected exactly one isolated child"
         closeSubagentRegistry registry
 
     it "cleans up worktrees after failed registry admission" do

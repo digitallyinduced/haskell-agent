@@ -64,7 +64,7 @@ spec = do
 
         it "uses the configured default when the request has no model" do
             let value = requestValue defaultClientOptions
-                    sampleRequest { model = Nothing }
+                    (withModel Nothing sampleRequest)
             object <- expectObject value
             KeyMap.lookup "model" object `shouldBe` Just (Aeson.String "openai/gpt-5.1")
 
@@ -175,6 +175,10 @@ sampleRequest = defaultResponseCreateParams
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     , promptCacheKey = Just "cache-1"
     }
+
+withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withModel nextModel ResponseCreateParams { model = _, .. } =
+    ResponseCreateParams { model = nextModel, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

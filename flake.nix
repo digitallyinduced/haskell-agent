@@ -34,6 +34,17 @@
                     ];
                 };
 
+                agentTuiSource = nix-filter.lib {
+                    root = ./packages/agent-tui;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-tui.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentCoreSource = nix-filter.lib {
                     root = ./packages/agent-core;
                     include = [
@@ -113,6 +124,9 @@
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         };
+                        agent-tui = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-tui/package.nix { }) {
+                            src = agentTuiSource;
+                        };
                         agent-cli = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
@@ -126,12 +140,17 @@
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
+                agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable = pkgs.haskell.lib.justStaticExecutables agentCliPackage;
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
 
                 # Opens cabal repl on the agent-cli library and enters the
                 # GHCi :cmd loop that reloads + resumes after agent :reload.
+                # Keep this single-component: GHC 9.10 multi-home-unit mode
+                # does not support the :module or :cmd commands used below.
+                # Use the documented manual multi-package REPL when editing
+                # agent-tui or another dependency alongside agent-cli.
                 # expect waits for modules to load, then starts the agent
                 # (ghci scripts run before cabal loads the package).
                 agentRepl = pkgs.writeShellScriptBin "repl" ''
@@ -142,10 +161,10 @@
                       echo "repl: missing $script" >&2
                       exit 1
                     fi
-                    # Cap the agent/GHCi heap so a runaway session OOMs itself
-                    # instead of the whole machine. Override with GHCRTS=...
+                    # Cap the long-running GHCi/agent process without forcing
+                    # every command in nix develop to inherit the same limit.
                     if [ -z "''${GHCRTS:-}" ]; then
-                      export GHCRTS="-M1G -A64m"
+                      export GHCRTS="-M8G -A64m"
                     fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
@@ -174,6 +193,7 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-tui = agentTuiPackage;
                 packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
@@ -193,6 +213,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-tui
                         packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
@@ -209,19 +230,12 @@
                             ripgrep
                         ])
                         ++ [ agentRepl ];
-                    # Default RTS heap ceiling for GHCi / agent runs started from
-                    # this shell (including `cabal repl` and `cabal run`). The
-                    # `repl` wrapper sets the same default if GHCRTS is unset.
-                    shellHook = ''
-                      if [ -z "''${GHCRTS:-}" ]; then
-                        export GHCRTS="-M1G -A64m"
-                      fi
-                    '';
                 };
 
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-tui = agentTuiPackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;

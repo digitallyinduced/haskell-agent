@@ -45,8 +45,7 @@ import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
-import qualified Agent.CLI.TUIMarkdownSpec as TUIMarkdownSpec
-import qualified Agent.CLI.UIModelSpec as UIModelSpec
+import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
@@ -95,7 +94,6 @@ main = hspec do
     ToolsSpec.spec
     TUIBridgeSpec.spec
     TUIImagePreviewSpec.spec
-    TUIMarkdownSpec.spec
-    UIModelSpec.spec
+    TUIScrollSpec.spec
     UsageSpec.spec
     WorktreeSpec.spec

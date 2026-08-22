@@ -1,6 +1,6 @@
 module Agent.SubagentsSpec (spec) where
 
-import Agent.Cancel (isCancelled)
+import Agent.Cancel (isCancelled, waitCancel)
 import Agent.InterAgentMessage
 import Agent.Loop (LoopError(..), LoopResult(..), emptyTokenUsage)
 import Agent.OsPath (fromFilePath)
@@ -89,7 +89,7 @@ spec = describe "Agent.Subagents" do
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "done:hello"))
 
-    it "does not launch a prepared worker after registry shutdown" do
+    it "does not launch a prepared supervisor after registry shutdown" do
         entered <- newEmptyMVar
         release <- newEmptyMVar
         ran <- newIORef False
@@ -102,7 +102,29 @@ spec = describe "Agent.Subagents" do
         closeSubagentRegistry registry
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its worker started."
+            Left "Subagent closed before its supervisor started."
+        readIORef ran `shouldReturn` False
+
+    it "releases a prepared lease when the supervisor cannot start" do
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        releases <- newIORef (0 :: Int)
+        ran <- newIORef False
+        registry <- shutdownRaceRegistry ran
+        spawning <- Async.async $
+            spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (\_ -> do
+                    putMVar entered ()
+                    takeMVar release
+                    pure $ subagentLease $
+                        atomicModifyIORef' releases \n -> (n + 1, ()))
+                Nothing 0 "task" Nothing
+        takeMVar entered
+        closeSubagentRegistry registry
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its supervisor started."
+        readIORef releases `shouldReturn` 1
         readIORef ran `shouldReturn` False
 
     it "rolls back prepared admission when spawning is cancelled" do
@@ -118,6 +140,61 @@ spec = describe "Agent.Subagents" do
         Async.cancel spawning
         _ <- Async.waitCatch spawning
         Right _ <- spawnSubagent registry Nothing 0 "next" Nothing
+        closeSubagentRegistry registry
+
+    it "releases pending capacity exactly once when an agent closes during preparation" do
+        preparedId <- newEmptyMVar
+        release <- newEmptyMVar
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically retry)
+            (\_ _ -> pure ())
+        spawning <- Async.async $
+            spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+                (\agentId -> do
+                    putMVar preparedId agentId
+                    takeMVar release
+                    pure mempty)
+                Nothing 0 "pending" Nothing
+        agentId <- takeMVar preparedId
+        closeSubagent registry agentId `shouldReturn` Right Pending
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its supervisor started."
+
+        Right _ <- spawnSubagent registry Nothing 0 "replacement" Nothing
+        extra <- spawnSubagent registry Nothing 0 "extra" Nothing
+        extra `shouldSatisfy` \case
+            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
+            Right _ -> False
+        closeSubagentRegistry registry
+
+    it "rejects a prepared spawn after its root turn is aborted" do
+        preparedId <- newEmptyMVar
+        release <- newEmptyMVar
+        leaseReleases <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically retry)
+            (\_ _ -> pure ())
+        rootTurnId <- beginRootTurn registry
+        spawning <- Async.async $
+            spawnSubagentWithCwdPreparedForTurn
+                registry (Just rootTurnId) (fromFilePath "/tmp")
+                (\agentId -> do
+                    putMVar preparedId agentId
+                    takeMVar release
+                    pure $ subagentLease $
+                        atomicModifyIORef' leaseReleases \n -> (n + 1, ()))
+                Nothing 0 "aborted" Nothing
+        agentId <- takeMVar preparedId
+
+        abortRootTurn registry rootTurnId
+        getStatus registry agentId `shouldReturn` Interrupted
+        putMVar release ()
+        Async.wait spawning `shouldReturn`
+            Left "Subagent closed before its supervisor started."
+        readIORef leaseReleases `shouldReturn` 1
+        getStatus registry agentId `shouldReturn` NotFound
         closeSubagentRegistry registry
 
     it "preserves replacement paths when an old spawn rolls back" do
@@ -334,6 +411,29 @@ spec = describe "Agent.Subagents" do
         history <- readIORef seen
         history `shouldBe` [Nothing, Just "resp-one"]
 
+    it "does not lose a follow-up that interrupts the active turn" do
+        started <- newEmptyTMVarIO
+        seen <- newIORef ([] :: [Text])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ prompt _ -> do
+                let payload = messagePayload prompt
+                atomicModifyIORef' seen \xs -> (xs <> [payload], ())
+                if payload == "first"
+                    then do
+                        atomically $ putTMVar started ()
+                        waitCancel env.subCancel
+                        pure (Left (LoopCancelled []))
+                    else pure (completedResult payload))
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        atomically $ takeTMVar started
+        Right _ <- sendInput registry agentId "second" True
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses `shouldBe` Just (Completed (Just "second"))
+        readIORef seen `shouldReturn` ["first", "second"]
+        closeSubagentRegistry registry
+
     it "does not leave Running when send_input admission fails" do
         gate <- newTVarIO False
         let config = defaultSubagentConfig { maxConcurrent = 1 }
@@ -442,7 +542,7 @@ spec = describe "Agent.Subagents" do
             `shouldBe` Just (Completed (Just "second"))
         readIORef prompts `shouldReturn` ["first", "second"]
 
-    it "cancels and joins a running worker when the registry closes" do
+    it "cancels and joins a running supervisor when the registry closes" do
         started <- newEmptyTMVarIO
         cleanedUp <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -552,6 +652,71 @@ spec = describe "Agent.Subagents" do
         Map.lookup agentId statuses
             `shouldBe` Just (Completed (Just "after-restore"))
 
+    it "keeps subagent-owned resources across completion and releases them on close" do
+        releases <- newIORef (0 :: Int)
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $ subagentLease $
+                atomicModifyIORef' releases \n -> (n + 1, ()))
+            Nothing 0 "first" Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        readIORef releases `shouldReturn` 0
+        Right _ <- sendInput registry agentId "second" False
+        _ <- waitSubagents registry [agentId] 15000
+        readIORef releases `shouldReturn` 0
+        _ <- closeSubagent registry agentId
+        readIORef releases `shouldReturn` 1
+        closeSubagentRegistry registry
+        readIORef releases `shouldReturn` 1
+
+    it "releases open subagent-owned resources when the registry closes" do
+        released <- newIORef False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right _ <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $ subagentLease (writeIORef released True))
+            Nothing 0 "first" Nothing
+        closeSubagentRegistry registry
+        readIORef released `shouldReturn` True
+
+    it "releases composed subagent leases in reverse acquisition order" do
+        released <- newIORef ([] :: [Int])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $
+                subagentLease
+                    (atomicModifyIORef' released \xs -> (xs <> [1], ()))
+                    <> subagentLease
+                        (atomicModifyIORef' released \xs -> (xs <> [2], ())))
+            Nothing 0 "first" Nothing
+        _ <- closeSubagent registry agentId
+        readIORef released `shouldReturn` [2, 1]
+        closeSubagentRegistry registry
+
+    it "releases nested subagent resources before their parent's resources" do
+        released <- newIORef ([] :: [Text])
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        Right parent <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $ subagentLease $
+                atomicModifyIORef' released \xs -> (xs <> ["parent"], ()))
+            Nothing 0 "parent" Nothing
+        _ <- waitSubagents registry [parent] 15000
+        Right child <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")
+            (\_ -> pure $ subagentLease $
+                atomicModifyIORef' released \xs -> (xs <> ["child"], ()))
+            (Just parent) 1 "child" Nothing
+        _ <- waitSubagents registry [child] 15000
+        _ <- closeSubagent registry parent
+        readIORef released `shouldReturn` ["child", "parent"]
+        closeSubagentRegistry registry
+
     it "does not let sendInput resurrect a closed agent" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
@@ -568,7 +733,7 @@ spec = describe "Agent.Subagents" do
             `shouldReturn` Left "agent is closed"
         getStatus registry agentId `shouldReturn` Closed
 
-    it "reset cancels old workers and reopens with a fresh resource scope" do
+    it "reset cancels old supervisors and reopens the registry" do
         started <- newEmptyMVar
         notices <- newIORef ([] :: [SubagentId])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -826,9 +991,9 @@ shutdownRaceRegistry ran =
         (\_ _ _ _ -> writeIORef ran True >> pure (Left LoopNoResponseId))
         (\_ _ -> pure ())
 
-blockPreparation :: MVar () -> MVar () -> SubagentId -> IO ()
+blockPreparation :: MVar () -> MVar () -> SubagentId -> IO SubagentLease
 blockPreparation entered release _ =
-    putMVar entered () >> takeMVar release
+    putMVar entered () >> takeMVar release >> pure mempty
 
 spawnPreparedAt
     :: SubagentRegistry

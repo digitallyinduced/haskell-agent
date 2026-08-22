@@ -207,13 +207,15 @@ takeTable (header : sep : rest)
     | isTableRow header
     , isSeparatorRow sep =
         let (body, after) = span isTableRow rest
-            rows = map splitRow (header : body)
+            headerCells = splitRow header
+            bodyCells = map splitRow body
+            rows = headerCells : bodyCells
             widths = columnWidths rows
             top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
             mid = md [fg solarizedBase01] (boxLine '├' '┼' '┤' '─' widths)
             bot = md [fg solarizedBase01] (boxLine '└' '┴' '┘' '─' widths)
-            headerRow = styleTableRow True widths (head rows)
-            bodyRows = map (styleTableRow False widths) (drop 1 rows)
+            headerRow = styleTableRow True widths headerCells
+            bodyRows = map (styleTableRow False widths) bodyCells
             styled = [top, headerRow, mid] ++ bodyRows ++ [bot]
         in Just (styled, after)
 takeTable _ = Nothing

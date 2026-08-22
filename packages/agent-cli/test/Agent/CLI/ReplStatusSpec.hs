@@ -7,6 +7,7 @@ import Agent.CLI
     , cycleReplInteraction
     , devArgs
     , formatReplStatusLine
+    , formatStartupTimings
     , formatTokenUsage
     , withRestoredCurrentDirectory
     )
@@ -118,6 +119,16 @@ spec = do
                         ReplModeNormal emptyTokenUsage
             terminalTextWidth line `shouldBe` 16
             line `shouldBe` "  模型模型 · hi…"
+
+    describe "formatStartupTimings" do
+        it "sorts cumulative startup markers and keeps subsecond precision" do
+            formatStartupTimings
+                [ ("ready", 1.25)
+                , ("first frame", 0.042)
+                , ("Loading tools…", 0.4)
+                ]
+                `shouldBe`
+                    "startup: first frame 42ms · Loading tools… 400ms · ready 1.25s"
 
     describe "cycleReplMode" do
         it "walks ask → plan → always-approve → ask" do

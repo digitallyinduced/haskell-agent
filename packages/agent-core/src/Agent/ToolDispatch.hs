@@ -8,13 +8,13 @@ module Agent.ToolDispatch
     , ToolHandler
     , typedTool
     , typedToolWithCall
+    , typedStreamingTool
     , noArgsTool
     , functionToolCall
     , customToolCall
     , canonicalToolName
     , dispatchToolCall
     , dispatchToolHandler
-    , canonicalToolName
     , handlerName
     , toolArgumentsValue
     , decodeToolArguments
@@ -77,11 +77,13 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFormatResult :: Either Text Text -> Text
     , toolDispatchFormatException :: Text -> SomeException -> Text
     , toolDispatchOnException :: Text -> SomeException -> IO ()
+    , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
     }
 
 data ToolHandler
     = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
     | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
+    | forall args. FromJSON args => TypedStreamingTool Text ((Text -> IO ()) -> args -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
 typedTool :: FromJSON args => Text -> (args -> IO (Either Text Text)) -> ToolHandler
@@ -89,6 +91,15 @@ typedTool = TypedTool
 
 typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
 typedToolWithCall = TypedToolWithCall
+
+-- | A typed tool that can publish accumulated output snapshots while running.
+-- The final result remains authoritative.
+typedStreamingTool
+    :: FromJSON args
+    => Text
+    -> ((Text -> IO ()) -> args -> IO (Either Text Text))
+    -> ToolHandler
+typedStreamingTool = TypedStreamingTool
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -108,7 +119,12 @@ dispatchToolHandler config maybeHandler call = do
     let callName = call.name
         input = toolArgumentsValue call.arguments
         runTool = case maybeHandler of
-            Just handler -> runHandler call input handler
+            Just handler ->
+                runHandler
+                    (config.toolDispatchOnOutput call)
+                    call
+                    input
+                    handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- tryAny runTool
     resultOutput <- case result of
@@ -171,10 +187,16 @@ handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ -> name
     TypedToolWithCall name _ -> name
+    TypedStreamingTool name _ -> name
     NoArgsTool name _ -> name
 
-runHandler :: ToolCall -> Value -> ToolHandler -> IO (Either Text Text)
-runHandler call value = \case
+runHandler
+    :: (Text -> IO ())
+    -> ToolCall
+    -> Value
+    -> ToolHandler
+    -> IO (Either Text Text)
+runHandler emitOutput call value = \case
     TypedTool _ run ->
         case decodeToolArguments value of
             Right args -> run args
@@ -182,6 +204,10 @@ runHandler call value = \case
     TypedToolWithCall _ run ->
         case decodeToolArguments value of
             Right args -> run call args
+            Left err -> pure (Left err)
+    TypedStreamingTool _ run ->
+        case decodeToolArguments value of
+            Right args -> run emitOutput args
             Left err -> pure (Left err)
     NoArgsTool _ run ->
         run

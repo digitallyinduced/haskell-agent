@@ -250,6 +250,33 @@ spec = describe "runLoop" do
             , TurnFinished (emptyTurnOutput "resp-2" [] (Just "done"))
             ]
 
+    it "emits correlated tool output snapshots before completion" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "stream" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromHandlers
+                    [ typedStreamingTool "stream" \emit EchoArgs{message} -> do
+                        emit ("partial:" <> message)
+                        pure (Right ("complete:" <> message))
+                    ]
+                , loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        _ <- runLoop config Nothing "hello"
+        seen <- reverse <$> readIORef events
+        seen `shouldContain`
+            [ ToolStarted
+                (functionToolCall "c1" "stream" "{\"message\":\"hi\"}")
+            , ToolOutputUpdated "c1" "partial:hi"
+            , ToolFinished (functionResult "c1" "complete:hi")
+            ]
+
 
     it "returns LoopCancelled when the cancel flag is set during tools" do
         submissions <- newIORef []

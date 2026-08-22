@@ -4,6 +4,7 @@ module Agent.CLI.Compaction
     , codexAutoCompactTokenLimit
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWith
+    , compactOpenAIWith
     , runProviderCompact
     ) where
 
@@ -14,10 +15,7 @@ import Agent.Loop
     , TokenUsage(..)
     , TurnOutput(..)
     )
-import Agent.OpenAI.CompactClient
-    ( CompactRequest(..)
-    , compactConversation
-    )
+import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
     ( buildLocalCompactedHistory
     , compactTranscriptAtLastCheckpoint
@@ -31,8 +29,7 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Agent.Provider
-    ( Credential
-    , Provider(..)
+    ( Provider(..)
     , TokenProvider
     , runWithTokenProvider
     )
@@ -48,7 +45,6 @@ import Control.Monad.Trans.Except
     , withExceptT
     )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -93,40 +89,31 @@ compactOpenAI
     -> Int
     -> Maybe Text
     -> ExceptT Text IO CompactOutcome
-compactOpenAI tokenProvider params history before focus = do
+compactOpenAI =
+    compactOpenAIWith OpenAI.createCodexMessageWithProvider
+
+compactOpenAIWith
+    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
+    -> Maybe TokenProvider
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> Maybe Text
+    -> ExceptT Text IO CompactOutcome
+compactOpenAIWith send tokenProvider params history before focus = do
     provider <- requireTokenProvider OpenAIProvider tokenProvider
-    requireHistory history
-    let model = fromMaybe "gpt-5.6-luna" params.model
-        focusedHistory = case focus of
-            Just text | not (Text.null (Text.strip text)) ->
-                history
-                    <> [ userTextItem
-                            ( "Compaction focus from the user: "
-                                <> Text.strip text
-                            )
-                       ]
-            _ -> history
-        request =
-            CompactRequest
-                { compactModel = model
-                , compactInput = focusedHistory
-                , compactInstructions = params.instructions
-                , compactTools = params.tools
-                , compactParallelToolCalls =
-                    fromMaybe True params.parallelToolCalls
-                , compactReasoning = params.reasoning
-                }
-    items <- withExceptT formatApiError $
-        ExceptT (compactConversation provider request)
-    pure CompactOutcome
-        { compactBeforeTokens = before
-        , compactAfterTokens = estimateItemsTokens items
-        , compactHistory = items
-        , compactSummary =
-            "remote compact returned "
-                <> Text.pack (show (length items))
-                <> " items"
-        }
+    -- The default OpenAI transport uses the ChatGPT Codex backend. Its normal
+    -- /responses endpoint is available, but /responses/compact returns 404.
+    -- Compact locally without first paying for a known-failing HTTP request.
+    -- Agent.OpenAI.CompactClient remains available to callers targeting an
+    -- API-compatible host that implements the remote compact endpoint.
+    summarizeLocal
+        send
+        provider
+        params
+        history
+        before
+        focus
 
 compactLocalXai
     :: Maybe TokenProvider
@@ -139,7 +126,9 @@ compactLocalXai tokenProvider params history before focus = do
     provider <- requireTokenProvider XAIProvider tokenProvider
     options <- lift XAI.clientOptionsFromEnv
     summarizeLocal
-        (XAI.createResponseWith options)
+        (\tokens request ->
+            runWithTokenProvider tokens \credential ->
+                XAI.createResponseWith options credential request)
         provider
         params
         history
@@ -157,7 +146,9 @@ compactLocalOpenRouter tokenProvider params history before focus = do
     provider <- requireTokenProvider OpenRouterProvider tokenProvider
     options <- lift OpenRouter.clientOptionsFromEnv
     summarizeLocal
-        (OpenRouter.createResponseWith options)
+        (\tokens request ->
+            runWithTokenProvider tokens \credential ->
+                OpenRouter.createResponseWith options credential request)
         provider
         params
         history
@@ -165,7 +156,7 @@ compactLocalOpenRouter tokenProvider params history before focus = do
         focus
 
 summarizeLocal
-    :: (Credential -> ResponseCreateParams -> IO (Either ApiError Response))
+    :: (TokenProvider -> ResponseCreateParams -> IO (Either ApiError Response))
     -> TokenProvider
     -> ResponseCreateParams
     -> [ResponseItem]
@@ -187,9 +178,7 @@ summarizeLocal send provider params history before focus = do
                 summaryParams
                 (history <> [userTextItem summaryPrompt])
     response <- withExceptT formatApiError $
-        ExceptT $
-            runWithTokenProvider provider \credential ->
-                send credential request
+        ExceptT (send provider request)
     summary <- case assistantTextFromResponse response of
         Nothing -> throwE "compaction produced no summary text"
         Just text -> pure text

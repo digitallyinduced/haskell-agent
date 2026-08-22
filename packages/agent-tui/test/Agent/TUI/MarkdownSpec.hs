@@ -1,6 +1,9 @@
-module Agent.CLI.TUIMarkdownSpec (spec) where
+module Agent.TUI.MarkdownSpec (spec) where
 
-import Agent.CLI.TUI.Markdown
+import Agent.TUI.Markdown
+import Brick (Widget, renderWidget, txt)
+import Data.List (isInfixOf)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -28,3 +31,19 @@ spec = describe "fullscreen Markdown inline parsing" do
     it "leaves unmatched delimiters visible" do
         inlinePlainText (parseInline "unfinished **bold")
             `shouldBe` "unfinished **bold"
+
+    it "keeps long unstyled input in one plain span" do
+        let input = Text.replicate 10000 "a"
+        parseInline input
+            `shouldBe` [InlineSpan InlinePlain input]
+
+    it "renders numbered controls for fenced code block headers" do
+        let widget :: Widget ()
+            widget =
+                markdownWidgetWithCodeControls
+                    (\index language ->
+                        txt (Text.pack (show index) <> ":" <> language))
+                    "```bash\none\n```\n\n~~~haskell\ntwo\n~~~"
+            rendered = show (renderWidget Nothing [widget] (40, 12))
+        rendered `shouldSatisfy` isInfixOf "1:bash"
+        rendered `shouldSatisfy` isInfixOf "2:haskell"

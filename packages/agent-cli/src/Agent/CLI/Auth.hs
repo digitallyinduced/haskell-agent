@@ -1,14 +1,19 @@
 -- | Load ChatGPT, Grok, or OpenRouter credentials for the CLI process.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
+    , GrokAuthState(..)
     , grokCredentialFromAuthJson
+    , grokAuthStateFromJson
+    , grokAuthStateToJson
     , grokEmailFromAuthJson
     , loadAuth
+    , managedGrokTokenProvider
     , openAIOAuthClientId
     , openAiAuthStateChanged
     , openaiAuthStateFromJson
     , probeLoadedAuth
     , reloadableFileCredentialProvider
+    , staticCredentialProvider
     , xaiOAuthClientId
     ) where
 
@@ -17,6 +22,8 @@ import Agent.CLI.CredentialStore
     , ManagedCredential(..)
     , ManagedSecret(..)
     , loadManagedCredentials
+    , upsertManagedCredentialAfterRefresh
+    , withCredentialRefreshFileLock
     , updateManagedCredentialSecret
     )
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -35,9 +42,9 @@ import Agent.Provider
     , seedTokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
-import Agent.XAI.Auth (accountIdFromAccessToken, emailFromToken)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import qualified Agent.XAI.Auth as XAIAuth
 import Control.Applicative ((<|>))
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (bracket, bracket_)
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
@@ -53,13 +60,14 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (partitionEithers)
 import Data.Function (on)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find, nubBy)
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
@@ -96,6 +104,20 @@ data LoadedAuth = LoadedAuth
     -- | Live OpenAI OAuth pool, when authentication uses one.
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
+
+data GrokAuthState = GrokAuthState
+    { grokAccessToken :: !Text, grokRefreshToken :: !(Maybe Text)
+    , grokIdToken :: !(Maybe Text), grokExpiresAt :: !(Maybe UTCTime)
+    }
+    deriving (Eq)
+
+instance Show GrokAuthState where
+    show state =
+        "GrokAuthState { grokAccessToken = <redacted>, grokRefreshToken = "
+            <> maybe "Nothing" (const "Just <redacted>") state.grokRefreshToken
+            <> ", grokIdToken = "
+            <> maybe "Nothing" (const "Just <redacted>") state.grokIdToken
+            <> ", grokExpiresAt = " <> show state.grokExpiresAt <> " }"
 
 loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
 loadAuth requested = runExceptT do
@@ -138,25 +160,54 @@ detectProvider Nothing = do
 
 loadXai :: ExceptT Text IO LoadedAuth
 loadXai = do
-    credential <- lift loadXaiCredential
-    case credential of
-        Nothing -> throwE noAuthHint
-        Just loaded -> do
-            provider <- lift $ reloadableFileCredentialProvider
-                XAIProvider loaded loadXaiCredential
+    managed <- lift (loadManagedCredential XAIProvider)
+    case managed of
+        Just (metadata, secret)
+            | metadata.managedAuthKind == ManagedGrokAuthJson -> do
+                now <- lift getCurrentTime
+                state <- maybe
+                    (throwE "managed Grok OAuth credential contains invalid auth JSON")
+                    pure
+                    (grokAuthStateFromJson now secret.secretPayload)
+                clientId <-
+                    lift $
+                        xaiOAuthClientId
+                            <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
+                provider <- lift $ managedGrokTokenProvider
+                    metadata
+                    secret
+                    state
+                    (XAIAuth.refreshAccessToken
+                        (XAIAuth.defaultOAuthOptions clientId))
+                pure LoadedAuth
+                    { loadedProvider = XAIProvider
+                    , loadedTokenProvider = provider
+                    , loadedOpenAiPool = Nothing
+                    }
+        Just (metadata, secret) ->
             pure LoadedAuth
                 { loadedProvider = XAIProvider
-                , loadedTokenProvider = provider
+                , loadedTokenProvider =
+                    staticCredentialProvider Credential
+                        { accessToken = secret.secretPayload
+                        , accountId = metadata.managedAccountId
+                        , leaseId = Nothing
+                        , provider = XAIProvider
+                        }
                 , loadedOpenAiPool = Nothing
                 }
-
-loadXaiCredential :: IO (Maybe Credential)
-loadXaiCredential = do
-    managed <- loadManagedCredential XAIProvider
-    case managed of
-        Just (metadata, secret) ->
-            pure $ managedBearerCredential metadata secret
-        Nothing -> loadGrokCredential
+        Nothing -> do
+            credential <- lift loadExternalGrokCredential
+            case credential of
+                Nothing -> throwE noAuthHint
+                Just loaded -> do
+                    provider <- lift $ reloadableFileCredentialProvider
+                        XAIProvider loaded loadExternalGrokCredential
+                    pure LoadedAuth
+                        { loadedProvider = XAIProvider
+                        , loadedTokenProvider = provider
+                        , loadedOpenAiPool = Nothing
+                        }
 
 loadOpenRouterKey :: IO (Maybe Text)
 loadOpenRouterKey = do
@@ -525,21 +576,22 @@ loadManagedCredential provider =
                 , metadata.managedProvider == provider
                 ]
 
-managedBearerCredential
-    :: ManagedCredential
-    -> ManagedSecret
-    -> Maybe Credential
-managedBearerCredential metadata secret =
-    let token = case metadata.managedAuthKind of
-            ManagedGrokAuthJson ->
-                grokCredentialFromAuthJson secret.secretPayload
-            _ -> Just secret.secretPayload
-    in (\accessToken -> Credential
-        { accessToken
-        , accountId = metadata.managedAccountId
-        , leaseId = Nothing
-        , provider = metadata.managedProvider
-        }) <$> token
+loadManagedCredentialById
+    :: Text
+    -> IO (Either Text (ManagedCredential, ManagedSecret))
+loadManagedCredentialById credentialId =
+    loadManagedCredentials >>= \case
+        Left err -> pure (Left err)
+        Right credentials ->
+            pure $ maybe
+                (Left
+                    ("managed credential disappeared during refresh: "
+                        <> credentialId))
+                Right
+                (listToMaybe
+                    (filter
+                        ((== credentialId) . (.managedId) . fst)
+                        credentials))
 
 openaiAuthStateFromJson :: UTCTime -> LBS.ByteString -> Maybe OpenAI.AuthState
 openaiAuthStateFromJson now bytes = do
@@ -582,8 +634,8 @@ authStateToJson state now = Aeson.object
         ]
     ]
 
-loadGrokCredential :: IO (Maybe Credential)
-loadGrokCredential = do
+loadExternalGrokCredential :: IO (Maybe Credential)
+loadExternalGrokCredential = do
     fromJson <- lookupNonEmpty "GROK_AUTH_JSON"
     fromToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
@@ -601,21 +653,215 @@ loadGrokCredential = do
     pure (fmap grokCredential token)
 
 grokCredentialFromAuthJson :: Text -> Maybe Text
-grokCredentialFromAuthJson raw = do
-    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
-    entryToken value <|> firstNestedToken value
+grokCredentialFromAuthJson raw =
+    (.grokAccessToken) <$> grokAuthStateFromJson epoch raw
   where
-    entryToken (Aeson.Object object) =
-        textField "key" object <|> textField "access_token" object
-    entryToken _ = Nothing
+    epoch = posixSecondsToUTCTime 0
 
-    firstNestedToken (Aeson.Object object) =
-        listToMaybe
-            [ token
-            | nested <- KeyMap.elems object
-            , Just token <- [entryToken nested]
-            ]
-    firstNestedToken _ = Nothing
+grokAuthStateFromJson :: UTCTime -> Text -> Maybe GrokAuthState
+grokAuthStateFromJson now raw = do
+    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
+    object <- authObject value
+    grokAccessToken <-
+        textField "key" object <|> textField "access_token" object
+    let grokRefreshToken = textField "refresh_token" object
+        grokIdToken = textField "id_token" object
+        grokExpiresAt =
+            utcTimeField "expires_at" object
+                <|> ((`addUTCTime` now) . fromIntegral
+                    <$> intField "expires_in" object)
+                <|> OpenAI.parseJwtExp grokAccessToken
+    pure GrokAuthState{..}
+
+grokAuthStateToJson :: GrokAuthState -> Aeson.Value
+grokAuthStateToJson state = Aeson.object
+    [ "access_token" .= state.grokAccessToken
+    , "refresh_token" .= state.grokRefreshToken
+    , "id_token" .= state.grokIdToken
+    , "expires_at" .= state.grokExpiresAt
+    ]
+
+authObject :: Aeson.Value -> Maybe Aeson.Object
+authObject = \case
+    Aeson.Object object
+        | hasAccessToken object -> Just object
+        | otherwise ->
+            listToMaybe
+                [ nestedObject
+                | Aeson.Object nestedObject <- KeyMap.elems object
+                , hasAccessToken nestedObject
+                ]
+    _ -> Nothing
+  where
+    hasAccessToken object =
+        isJust (textField "key" object <|> textField "access_token" object)
+
+utcTimeField :: Text -> Aeson.Object -> Maybe UTCTime
+utcTimeField name object =
+    KeyMap.lookup (Key.fromText name) object >>= \value ->
+        case Aeson.fromJSON value of
+            Aeson.Success time -> Just time
+            Aeson.Error _ -> case value of
+                Aeson.Number seconds ->
+                    Just
+                        (posixSecondsToUTCTime (realToFrac seconds))
+                _ -> Nothing
+
+intField :: Text -> Aeson.Object -> Maybe Int
+intField name object = case KeyMap.lookup (Key.fromText name) object of
+    Just (Aeson.Number value) -> Just (floor value)
+    _ -> Nothing
+
+grokNeedsRefresh :: UTCTime -> GrokAuthState -> Bool
+grokNeedsRefresh now state =
+    maybe False (<= addUTCTime 600 now) state.grokExpiresAt
+
+managedGrokTokenProvider
+    :: ManagedCredential
+    -> ManagedSecret
+    -> GrokAuthState
+    -> (Text -> IO (Either ApiError XAIAuth.OAuthTokens))
+    -> IO TokenProvider
+managedGrokTokenProvider metadata secret initial refresh = do
+    stateRef <- newIORef initial
+    refreshLock <- newMVar ()
+    pure $ TokenProvider \failed ->
+        withMVar refreshLock \_ ->
+            managedGrokCredential metadata secret stateRef refresh failed
+
+managedGrokCredential
+    :: ManagedCredential
+    -> ManagedSecret
+    -> IORef GrokAuthState
+    -> (Text -> IO (Either ApiError XAIAuth.OAuthTokens))
+    -> Maybe FailedCredential
+    -> IO (Either ApiError Credential)
+managedGrokCredential metadata secret stateRef refresh failed = do
+    current <- readIORef stateRef
+    case failed of
+        Just FailedCredential
+            { failure = AccountRateLimited { retryAfterSeconds }
+            } -> do
+                now <- getCurrentTime
+                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
+                pure $ Left $ CredentialsExhausted
+                    (addUTCTime (fromIntegral seconds) now)
+        Just FailedCredential
+            { credential = rejected
+            , failure = AccountAuthenticationRejected
+            }
+            | rejected.accessToken /= current.grokAccessToken ->
+                pure (Right (grokCredentialFromState metadata current))
+            | otherwise ->
+                refreshManagedGrok metadata secret stateRef refresh current
+        Nothing -> do
+            now <- getCurrentTime
+            if grokNeedsRefresh now current
+                then refreshManagedGrok metadata secret stateRef refresh current
+                else pure (Right (grokCredentialFromState metadata current))
+
+refreshManagedGrok
+    :: ManagedCredential
+    -> ManagedSecret
+    -> IORef GrokAuthState
+    -> (Text -> IO (Either ApiError XAIAuth.OAuthTokens))
+    -> GrokAuthState
+    -> IO (Either ApiError Credential)
+refreshManagedGrok metadata _secret stateRef refresh state =
+    withCredentialRefreshFileLock $
+        loadManagedCredentialById metadata.managedId >>= \case
+            Left err -> pure (Left (ConnectionError err))
+            Right (latestMetadata, latestSecret) -> do
+                now <- getCurrentTime
+                case grokAuthStateFromJson now latestSecret.secretPayload of
+                    Nothing ->
+                        pure $ Left $ ProviderError AuthenticationError
+                            "managed Grok OAuth credential became invalid during refresh"
+                            Nothing
+                    Just current
+                        | grokStateChanged state current -> do
+                            writeIORef stateRef current
+                            pure
+                                (Right
+                                    (grokCredentialFromState
+                                        latestMetadata current))
+                        | otherwise ->
+                            refreshCurrentGrok
+                                latestMetadata latestSecret
+                                stateRef refresh current
+
+grokStateChanged :: GrokAuthState -> GrokAuthState -> Bool
+grokStateChanged stale current =
+    stale.grokAccessToken /= current.grokAccessToken
+        || stale.grokRefreshToken /= current.grokRefreshToken
+
+refreshCurrentGrok
+    :: ManagedCredential
+    -> ManagedSecret
+    -> IORef GrokAuthState
+    -> (Text -> IO (Either ApiError XAIAuth.OAuthTokens))
+    -> GrokAuthState
+    -> IO (Either ApiError Credential)
+refreshCurrentGrok metadata secret stateRef refresh state =
+    case state.grokRefreshToken of
+        Nothing ->
+            pure $ Left $ ProviderError AuthenticationError
+                "managed Grok OAuth credential has no refresh token; reconnect the account"
+                Nothing
+        Just refreshToken ->
+            refresh refreshToken >>= \case
+                Left err -> pure (Left err)
+                Right tokens ->
+                    persistRefreshedGrok
+                        metadata secret stateRef state tokens
+
+persistRefreshedGrok
+    :: ManagedCredential
+    -> ManagedSecret
+    -> IORef GrokAuthState
+    -> GrokAuthState
+    -> XAIAuth.OAuthTokens
+    -> IO (Either ApiError Credential)
+persistRefreshedGrok metadata secret stateRef state tokens = do
+    now <- getCurrentTime
+    let newState = GrokAuthState
+            { grokAccessToken = tokens.accessToken
+            , grokRefreshToken =
+                tokens.refreshToken <|> state.grokRefreshToken
+            , grokIdToken = tokens.idToken <|> state.grokIdToken
+            , grokExpiresAt =
+                ((`addUTCTime` now) . fromIntegral
+                    <$> tokens.expiresInSeconds)
+                    <|> OpenAI.parseJwtExp tokens.accessToken
+            }
+        newAccountId =
+            fromMaybe metadata.managedAccountId
+                (XAIAuth.accountIdFromAccessToken tokens.accessToken)
+        newMetadata = metadata { managedAccountId = newAccountId }
+        newSecret = secret
+            { secretPayload =
+                TextEncoding.decodeUtf8
+                    (LBS.toStrict
+                        (Aeson.encode (grokAuthStateToJson newState)))
+            }
+    upsertManagedCredentialAfterRefresh newMetadata newSecret >>= \case
+        Left err -> pure (Left (ConnectionError err))
+        Right () -> do
+            writeIORef stateRef newState
+            pure (Right (grokCredentialFromState newMetadata newState))
+
+grokCredentialFromState
+    :: ManagedCredential
+    -> GrokAuthState
+    -> Credential
+grokCredentialFromState metadata state = Credential
+    { accessToken = state.grokAccessToken
+    , accountId =
+        fromMaybe metadata.managedAccountId
+            (XAIAuth.accountIdFromAccessToken state.grokAccessToken)
+    , leaseId = Nothing
+    , provider = XAIProvider
+    }
 
 grokEmailFromAuthJson :: Text -> Maybe Text
 grokEmailFromAuthJson raw = do
@@ -624,9 +870,9 @@ grokEmailFromAuthJson raw = do
   where
     entryEmail (Aeson.Object object) =
         textField "email" object
-            <|> (textField "id_token" object >>= emailFromToken)
-            <|> (textField "access_token" object >>= emailFromToken)
-            <|> (textField "key" object >>= emailFromToken)
+            <|> (textField "id_token" object >>= XAIAuth.emailFromToken)
+            <|> (textField "access_token" object >>= XAIAuth.emailFromToken)
+            <|> (textField "key" object >>= XAIAuth.emailFromToken)
     entryEmail _ = Nothing
 
     firstNestedEmail (Aeson.Object object) =
@@ -640,7 +886,8 @@ grokEmailFromAuthJson raw = do
 grokCredential :: Text -> Credential
 grokCredential token = Credential
     { accessToken = token
-    , accountId = fromMaybe "grok" (accountIdFromAccessToken token)
+    , accountId =
+        fromMaybe "grok" (XAIAuth.accountIdFromAccessToken token)
     , leaseId = Nothing
     , provider = XAIProvider
     }
@@ -731,6 +978,24 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
             readIORef cache >>= \case
                 Just credential -> pure (Right credential)
                 Nothing -> loadFresh Nothing
+
+staticCredentialProvider :: Credential -> TokenProvider
+staticCredentialProvider credential = TokenProvider \failed ->
+    case failed of
+        Nothing -> pure (Right credential)
+        Just FailedCredential
+            { failure = AccountRateLimited { retryAfterSeconds }
+            } -> do
+                now <- getCurrentTime
+                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
+                pure $ Left $ CredentialsExhausted
+                    (addUTCTime (fromIntegral seconds) now)
+        Just FailedCredential
+            { failure = AccountAuthenticationRejected
+            } ->
+                pure $ Left $ ProviderError AuthenticationError
+                    "static credential was rejected"
+                    Nothing
 
 lookupNonEmpty :: String -> IO (Maybe Text)
 lookupNonEmpty name = do

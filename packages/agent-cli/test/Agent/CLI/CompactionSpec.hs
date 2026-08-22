@@ -4,13 +4,21 @@ import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , autoCompactOpenAiBackendWith
     , codexAutoCompactTokenLimit
+    , compactOpenAIWith
     , runProviderCompact
     )
 import Agent.Loop
-import Agent.OpenAI.Compaction (userTextItem)
-import Agent.Responses.Types (defaultResponseCreateParams)
+import Agent.OpenAI.Compaction
+    ( hasCompactionCheckpoint
+    , userTextItem
+    )
+import Agent.Responses.Types
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
 import Agent.Provider (Provider(..), TokenProvider(..))
 import Data.IORef
+import Control.Monad.Trans.Except (runExceptT)
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
@@ -33,6 +41,33 @@ spec = do
                     error "empty compaction unexpectedly requested credentials"
             runProviderCompact OpenAIProvider (Just provider) params transcript Nothing
                 `shouldReturn` Left "nothing to compact"
+
+    describe "compactOpenAIWith" do
+        it "uses normal Responses summarization directly" do
+            requests <- newIORef []
+            let provider = TokenProvider \_ ->
+                    error "local summarization unexpectedly requested credentials"
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right (summaryResponse "local summary"))
+                history = [userTextItem "old context"]
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    defaultResponseCreateParams
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome -> do
+                    outcome.compactSummary `shouldBe` "local summary"
+                    outcome.compactHistory
+                        `shouldSatisfy` hasCompactionCheckpoint
+            seen <- readIORef requests
+            length seen `shouldBe` 1
+            map (.tools) seen `shouldBe` [Nothing]
+            map (.parallelToolCalls) seen `shouldBe` [Just False]
 
     describe "autoCompactOpenAiBackendWith" do
         it "compacts before the next request at the Codex token limit" do
@@ -72,3 +107,26 @@ spec = do
                 Just (25, length compactedHistory)
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
+
+summaryResponse :: Text -> Response
+summaryResponse summary =
+    case Aeson.fromJSON $ Aeson.object
+        [ "id" .= ("resp-summary" :: Text)
+        , "created_at" .= (0 :: Int)
+        , "status" .= ("completed" :: Text)
+        , "model" .= ("gpt-test" :: Text)
+        , "output" .=
+            [ Aeson.object
+                [ "type" .= ("message" :: Text)
+                , "role" .= ("assistant" :: Text)
+                , "content" .=
+                    [ Aeson.object
+                        [ "type" .= ("output_text" :: Text)
+                        , "text" .= summary
+                        ]
+                    ]
+                ]
+            ]
+        ] of
+        Aeson.Success response -> response
+        Aeson.Error err -> error err

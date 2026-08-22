@@ -9,6 +9,7 @@ module Agent.Tools.IO
     , renameTextFile
     , listDirectoryEntries
     , runShellCommand
+    , runShellCommandStreaming
     , startShellCommand
     , stopShellCommand
     , terminateProcessGroup
@@ -34,6 +35,7 @@ import Control.Concurrent.Async
     , cancel
     , concurrently
     , race
+    , withAsync
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -50,7 +52,7 @@ import Control.Exception.Safe
     , onException
     , try
     )
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
@@ -121,7 +123,21 @@ runShellCommand
     -> String
     -> Int
     -> IO CommandResult
-runShellCommand env workdir command timeoutMs = mask \restore -> do
+runShellCommand env workdir command timeoutMs =
+    runShellCommandStreaming env workdir command timeoutMs (\_ _ -> pure ())
+
+-- | Run a foreground shell command while publishing accumulated stdout/stderr
+-- snapshots. Snapshots are coalesced to at most roughly ten per second and the
+-- final 'CommandResult' remains authoritative.
+runShellCommandStreaming
+    :: ToolEnv
+    -> OsPath
+    -> String
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO CommandResult
+runShellCommandStreaming env workdir command timeoutMs onSnapshot =
+    mask \restore -> do
     let spec = (shell command)
             { cwd = Just (toFilePath workdir)
             , std_in = CreatePipe
@@ -145,16 +161,35 @@ runShellCommand env workdir command timeoutMs = mask \restore -> do
                     terminateProcessGroup groupId processHandle
                     closePipes
             hClose hin `onException` stopCommand
-            outRef <- newIORef emptyCapturedBytes
-            errRef <- newIORef emptyCapturedBytes
+            stdoutRef <- newIORef emptyCapturedBytes
+            stderrRef <- newIORef emptyCapturedBytes
+            lastSnapshotRef <- newIORef Nothing
             let collect = do
                     -- Drain stdout and stderr concurrently so a child that
                     -- fills one pipe cannot deadlock the other.
-                    (out, err) <- concurrently
-                        (drainHandle env.toolStdoutCap hout outRef)
-                        (drainHandle env.toolStdoutCap herr errRef)
-                    code <- waitForProcess processHandle
-                    pure (out, err, code)
+                    withAsync sampleSnapshots \_sampler -> do
+                        (out, err) <- concurrently
+                            (drainHandle env.toolStdoutCap hout stdoutRef)
+                            (drainHandle env.toolStdoutCap herr stderrRef)
+                        code <- waitForProcess processHandle
+                        emitSnapshot
+                        pure (out, err, code)
+                sampleSnapshots = do
+                    threadDelay 100000
+                    emitSnapshot
+                    sampleSnapshots
+                emitSnapshot = do
+                    outBytes <- readIORef stdoutRef
+                    errBytes <- readIORef stderrRef
+                    let out = renderCapturedBytes outBytes
+                        err = renderCapturedBytes errBytes
+                        snapshot = (out, err)
+                    changed <- atomicModifyIORef' lastSnapshotRef \previous ->
+                        if previous == Just snapshot
+                            then (previous, False)
+                            else (Just snapshot, True)
+                    when (changed && not (Text.null out && Text.null err)) $
+                        onSnapshot out err
                 -- Prefer cancel over timeout when both fire: race cancel
                 -- against (timeout `race` collect).
                 waitStop = do

@@ -65,7 +65,7 @@ joinTaskPath (TaskPath parent) name = do
 -- | Resolve a target reference relative to the caller's path.
 -- Absolute @/root/...@ paths parse directly; relative names join the caller.
 resolveTaskPath :: TaskPath -> Text -> Either Text TaskPath
-resolveTaskPath current@(TaskPath currentText) reference
+resolveTaskPath (TaskPath currentText) reference
     | Text.null reference = Left "target must not be empty"
     | reference == "/root" = Right taskPathRoot
     | "/" `Text.isPrefixOf` reference = parseTaskPath reference
