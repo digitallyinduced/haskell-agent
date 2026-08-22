@@ -2,7 +2,7 @@ module Agent.CLI.CredentialStoreSpec (spec) where
 
 import Agent.CLI.CredentialStore
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Bits ((.&.))
@@ -89,7 +89,7 @@ account = ManagedCredential
     , managedProvider = OpenRouterProvider
     , managedAccountId = "account"
     , managedLabel = "Test"
-    , managedBilling = ManagedApiCredits
+    , managedBilling = ApiBilled
     , managedAuthKind = ManagedBearerToken
     , managedEnabled = True
     }

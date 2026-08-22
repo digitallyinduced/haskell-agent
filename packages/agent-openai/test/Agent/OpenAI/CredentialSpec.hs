@@ -55,7 +55,7 @@ spec = do
     describe "runWithTokenProvider" do
         it "shares account failover orchestration across transports" do
             reportedFailures <- newIORef ([] :: [Maybe FailedCredential])
-            let provider = TokenProvider \reported -> do
+            let provider = tokenProvider SubscriptionBilled \reported -> do
                     modifyIORef' reportedFailures (<> [reported])
                     pure $ Right $ case reported of
                         Nothing -> credentialFor "acc-a"
@@ -73,7 +73,7 @@ spec = do
 
         it "does not poison credentials after transport failures" do
             acquisitions <- newIORef (0 :: Int)
-            let provider = TokenProvider \_ -> do
+            let provider = tokenProvider SubscriptionBilled \_ -> do
                     modifyIORef' acquisitions (+ 1)
                     pure $ Right (credentialFor "acc-a")
             result <- runWithTokenProvider provider \_ ->
@@ -87,7 +87,7 @@ spec = do
             let exhausted = credentialFor "acc-exhausted"
                 initialFailure =
                     failed exhausted (AccountRateLimited (Just 120))
-                provider = TokenProvider \reported -> do
+                provider = tokenProvider SubscriptionBilled \reported -> do
                     modifyIORef' reportedFailures (<> [reported])
                     pure $ Right (credentialFor "acc-healthy")
 
@@ -100,13 +100,14 @@ spec = do
     describe "seedTokenProvider" do
         it "uses an acquired replacement exactly once before delegating" do
             acquisitions <- newIORef (0 :: Int)
-            let underlying = TokenProvider \_ -> do
+            let underlying = tokenProvider SubscriptionBilled \_ -> do
                     call <- atomicModifyIORef' acquisitions (\n -> (n + 1, n + 1))
                     pure $ Right (credentialFor ("underlying-" <> showText call))
                 replacement = (credentialFor "replacement")
                     { leaseId = Just "replacement-lease" }
             seeded <- seedTokenProvider underlying replacement
 
+            tokenProviderBillingMode seeded `shouldBe` SubscriptionBilled
             first <- getNextToken seeded Nothing
             second <- getNextToken seeded Nothing
 
@@ -116,7 +117,7 @@ spec = do
 
         it "forwards failure feedback without consuming the seed" do
             reported <- newIORef ([] :: [Maybe FailedCredential])
-            let underlying = TokenProvider \failure -> do
+            let underlying = tokenProvider SubscriptionBilled \failure -> do
                     modifyIORef' reported (<> [failure])
                     pure $ Right (credentialFor "after-feedback")
                 replacement = (credentialFor "replacement")
@@ -135,6 +136,7 @@ spec = do
         it "acquires a credential without exposing local pool details" do
             provider <- localProvider ["acc-a"] (pure . Right)
 
+            tokenProviderBillingMode provider `shouldBe` SubscriptionBilled
             result <- getNextToken provider Nothing
 
             fmap (.accountId) result `shouldBe` Right "acc-a"
@@ -205,7 +207,9 @@ spec = do
 
     describe "staticBearerProvider" do
         it "returns the same bearer without an account id" do
-            result <- getNextToken (staticBearerProvider "router-key") Nothing
+            let provider = staticBearerProvider "router-key"
+            tokenProviderBillingMode provider `shouldBe` ApiBilled
+            result <- getNextToken provider Nothing
 
             case result of
                 Right credential -> do

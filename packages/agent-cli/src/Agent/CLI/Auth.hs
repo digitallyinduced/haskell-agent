@@ -34,13 +34,15 @@ import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.Provider
     ( AccountFailure(..)
+    , BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider(..)
+    , TokenProvider
     , getNextToken
     , providerSlug
     , seedTokenProvider
+    , tokenProvider
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
 import Agent.OsPath (unsafeToFilePath)
@@ -235,7 +237,7 @@ loadXai = do
             pure LoadedAuth
                 { loadedProvider = XAIProvider
                 , loadedTokenProvider =
-                    staticCredentialProvider Credential
+                    staticCredentialProvider metadata.managedBilling Credential
                         { accessToken = secret.secretPayload
                         , accountId = metadata.managedAccountId
                         , leaseId = Nothing
@@ -251,7 +253,10 @@ loadXai = do
                 Nothing -> throwE noAuthHint
                 Just loaded -> do
                     provider <- lift $ reloadableFileCredentialProvider
-                        XAIProvider loaded loadExternalGrokCredential
+                        XAIProvider
+                        SubscriptionBilled
+                        loaded
+                        loadExternalGrokCredential
                     pure LoadedAuth
                         { loadedProvider = XAIProvider
                         , loadedTokenProvider = provider
@@ -280,7 +285,9 @@ loadOpenRouter = do
         Nothing -> throwE noAuthHint
         Just (initial, initialLabel) -> do
             provider <- lift $ reloadableFileCredentialProvider
-                OpenRouterProvider initial
+                OpenRouterProvider
+                ApiBilled
+                initial
                 (fmap (fmap fst) loadOpenRouterCredential)
             pure LoadedAuth
                 { loadedProvider = OpenRouterProvider
@@ -309,13 +316,20 @@ loadOpenAi = do
     clientId <-
         lift $
             openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
+    let billing =
+            if any ((== SubscriptionBilled) . (.openAiBilling)) accounts
+                then SubscriptionBilled
+                else ApiBilled
+        activeAccounts =
+            filter ((== billing) . (.openAiBilling)) accounts
     refreshLock <- lift (newMVar ())
-    accountSources <- lift (newIORef accounts)
+    accountSources <- lift (newIORef activeAccounts)
     pool <- lift $ OpenAI.newDiscoveringPool
-        (map (.openAiState) accounts)
+        (map (.openAiState) activeAccounts)
         (refreshOpenAiAccount refreshLock clientId accountSources)
-        (discoverOpenAiAccounts accountSources)
-    tokenProvider <- lift (OpenAICredential.poolTokenProvider pool)
+        (discoverOpenAiAccounts billing accountSources)
+    tokenProvider <- lift
+        (OpenAICredential.poolTokenProviderWithBilling billing pool)
     pure LoadedAuth
         { loadedProvider = OpenAIProvider
         , loadedTokenProvider = tokenProvider
@@ -371,6 +385,7 @@ loadOpenAiAccounts = do
                 { openAiState = state
                 , openAiSource = OpenAiEnvironmentOAuth
                 , openAiLabel = openAiStateLabel "ChatGPT" state
+                , openAiBilling = SubscriptionBilled
                 }
         fileAccount = do
             state <- fileBytes >>= openaiAuthStateFromJson now
@@ -378,6 +393,7 @@ loadOpenAiAccounts = do
                 { openAiState = state
                 , openAiSource = OpenAiAuthFile filePath
                 , openAiLabel = openAiStateLabel "ChatGPT" state
+                , openAiBilling = SubscriptionBilled
                 }
         externalAccounts =
             filter
@@ -389,15 +405,17 @@ loadOpenAiAccounts = do
     pure (storeErrors <> managedErrors, accounts)
 
 discoverOpenAiAccounts
-    :: IORef [OpenAiAccount]
+    :: BillingMode
+    -> IORef [OpenAiAccount]
     -> [Text]
     -> IO (Either ApiError [OpenAI.AuthState])
-discoverOpenAiAccounts accountSources knownAccountIds = do
+discoverOpenAiAccounts billing accountSources knownAccountIds = do
     (errors, accounts) <- loadOpenAiAccounts
     let additional =
             filter
                 (\account ->
-                    account.openAiState.accountId `notElem` knownAccountIds)
+                    account.openAiBilling == billing
+                        && account.openAiState.accountId `notElem` knownAccountIds)
                 accounts
     if null additional
         then pure $ case errors of
@@ -419,6 +437,7 @@ data OpenAiAccount = OpenAiAccount
     { openAiState :: !OpenAI.AuthState
     , openAiSource :: !OpenAiCredentialSource
     , openAiLabel :: !Text
+    , openAiBilling :: !BillingMode
     }
 
 managedOpenAiAccount
@@ -448,6 +467,7 @@ managedOpenAiAccount now (metadata, secret) =
                                 OpenAiManagedOAuth metadata.managedId
                             , openAiLabel =
                                 openAiStateLabel metadata.managedLabel state
+                            , openAiBilling = metadata.managedBilling
                             }
         _ ->
             Right OpenAiAccount
@@ -462,6 +482,7 @@ managedOpenAiAccount now (metadata, secret) =
                         , provider = OpenAIProvider
                         })
                     (nonEmptyText metadata.managedLabel)
+                , openAiBilling = metadata.managedBilling
                 }
 
 openAiStaticAccount :: UTCTime -> Text -> IO OpenAiAccount
@@ -477,6 +498,7 @@ openAiStaticAccount now token = do
                 , leaseId = Nothing
                 , provider = OpenAIProvider
                 }
+        , openAiBilling = SubscriptionBilled
         }
 
 openAiStateLabel :: Text -> OpenAI.AuthState -> Text
@@ -859,7 +881,7 @@ managedGrokTokenProvider
 managedGrokTokenProvider metadata secret initial refresh = do
     stateRef <- newIORef initial
     refreshLock <- newMVar ()
-    pure $ TokenProvider \failed ->
+    pure $ tokenProvider metadata.managedBilling \failed ->
         withMVar refreshLock \_ ->
             managedGrokCredential metadata secret stateRef refresh failed
 
@@ -1068,10 +1090,11 @@ hasManagedProvider provider =
 -- spinning on the same key.
 reloadableFileCredentialProvider
     :: Provider
+    -> BillingMode
     -> Credential
     -> IO (Maybe Credential)
     -> IO TokenProvider
-reloadableFileCredentialProvider expectedProvider initial reload = do
+reloadableFileCredentialProvider expectedProvider billing initial reload = do
     cache <- newIORef (Just initial)
     let loadFresh rejectedToken =
             reload >>= \case
@@ -1091,26 +1114,26 @@ reloadableFileCredentialProvider expectedProvider initial reload = do
                     | otherwise -> do
                         writeIORef cache (Just credential)
                         pure (Right credential)
-    pure $ TokenProvider \failed -> case failed of
-        Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
-            now <- getCurrentTime
-            let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
-            pure $ Left $ CredentialsExhausted
-                (addUTCTime (fromIntegral seconds) now)
-        Just FailedCredential
-            { credential = rejected
-            , failure = AccountAuthenticationRejected
-            } -> do
-            writeIORef cache Nothing
-            loadFresh (Just rejected.accessToken)
-        Nothing ->
-            readIORef cache >>= \case
-                Just credential -> pure (Right credential)
-                Nothing -> loadFresh Nothing
+    pure $ tokenProvider billing \failed -> case failed of
+            Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
+                now <- getCurrentTime
+                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
+                pure $ Left $ CredentialsExhausted
+                    (addUTCTime (fromIntegral seconds) now)
+            Just FailedCredential
+                { credential = rejected
+                , failure = AccountAuthenticationRejected
+                } -> do
+                writeIORef cache Nothing
+                loadFresh (Just rejected.accessToken)
+            Nothing ->
+                readIORef cache >>= \case
+                    Just credential -> pure (Right credential)
+                    Nothing -> loadFresh Nothing
 
-staticCredentialProvider :: Credential -> TokenProvider
-staticCredentialProvider credential = TokenProvider \failed ->
-    case failed of
+staticCredentialProvider :: BillingMode -> Credential -> TokenProvider
+staticCredentialProvider billing credential =
+    tokenProvider billing \failed -> case failed of
         Nothing -> pure (Right credential)
         Just FailedCredential
             { failure = AccountRateLimited { retryAfterSeconds }

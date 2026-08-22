@@ -15,8 +15,7 @@ import System.Environment (lookupEnv)
 
 -- | A single OpenRouter API key with no OAuth refresh or account failover.
 staticApiKeyProvider :: Text -> TokenProvider
-staticApiKeyProvider apiKey = TokenProvider \failed ->
-    case failed of
+staticApiKeyProvider apiKey = tokenProvider ApiBilled \failed -> case failed of
         Nothing ->
             pure $ Right (credentialFromApiKey apiKey)
         Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do

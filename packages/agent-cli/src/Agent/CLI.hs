@@ -143,7 +143,8 @@ import Agent.CLI.Project
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
-    ( automaticCooldownRetryDelay
+    ( allowsAutomaticBillingFallback
+    , automaticCooldownRetryDelay
     , fallbackCandidates
     )
 import Agent.CLI.ProviderTransition
@@ -305,12 +306,15 @@ import Agent.OpenAI.WebSocketClient
     )
 import Agent.Provider
     ( AccountFailure(..)
+    , BillingMode
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider(..)
+    , TokenProvider
     , getNextToken
     , providerSlug
+    , tokenProvider
+    , tokenProviderBillingMode
     )
 import Agent.Subagents
     ( RootTurnId
@@ -1023,6 +1027,16 @@ runAgentInitialized options transition home root resumed cwd startup = do
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         _ -> pure ()
+    case transition >>= (.transitionAutomaticBilling) of
+        Just sourceBilling
+            | not
+                (allowsAutomaticBillingFallback
+                    sourceBilling
+                    (tokenProviderBillingMode loaded.loadedTokenProvider)) ->
+                startupDie startup
+                    "automatic provider fallback would cross from subscription \
+                    \billing to API-credit billing"
+        _ -> pure ()
     activeAccountRef <- newIORef ""
     let tokenProvider =
             trackCredentialAccount
@@ -1373,7 +1387,7 @@ trackCredentialAccount
     -> TokenProvider
     -> TokenProvider
 trackCredentialAccount accountRef resolveLabel provider =
-    TokenProvider \failed ->
+    tokenProvider (tokenProviderBillingMode provider) \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
@@ -3321,12 +3335,17 @@ requestAutomaticProviderFallback env apiError pending = do
         emitUiEvent runtime UiTurnRestarted
     sessionId <- ensureTransitionSessionId env.sessionPersist
     unavailable <- readIORef env.sessionUnavailableProviders
-    chooseAutomaticProviderTransition env.sessionFullscreen
-        env.sessionProvider
-        unavailable
-        sessionId
-        pending
-        apiError
+    case env.sessionTokenProvider of
+        Nothing -> pure Nothing
+        Just tokenProvider ->
+            chooseAutomaticProviderTransition
+                env.sessionFullscreen
+                (tokenProviderBillingMode tokenProvider)
+                env.sessionProvider
+                unavailable
+                sessionId
+                pending
+                apiError
 
 continueAutomaticFallback
     :: Maybe FullscreenRuntime
@@ -3334,18 +3353,23 @@ continueAutomaticFallback
     -> ApiError
     -> IO (Maybe ProviderTransition)
 continueAutomaticFallback fullscreen failed apiError =
-    case failed.transitionPendingTurn of
-        Nothing -> pure Nothing
-        Just pending ->
-            chooseAutomaticProviderTransition fullscreen
+    case ( failed.transitionAutomaticBilling
+         , failed.transitionPendingTurn
+         ) of
+        (Just billing, Just pending) ->
+            chooseAutomaticProviderTransition
+                fullscreen
+                billing
                 failed.transitionTarget.modelProvider
                 failed.transitionUnavailableProviders
                 failed.transitionSessionId
                 pending
                 apiError
+        _ -> pure Nothing
 
 chooseAutomaticProviderTransition
     :: Maybe FullscreenRuntime
+    -> BillingMode
     -> Provider
     -> [Provider]
     -> Maybe Text
@@ -3353,7 +3377,7 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    fullscreen current unavailable0 sessionId pending apiError =
+    fullscreen sourceBilling current unavailable0 sessionId pending apiError =
     tryCandidates unavailable candidates
   where
     unavailable = markUnavailable current unavailable0
@@ -3362,7 +3386,7 @@ chooseAutomaticProviderTransition
     tryCandidates unavailable = \case
         [] -> pure Nothing
         choice : rest ->
-            validateProviderTarget choice >>= \case
+            validateAutomaticProviderTarget sourceBilling choice >>= \case
                 Left err -> do
                     let message =
                             "skipping "
@@ -3399,6 +3423,7 @@ chooseAutomaticProviderTransition
                         , transitionDraft = ""
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
+                        , transitionAutomaticBilling = Just sourceBilling
                         }
 
 prepareProviderTransition
@@ -3421,10 +3446,32 @@ prepareProviderTransition cause unavailable pending draft choice persist =
                 , transitionDraft = draft
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
+                , transitionAutomaticBilling = Nothing
                 }
 
 validateProviderTarget :: ModelOption -> IO (Either Text ())
 validateProviderTarget choice =
+    fmap (() <$) (loadValidatedProviderTarget choice)
+
+validateAutomaticProviderTarget
+    :: BillingMode
+    -> ModelOption
+    -> IO (Either Text ())
+validateAutomaticProviderTarget sourceBilling choice =
+    loadValidatedProviderTarget choice >>= \case
+        Left err -> pure (Left err)
+        Right loaded
+            | allowsAutomaticBillingFallback
+                sourceBilling
+                (tokenProviderBillingMode loaded.loadedTokenProvider) ->
+                    pure (Right ())
+            | otherwise ->
+                pure $ Left
+                    "automatic fallback from subscription billing to API \
+                    \credits is disabled"
+
+loadValidatedProviderTarget :: ModelOption -> IO (Either Text LoadedAuth)
+loadValidatedProviderTarget choice =
     loadAuth (Just choice.modelProvider) >>= \case
         Left err -> pure $ Left $
             "cannot switch to "
@@ -3447,7 +3494,7 @@ validateProviderTarget choice =
                                 <> providerSlug choice.modelProvider
                                 <> ": auth resolved "
                                 <> providerSlug usable.loadedProvider
-                    | otherwise -> pure (Right ())
+                    | otherwise -> pure (Right usable)
 
 ensureTransitionSessionId
     :: Persistence

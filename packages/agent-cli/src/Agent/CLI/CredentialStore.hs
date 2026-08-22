@@ -1,7 +1,6 @@
 -- | Restricted-file credential store used by the interactive login manager.
 module Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
-    , ManagedBilling(..)
     , ManagedCredential(..)
     , ManagedSecret(..)
     , deleteManagedCredential
@@ -19,7 +18,12 @@ module Agent.CLI.CredentialStore
 import Agent.CLI.Error (formatException)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)
-import Agent.Provider (Provider(..), parseProvider, providerSlug)
+import Agent.Provider
+    ( BillingMode
+    , Provider(..)
+    , parseProvider
+    , providerSlug
+    )
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (bracket, bracket_, tryIO)
 import qualified Data.Aeson as Aeson
@@ -55,17 +59,12 @@ data ManagedAuthKind
     | ManagedGrokAuthJson
     deriving (Eq, Show)
 
-data ManagedBilling
-    = ManagedSubscription
-    | ManagedApiCredits
-    deriving (Eq, Show)
-
 data ManagedCredential = ManagedCredential
     { managedId :: !Text
     , managedProvider :: !Provider
     , managedAccountId :: !Text
     , managedLabel :: !Text
-    , managedBilling :: !ManagedBilling
+    , managedBilling :: !BillingMode
     , managedAuthKind :: !ManagedAuthKind
     , managedEnabled :: !Bool
     }
@@ -95,17 +94,6 @@ instance Aeson.FromJSON ManagedAuthKind where
         "openai_oauth" -> pure ManagedOpenAIAuthJson
         "grok_oauth" -> pure ManagedGrokAuthJson
         other -> fail ("unknown managed auth kind: " <> Text.unpack other)
-
-instance Aeson.ToJSON ManagedBilling where
-    toJSON = Aeson.String . \case
-        ManagedSubscription -> "subscription"
-        ManagedApiCredits -> "api_credits"
-
-instance Aeson.FromJSON ManagedBilling where
-    parseJSON = Aeson.withText "ManagedBilling" \case
-        "subscription" -> pure ManagedSubscription
-        "api_credits" -> pure ManagedApiCredits
-        other -> fail ("unknown managed billing kind: " <> Text.unpack other)
 
 instance Aeson.ToJSON ManagedCredential where
     toJSON credential = Aeson.object

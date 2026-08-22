@@ -8,11 +8,14 @@ import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Provider
     ( AccountFailure(..)
+    , BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
-    , TokenProvider(..)
+    , TokenProvider
     , getNextToken
+    , tokenProvider
+    , tokenProviderBillingMode
     )
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Exception.Safe (bracket)
@@ -53,7 +56,7 @@ spec = do
             let retryAt = UTCTime (fromGregorian 2026 8 21) 3600
                 exhausted = LoadedAuth
                     { loadedProvider = XAIProvider
-                    , loadedTokenProvider = TokenProvider \_ ->
+                    , loadedTokenProvider = tokenProvider SubscriptionBilled \_ ->
                         pure (Left (CredentialsExhausted retryAt))
                     , loadedAccountLabel = pure . credentialAccountLabel
                     , loadedOpenAiPool = Nothing
@@ -98,6 +101,10 @@ spec = do
     describe "OpenAI account pools" do
         it "loads every enabled managed account into one pool" $
             withTempHome openAiManagedPoolTest
+        it "does not mix subscription and API-credit accounts" $
+            withTempHome openAiBillingPoolTest
+        it "uses API billing when only API-credit accounts exist" $
+            withTempHome openAiApiBillingPoolTest
         it "discovers an account connected after the session started" $
             withTempHome openAiManagedPoolDiscoveryTest
         it "combines distinct managed and ~/.codex accounts" $
@@ -108,6 +115,69 @@ spec = do
             withTempHome openAiDisabledSourceTest
         it "uses the login email as the active account label" $
             withTempHome openAiAccountLabelTest
+
+    describe "loaded billing" do
+        it "classifies an OpenRouter API key as API-credit billed" $
+            withTempHome \_ ->
+                withEnv "OPENROUTER_API_KEY" (Just "openrouter-key") do
+                    loadAuth (Just OpenRouterProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded ->
+                            tokenProviderBillingMode loaded.loadedTokenProvider
+                                `shouldBe` ApiBilled
+
+        it "does not trust managed metadata to make OpenRouter subscription billed" $
+            withTempHome \_ -> do
+                upsertManagedCredential
+                    ManagedCredential
+                        { managedId = "openrouter"
+                        , managedProvider = OpenRouterProvider
+                        , managedAccountId = "openrouter"
+                        , managedLabel = "OpenRouter"
+                        , managedBilling = SubscriptionBilled
+                        , managedAuthKind = ManagedBearerToken
+                        , managedEnabled = True
+                        }
+                    (ManagedSecret "openrouter" "openrouter-key")
+                    `shouldReturn` Right ()
+                loadAuth (Just OpenRouterProvider) >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right loaded ->
+                        tokenProviderBillingMode loaded.loadedTokenProvider
+                            `shouldBe` ApiBilled
+
+        it "classifies an external Grok access token as subscription billed" $
+            withTempHome \_ ->
+                withCleanGrokEnv $
+                    withEnv "GROK_ACCESS_TOKEN" (Just "grok-token") do
+                        loadAuth (Just XAIProvider) >>= \case
+                            Left err -> expectationFailure (Text.unpack err)
+                            Right loaded ->
+                                tokenProviderBillingMode
+                                    loaded.loadedTokenProvider
+                                    `shouldBe` SubscriptionBilled
+
+        it "uses stored billing for a managed XAI bearer token" $
+            withTempHome \_ ->
+                withCleanGrokEnv do
+                    upsertManagedCredential
+                        ManagedCredential
+                            { managedId = "xai-api"
+                            , managedProvider = XAIProvider
+                            , managedAccountId = "xai-api"
+                            , managedLabel = "xAI API"
+                            , managedBilling = ApiBilled
+                            , managedAuthKind = ManagedBearerToken
+                            , managedEnabled = True
+                            }
+                        (ManagedSecret "xai-api" "xai-api-key")
+                        `shouldReturn` Right ()
+                    loadAuth (Just XAIProvider) >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded ->
+                            tokenProviderBillingMode
+                                loaded.loadedTokenProvider
+                                `shouldBe` ApiBilled
 
     describe "openAIOAuthClientId" do
         it "uses the Codex public client id by default" do
@@ -264,7 +334,7 @@ spec = do
         it "preserves rate-limit cooldowns for managed bearer tokens" do
             before <- getCurrentTime
             result <- getNextToken
-                (staticCredentialProvider staleGrok)
+                (staticCredentialProvider SubscriptionBilled staleGrok)
                 (Just
                     (FailedCredential staleGrok
                         (AccountRateLimited (Just 7))))
@@ -289,7 +359,8 @@ spec = do
     describe "reloadableFileCredentialProvider" do
         it "returns the cached credential without reloading" do
             loads <- newIORef (0 :: Int)
-            provider <- reloadableFileCredentialProvider XAIProvider staleGrok
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok
                 (modifyIORef' loads (+ 1) >> pure (Just freshGrok))
             first <- getNextToken provider Nothing
             second <- getNextToken provider Nothing
@@ -299,7 +370,8 @@ spec = do
 
         it "reloads after an authentication rejection" do
             loads <- newIORef (0 :: Int)
-            provider <- reloadableFileCredentialProvider XAIProvider staleGrok
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok
                 (modifyIORef' loads (+ 1) >> pure (Just freshGrok))
             reloaded <- getNextToken provider (Just FailedCredential
                 { credential = staleGrok
@@ -310,7 +382,8 @@ spec = do
             readIORef loads `shouldReturn` 1
 
         it "rejects an unchanged reload after authentication failure" do
-            provider <- reloadableFileCredentialProvider XAIProvider staleGrok
+            provider <- reloadableFileCredentialProvider
+                XAIProvider SubscriptionBilled staleGrok
                 (pure (Just staleGrok))
             result <- getNextToken provider (Just FailedCredential
                 { credential = staleGrok
@@ -329,8 +402,31 @@ openAiManagedPoolTest _ =
         storeOpenAiAccount "managed-b" "acc-b" True "token-b"
         storeOpenAiAccount "managed-disabled" "acc-disabled" False "token-disabled"
         loaded <- loadAuth (Just OpenAIProvider)
+        expectLoadedBilling loaded `shouldReturn` SubscriptionBilled
         pool <- expectOpenAiPool loaded
         OpenAI.allAccountIds pool `shouldReturn` ["acc-b", "acc-a"]
+
+openAiBillingPoolTest :: OsPath -> IO ()
+openAiBillingPoolTest _ =
+    withCleanOpenAiEnv do
+        storeOpenAiAccount "subscription" "acc-subscription" True
+            "subscription-token"
+        storeOpenAiAccountWithBilling
+            ApiBilled "api" "acc-api" True "api-token"
+        loaded <- loadAuth (Just OpenAIProvider)
+        expectLoadedBilling loaded `shouldReturn` SubscriptionBilled
+        pool <- expectOpenAiPool loaded
+        OpenAI.allAccountIds pool `shouldReturn` ["acc-subscription"]
+
+openAiApiBillingPoolTest :: OsPath -> IO ()
+openAiApiBillingPoolTest _ =
+    withCleanOpenAiEnv do
+        storeOpenAiAccountWithBilling
+            ApiBilled "api" "acc-api" True "api-token"
+        loaded <- loadAuth (Just OpenAIProvider)
+        expectLoadedBilling loaded `shouldReturn` ApiBilled
+        pool <- expectOpenAiPool loaded
+        OpenAI.allAccountIds pool `shouldReturn` ["acc-api"]
 
 openAiManagedPoolDiscoveryTest :: OsPath -> IO ()
 openAiManagedPoolDiscoveryTest _ =
@@ -428,20 +524,43 @@ expectOpenAiPool = \case
             >> fail "missing pool"
         Just pool -> pure pool
 
+expectLoadedBilling :: Either Text LoadedAuth -> IO BillingMode
+expectLoadedBilling = \case
+    Left err -> expectationFailure (Text.unpack err)
+        >> fail "missing loaded auth"
+    Right loaded ->
+        pure (tokenProviderBillingMode loaded.loadedTokenProvider)
+
 storeOpenAiAccount :: Text -> Text -> Bool -> Text -> IO ()
 storeOpenAiAccount credentialId accountId enabled token =
+    storeOpenAiAccountWithBilling
+        SubscriptionBilled credentialId accountId enabled token
+
+storeOpenAiAccountWithBilling
+    :: BillingMode
+    -> Text
+    -> Text
+    -> Bool
+    -> Text
+    -> IO ()
+storeOpenAiAccountWithBilling billing credentialId accountId enabled token =
     upsertManagedCredential
-        (openAiMetadata credentialId accountId enabled)
+        (openAiMetadata billing credentialId accountId enabled)
         (ManagedSecret credentialId (authJson accountId token))
         `shouldReturn` Right ()
 
-openAiMetadata :: Text -> Text -> Bool -> ManagedCredential
-openAiMetadata credentialId accountId enabled = ManagedCredential
+openAiMetadata
+    :: BillingMode
+    -> Text
+    -> Text
+    -> Bool
+    -> ManagedCredential
+openAiMetadata billing credentialId accountId enabled = ManagedCredential
     { managedId = credentialId
     , managedProvider = OpenAIProvider
     , managedAccountId = accountId
     , managedLabel = "ChatGPT"
-    , managedBilling = ManagedSubscription
+    , managedBilling = billing
     , managedAuthKind = ManagedOpenAIAuthJson
     , managedEnabled = enabled
     }
@@ -489,7 +608,7 @@ freshGrok = Credential
 managedGrokMetadata :: ManagedCredential
 managedGrokMetadata =
     ManagedCredential "grok-test" XAIProvider "account" "Grok"
-        ManagedSubscription ManagedGrokAuthJson True
+        SubscriptionBilled ManagedGrokAuthJson True
 
 managedGrokSecretFor :: GrokAuthState -> ManagedSecret
 managedGrokSecretFor state =
@@ -561,6 +680,16 @@ withCleanOpenAiEnv action =
         , "CODEX_ACCOUNT_ID"
         , "CODEX_ID_TOKEN"
         , "OPENAI_OAUTH_CLIENT_ID"
+        ]
+
+withCleanGrokEnv :: IO a -> IO a
+withCleanGrokEnv action =
+    foldr
+        (\name next -> withEnv name Nothing next)
+        action
+        [ "GROK_AUTH_JSON"
+        , "GROK_ACCESS_TOKEN"
+        , "XAI_OAUTH_CLIENT_ID"
         ]
 
 withTempHome :: (OsPath -> IO a) -> IO a
