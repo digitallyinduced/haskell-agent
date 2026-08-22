@@ -26,7 +26,7 @@ spec = describe "fullscreen TUI bridge" do
 
     it "starts, refreshes, and clears native terminal progress" do
         let running = reduceUi (UiLoop TurnStarted) initialUiState
-            refresh = running { uiFrame = 0 }
+            refresh = running { uiFrame = 10 }
             toolCall =
                 functionToolCall
                     "tool-1"

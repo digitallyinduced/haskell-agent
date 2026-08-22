@@ -166,8 +166,15 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "live output"
             _ -> expectationFailure "expected one running tool block"
 
-    it "tracks elapsed tenths only while a turn is running" do
-        let idle = apply [UiTick, UiTick]
+    it "animates an empty conversation without advancing elapsed time" do
+        let emptyIdle = apply [UiSystemMessage "startup status", UiTick, UiTick]
+            wrapped =
+                apply (UiSystemMessage "startup status" : replicate 120 UiTick)
+            nonEmptyIdle =
+                reduceUi UiTick $
+                    reduceUi (UiUserSubmitted "hello") initialUiState
+            compactedHistory =
+                reduceUi (UiHistory "compacted summary") initialUiState
             running = apply [UiLoop TurnStarted, UiTick, UiTick, UiTick]
             finished =
                 reduceUi
@@ -176,8 +183,13 @@ spec = describe "fullscreen UI reducer" do
                             (emptyTurnOutput "r1" [] Nothing)))
                     running
             after = reduceUi UiTick finished
-        idle.uiElapsedTenths `shouldBe` 0
-        idle.uiFrame `shouldBe` 0
+        emptyIdle.uiElapsedTenths `shouldBe` 0
+        emptyIdle.uiFrame `shouldBe` 2
+        wrapped.uiFrame `shouldBe` 0
+        conversationIsEmpty emptyIdle `shouldBe` True
+        conversationIsEmpty nonEmptyIdle `shouldBe` False
+        conversationIsEmpty compactedHistory `shouldBe` False
+        nonEmptyIdle.uiFrame `shouldBe` 0
         running.uiElapsedTenths `shouldBe` 3
         after.uiElapsedTenths `shouldBe` 3
 

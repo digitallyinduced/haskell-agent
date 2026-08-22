@@ -3537,7 +3537,7 @@ hydrateUiHistory = foldl addTurn initialUiState
         let cleared = reduceUi UiConversationCleared state
         in case turn.turnAssistantText of
             Nothing -> cleared
-            Just text -> reduceUi (UiSystemMessage text) cleared
+            Just text -> reduceUi (UiHistory text) cleared
 
     addRegularTurn state turn =
         let withUser =
