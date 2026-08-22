@@ -2064,17 +2064,21 @@ handleEventInner event = case event of
     AppEvent (AppSetImagePreviews images) ->
         do
             state <- get
-            let prepared =
-                    mapMaybe
-                        (\image ->
-                            case prepareTuiImagePreview image of
-                                Left _ -> Nothing
-                                Right preview -> Just (image, preview))
-                        images
-            liftIO do
-                previous <-
+            previous <-
+                liftIO $
                     readIORef state.appRuntime.runtimeImagePreviews
-                when (map fst previous /= map fst prepared) do
+            let unchanged = map fst previous == images
+                prepared
+                    | unchanged = previous
+                    | otherwise =
+                        mapMaybe
+                            (\image ->
+                                case prepareTuiImagePreview image of
+                                    Left _ -> Nothing
+                                    Right preview -> Just (image, preview))
+                            images
+            liftIO do
+                when (not unchanged) do
                     writeIORef
                         state.appRuntime.runtimeImagePreviews
                         prepared

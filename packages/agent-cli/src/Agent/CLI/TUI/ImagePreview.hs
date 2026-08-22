@@ -56,7 +56,11 @@ data TuiImagePreview = TuiImagePreview
     , previewBytes :: !Int
     , previewSourceWidth :: !Int
     , previewSourceHeight :: !Int
-    , previewSample :: !(Image PixelRGB8)
+    -- Keep the ANSI fallback sample lazy. Native Kitty previews only need the
+    -- source dimensions and encoded attachment, and eagerly resampling a large
+    -- screenshot here can stall the Brick event thread for over a second in
+    -- the interpreted development loop.
+    , previewSample :: Image PixelRGB8
     , previewKittyAttachment :: !ImageAttachment
     }
     deriving (Eq)
@@ -190,8 +194,8 @@ renderTuiImagePreview maxColumns maxRows preview =
 previewPixelSize :: Int -> Int -> TuiImagePreview -> (Int, Int)
 previewPixelSize maxColumns maxRows preview =
     previewSizeWithin
-        (min (imageWidth preview.previewSample) (max 1 maxColumns))
-        (min (imageHeight preview.previewSample) (max 1 maxRows * 2))
+        (min maxPreviewColumns (max 1 maxColumns))
+        (min maxPreviewPixelRows (max 1 maxRows * 2))
         preview.previewSourceWidth
         preview.previewSourceHeight
 

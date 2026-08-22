@@ -61,6 +61,33 @@ spec =
                     previewCellSize 72 23 preview `shouldBe` (72, 20)
                     previewCellSize 48 12 preview `shouldBe` (42, 12)
 
+        it "does not force the ANSI sample when sizing native previews" do
+            let attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = ""
+                    }
+                preview = TuiImagePreview
+                    { previewMime = "image/png"
+                    , previewBytes = 0
+                    , previewSourceWidth = 1600
+                    , previewSourceHeight = 900
+                    , previewSample =
+                        error "native preview sizing forced the ANSI sample"
+                    , previewKittyAttachment = attachment
+                    }
+            previewCellSize 72 23 preview `shouldBe` (72, 20)
+            nativePreviewPlacements 100 120 40 [(attachment, preview)]
+                `shouldBe`
+                    [ NativePreviewPlacement
+                        { nativePreviewImageId = 100
+                        , nativePreviewRow = 9
+                        , nativePreviewColumn = 24
+                        , nativePreviewColumns = 72
+                        , nativePreviewRows = 20
+                        , nativePreviewAttachment = attachment
+                        }
+                    ]
+
         it "preserves thin screenshot details while downsampling" do
             let source =
                     generateImage
