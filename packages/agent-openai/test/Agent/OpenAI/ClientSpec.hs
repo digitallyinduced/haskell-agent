@@ -9,6 +9,7 @@ import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
 import Data.IORef
@@ -131,6 +132,12 @@ spec = do
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer router-key"
             lookup "chatgpt-account-id" request.headers `shouldBe` Nothing
+            case request.body of
+                Aeson.Object object ->
+                    KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
+                other ->
+                    expectationFailure
+                        ("expected JSON request object, got " <> show other)
 
         it "sends chatgpt-account-id when the credential has one" do
             recorded <- newIORef []
@@ -176,6 +183,7 @@ responseWithStatus status errorValue = decodeResponse (Aeson.object
 data RecordedRequest = RecordedRequest
     { path :: !Text
     , headers :: ![(Text, Text)]
+    , body :: !Aeson.Value
     }
 
 withMockResponses
@@ -188,12 +196,17 @@ withMockResponses recorded handler action =
         action ("http://127.0.0.1:" <> Text.pack (show port) <> "/v1")
   where
     app waiRequest respond = do
+        requestBody <- Wai.strictRequestBody waiRequest
         let request = RecordedRequest
                 { path = "/" <> Text.intercalate "/" (Wai.pathInfo waiRequest)
                 , headers =
                     [ (Text.decodeUtf8 (CI.original name), Text.decodeUtf8 value)
                     | (name, value) <- Wai.requestHeaders waiRequest
                     ]
+                , body =
+                    case Aeson.eitherDecode requestBody of
+                        Right value -> value
+                        Left _ -> Aeson.Null
                 }
         atomicModifyIORef' recorded \requests -> (requests <> [request], ())
         respond =<< handler request

@@ -490,6 +490,89 @@ spec = do
             readIORef healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
 
+    describe "openAiBackendWithTransportFallback" do
+        it "switches permanently to fallback after a pre-output connection error" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            let primary = Backend \_previous _inputs _onEvent -> do
+                    modifyIORef' primaryCalls (+ 1)
+                    pure (Left (ConnectionError
+                        "WebSocket receive error: ParseException \"not enough bytes\""))
+                fallback = Backend \_previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            first <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            second <- backend.submitTurn (Just "resp-http")
+                [UserMessage "two"] (const (pure ()))
+            first `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            second `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            readIORef fallbackActive `shouldReturn` True
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 2
+
+        it "does not replay a failed turn after model output was exposed" do
+            fallbackActive <- newIORef False
+            fallbackCalls <- newIORef (0 :: Int)
+            let primary = Backend \_previous _inputs onEvent -> do
+                    onEvent (TextDelta "partial")
+                    pure (Left (ConnectionError "socket closed"))
+                fallback = Backend \_previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (ConnectionError "socket closed")
+            readIORef fallbackActive `shouldReturn` True
+            readIORef fallbackCalls `shouldReturn` 0
+
+        it "falls back after a websocket connection-limit activity update" do
+            fallbackActive <- newIORef False
+            fallbackCalls <- newIORef (0 :: Int)
+            events <- newIORef []
+            let primary = Backend \_previous _inputs onEvent -> do
+                    onEvent (ActivityUpdated "Codex connection limit reached")
+                    pure (Left (ProviderError WebSocketConnectionLimitReached
+                        "too many websocket connections" Nothing))
+                fallback = Backend \_previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (modifyIORef' events . (:))
+            result `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            reverse <$> readIORef events `shouldReturn`
+                [ActivityUpdated "Codex connection limit reached"]
+            readIORef fallbackCalls `shouldReturn` 1
+
+        it "preserves non-transport provider failures" do
+            fallbackActive <- newIORef False
+            fallbackCalls <- newIORef (0 :: Int)
+            let primary = Backend \_previous _inputs _onEvent ->
+                    pure (Left (ProviderError InvalidRequestError
+                        "bad request" Nothing))
+                fallback = Backend \_previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- backend.submitTurn Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left (ProviderError InvalidRequestError
+                "bad request" Nothing)
+            readIORef fallbackActive `shouldReturn` False
+            readIORef fallbackCalls `shouldReturn` 0
+
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
