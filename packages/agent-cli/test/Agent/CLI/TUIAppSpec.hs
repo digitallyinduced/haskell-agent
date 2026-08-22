@@ -5,7 +5,14 @@ import Agent.CLI.TUI.App
     ( agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , conversationScrollbarRenderer
     , fullscreenVtyConfig
+    )
+import Brick
+    ( VScrollbarRenderer(..)
+    , hLimit
+    , renderWidget
+    , vLimit
     )
 import Agent.Subagents (SubagentId(..))
 import Data.Text (Text)
@@ -67,6 +74,20 @@ spec = do
                     length shown + indicatorRows + 7
             entryLimit `shouldBe` 6
             renderedRows `shouldSatisfy` (<= availableHeight)
+
+    describe "conversation scrollbar" do
+        it "uses a visible trough that repaints old thumb cells" do
+            let renderCell widget =
+                    V.picImage $
+                        renderWidget Nothing
+                            [hLimit 1 (vLimit 1 widget)]
+                            (1, 1)
+            renderCell
+                (conversationScrollbarRenderer @()).renderVScrollbarTrough
+                `shouldBe` V.char V.defAttr '│'
+            renderCell
+                (conversationScrollbarRenderer @()).renderVScrollbar
+                `shouldBe` V.char V.defAttr '┃'
 
 rootEntry :: AgentEntry
 rootEntry = AgentEntry

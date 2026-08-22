@@ -5,6 +5,7 @@ module Agent.CLI.TUI.App
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , conversationScrollbarRenderer
     , emitUiEvent
     , hasQueuedFullscreenInput
     , newFullscreenInputBuffer
@@ -1079,9 +1080,27 @@ drawConversationPane state
                 , drawEmptyConversation (state.appUi.uiFrame `div` 2)
                 ]
     | otherwise =
-        withVScrollBars OnRight $
-            viewport ConversationViewport Vertical $
-                padLeftRight 2 (drawTranscript state)
+        withVScrollBarRenderer conversationScrollbarRenderer $
+            withVScrollBars OnRight $
+                viewport ConversationViewport Vertical $
+                    padLeftRight 2 (drawTranscript state)
+
+-- Brick's default scrollbar uses a full block for the thumb and a blank
+-- space for the trough. During rapid viewport reflow, some terminals can
+-- leave the old full-block cells behind because the replacement trough is
+-- visually identical to the surrounding background. A visible one-column
+-- trough makes every old thumb position get explicitly repainted.
+conversationScrollbarRenderer :: VScrollbarRenderer n
+conversationScrollbarRenderer =
+    VScrollbarRenderer
+        { renderVScrollbar =
+            withAttr Theme.mutedAttr (fill '┃')
+        , renderVScrollbarTrough =
+            withAttr Theme.borderAttr (fill '│')
+        , renderVScrollbarHandleBefore = emptyWidget
+        , renderVScrollbarHandleAfter = emptyWidget
+        , scrollbarWidthAllocation = 1
+        }
 
 agentPaneWidth :: Int
 agentPaneWidth = 42
@@ -2379,7 +2398,9 @@ handleEvent event = case event of
                 when
                     ((length state.appAgentEntries > 1)
                         /= (length entries > 1))
-                    invalidateCache
+                    do
+                        invalidateCache
+                        queueConversationReflow
     AppEvent (AppUi uiEvent) ->
         handleUiEvents (uiEvent :| [])
     AppEvent (AppUiBatch uiEvents) ->
