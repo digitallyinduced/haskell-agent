@@ -55,8 +55,9 @@ import Agent.CLI.AgentSessions
     , sessionProcessStatus
     )
 import Agent.CLI.Approval
-    ( approveToolDecision
-    , approveToolDecisionWith
+    ( ApprovalNotice(..)
+    , approveToolDecision
+    , approveToolDecisionWithReporter
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -186,8 +187,8 @@ import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
-    , installSkillCatalog
-    , loadSkillsCatalog
+    , installSkillCatalogWithOmissions
+    , loadSkillsCatalogQuiet
     , reservedSlashNames
     , skillInvocationCommand
     )
@@ -869,15 +870,20 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     setCurrentDirectory cwd
 
     toolEnv <- defaultToolEnv cwd
+    uiRuntimeRef <- newIORef Nothing
     interrupt <- newInterruptState \msg -> do
-        -- Drop an in-place "Thinking…" status so the hint is its own line.
-        Text.hPutStr stderr "\r\ESC[K"
-        clearNativeProgress stderr
-        color <- resolveColor stderr
-        putTextLn stderr (roleMuted color msg)
+        readIORef uiRuntimeRef >>= \case
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSetNotice (Just (warningNotice msg)))
+            Nothing -> do
+                -- Drop an in-place "Thinking…" status so the hint is its own line.
+                Text.hPutStr stderr "\r\ESC[K"
+                clearNativeProgress stderr
+                color <- resolveColor stderr
+                putTextLn stderr (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
-    uiRuntimeRef <- newIORef Nothing
     stderrTty <- hIsTerminalDevice stderr
     stdinTty <- hIsTerminalDevice stdin
     stdoutTty <- hIsTerminalDevice stdout
@@ -1446,7 +1452,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
         progName <- getProgName
         markStartupStage startup "Connecting to provider…"
         withCtrlCHandler interrupt $
-            withInterruptResume progName persist RunQuit do
+            withInterruptResume fullscreen progName persist RunQuit do
                 let shouldProbeAtStartup =
                         isJust fullscreen
                             && isNothing transition
@@ -1885,12 +1891,13 @@ preparePersistence fullscreen options root provider model cwd effort prompt resu
 
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
-    :: String
+    :: Maybe FullscreenRuntime
+    -> String
     -> Persistence
     -> a
     -> IO a
     -> IO a
-withInterruptResume progName persist interrupted action =
+withInterruptResume fullscreen progName persist interrupted action =
     (action `catchAny` handleSyncException) `catchAsync` handleInterrupt
   where
     -- UserInterrupt can arrive asynchronously from the installed SIGINT
@@ -1904,7 +1911,11 @@ withInterruptResume progName persist interrupted action =
         | isWrappedUserInterrupt e = finishInterrupt
         | otherwise = throwIO e
     finishInterrupt = do
-        printResumeHint progName persist
+        case fullscreen of
+            Nothing -> printResumeHint progName persist
+            Just runtime ->
+                withFullscreenSuspended runtime
+                    (printResumeHint progName persist)
         -- The interrupt is the requested, graceful end of the CLI session.
         -- Returning lets the surrounding brackets restore the SIGINT handler
         -- and close tools without GHC's top-level exception handler printing
@@ -2156,18 +2167,72 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext fullscreen options provider home cwd [] Nothing
-            freshSkills <- loadSkillsCatalog options home projectRoot cwd True
-            installSkillCatalog
+            freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames True freshAgents
                 skillsRef skillInvocationsRef freshSkills
+            reportSkillCatalog True freshSkills omitted
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
-            refreshed <- loadSkillsCatalog
-                options home projectRoot cwd queueContext
-            installSkillCatalog
+            refreshed <- loadSkillsCatalogQuiet
+                options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames queueContext startupContext
                 skillsRef skillInvocationsRef refreshed
+            when queueContext $
+                reportSkillCatalog True refreshed omitted
+        formatSkillWarning warning =
+            "skill ignored: "
+                <> toText warning.skillWarningPath
+                <> ": "
+                <> warning.skillWarningMessage
+        formatSkillOmission omitted =
+            "skills: "
+                <> Text.pack (show omitted)
+                <> " omitted from model context due to the catalog budget"
+        reportSkillCatalog includeSummary catalog omitted =
+            case fullscreen of
+                Nothing -> do
+                    color <- resolveColor stderr
+                    when includeSummary do
+                        let count = length catalog.catalogSkills
+                        putTextLn stderr $
+                            roleMuted color
+                                (glyphSession
+                                    <> "skills: loaded "
+                                    <> Text.pack (show count)
+                                    <> if count == 1
+                                        then " skill"
+                                        else " skills")
+                    mapM_
+                        (putTextLn stderr
+                            . roleWarn color
+                            . (glyphWarn <>)
+                            . formatSkillWarning)
+                        catalog.catalogWarnings
+                    when (omitted > 0) $
+                        putTextLn stderr $
+                            roleWarn color
+                                (glyphWarn <> formatSkillOmission omitted)
+                Just runtime -> do
+                    when includeSummary do
+                        let count = length catalog.catalogSkills
+                        emitUiEvent runtime $
+                            UiSystemMessage
+                                ("skills: loaded "
+                                    <> Text.pack (show count)
+                                    <> if count == 1
+                                        then " skill"
+                                        else " skills")
+                    mapM_
+                        (emitUiEvent runtime
+                            . UiSystemMessage
+                            . formatSkillWarning)
+                        catalog.catalogWarnings
+                    when (omitted > 0) $
+                        emitUiEvent runtime
+                            (UiSystemMessage (formatSkillOmission omitted))
     policyRef <- newIORef policy
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
@@ -2229,8 +2294,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                 approveToolDecision
                                     policyRef allowedToolsRef toolRegistry planMode call
                         Just runtime ->
-                            approveToolDecisionWith
+                            approveToolDecisionWithReporter
                                 (requestFullscreenPermission runtime)
+                                (\case
+                                    ApprovalWarning _ -> pure ()
+                                    ApprovalSuccess message ->
+                                        emitUiEvent runtime
+                                            (UiSetNotice
+                                                (Just
+                                                    (successNotice message))))
                                 policyRef
                                 allowedToolsRef
                                 toolRegistry
@@ -2308,25 +2380,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
-    let formatSkillWarning warning =
-            "skill ignored: "
-                <> toText warning.skillWarningPath
-                <> ": "
-                <> warning.skillWarningMessage
-        initializeSkills = do
+    let initializeSkills = do
             markStartupStage startup "Loading skills…"
-            skills <- loadSkillsCatalog
-                options home projectRoot cwd (isNothing fullscreen)
-            installSkillCatalog
+            skills <- loadSkillsCatalogQuiet
+                options home projectRoot cwd
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames
                 (null initialTurns && not (isJust initialPrevious))
                 startupContext skillsRef skillInvocationsRef skills
-            case fullscreen of
-                Nothing -> pure ()
-                Just runtime -> do
-                    mapM_
-                        (emitUiEvent runtime . UiSystemMessage . formatSkillWarning)
-                        skills.catalogWarnings
+            reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
             initializeSkills
@@ -2804,7 +2866,8 @@ replWithDraft env@SessionEnv
   where
     handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
         ReplEof -> do
-            putStrLn ""
+            when (isNothing fullscreen) $
+                putStrLn ""
             pure RunQuit
         ReplQuitInterrupt ->
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
@@ -2883,7 +2946,7 @@ replWithDraft env@SessionEnv
                         Text.putStrLn (roleMuted color chip)
                 case parseReplLineWithSkills skillCommands promptLine of
                     ReplQuit -> pure RunQuit
-                    ReplReload -> requestReload persist
+                    ReplReload -> requestReload fullscreen persist
                     ReplPrompt text -> do
                         -- Native Cmd+V of a Finder image often pastes a path
                         -- rather than bitmap bytes. Treat a prompt that is
@@ -4492,20 +4555,31 @@ reloadAuth provider = \case
 
 
 requestReload
-    :: Persistence
+    :: Maybe FullscreenRuntime
+    -> Persistence
     -> IO RunResult
-requestReload persist = do
+requestReload fullscreen persist = do
     color <- resolveColor stderr
+    let reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    putTextLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
     case persist of
         PersistenceDisabled -> do
-            putTextLn stderr
-                (roleError color ":reload needs a persisted REPL session")
+            reportError ":reload needs a persisted REPL session"
             pure RunQuit
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
-            putTextLn stderr
-                (roleMuted color
-                    (glyphSession <> "reloading; session " <> handle.sessionMeta.metaId))
+            reportInfo ("reloading; session " <> handle.sessionMeta.metaId)
             pure (RunReload handle.sessionMeta.metaId)
 
 enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
@@ -4559,7 +4633,8 @@ enterPlanFromSlash env@SessionEnv
                             Just providerTransition ->
                                 pure (Just providerTransition)
                 _ -> do
-                    putTrailingNewline printed
+                    when (isNothing fullscreen) $
+                        putTrailingNewline printed
                     pure Nothing
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
@@ -4729,19 +4804,30 @@ handleResume
 handleResume fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
-    let root = sessionsRoot home
+    let reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+        root = sessionsRoot home
         resume sessionId = do
             currentId <- currentSessionId persist
             if Just sessionId == currentId
                 then do
-                    Text.hPutStrLn stderr
-                        (roleMuted color
-                            (glyphSession <> "already on session " <> sessionId))
+                    reportInfo ("already on session " <> sessionId)
                     pure Nothing
                 else
                     loadSession root sessionId >>= \case
                         Left err -> do
-                            Text.hPutStrLn stderr (roleError color err)
+                            reportError err
                             pure Nothing
                         Right _ -> pure (Just (RunResumeSession sessionId))
     case maybeId of

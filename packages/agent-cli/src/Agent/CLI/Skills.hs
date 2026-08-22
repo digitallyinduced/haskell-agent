@@ -2,8 +2,11 @@
 module Agent.CLI.Skills
     ( formatSkillsListing
     , installSkillCatalog
+    , installSkillCatalogWithOmissions
     , loadSkillsCatalog
+    , loadSkillsCatalogQuiet
     , queueSkillCatalogContext
+    , queueSkillCatalogContextWithOmissions
     , reservedSlashNames
     , skillInvocationCommand
     ) where
@@ -14,6 +17,7 @@ import Agent.CLI.Command
     , slashCommands
     )
 import Agent.CLI.Options (CliOptions(..))
+import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
     ( glyphSession
     , glyphWarn
@@ -21,11 +25,10 @@ import Agent.CLI.Style
     , rolePrompt
     , roleWarn
     )
-import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (toText)
 import Agent.Skills
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Data.IORef (IORef, modifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -49,12 +52,7 @@ loadSkillsCatalog
 loadSkillsCatalog options home projectRoot cwd report
     | not options.optSkills = pure (SkillCatalog [] [])
     | otherwise = do
-        catalog <- discoverSkills SkillDiscoverOptions
-            { skillsHome = home
-            , skillsProjectRoot = projectRoot
-            , skillsCwd = cwd
-            , skillsMaxDepth = 6
-            }
+        catalog <- loadSkillsCatalogQuiet options home projectRoot cwd
         when report do
             color <- resolveColor stderr
             let count = length catalog.catalogSkills
@@ -67,6 +65,22 @@ loadSkillsCatalog options home projectRoot cwd report
             mapM_ (reportSkillWarning color) catalog.catalogWarnings
         pure catalog
 
+loadSkillsCatalogQuiet
+    :: CliOptions
+    -> OsPath
+    -> OsPath
+    -> OsPath
+    -> IO SkillCatalog
+loadSkillsCatalogQuiet options home projectRoot cwd
+    | not options.optSkills = pure (SkillCatalog [] [])
+    | otherwise =
+        discoverSkills SkillDiscoverOptions
+            { skillsHome = home
+            , skillsProjectRoot = projectRoot
+            , skillsCwd = cwd
+            , skillsMaxDepth = 6
+            }
+
 reportSkillWarning :: Bool -> SkillWarning -> IO ()
 reportSkillWarning color warning =
     putTextLn stderr $
@@ -78,22 +92,30 @@ reportSkillWarning color warning =
                 <> warning.skillWarningMessage)
 
 queueSkillCatalogContext :: IORef (Maybe Text) -> SkillCatalog -> IO ()
-queueSkillCatalogContext contextRef catalog =
+queueSkillCatalogContext contextRef catalog = do
+    omitted <- queueSkillCatalogContextWithOmissions contextRef catalog
+    when (omitted > 0) do
+        color <- resolveColor stderr
+        putTextLn stderr $
+            roleWarn color
+                (glyphWarn
+                    <> "skills: "
+                    <> Text.pack (show omitted)
+                    <> " omitted from model context due to the catalog budget")
+
+queueSkillCatalogContextWithOmissions
+    :: IORef (Maybe Text)
+    -> SkillCatalog
+    -> IO Int
+queueSkillCatalogContextWithOmissions contextRef catalog =
     case formatSkillCatalogContext defaultSkillCatalogMaxChars catalog of
-        (Nothing, _) -> pure ()
+        (Nothing, omitted) -> pure omitted
         (Just text, omitted) -> do
             modifyIORef' contextRef \current ->
                 Just $ case current of
                     Nothing -> text
                     Just existing -> existing <> "\n\n" <> text
-            when (omitted > 0) do
-                color <- resolveColor stderr
-                putTextLn stderr $
-                    roleWarn color
-                        (glyphWarn
-                            <> "skills: "
-                            <> Text.pack (show omitted)
-                            <> " omitted from model context due to the catalog budget")
+            pure omitted
 
 -- | Publish a freshly discovered catalog to all session consumers. Keeping
 -- this transition in one helper lets fullscreen startup begin with empty refs
@@ -107,10 +129,29 @@ installSkillCatalog
     -> SkillCatalog
     -> IO ()
 installSkillCatalog reservedNames queueContext contextRef catalogRef invocationsRef catalog = do
+    void $
+        installSkillCatalogWithOmissions
+            reservedNames
+            queueContext
+            contextRef
+            catalogRef
+            invocationsRef
+            catalog
+
+installSkillCatalogWithOmissions
+    :: [Text]
+    -> Bool
+    -> IORef (Maybe Text)
+    -> IORef SkillCatalog
+    -> IORef [SkillInvocation]
+    -> SkillCatalog
+    -> IO Int
+installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRef invocationsRef catalog = do
     writeIORef catalogRef catalog
     writeIORef invocationsRef (buildSkillInvocations reservedNames catalog)
-    when queueContext $
-        queueSkillCatalogContext contextRef catalog
+    if queueContext
+        then queueSkillCatalogContextWithOmissions contextRef catalog
+        else pure 0
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =

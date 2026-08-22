@@ -24,7 +24,9 @@ spec = describe "Agent.CLI.Skills" do
 
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")
-        queueSkillCatalogContext context (SkillCatalog [fakeSkill] [])
+        _ <- queueSkillCatalogContextWithOmissions
+            context
+            (SkillCatalog [fakeSkill] [])
         readIORef context >>= \case
             Nothing -> expectationFailure "expected startup context"
             Just text -> do
@@ -45,7 +47,7 @@ spec = describe "Agent.CLI.Skills" do
         catalogRef <- newIORef (SkillCatalog [] [])
         invocationsRef <- newIORef []
         let catalog = SkillCatalog [fakeSkill] []
-        installSkillCatalog
+        _ <- installSkillCatalogWithOmissions
             ["help"] True context catalogRef invocationsRef catalog
         readIORef catalogRef `shouldReturn` catalog
         readIORef invocationsRef `shouldReturn`
