@@ -2,6 +2,7 @@
 module Agent.CLI
     ( DevResult(..)
     , afterDev
+    , accountSwitchTarget
     , applyReplMode
     , buildPromptState
     , cycleReplInteraction
@@ -277,7 +278,6 @@ import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
     , formatUsageReport
-    , formatUsageSummary
     )
 import Agent.CLI.Worktree
     ( createWorktree
@@ -468,8 +468,14 @@ data PendingTurnPresentation
     | ContinuePendingTurn
 
 data AccountPickerOption
-    = AccountPickerAccount !Text !Text !Text !Text
-    | AccountPickerConnect
+    = AccountPickerAccount
+        !Provider
+        !BillingMode
+        !Text
+        !Text
+        !Text
+        !Text
+    | AccountPickerConnect !Provider
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -2358,7 +2364,7 @@ loadStartupAuth
     -> Maybe Provider
     -> IO LoadedAuth
 loadStartupAuth startup transition requestedProvider =
-    loadAuth requestedProvider >>= \case
+    loadTransitionAuth transition requestedProvider >>= \case
         Right loaded -> pure loaded
         Left err
             | isNothing transition
@@ -2369,6 +2375,46 @@ loadStartupAuth startup transition requestedProvider =
                         >>= either (startupDie startup . Text.unpack) pure
             | otherwise ->
                 startupDie startup (Text.unpack err)
+
+loadTransitionAuth
+    :: Maybe ProviderTransition
+    -> Maybe Provider
+    -> IO (Either Text LoadedAuth)
+loadTransitionAuth transition requestedProvider =
+    case transition of
+        Just active
+            | Just selectionId <- active.transitionAccountSelectionId ->
+                loadSelectedAccountAuth
+                    active.transitionTarget.modelProvider
+                    selectionId
+                    (fromMaybe selectionId active.transitionAccountId)
+        _ -> loadAuth requestedProvider
+
+loadSelectedAccountAuth
+    :: Provider
+    -> Text
+    -> Text
+    -> IO (Either Text LoadedAuth)
+loadSelectedAccountAuth provider selectionId accountId =
+    case provider of
+        OpenAIProvider ->
+            loadAuth (Just OpenAIProvider) >>= \case
+                Left err -> pure (Left err)
+                Right loaded -> case loaded.loadedOpenAiPool of
+                    Nothing ->
+                        pure (Left
+                            "OpenAI account selection requires a live account pool")
+                    Just pool -> do
+                        preferred <- newIORef (Just accountId)
+                        pure $ Right loaded
+                            { loadedTokenProvider =
+                                preferredOpenAiTokenProvider
+                                    preferred
+                                    pool
+                                    loaded.loadedTokenProvider
+                            , loadedSelectionId = Just accountId
+                            }
+        _ -> loadAuthForAccount provider selectionId
 
 runCredentialOnboarding
     :: StartupRuntime
@@ -2682,8 +2728,8 @@ replWithDraft env@SessionEnv
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAccount = accountRef
+    , sessionAccountId = accountIdRef
     , sessionAccountSelectionId = selectionRef
-    , sessionAccountLabel = accountLabel
     , sessionSelectAccount = selectAccount
     , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
@@ -3623,106 +3669,162 @@ replWithDraft env@SessionEnv
                                     (roleError color err)
                             next
                         Right result -> pure result
-    chooseAccount _keptDraft next =
-        case (fullscreen, selectAccount) of
-            (Just runtime, Just select) -> do
+    chooseAccount keptDraft next =
+        case fullscreen of
+            Just runtime -> do
                 currentSelectionId <- readIORef selectionRef
+                currentAccountId <- readIORef accountIdRef
                 options <- withReplActivity
                     "Loading account usage…"
-                    (case openAiPool of
-                        Just pool ->
-                            loadAccountPickerOptions accountLabel pool
-                        Nothing -> case tokenProvider of
-                            Just active ->
-                                loadProviderAccountPickerOptions
-                                    provider
-                                    (tokenProviderBillingMode active)
-                                    currentSelectionId
-                            Nothing ->
-                                pure [AccountPickerConnect])
+                    (loadAllAccountPickerOptions provider)
                 let initial =
                         fromMaybe 0 $
                             findIndex
-                                (accountPickerMatches currentSelectionId)
+                                (accountPickerMatches
+                                    provider
+                                    currentSelectionId
+                                    currentAccountId)
                                 options
                 requestFullscreenChoiceWithBody
                     runtime
-                    "Account"
-                    ("Choose the "
-                        <> providerSlug provider
-                        <> " account for future requests.")
+                    "Accounts"
+                    "Choose any account. Switching provider also switches to its default model."
                     initial
-                    (map (accountPickerRow currentSelectionId) options)
+                    (map
+                        (accountPickerRow
+                            provider
+                            currentSelectionId
+                            currentAccountId)
+                        options)
                     >>= \case
                         Just index
                             | Just option <- atMay index options ->
                                 case option of
                                     AccountPickerAccount
+                                        selectedProvider
+                                        selectedBilling
                                         selectedSelectionId
-                                        _
+                                        selectedAccountId
                                         selectedLabel
                                         _
-                                            | selectedSelectionId
-                                                == currentSelectionId ->
+                                            | selectedProvider == provider
+                                            , selectedAccountId
+                                                == currentAccountId ->
                                                 displayInfo
                                                     ("account: " <> selectedLabel)
                                                     (pure ())
                                                     >> next
                                             | otherwise ->
                                                 chooseSelectedAccount
+                                                    selectedProvider
+                                                    selectedBilling
                                                     selectedSelectionId
-                                    AccountPickerConnect -> do
+                                                    selectedAccountId
+                                                    selectedLabel
+                                    AccountPickerConnect selectedProvider -> do
                                         color <- resolveColor stderr
                                         connected <-
                                             withFullscreenSuspended runtime $
                                                 connectProviderAccount
                                                     color
-                                                    provider
+                                                    selectedProvider
                                         case connected of
                                             Nothing -> next
                                             Just selectedAccountId -> do
                                                 refreshed <-
-                                                    loadProviderAccountPickerOptions
+                                                    loadAllAccountPickerOptions
                                                         provider
-                                                        (maybe
-                                                            SubscriptionBilled
-                                                            tokenProviderBillingMode
-                                                            tokenProvider)
-                                                        currentSelectionId
-                                                let connectedSelection =
-                                                        [ selectionId
-                                                        | AccountPickerAccount
-                                                            selectionId
+                                                case listToMaybe
+                                                        [ account
+                                                        | account@(AccountPickerAccount
+                                                            accountProvider
+                                                            _
+                                                            _
                                                             accountId
                                                             _
-                                                            _ <- refreshed
+                                                            _) <- refreshed
+                                                        , accountProvider
+                                                            == selectedProvider
                                                         , accountId
                                                             == selectedAccountId
-                                                        ]
-                                                chooseSelectedAccount $
-                                                    fromMaybe
-                                                        selectedAccountId
-                                                        (listToMaybe
-                                                            connectedSelection)
+                                                        ] of
+                                                    Just
+                                                        (AccountPickerAccount
+                                                            accountProvider
+                                                            billing
+                                                            selectionId
+                                                            accountId
+                                                            label
+                                                            _) ->
+                                                        chooseSelectedAccount
+                                                            accountProvider
+                                                            billing
+                                                            selectionId
+                                                            accountId
+                                                            label
+                                                    _ -> do
+                                                        displayError
+                                                            "Connected account could not be loaded."
+                                                            (pure ())
+                                                        next
                         _ -> next
               where
-                chooseSelectedAccount selectedId =
-                    select selectedId >>= \case
-                        Left err -> do
-                            now <- getCurrentTime
-                            let message =
-                                    "could not select account: "
-                                        <> formatApiErrorInlineAt
-                                            now
-                                            err
-                            displayError message (pure ())
-                            next
-                        Right label -> do
-                            displayInfo
-                                ("account switched to " <> label)
-                                (pure ())
-                            next
-            _ -> do
+                currentBilling =
+                    tokenProviderBillingMode
+                        <$> tokenProvider
+                chooseSelectedAccount
+                    selectedProvider
+                    selectedBilling
+                    selectedSelectionId
+                    selectedAccountId
+                    selectedLabel
+                        | selectedProvider == provider
+                        , Just selectedBilling == currentBilling
+                        , Just select <- selectAccount =
+                            let liveSelectionId =
+                                    case selectedProvider of
+                                        OpenAIProvider -> selectedAccountId
+                                        _ -> selectedSelectionId
+                            in select liveSelectionId >>= \case
+                                Left err -> do
+                                    now <- getCurrentTime
+                                    let message =
+                                            "could not select account: "
+                                                <> formatApiErrorInlineAt
+                                                    now
+                                                    err
+                                    displayError message (pure ())
+                                    next
+                                Right label -> do
+                                    displayInfo
+                                        ("account switched to " <> label)
+                                        (pure ())
+                                    next
+                        | otherwise =
+                            readIORef paramsRef >>= \params ->
+                                requestAccountProviderSwitch
+                                    fullscreen
+                                    provider
+                                    (currentModel params)
+                                    selectedProvider
+                                    selectedSelectionId
+                                    selectedAccountId
+                                    keptDraft
+                                    persist >>= \case
+                                        Left err -> do
+                                            displayError err (pure ())
+                                            next
+                                        Right result -> do
+                                            displayInfo
+                                                ("switching to "
+                                                    <> selectedLabel
+                                                    <> " ("
+                                                    <> providerSlug
+                                                        selectedProvider
+                                                    <> ")")
+                                                (pure ())
+                                            pure result
+            Nothing -> do
                 displayError
                     "Account switching is unavailable for this session."
                     (pure ())
@@ -3800,61 +3902,46 @@ effortChoice fullscreen current = case fullscreen of
                         pure (Just (efforts !! index))
                 _ -> pure Nothing
 
-loadAccountPickerOptions
-    :: (Credential -> IO Text)
-    -> OpenAI.Pool
-    -> IO [AccountPickerOption]
-loadAccountPickerOptions resolveLabel pool = do
-    _ <- OpenAI.discoverAccounts pool
-    now <- getCurrentTime
-    snapshots <- OpenAI.snapshotAccounts pool
-    accounts <- mapConcurrently (loadAccount now) snapshots
-    pure (accounts <> [AccountPickerConnect])
-  where
-    loadAccount now snapshot = do
-        let auth = snapshot.snapshotAuth
-            credential = Credential
-                { accessToken = auth.accessToken
-                , accountId = auth.accountId
-                , leaseId = Nothing
-                , provider = OpenAIProvider
-                }
-        label <- resolveLabel credential
-        usage <- fetchUsage auth.accessToken auth.accountId
-        pure $
-            AccountPickerAccount
-                auth.accountId
-                auth.accountId
-                label
-                (formatUsageSummary
-                    now
-                    snapshot.snapshotCooldownUntil
-                    usage)
-
-loadProviderAccountPickerOptions
-    :: Provider
-    -> BillingMode
-    -> Text
-    -> IO [AccountPickerOption]
-loadProviderAccountPickerOptions provider billing _currentSelectionId = do
+loadAllAccountPickerOptions :: Provider -> IO [AccountPickerOption]
+loadAllAccountPickerOptions currentProvider = do
     discovered <- discoverSelectableLoginAccounts
-    refreshed <-
-        mapConcurrently refreshLoginAccount
-            [ account
-            | account <- discovered
-            , account.loginProvider == provider
-            , accountBillingMode provider account.loginBilling == billing
-            ]
+    refreshed <- mapConcurrently refreshLoginAccount discovered
     now <- getCurrentTime
+    let ordered =
+            sortOn
+                (\account ->
+                    ( account.loginProvider /= currentProvider
+                    , providerOrder account.loginProvider
+                    , Text.toLower account.loginLabel
+                    ))
+                (deduplicateAccounts refreshed)
     pure $
         [ AccountPickerAccount
+            account.loginProvider
+            (accountBillingMode account.loginProvider account.loginBilling)
             (loginAccountSelectionId account)
             account.loginAccountId
             account.loginLabel
-            (formatLoginUsageSummary provider now account)
-        | account <- refreshed
+            (formatLoginUsageSummary account.loginProvider now account)
+        | account <- ordered
         ]
-            <> [AccountPickerConnect]
+            <> map AccountPickerConnect
+                [OpenAIProvider, XAIProvider, OpenRouterProvider]
+  where
+    deduplicateAccounts = foldr addUnique []
+    addUnique account accounts
+        | any (samePickerAccount account) accounts = accounts
+        | otherwise = account : accounts
+    samePickerAccount left right
+        | left.loginProvider /= right.loginProvider = False
+        | left.loginProvider == OpenAIProvider =
+            left.loginAccountId == right.loginAccountId
+        | otherwise =
+            loginAccountSelectionId left == loginAccountSelectionId right
+    providerOrder = \case
+        OpenAIProvider -> 0 :: Int
+        XAIProvider -> 1
+        OpenRouterProvider -> 2
 
 accountBillingMode :: Provider -> AccountBilling -> BillingMode
 accountBillingMode provider = case provider of
@@ -3894,28 +3981,47 @@ formatLoginUsageSummary provider now account =
                 else ""
     maybeToList = maybe [] pure
 
-accountPickerMatches :: Text -> AccountPickerOption -> Bool
-accountPickerMatches currentSelectionId = \case
-    AccountPickerAccount selectionId _ _ _ ->
-        selectionId == currentSelectionId
-    AccountPickerConnect -> False
+accountPickerMatches
+    :: Provider
+    -> Text
+    -> Text
+    -> AccountPickerOption
+    -> Bool
+accountPickerMatches currentProvider currentSelectionId currentAccountId = \case
+    AccountPickerAccount optionProvider _ selectionId accountId _ _ ->
+        optionProvider == currentProvider
+            && ( selectionId == currentSelectionId
+                || accountId == currentAccountId
+               )
+    AccountPickerConnect _ -> False
 
 accountPickerRow
-    :: Text
+    :: Provider
+    -> Text
+    -> Text
     -> AccountPickerOption
     -> (Text, Text)
-accountPickerRow currentSelectionId = \case
+accountPickerRow currentProvider currentSelectionId currentAccountId = \case
     AccountPickerAccount
-        selectionId
+        optionProvider
         _
+        selectionId
+        accountId
         accountPickerLabel
         accountPickerUsage ->
-            ( (if selectionId == currentSelectionId then "✓ " else "")
+            ( (if optionProvider == currentProvider
+                    && ( selectionId == currentSelectionId
+                        || accountId == currentAccountId
+                       )
+                    then "✓ "
+                    else "")
+                <> providerSlug optionProvider
+                <> " · "
                 <> accountPickerLabel
             , accountPickerUsage
             )
-    AccountPickerConnect ->
-        ("＋ Connect new account", "")
+    AccountPickerConnect optionProvider ->
+        ("＋ Connect " <> providerSlug optionProvider <> " account", "")
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -4137,6 +4243,115 @@ requestModelProviderSwitch fullscreen choice draft persist =
                         emitUiEvent runtime (UiSystemMessage message)
                 pure (Right (RunSwitchProvider transition))
 
+requestAccountProviderSwitch
+    :: Maybe FullscreenRuntime
+    -> Provider
+    -> Text
+    -> Provider
+    -> Text
+    -> Text
+    -> Text
+    -> Persistence
+    -> IO (Either Text RunResult)
+requestAccountProviderSwitch
+    fullscreen
+    currentProvider
+    currentModelId
+    selectedProvider
+    selectionId
+    accountId
+    draft
+    persist = do
+        let choice =
+                accountSwitchTarget
+                    currentProvider
+                    currentModelId
+                    selectedProvider
+        validateSelectedAccountTarget
+            selectedProvider
+            selectionId
+            accountId >>= \case
+                Left err -> pure (Left err)
+                Right () -> do
+                    sessionId <- ensureTransitionSessionId persist
+                    let transition = ProviderTransition
+                            { transitionTarget = choice
+                            , transitionAccountSelectionId =
+                                Just selectionId
+                            , transitionAccountId = Just accountId
+                            , transitionSessionId = sessionId
+                            , transitionPendingTurn = Nothing
+                            , transitionDraft = draft
+                            , transitionUnavailableProviders = []
+                            , transitionCause = ManualTransition
+                            , transitionAutomaticBilling = Nothing
+                            }
+                        modelMessage
+                            | currentProvider == selectedProvider =
+                                providerSlug selectedProvider
+                                    <> "/"
+                                    <> choice.modelId
+                            | otherwise =
+                                providerSlug selectedProvider
+                                    <> "/"
+                                    <> choice.modelId
+                                    <> " (provider changed)"
+                    color <- resolveColor stdout
+                    case fullscreen of
+                        Nothing ->
+                            Text.putStrLn
+                                (roleMuted color
+                                    (glyphOk
+                                        <> "switching to "
+                                        <> modelMessage))
+                        Just runtime ->
+                            emitUiEvent runtime $
+                                UiSystemMessage
+                                    ("switching to " <> modelMessage)
+                    pure (Right (RunSwitchProvider transition))
+
+accountSwitchTarget :: Provider -> Text -> Provider -> ModelOption
+accountSwitchTarget currentProvider currentModelId selectedProvider =
+    ModelOption
+        { modelProvider = selectedProvider
+        , modelId =
+            if currentProvider == selectedProvider
+                then currentModelId
+                else defaultModelFor selectedProvider
+        , modelLabel = Nothing
+        }
+
+validateSelectedAccountTarget
+    :: Provider
+    -> Text
+    -> Text
+    -> IO (Either Text ())
+validateSelectedAccountTarget provider selectionId accountId =
+    loadSelectedAccountAuth provider selectionId accountId >>= \case
+        Left err ->
+            pure $ Left $
+                "cannot switch to "
+                    <> providerSlug provider
+                    <> " account: "
+                    <> err
+        Right loaded ->
+            probeLoadedAvailability loaded >>= \case
+                Left err -> do
+                    now <- getCurrentTime
+                    pure $ Left $
+                        "cannot switch to "
+                            <> providerSlug provider
+                            <> " account: "
+                            <> formatApiErrorInlineAt now err
+                Right usable
+                    | usable.loadedProvider /= provider ->
+                        pure $ Left $
+                            "cannot switch to "
+                                <> providerSlug provider
+                                <> " account: auth resolved "
+                                <> providerSlug usable.loadedProvider
+                    | otherwise -> pure (Right ())
+
 requestAutomaticProviderFallback
     :: SessionEnv
     -> ApiError
@@ -4247,6 +4462,8 @@ chooseAutomaticProviderTransition
                             emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice
+                        , transitionAccountSelectionId = Nothing
+                        , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionDraft = ""
@@ -4296,6 +4513,8 @@ chooseStartupProviderTransition
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice
+                        , transitionAccountSelectionId = Nothing
+                        , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionDraft = ""
@@ -4319,6 +4538,8 @@ prepareProviderTransition cause unavailable pending draft choice persist =
             sessionId <- ensureTransitionSessionId persist
             pure $ Right ProviderTransition
                 { transitionTarget = choice
+                , transitionAccountSelectionId = Nothing
+                , transitionAccountId = Nothing
                 , transitionSessionId = sessionId
                 , transitionPendingTurn = pending
                 , transitionDraft = draft
