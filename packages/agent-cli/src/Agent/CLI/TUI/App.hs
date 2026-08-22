@@ -22,9 +22,11 @@ module Agent.CLI.TUI.App
     , readFullscreenLine
     , readFullscreenLineOr
     , repositoryHeaderText
+    , onboardingVisibleRowIndices
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenText
     , runFullscreen
@@ -162,7 +164,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.List (find, findIndex, intersperse, sortOn)
+import Data.List (find, findIndex, intersperse, nub, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
@@ -448,7 +450,19 @@ requestFullscreenChoiceWithBody
 requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
-        (AppAskChoice title body initial rows reply)
+        (AppAskChoice ChoiceDialog title body initial rows reply)
+    atomically (readTMVar reply)
+
+requestFullscreenOnboarding
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenOnboarding runtime title body rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskChoice ChoiceOnboarding title body 0 rows reply)
     atomically (readTMVar reply)
 
 requestFullscreenResume
@@ -2691,7 +2705,12 @@ resumeFooter browser =
                     )
 
 drawChoice :: AppState -> ChoiceOverlay -> Widget Name
-drawChoice appState choice =
+drawChoice appState choice = case choice.choicePresentation of
+    ChoiceDialog -> drawDialogChoice appState choice
+    ChoiceOnboarding -> drawOnboardingChoice appState choice
+
+drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
+drawDialogChoice appState choice =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
@@ -2720,6 +2739,110 @@ drawChoice appState choice =
     start =
         max 0 (min choice.choiceIndex (max 0 (count - 14)))
     rows = take 14 (drop start choice.choiceRows)
+
+drawOnboardingChoice :: AppState -> ChoiceOverlay -> Widget Name
+drawOnboardingChoice appState choice =
+    Widget Greedy Greedy do
+        context <- getContext
+        render $
+            withAttr Theme.baseAttr $
+                padRight Max $
+                    padBottom Max $
+                        padLeft (Pad 3) $
+                            vBox
+                                [ onboardingRow context.availWidth sourceIndex
+                                | sourceIndex <-
+                                    onboardingVisibleRowIndices
+                                        context.availHeight
+                                        choice.choiceIndex
+                                        (length choice.choiceRows)
+                                ]
+  where
+    choiceStart = 8
+    choiceEnd = choiceStart + length choice.choiceRows
+    onboardingRow width sourceIndex
+        | sourceIndex >= choiceStart
+        , sourceIndex < choiceEnd =
+            case drop (sourceIndex - choiceStart) choice.choiceRows of
+                row : _ ->
+                    onboardingChoiceRow
+                        appState
+                        width
+                        choice.choiceIndex
+                        (sourceIndex - choiceStart)
+                        row
+                [] -> emptyWidget
+        | otherwise =
+            vLimit 1 $
+                case sourceIndex of
+                    0 -> withAttr Theme.headingAttr (txt choice.choiceTitle)
+                    2 -> txtWrap choice.choiceBody
+                    3 ->
+                        withAttr Theme.mutedAttr $
+                            txt "Choose a sign-in option below, or add your own API key."
+                    5 ->
+                        withAttr Theme.mutedAttr $
+                            txt "You can change this anytime with /login."
+                    7 -> withAttr Theme.strongAttr (txt "Get started")
+                    12 ->
+                        withAttr Theme.mutedAttr $
+                            txt "Credentials are stored locally on this computer."
+                    15 ->
+                        withAttr Theme.mutedAttr $
+                            txt "Esc to exit · Explore all commands with /help"
+                    _ -> txt " "
+
+onboardingChoiceRow
+    :: AppState
+    -> Int
+    -> Int
+    -> Int
+    -> (Text, Text)
+    -> Widget Name
+onboardingChoiceRow appState width selected index (label, detail) =
+    clickable name interactive
+  where
+    prefix = if selected == index then "› " else "  "
+    name = ChoiceRow index
+    showDetail = width >= 72 && not (Text.null detail)
+    row =
+        vLimit 1 $
+            if showDetail
+                then hBox
+                    [ hLimit 36 $
+                        padRight Max (txt (prefix <> label))
+                    , withAttr Theme.mutedAttr (txt detail)
+                    ]
+                else txt (prefix <> label)
+    styled =
+        if selected == index
+            then withAttr Theme.selectedAttr row
+            else row
+    interactive = case Composer.controlInteractionAttr appState name of
+        Nothing -> styled
+        Just attr -> forceAttr attr row
+
+-- | Project the 18-row onboarding surface into a short terminal while keeping
+-- the selected action and all setup paths visible before explanatory copy.
+onboardingVisibleRowIndices :: Int -> Int -> Int -> [Int]
+onboardingVisibleRowIndices availableHeight selected choiceCount
+    | availableHeight <= 0 = []
+    | availableHeight >= onboardingRowCount =
+        [0 .. onboardingRowCount - 1]
+    | otherwise =
+        sort $
+            take availableHeight $
+                nub $
+                    [ choiceStart + clampedSelected
+                    , choiceStart + max 0 (choiceCount - 1)
+                    ]
+                        <> [choiceStart .. choiceStart + choiceCount - 1]
+                        <> [7, 12, 15, 5, 0, 2, 3, 1, 4, 6, 13, 14, 16, 17]
+  where
+    onboardingRowCount = 18
+    choiceStart = 8
+    clampedSelected =
+        max 0 (min (max 0 (choiceCount - 1)) selected)
 
 waitingOverlayLabel :: AppState -> Text -> Widget Name
 waitingOverlayLabel state label =
@@ -3195,13 +3318,14 @@ handleEventInner event = case event of
                     { appPermissionReply = Just reply
                     , appAgentHover = Nothing
                     }
-    AppEvent (AppAskChoice title body initial rows reply) -> do
+    AppEvent (AppAskChoice presentation title body initial rows reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
             state
                 { appChoice = Just ChoiceOverlay
-                    { choiceTitle = title
+                    { choicePresentation = presentation
+                    , choiceTitle = title
                     , choiceBody = body
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
