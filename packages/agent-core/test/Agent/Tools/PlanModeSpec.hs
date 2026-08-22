@@ -1,6 +1,7 @@
 module Agent.Tools.PlanModeSpec (spec) where
 
-import Agent.OsPath (fromFilePath, toText)
+import Agent.OsPath (toText)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool(..)
@@ -12,6 +13,8 @@ import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
 import Control.Exception.Safe (bracket)
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.PlanMode" do

@@ -14,7 +14,6 @@ module Agent.Tools.Ghci.Runtime
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
-import Agent.OsPath (toFilePath)
 import Agent.Tools.Ghci.Classify
     ( GhciClass(..)
     , classifyGhciInput
@@ -51,6 +50,7 @@ import Control.Concurrent.STM
 import Control.Exception.Safe
     ( SomeException
     , finally
+    , impureThrow
     , mask
     , onException
     , try
@@ -85,6 +85,7 @@ import System.Process
     )
 import System.Posix.Signals (sigINT, signalProcessGroup)
 import System.Posix.Types (ProcessGroupID)
+import System.OsPath (OsPath, decodeUtf)
 
 data GhciOutcome
     = GhciCompleted
@@ -467,7 +468,7 @@ ghciArgs =
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
     let spec = (proc "ghci" ghciArgs)
-            { cwd = Just (toFilePath env.toolCwd)
+            { cwd = Just (decodeUtfPath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
@@ -868,3 +869,6 @@ remainingMillis started budget = do
     now <- getMonotonicTimeNSec
     let elapsed = fromIntegral ((now - started) `div` 1000000)
     pure (max 0 (budget - elapsed))
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

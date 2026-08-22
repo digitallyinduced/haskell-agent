@@ -17,11 +17,11 @@ module Agent.CLI.SubagentStore
 
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
+import Agent.OsPath (toText)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (impureThrow, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -35,7 +35,7 @@ import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
     )
-import System.OsPath ((</>))
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 
 data SubagentDiskMeta = SubagentDiskMeta
@@ -57,7 +57,7 @@ instance ToJSON SubagentDiskMeta where
         , "agentType" .= meta.diskAgentType
         , "agentModel" .= meta.diskAgentModel
         , "reasoningEffort" .= meta.diskReasoningEffort
-        , "cwd" .= fmap toFilePath meta.diskCwd
+        , "cwd" .= fmap decodeUtfPath meta.diskCwd
         , "taskPath" .= meta.diskTaskPath
         , "parentId" .= meta.diskParentId
         , "depth" .= meta.diskDepth
@@ -73,7 +73,7 @@ instance FromJSON SubagentDiskMeta where
             <*> o .:? "agentType"
             <*> o .:? "agentModel"
             <*> o .:? "reasoningEffort"
-            <*> (fmap fromFilePath <$> o .:? "cwd")
+            <*> (fmap unsafeEncodeUtf <$> o .:? "cwd")
             <*> o .:? "taskPath"
             <*> o .:? "parentId"
             <*> o .:? "depth"
@@ -124,8 +124,8 @@ subagentStoreDir sessionDir agentId
     | otherwise =
         Right
             ( sessionDir
-                </> fromFilePath "agents"
-                </> fromFilePath (Text.unpack agentId.unSubagentId)
+                </> unsafeEncodeUtf "agents"
+                </> unsafeEncodeUtf (Text.unpack agentId.unSubagentId)
             )
 
 forkSubagentTranscript :: Maybe Text -> [ResponseItem] -> [ResponseItem]
@@ -169,10 +169,10 @@ saveSubagentState
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
-            let metaPath = dir </> fromFilePath "meta.json"
-                transcriptPath = dir </> fromFilePath "transcript.json"
+            let metaPath = dir </> unsafeEncodeUtf "meta.json"
+                transcriptPath = dir </> unsafeEncodeUtf "transcript.json"
             createDirectoryIfMissing True dir
-            _ <- tryAny (setFileMode (toFilePath dir) 0o700)
+            _ <- tryAny (setFileMode (decodeUtfPath dir) 0o700)
             writeLazyFileAtomically metaPath 0o600 $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
                 , diskStatus = Just status
@@ -195,8 +195,8 @@ loadSubagentState sessionDir agentId =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
-            let metaPath = dir </> fromFilePath "meta.json"
-                transcriptPath = dir </> fromFilePath "transcript.json"
+            let metaPath = dir </> unsafeEncodeUtf "meta.json"
+                transcriptPath = dir </> unsafeEncodeUtf "transcript.json"
             hasMeta <- doesFileExist metaPath
             hasTranscript <- doesFileExist transcriptPath
             if not (hasMeta || hasTranscript)
@@ -216,7 +216,7 @@ loadSubagentState sessionDir agentId =
                             Right (Just (items, meta))
   where
     decodeFile path = do
-        raw <- retryOnFileBusy (LBS.readFile (toFilePath path))
+        raw <- retryOnFileBusy (LBS.readFile (decodeUtfPath path))
         case Aeson.eitherDecode raw of
             Left err ->
                 pure $ Left $
@@ -225,3 +225,6 @@ loadSubagentState sessionDir agentId =
                         <> ": "
                         <> Text.pack err
             Right value -> pure (Right value)
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

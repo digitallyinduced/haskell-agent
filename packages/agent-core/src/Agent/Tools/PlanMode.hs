@@ -28,7 +28,7 @@ module Agent.Tools.PlanMode
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
+import Agent.OsPath (toText)
 import Agent.ToolArgs (objectArgs, optText, reqText)
 import Agent.ToolDSL
     ( PropertySchema(..)
@@ -40,7 +40,7 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , jsonAppTool
     )
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (impureThrow, tryAny)
 import Data.Aeson (FromJSON(..), withObject)
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -48,7 +48,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
-import System.OsPath (equalFilePath, takeDirectory, (</>))
+import System.OsPath (OsPath, decodeUtf, equalFilePath, takeDirectory, unsafeEncodeUtf, (</>))
 
 data PlanModeState
     = PlanInactive
@@ -82,7 +82,7 @@ data PlanModeHooks = PlanModeHooks
     }
 
 planFileName :: OsPath
-planFileName = fromFilePath "plan.md"
+planFileName = unsafeEncodeUtf "plan.md"
 
 defaultHooks :: PlanModeHooks
 defaultHooks = PlanModeHooks
@@ -125,13 +125,13 @@ readPlanMarkdown env = do
     if not exists
         then pure ""
         else either (const "") id
-            <$> tryAny (retryOnFileBusy (Text.readFile (toFilePath path)))
+            <$> tryAny (retryOnFileBusy (Text.readFile (decodeUtfPath path)))
 
 writePlanMarkdown :: PlanModeEnv -> Text -> IO (Either Text ())
 writePlanMarkdown env content = do
     path <- planFilePath env
     createDirectoryIfMissing True (takeDirectory path)
-    result <- tryAny (retryOnFileBusy (Text.writeFile (toFilePath path) content))
+    result <- tryAny (retryOnFileBusy (Text.writeFile (decodeUtfPath path) content))
     pure $ case result of
         Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
         Right () -> Right ()
@@ -316,3 +316,6 @@ parseOptions raw =
         [ Text.strip part
         | part <- Text.split (\c -> c == '\n' || c == ',') raw
         ]
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

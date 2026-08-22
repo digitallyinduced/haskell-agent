@@ -1,6 +1,6 @@
 module Agent.SkillsSpec (spec) where
 
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Skills
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
@@ -13,6 +13,8 @@ import System.Directory
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Skills" do

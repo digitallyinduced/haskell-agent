@@ -31,7 +31,6 @@ import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
 import Agent.Provider
     ( AccountFailure(..)
     , Credential(..)
@@ -45,7 +44,7 @@ import Agent.OpenRouter.Credential (credentialFromApiKey)
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (bracket, bracket_)
+import Control.Exception.Safe (bracket, bracket_, impureThrow)
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -74,7 +73,7 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.IO (SeekMode(AbsoluteSeek))
-import System.OsPath (takeDirectory, (</>))
+import System.OsPath (OsPath, decodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 import qualified System.OsPath as OsPath
 import System.Posix.Files (setFileMode)
 import System.Posix.IO
@@ -238,10 +237,10 @@ loadOpenAi = do
     fromEnvJson <- lift (lookupNonEmpty "CODEX_AUTH_JSON")
     home <- lift getHomeDirectory
     let filePath =
-            home </> fromFilePath ".codex" </> fromFilePath "auth.json"
+            home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json"
     fileExists <- lift (doesFileExist filePath)
     fileBytes <- if fileExists
-        then lift (Just <$> retryOnFileBusy (LBS.readFile (toFilePath filePath)))
+        then lift (Just <$> retryOnFileBusy (LBS.readFile (decodeUtfPath filePath)))
         else pure Nothing
     now <- lift getCurrentTime
     let (storeErrors, managed) = case managedResult of
@@ -422,7 +421,7 @@ openAiSourceLockPath source =
         OpenAiManagedOAuth managedId ->
             Just <$> managedRefreshLockPath managedId
         OpenAiAuthFile filePath ->
-            pure (Just (fromFilePath (toFilePath filePath <> ".refresh.lock")))
+            pure (Just (unsafeEncodeUtf (decodeUtfPath filePath <> ".refresh.lock")))
         _ ->
             pure Nothing
 
@@ -433,9 +432,9 @@ managedRefreshLockPath managedId = do
             "refresh-" <> Text.unpack (safeLockName managedId) <> ".lock"
     pure $
         home
-            </> fromFilePath ".haskell-agent"
-            </> fromFilePath "credentials"
-            </> fromFilePath fileName
+            </> unsafeEncodeUtf ".haskell-agent"
+            </> unsafeEncodeUtf "credentials"
+            </> unsafeEncodeUtf fileName
 
 safeLockName :: Text -> Text
 safeLockName = Text.map replace
@@ -449,7 +448,7 @@ safeLockName = Text.map replace
 withAdvisoryFileLock :: OsPath -> IO a -> IO a
 withAdvisoryFileLock path action = do
     createDirectoryIfMissing True (takeDirectory path)
-    setFileMode (toFilePath (takeDirectory path)) 0o700
+    setFileMode (decodeUtfPath (takeDirectory path)) 0o700
     bracket
         (openRefreshLock path)
         closeFd
@@ -458,7 +457,7 @@ withAdvisoryFileLock path action = do
 openRefreshLock :: OsPath -> IO Fd
 openRefreshLock path =
     openFd
-        (toFilePath path)
+        (decodeUtfPath path)
         ReadWrite
         defaultFileFlags { creat = Just 0o600, cloexec = True }
 
@@ -516,7 +515,7 @@ reloadOpenAiAccount source stale =
                 else do
                     now <- getCurrentTime
                     bytes <- retryOnFileBusy
-                        (LBS.readFile (toFilePath filePath))
+                        (LBS.readFile (decodeUtfPath filePath))
                     pure $ case openaiAuthStateFromJson now bytes of
                         Nothing ->
                             Left $ ProviderError AuthenticationError
@@ -640,11 +639,11 @@ loadExternalGrokCredential = do
     fromToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
     let filePath =
-            home </> fromFilePath ".grok" </> fromFilePath "auth.json"
+            home </> unsafeEncodeUtf ".grok" </> unsafeEncodeUtf "auth.json"
     fileExists <- doesFileExist filePath
     fileJson <- if fileExists
         then Just . TextEncoding.decodeUtf8 . LBS.toStrict
-            <$> retryOnFileBusy (LBS.readFile (toFilePath filePath))
+            <$> retryOnFileBusy (LBS.readFile (decodeUtfPath filePath))
         else pure Nothing
     let token =
             (fromJson >>= grokCredentialFromAuthJson)
@@ -907,7 +906,7 @@ hasGrokAuth = do
     envToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
     file <- doesFileExist
-        (home </> fromFilePath ".grok" </> fromFilePath "auth.json")
+        (home </> unsafeEncodeUtf ".grok" </> unsafeEncodeUtf "auth.json")
     managed <- hasManagedProvider XAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 
@@ -917,7 +916,7 @@ hasOpenAiAuth = do
     envToken <- lookupNonEmpty "CODEX_ACCESS_TOKEN"
     home <- getHomeDirectory
     file <- doesFileExist
-        (home </> fromFilePath ".codex" </> fromFilePath "auth.json")
+        (home </> unsafeEncodeUtf ".codex" </> unsafeEncodeUtf "auth.json")
     managed <- hasManagedProvider OpenAIProvider
     pure (isJust envJson || isJust envToken || file || managed)
 
@@ -1016,3 +1015,6 @@ noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
     \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

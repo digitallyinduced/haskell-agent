@@ -1,13 +1,15 @@
 module Agent.OpenAI.LoginSpec (spec) where
 
 import Agent.OpenAI.Login (writeAuthFile)
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.OpenAI.Login" do

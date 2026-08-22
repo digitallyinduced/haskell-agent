@@ -3,11 +3,13 @@ module Agent.CLI.SkillsSpec (spec) where
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
-import Agent.OsPath (fromFilePath)
+import System.OsPath (unsafeEncodeUtf)
 import Agent.Skills
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.CLI.Skills" do

@@ -2,7 +2,7 @@ module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.CLI.SubagentStore
 import Agent.Responses.Types
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentIdentity(..)
@@ -19,6 +19,9 @@ import qualified System.FilePath as FilePath
 import System.OsPath ((</>))
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.SubagentStore" do

@@ -44,7 +44,7 @@ import Agent.Loop
     )
 import Agent.OpenAI.LoopBackend (openAiBackend)
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
-import Agent.OsPath (OsPath)
+import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider)
 import Agent.Responses.Types
     ( ReasoningConfig(..)

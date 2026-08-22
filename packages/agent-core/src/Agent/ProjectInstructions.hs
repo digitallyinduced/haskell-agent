@@ -20,8 +20,8 @@ module Agent.ProjectInstructions
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Provider (Provider(..))
-import Agent.OsPath (OsPath, fromFilePath, toFilePath, toText)
-import Control.Exception.Safe (tryAny)
+import Agent.OsPath (toText)
+import Control.Exception.Safe (impureThrow, tryAny)
 import qualified Data.ByteString as BS
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -29,7 +29,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (doesFileExist, doesPathExist)
-import System.OsPath (takeDirectory, (</>))
+import System.OsPath (OsPath, decodeUtf, takeDirectory, unsafeEncodeUtf, (</>))
 
 -- | One loaded instruction file and its absolute path.
 data InstructionFile = InstructionFile
@@ -64,15 +64,15 @@ defaultDiscoverOptions :: DiscoverOptions
 defaultDiscoverOptions = DiscoverOptions
     { discoverMaxBytes = defaultProjectDocMaxBytes
     , discoverGlobalDir = Nothing
-    , discoverRootMarkers = [fromFilePath ".git"]
+    , discoverRootMarkers = [unsafeEncodeUtf ".git"]
     }
 
 -- | Provider-specific directory under the user home for global AGENTS.md.
 globalAgentsHomeDir :: Provider -> OsPath -> OsPath
 globalAgentsHomeDir provider home = case provider of
-    OpenAIProvider -> home </> fromFilePath ".codex"
-    XAIProvider -> home </> fromFilePath ".grok"
-    OpenRouterProvider -> home </> fromFilePath ".grok"
+    OpenAIProvider -> home </> unsafeEncodeUtf ".codex"
+    XAIProvider -> home </> unsafeEncodeUtf ".grok"
+    OpenRouterProvider -> home </> unsafeEncodeUtf ".grok"
 
 -- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
 -- are skipped. Project files are ordered root -> cwd.
@@ -114,17 +114,17 @@ directoryChain root cwd = reverse (go cwd)
 -- | Prefer @AGENTS.override.md@ over @AGENTS.md@ in a directory.
 readPreferredAgentsMd :: OsPath -> IO (Maybe InstructionFile)
 readPreferredAgentsMd dir = do
-    override <- readAgentsFile (dir </> fromFilePath "AGENTS.override.md")
+    override <- readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.override.md")
     case override of
         Just file -> pure (Just file)
-        Nothing -> readAgentsFile (dir </> fromFilePath "AGENTS.md")
+        Nothing -> readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.md")
 
 readAgentsFile :: OsPath -> IO (Maybe InstructionFile)
 readAgentsFile path = do
     exists <- doesFileExist path
     if not exists
         then pure Nothing
-        else tryAny (retryOnFileBusy (Text.readFile (toFilePath path))) >>= \case
+        else tryAny (retryOnFileBusy (Text.readFile (decodeUtfPath path))) >>= \case
             Left _ -> pure Nothing
             Right text ->
                 if Text.null (Text.strip text)
@@ -235,3 +235,6 @@ neutralizeReminderTags =
         . Text.replace "</system-reminder" "&lt;/system-reminder"
         . Text.replace "<system_reminder" "&lt;system_reminder"
         . Text.replace "</system_reminder" "&lt;/system_reminder"
+
+decodeUtfPath :: OsPath -> FilePath
+decodeUtfPath = either impureThrow id . decodeUtf

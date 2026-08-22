@@ -1,7 +1,7 @@
 module Agent.CLI.WorktreeSpec (spec) where
 
 import Agent.CLI.Worktree
-import Agent.OsPath (OsPath, fromFilePath, toFilePath)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import Data.List (dropWhileEnd, isInfixOf)
 import Data.Text (Text)
@@ -15,6 +15,9 @@ import System.OsPath (addTrailingPathSeparator, takeFileName, (</>))
 import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 import Test.Hspec
+
+fromFilePath = unsafeEncodeUtf
+toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.Worktree" do
