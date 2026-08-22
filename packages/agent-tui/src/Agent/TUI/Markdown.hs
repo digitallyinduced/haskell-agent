@@ -63,7 +63,7 @@ data InlineStyle
     | InlineStrong
     | InlineEmphasis
     | InlineCode
-    | InlineLink
+    | InlineLink !Text
     deriving (Eq, Show)
 
 data InlineSpan = InlineSpan
@@ -271,7 +271,7 @@ parseInline = go Nothing []
                     : go (lastChar body) [] rest
         | Just (label, url, rest) <- linkSpan text =
             flushPlain plain $
-                InlineSpan InlineLink
+                InlineSpan (InlineLink url)
                     (label
                         <> if Text.null url || label == url
                             then ""
@@ -377,7 +377,13 @@ inlineWidget spans =
   where
     resolve InlineSpan{inlineStyle, inlineText} = do
         attr <- B.lookupAttrName (styleAttr inlineStyle)
-        pure (attr, inlineText)
+        pure
+            ( case inlineStyle of
+                InlineLink url
+                    | not (Text.null url) -> attr `V.withURL` url
+                _ -> attr
+            , inlineText
+            )
 
 styleAttr :: InlineStyle -> AttrName
 styleAttr = \case
@@ -385,7 +391,7 @@ styleAttr = \case
     InlineStrong -> Theme.strongAttr
     InlineEmphasis -> Theme.emphasisAttr
     InlineCode -> Theme.inlineCodeAttr
-    InlineLink -> Theme.linkAttr
+    InlineLink _ -> Theme.linkAttr
 
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =
