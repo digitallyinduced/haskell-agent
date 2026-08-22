@@ -32,6 +32,25 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
+    it "keeps plaintext inter-agent content useful in Show output" do
+        let rendered = show (PlainInterAgentContent "visible task")
+        rendered `shouldContain` "PlainInterAgentContent"
+        rendered `shouldContain` "visible task"
+
+    it "redacts encrypted inter-agent content from Show output" do
+        let secret = "gAAAAA-secret-ciphertext"
+            message = InterAgentMessage
+                { messageAuthor = "/root"
+                , messageRecipient = "/root/worker"
+                , messageType = NewTaskMessage
+                , messageContent = EncryptedInterAgentContent secret
+                }
+            rendered = show message
+        rendered `shouldContain` "/root/worker"
+        rendered `shouldContain` "NewTaskMessage"
+        rendered `shouldContain` "<redacted>"
+        rendered `shouldNotContain` "gAAAAA-secret-ciphertext"
+
     it "allows collaboration coordination without approval" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)

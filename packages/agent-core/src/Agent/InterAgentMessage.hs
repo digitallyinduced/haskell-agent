@@ -27,14 +27,29 @@ data InterAgentMessageType
 data InterAgentMessageContent
     = PlainInterAgentContent !Text
     | EncryptedInterAgentContent !Text
-    deriving (Eq, Show)
+    deriving (Eq)
+
+instance Show InterAgentMessageContent where
+    show = \case
+        PlainInterAgentContent text ->
+            "PlainInterAgentContent " <> show text
+        EncryptedInterAgentContent _ ->
+            "EncryptedInterAgentContent <redacted>"
 
 data InterAgentMessage = InterAgentMessage
     { messageAuthor :: !Text
     , messageRecipient :: !Text
     , messageType :: !InterAgentMessageType
     , messageContent :: !InterAgentMessageContent
-    } deriving (Eq, Show)
+    } deriving (Eq)
+
+instance Show InterAgentMessage where
+    show message =
+        "InterAgentMessage { messageAuthor = " <> show message.messageAuthor
+            <> ", messageRecipient = " <> show message.messageRecipient
+            <> ", messageType = " <> show message.messageType
+            <> ", messageContent = " <> show message.messageContent
+            <> " }"
 
 plainInterAgentContent :: Text -> InterAgentMessageContent
 plainInterAgentContent = PlainInterAgentContent

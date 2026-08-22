@@ -21,6 +21,14 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    it "shows image metadata without exposing attachment bytes" do
+        let image = ImageAttachment "image/png" "secret-image-bytes"
+            rendered = show image
+        rendered `shouldContain` "image/png"
+        rendered `shouldContain` "imageByteLength = 18"
+        rendered `shouldContain` "<redacted>"
+        rendered `shouldNotContain` "secret-image-bytes"
+
     it "combines TokenUsage component-wise" do
         TokenUsage 10 4 6 <> TokenUsage 3 2 1
             `shouldBe` TokenUsage 13 6 7
