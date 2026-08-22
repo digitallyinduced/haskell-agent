@@ -1,19 +1,24 @@
 -- | Load ChatGPT, Grok, or OpenRouter credentials for the CLI process.
 module Agent.CLI.Auth
     ( LoadedAuth(..)
+    , authErrorNeedsOnboarding
     , GrokAuthState(..)
     , credentialAccountLabel
     , grokCredentialFromAuthJson
     , grokAuthStateFromJson
     , grokAuthStateToJson
     , grokEmailFromAuthJson
+    , externalAuthSelectionId
     , loadAuth
+    , loadAuthForAccount
+    , managedAuthSelectionId
     , managedGrokTokenProvider
     , openAIOAuthClientId
     , openAiAuthStateChanged
     , openaiAuthStateFromJson
     , preferredOpenAiTokenProvider
     , probeLoadedAuth
+    , probeLoadedAuthCredential
     , reloadableFileCredentialProvider
     , staticCredentialProvider
     , xaiOAuthClientId
@@ -47,7 +52,7 @@ import Agent.Provider
     , tokenProviderBillingMode
     )
 import Agent.OpenRouter.Credential (credentialFromApiKey)
-import Agent.OsPath (unsafeToFilePath)
+import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -114,9 +119,18 @@ data LoadedAuth = LoadedAuth
     { loadedProvider :: !Provider
     , loadedTokenProvider :: !TokenProvider
     , loadedAccountLabel :: !(Credential -> IO Text)
+    -- | Stable credential-source key used by the account picker.
+    , loadedSelectionId :: !(Maybe Text)
     -- | Live OpenAI OAuth pool, when authentication uses one.
     , loadedOpenAiPool :: !(Maybe OpenAI.Pool)
     }
+
+managedAuthSelectionId :: Text -> Text
+managedAuthSelectionId managedId = "managed:" <> managedId
+
+externalAuthSelectionId :: Provider -> Text -> Text
+externalAuthSelectionId provider source =
+    "external:" <> providerSlug provider <> ":" <> source
 
 -- | Human-readable identity for the credential most recently selected by a
 -- provider. Prefer an email claim, then fall back to a compact account id.
@@ -173,14 +187,32 @@ loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
 loadAuth requested = runExceptT do
     provider <- detectProvider requested
     case provider of
-        XAIProvider -> loadXai
+        XAIProvider -> loadXai Nothing
         OpenAIProvider -> loadOpenAi
-        OpenRouterProvider -> loadOpenRouter
+        OpenRouterProvider -> loadOpenRouter Nothing
+
+-- | Load one specific account for providers whose HTTP backends can swap
+-- token sources without reconnecting a long-lived transport.
+loadAuthForAccount :: Provider -> Text -> IO (Either Text LoadedAuth)
+loadAuthForAccount provider selectionId = runExceptT case provider of
+    XAIProvider -> loadXai (Just selectionId)
+    OpenRouterProvider -> loadOpenRouter (Just selectionId)
+    OpenAIProvider ->
+        throwE "OpenAI account selection is handled by the live account pool"
 
 -- | Ask the token source whether it has a usable credential now without
 -- making a model request, preserving a successful checkout for later use.
 probeLoadedAuth :: LoadedAuth -> IO (Either ApiError LoadedAuth)
-probeLoadedAuth loaded = do
+probeLoadedAuth loaded =
+    fmap snd <$> probeLoadedAuthCredential loaded
+
+-- | Validate the current token source and preserve the checked credential for
+-- the next real request. Returning the credential lets the UI show the active
+-- account before an HTTP backend performs its first checkout.
+probeLoadedAuthCredential
+    :: LoadedAuth
+    -> IO (Either ApiError (Credential, LoadedAuth))
+probeLoadedAuthCredential loaded = do
     result <- getNextToken loaded.loadedTokenProvider Nothing
     case result of
         Left err -> pure (Left err)
@@ -191,7 +223,10 @@ probeLoadedAuth loaded = do
             | otherwise -> do
                 tokenProvider <-
                     seedTokenProvider loaded.loadedTokenProvider credential
-                pure $ Right loaded { loadedTokenProvider = tokenProvider }
+                pure $ Right
+                    ( credential
+                    , loaded { loadedTokenProvider = tokenProvider }
+                    )
 
 -- | Pin normal checkouts to one OpenAI pool account until that credential is
 -- reported as failed. A failure for the selected credential clears the pin
@@ -254,9 +289,9 @@ detectProvider Nothing = do
                 then pure OpenRouterProvider
                 else throwE noAuthHint
 
-loadXai :: ExceptT Text IO LoadedAuth
-loadXai = do
-    managed <- lift (loadManagedCredential XAIProvider)
+loadXai :: Maybe Text -> ExceptT Text IO LoadedAuth
+loadXai requestedSelectionId = do
+    managed <- lift (loadManagedCredential XAIProvider requestedSelectionId)
     case managed of
         Just (metadata, secret)
             | metadata.managedAuthKind == ManagedGrokAuthJson -> do
@@ -280,6 +315,8 @@ loadXai = do
                     , loadedTokenProvider = provider
                     , loadedAccountLabel =
                         pure . credentialAccountLabelWith metadata.managedLabel
+                    , loadedSelectionId =
+                        Just (managedAuthSelectionId metadata.managedId)
                     , loadedOpenAiPool = Nothing
                     }
         Just (metadata, secret) ->
@@ -294,62 +331,102 @@ loadXai = do
                         }
                 , loadedAccountLabel =
                     pure . credentialAccountLabelWith metadata.managedLabel
+                , loadedSelectionId =
+                    Just (managedAuthSelectionId metadata.managedId)
                 , loadedOpenAiPool = Nothing
                 }
         Nothing -> do
-            credential <- lift loadExternalGrokCredential
-            case credential of
-                Nothing -> throwE noAuthHint
-                Just loaded -> do
+            selected <- lift $
+                selectExternalCredential
+                    requestedSelectionId
+                    <$> loadExternalGrokCredentials
+            case selected of
+                Nothing ->
+                    throwE $
+                        maybe noAuthHint
+                            (const
+                                (accountNotFound
+                                    XAIProvider requestedSelectionId))
+                            requestedSelectionId
+                Just (selectionId, loaded) -> do
                     provider <- lift $ reloadableFileCredentialProvider
                         XAIProvider
                         SubscriptionBilled
                         loaded
-                        loadExternalGrokCredential
+                        (fmap snd
+                            . selectExternalCredential (Just selectionId)
+                            <$> loadExternalGrokCredentials)
                     pure LoadedAuth
                         { loadedProvider = XAIProvider
                         , loadedTokenProvider = provider
                         , loadedAccountLabel = pure . credentialAccountLabel
+                        , loadedSelectionId = Just selectionId
                         , loadedOpenAiPool = Nothing
                         }
 
-loadOpenRouterCredential :: IO (Maybe (Credential, Text))
-loadOpenRouterCredential = do
-    managed <- loadManagedCredential OpenRouterProvider
+loadOpenRouterCredential
+    :: Maybe Text
+    -> IO (Maybe (Text, Credential, Text))
+loadOpenRouterCredential requestedSelectionId = do
+    managed <- loadManagedCredential OpenRouterProvider requestedSelectionId
     case managed of
         Just (metadata, secret) ->
             pure $ Just
-                ( (credentialFromApiKey secret.secretPayload)
+                ( managedAuthSelectionId metadata.managedId
+                , (credentialFromApiKey secret.secretPayload)
                     { accountId = metadata.managedAccountId }
                 , metadata.managedLabel
                 )
-        Nothing ->
-            fmap (\key -> (credentialFromApiKey key, "")) <$>
-                lookupNonEmpty "OPENROUTER_API_KEY"
+        Nothing -> do
+            external <- fmap
+                (\key ->
+                    ( externalAuthSelectionId
+                        OpenRouterProvider
+                        "environment"
+                    , (credentialFromApiKey key)
+                        { accountId = "openrouter" }
+                    , ""
+                    ))
+                <$> lookupNonEmpty "OPENROUTER_API_KEY"
+            pure $ external >>= \candidate@(selectionId, credential, _) ->
+                if matchesSelection
+                    requestedSelectionId
+                    selectionId
+                    credential
+                    then Just candidate
+                    else Nothing
 
-loadOpenRouter :: ExceptT Text IO LoadedAuth
-loadOpenRouter = do
-    loadedCredential <- lift loadOpenRouterCredential
+loadOpenRouter :: Maybe Text -> ExceptT Text IO LoadedAuth
+loadOpenRouter requestedSelectionId = do
+    loadedCredential <- lift (loadOpenRouterCredential requestedSelectionId)
     case loadedCredential of
-        Nothing -> throwE noAuthHint
-        Just (initial, initialLabel) -> do
+        Nothing ->
+            throwE $
+                maybe noAuthHint
+                    (const
+                        (accountNotFound
+                            OpenRouterProvider requestedSelectionId))
+                    requestedSelectionId
+        Just (selectionId, initial, initialLabel) -> do
             provider <- lift $ reloadableFileCredentialProvider
                 OpenRouterProvider
                 ApiBilled
                 initial
-                (fmap (fmap fst) loadOpenRouterCredential)
+                (fmap (\(_, credential, _) -> credential)
+                    <$> loadOpenRouterCredential (Just selectionId))
             pure LoadedAuth
                 { loadedProvider = OpenRouterProvider
                 , loadedTokenProvider = provider
                 , loadedAccountLabel = \credential -> do
-                    current <- loadOpenRouterCredential
+                    current <- loadOpenRouterCredential (Just selectionId)
                     let label = case current of
-                            Just (currentCredential, currentLabel)
+                            Just (_, currentCredential, currentLabel)
                                 | currentCredential.accountId
                                     == credential.accountId ->
                                         currentLabel
                             _ -> initialLabel
                     pure (credentialAccountLabelWith label credential)
+                , loadedSelectionId = Just selectionId
                 , loadedOpenAiPool = Nothing
                 }
 
@@ -392,6 +469,7 @@ loadOpenAi = do
                         . (.accountId)
                         . (.openAiState))
                     currentAccounts)
+        , loadedSelectionId = Nothing
         , loadedOpenAiPool = Just pool
         }
 
@@ -769,8 +847,9 @@ persistRefreshedOpenAiAccount source newState = do
 
 loadManagedCredential
     :: Provider
+    -> Maybe Text
     -> IO (Maybe (ManagedCredential, ManagedSecret))
-loadManagedCredential provider =
+loadManagedCredential provider requestedSelectionId =
     loadManagedCredentials >>= \case
         Left _ -> pure Nothing
         Right credentials ->
@@ -779,7 +858,17 @@ loadManagedCredential provider =
                 | (metadata, secret) <- credentials
                 , metadata.managedEnabled
                 , metadata.managedProvider == provider
+                , matchesManagedSelection requestedSelectionId metadata
                 ]
+
+matchesManagedSelection :: Maybe Text -> ManagedCredential -> Bool
+matchesManagedSelection requested metadata =
+    case requested of
+        Nothing -> True
+        Just selectionId ->
+            case Text.stripPrefix "managed:" selectionId of
+                Just managedId -> metadata.managedId == managedId
+                Nothing -> metadata.managedAccountId == selectionId
 
 loadManagedCredentialById
     :: Text
@@ -839,8 +928,8 @@ authStateToJson state now = Aeson.object
         ]
     ]
 
-loadExternalGrokCredential :: IO (Maybe Credential)
-loadExternalGrokCredential = do
+loadExternalGrokCredentials :: IO [(Text, Credential)]
+loadExternalGrokCredentials = do
     fromJson <- lookupNonEmpty "GROK_AUTH_JSON"
     fromToken <- lookupNonEmpty "GROK_ACCESS_TOKEN"
     home <- getHomeDirectory
@@ -851,11 +940,15 @@ loadExternalGrokCredential = do
         then Just . TextEncoding.decodeUtf8 . LBS.toStrict
             <$> retryOnFileBusy (LBS.readFile (unsafeToFilePath filePath))
         else pure Nothing
-    let token =
-            (fromJson >>= grokCredentialFromAuthJson)
-                <|> fromToken
-                <|> (fileJson >>= grokCredentialFromAuthJson)
-    pure (fmap grokCredential token)
+    let environmentToken =
+            (fromJson >>= grokCredentialFromAuthJson) <|> fromToken
+        sourceCredential source token =
+            (externalAuthSelectionId XAIProvider source, grokCredential token)
+    pure $ catMaybes
+        [ sourceCredential "environment" <$> environmentToken
+        , sourceCredential (toText filePath)
+            <$> (fileJson >>= grokCredentialFromAuthJson)
+        ]
 
 grokCredentialFromAuthJson :: Text -> Maybe Text
 grokCredentialFromAuthJson raw =
@@ -1132,7 +1225,30 @@ hasOpenRouterAuth = do
 
 hasManagedProvider :: Provider -> IO Bool
 hasManagedProvider provider =
-    isJust <$> loadManagedCredential provider
+    isJust <$> loadManagedCredential provider Nothing
+
+matchesSelection :: Maybe Text -> Text -> Credential -> Bool
+matchesSelection requested selectionId credential =
+    maybe True
+        (\requestedId ->
+            requestedId == selectionId
+                || requestedId == credential.accountId)
+        requested
+
+selectExternalCredential
+    :: Maybe Text
+    -> [(Text, Credential)]
+    -> Maybe (Text, Credential)
+selectExternalCredential requested =
+    find (\(selectionId, credential) ->
+        matchesSelection requested selectionId credential)
+
+accountNotFound :: Provider -> Maybe Text -> Text
+accountNotFound provider requested =
+    "no enabled "
+        <> providerSlug provider
+        <> " credential found for account "
+        <> fromMaybe "(unknown)" requested
 
 -- | Cache one credential and only re-read disk/env after the provider rejects
 -- it for authentication. Rate-limit failures stay exhausted rather than
@@ -1216,3 +1332,8 @@ noAuthHint :: Text
 noAuthHint =
     "no credentials found. Set GROK_ACCESS_TOKEN, CODEX_ACCESS_TOKEN, \
     \or OPENROUTER_API_KEY, or place auth at ~/.grok/auth.json / ~/.codex/auth.json."
+
+authErrorNeedsOnboarding :: Text -> Bool
+authErrorNeedsOnboarding message =
+    message == noAuthHint
+        || "no valid OpenAI credentials found:" `Text.isPrefixOf` message

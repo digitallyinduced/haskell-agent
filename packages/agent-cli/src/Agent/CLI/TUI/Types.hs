@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , AppState(..)
     , AgentHover(..)
+    , ChoicePresentation(..)
     , ChoiceOverlay(..)
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
@@ -75,6 +76,7 @@ data AppEvent
     | AppUiBatch !(NonEmpty UiEvent)
     | AppAskPermission !Text !(TMVar (Maybe PermissionChoice))
     | AppAskChoice
+        !ChoicePresentation
         !Text
         !Text
         !Int
@@ -206,8 +208,14 @@ data AgentHover = AgentHover
     , agentHoverPaneWidth :: !Int
     }
 
+data ChoicePresentation
+    = ChoiceDialog
+    | ChoiceOnboarding
+    deriving (Eq, Show)
+
 data ChoiceOverlay = ChoiceOverlay
-    { choiceTitle :: !Text
+    { choicePresentation :: !ChoicePresentation
+    , choiceTitle :: !Text
     , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]

@@ -24,6 +24,7 @@ import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Data.IORef (IORef)
 import Data.Text (Text)
+import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
@@ -32,6 +33,7 @@ data SessionEnv = SessionEnv
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
     , sessionUnavailableProviders :: !(IORef [Provider])
+    , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionPrevious :: !(IORef (Maybe Text))
     , sessionPrinted :: !(IORef Bool)
     , sessionParams :: !(IORef ResponseCreateParams)
@@ -59,6 +61,7 @@ data SessionEnv = SessionEnv
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)
     , sessionAccountId :: !(IORef Text)
+    , sessionAccountSelectionId :: !(IORef Text)
     , sessionAccountLabel :: !(Credential -> IO Text)
     , sessionSelectAccount
         :: !(Maybe (Text -> IO (Either ApiError Text)))

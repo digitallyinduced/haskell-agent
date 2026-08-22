@@ -7,6 +7,7 @@ import Control.Concurrent.STM (atomically)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
@@ -71,6 +72,17 @@ spec = describe "fullscreen composer" do
                 }
         queuedFullscreenInputDisplays buffer
             `shouldReturn` Seq.singleton "queued"
+
+    it "prefers an already-submitted prompt over a simultaneous wakeup" do
+        buffer <- newFullscreenInputBuffer
+        atomically $
+            appendFullscreenInput buffer (input (ReplText "submitted"))
+        result <- atomically $
+            takeFullscreenInputOr
+                buffer
+                (pure ("provider unavailable" :: Text))
+        fmap (.fullscreenInputLine) result
+            `shouldBe` Right (ReplText "submitted")
   where
     input replLine = FullscreenInput
         { fullscreenInputLine = replLine

@@ -13,6 +13,7 @@ import Agent.CLI.TUI.App
     , motionDemandFor
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , onboardingVisibleRowIndices
     , repositoryHeaderText
     , uiEventRestartsMotionSchedule
     )
@@ -39,6 +40,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "prompt model refresh" do
+        it "preserves the live draft and cursor across a provider restart" do
+            let before =
+                    reduceUi
+                        (UiSetDraft "half typed prompt" 7)
+                        initialUiState
+                after =
+                    reduceUi
+                        (UiSetPrompt
+                            before.uiPrompt
+                                { promptModel = "gpt-5.6-sol"
+                                })
+                        before
+            after.uiDraft `shouldBe` "half typed prompt"
+            after.uiCursor `shouldBe` 7
+            after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
+
     describe "fullscreenVtyConfig" do
         it "maps enhanced-keyboard Shift+Enter sequences before Vty decodes them" do
             V.configInputMap fullscreenVtyConfig
@@ -64,6 +82,19 @@ spec = do
         it "still renders a path when git state is unavailable" do
             repositoryHeaderText "" "~/scratch"
                 `shouldBe` "~/scratch"
+
+    describe "onboarding layout" do
+        it "uses the complete 18-row surface when it fits" do
+            onboardingVisibleRowIndices 18 0 3
+                `shouldBe` [0 .. 17]
+
+        it "keeps every setup path in a short terminal" do
+            onboardingVisibleRowIndices 3 1 3
+                `shouldBe` [8, 9, 10]
+
+        it "keeps the selected setup path when only one row fits" do
+            onboardingVisibleRowIndices 1 1 3
+                `shouldBe` [9]
 
     describe "Agents pane layout" do
         it "hides below the responsive breakpoint and without children" do
