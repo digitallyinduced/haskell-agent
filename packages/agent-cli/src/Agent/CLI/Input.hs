@@ -19,6 +19,7 @@ module Agent.CLI.Input
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , isShiftEnterCsiBody
+    , submissionPromptText
     , appendReplHistory
     , readReplHistory
     , replHistoryPath
@@ -136,6 +137,15 @@ data ReplLine
     -- ^ Fullscreen status click: open the effort selector and keep the draft.
     | ReplQuitInterrupt
     deriving (Eq, Show)
+
+-- | Keep empty composers inert unless they have queued image attachments.
+-- Providers expect a non-empty text part alongside image parts, so image-only
+-- submissions receive a small synthetic prompt.
+submissionPromptText :: Int -> Text -> Maybe Text
+submissionPromptText attachmentCount text
+    | not (Text.null (Text.strip text)) = Just text
+    | attachmentCount > 0 = Just "The user attached an image."
+    | otherwise = Nothing
 
 -- | Strip terminal bracketed-paste wrappers (raw @CSI 200~@ / @CSI 201~@,
 -- or the printable sentinels used by older history/input versions) and decide

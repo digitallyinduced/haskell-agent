@@ -91,6 +91,7 @@ import Agent.CLI.Input
     ( ReplLine(..)
     , formatPasteChip
     , readReplLineWithSkills
+    , submissionPromptText
     )
 import Agent.CLI.ReplMode
     ( ReplMode(..)
@@ -2282,16 +2283,17 @@ replWithDraft env@SessionEnv
             submitLine skillCommands skillInvocations
                 continue stdoutColor False line
   where
-    submitLine skillCommands skillInvocations continue color pasted line =
-        let stripped = Text.strip line
-        in if Text.null stripped
-            then continue
-            else do
+    submitLine skillCommands skillInvocations continue color pasted line = do
+        attachmentCount <- length <$> readIORef attachmentsRef
+        case submissionPromptText attachmentCount line of
+            Nothing -> continue
+            Just promptLine -> do
+                let stripped = Text.strip promptLine
                 when pasted do
                     let chip = formatPasteChip stripped
                     when (chip /= stripped && isNothing fullscreen) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLineWithSkills skillCommands line of
+                case parseReplLineWithSkills skillCommands promptLine of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload persist
                     ReplPrompt text -> do
