@@ -166,32 +166,35 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "live output"
             _ -> expectationFailure "expected one running tool block"
 
-    it "animates an empty conversation without advancing elapsed time" do
-        let emptyIdle = apply [UiSystemMessage "startup status", UiTick, UiTick]
-            wrapped =
-                apply (UiSystemMessage "startup status" : replicate 120 UiTick)
+    it "uses elapsed milliseconds without advancing idle turn time" do
+        let emptyIdle =
+                advanceUiTime 67 $
+                    advanceUiTime 33 $
+                        apply [UiSystemMessage "startup status"]
             nonEmptyIdle =
-                reduceUi UiTick $
+                advanceUiTime 100 $
                     reduceUi (UiUserSubmitted "hello") initialUiState
             compactedHistory =
                 reduceUi (UiHistory "compacted summary") initialUiState
-            running = apply [UiLoop TurnStarted, UiTick, UiTick, UiTick]
+            running =
+                advanceUiTime 100 $
+                    advanceUiTime 67 $
+                        advanceUiTime 33 $
+                            apply [UiLoop TurnStarted]
             finished =
                 reduceUi
                     (UiLoop
                         (TurnFinished
                             (emptyTurnOutput "r1" [] Nothing)))
                     running
-            after = reduceUi UiTick finished
-        emptyIdle.uiElapsedTenths `shouldBe` 0
-        emptyIdle.uiFrame `shouldBe` 2
-        wrapped.uiFrame `shouldBe` 0
+            after = advanceUiTime 100 finished
+        emptyIdle.uiElapsedMillis `shouldBe` 0
         conversationIsEmpty emptyIdle `shouldBe` True
         conversationIsEmpty nonEmptyIdle `shouldBe` False
         conversationIsEmpty compactedHistory `shouldBe` False
-        nonEmptyIdle.uiFrame `shouldBe` 0
-        running.uiElapsedTenths `shouldBe` 3
-        after.uiElapsedTenths `shouldBe` 3
+        nonEmptyIdle.uiElapsedMillis `shouldBe` 0
+        running.uiElapsedMillis `shouldBe` 200
+        after.uiElapsedMillis `shouldBe` 200
 
     it "briefly settles on Finished before returning to Ready" do
         let finished =
@@ -202,12 +205,14 @@ spec = describe "fullscreen UI reducer" do
                             (emptyTurnOutput "r1" [] Nothing))
                     ]
             awaiting = reduceUi (UiSetAwaitingInput True) finished
-            settled = iterate (reduceUi UiTick) awaiting !! 10
+            almostSettled = advanceUiTime 999 awaiting
+            settled = advanceUiTime 1 almostSettled
         finished.uiActivity `shouldBe` "Finished"
-        finished.uiCompletionTicks `shouldBe` 10
+        finished.uiCompletionRemainingMillis `shouldBe` 1000
         awaiting.uiActivity `shouldBe` "Finished"
+        almostSettled.uiActivity `shouldBe` "Finished"
         settled.uiActivity `shouldBe` "Ready"
-        settled.uiCompletionTicks `shouldBe` 0
+        settled.uiCompletionRemainingMillis `shouldBe` 0
 
     it "expires transient notices but keeps progress notices visible" do
         let transient =
@@ -215,15 +220,37 @@ spec = describe "fullscreen UI reducer" do
                     (UiSetNotice
                         (Just (successNotice "Copied selected block.")))
                     initialUiState
-            expired = iterate (reduceUi UiTick) transient !! 30
+            visible = advanceUiTime 2999 transient
+            expired = advanceUiTime 1 visible
             progress =
                 reduceUi
                     (UiSetNotice (Just (progressNotice "Cancelling…")))
                     initialUiState
-            stillProgress = iterate (reduceUi UiTick) progress !! 40
+            stillProgress = advanceUiTime 40000 progress
+        visible.uiNotice
+            `shouldBe` Just (successNotice "Copied selected block.")
+        uiNextDeadlineMillis transient `shouldBe` Just 3000
+        uiNextDeadlineMillis visible `shouldBe` Just 1
         expired.uiNotice `shouldBe` Nothing
         stillProgress.uiNotice
             `shouldBe` Just (progressNotice "Cancelling…")
+        stillProgress.uiNoticeElapsedMillis `shouldBe` 0
+        uiNextDeadlineMillis stillProgress `shouldBe` Nothing
+
+    it "does not let replacement notices inherit elapsed time" do
+        let almostExpired =
+                advanceUiTime 2999 $
+                    reduceUi
+                        (UiSetNotice (Just (successNotice "Saved.")))
+                        initialUiState
+            replaced = reduceUi (UiInputPromoted "send next") almostExpired
+            stillVisible = advanceUiTime 1 replaced
+        replaced.uiNoticeElapsedMillis `shouldBe` 0
+        stillVisible.uiNotice
+            `shouldBe`
+                Just
+                    (warningNotice
+                        "Cancelling the current turn; sending this prompt next…")
 
     it "shows a search-replace diff while the tool is running" do
         let call =
@@ -408,7 +435,7 @@ spec = describe "fullscreen UI reducer" do
         afterTool.uiRunning `shouldBe` True
         finished.uiRunning `shouldBe` False
         finished.uiActivity `shouldBe` "Finished"
-        finished.uiCompletionTicks `shouldBe` 10
+        finished.uiCompletionRemainingMillis `shouldBe` 1000
 
     it "deletes the previous word for command/option-backspace" do
         deleteWordBefore "hello brave world" 17

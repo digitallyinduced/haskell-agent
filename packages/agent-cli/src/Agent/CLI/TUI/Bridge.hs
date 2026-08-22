@@ -35,22 +35,18 @@ mergeUiEvents older newer = case (older, newer) of
         Just (UiLoop (ReasoningDelta (left <> right)))
     (UiLoop (ActivityUpdated _), UiLoop (ActivityUpdated latest)) ->
         Just (UiLoop (ActivityUpdated latest))
-    (UiTick, UiTick) ->
-        Just UiTick
     _ ->
         Nothing
 
-nativeProgressSignal :: UiEvent -> UiState -> Maybe Bool
-nativeProgressSignal event state = case event of
-    UiLoop TurnStarted -> Just True
-    UiLoop (TurnFinished _) -> Just state.uiRunning
-    UiTurnEnded _ -> Just False
-    UiSetAwaitingInput True -> Just False
-    UiTick
-        | state.uiRunning
-        , state.uiFrame `mod` 10 == 0 ->
-            Just True
-    _ -> Nothing
+nativeProgressSignal :: Bool -> UiEvent -> UiState -> Maybe Bool
+nativeProgressSignal blocked event state
+    | blocked = Nothing
+    | otherwise = case event of
+        UiLoop TurnStarted -> Just True
+        UiLoop (TurnFinished _) -> Just state.uiRunning
+        UiTurnEnded _ -> Just False
+        UiSetAwaitingInput True -> Just False
+        _ -> Nothing
 
 historyMove
     :: Int

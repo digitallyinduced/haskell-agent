@@ -24,14 +24,17 @@ import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
 import Agent.Syntax (SyntaxHighlighter)
+import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
 import Brick.BChan (BChan)
 import Control.Concurrent.STM (TMVar, TVar)
 import Control.Exception.Safe (SomeException)
 import Data.IORef (IORef)
 import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import Data.Text (Text)
+import Data.Word (Word64)
 
 data Name
     = ConversationViewport
@@ -80,6 +83,7 @@ data AppEvent
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppConversationReflow
+    | AppMotionTick
     | AppStop
 
 data PendingAppEvent
@@ -116,7 +120,9 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
     , runtimeFirstFrame :: !(IO ())
-    , runtimeRunning :: !(IORef Bool)
+    , runtimeMotionSchedule :: !(TVar (MotionDemand, Int, Int))
+    , runtimeMotionTickQueued :: !(TVar Bool)
+    , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
     , runtimeImagePreviewRevision :: !(IORef Int)
     , runtimeImagePreviewVisible :: !(IORef Bool)
@@ -153,6 +159,11 @@ data AppState = AppState
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
     , appConversationReflowQueued :: !Bool
     , appWindowTitle :: !(Maybe Text)
+    , appMotionElapsedMillis :: !Int
+    , appCompletionFlashes :: !(Map.Map BlockId Int)
+    , appMotionScheduleReset :: !Bool
+    , appClockNanos :: !Word64
+    , appNativeProgressKeepaliveBucket :: !Int
     }
 
 data AgentHover = AgentHover

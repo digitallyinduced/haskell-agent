@@ -70,6 +70,11 @@ import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Graphics.Vty as V
 
+type ApplyLocalUiEvent =
+    UiEvent
+    -> (AppState -> AppState)
+    -> EventM Name AppState ()
+
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer =
     FullscreenInputBuffer <$> newTVarIO Seq.empty
@@ -365,9 +370,10 @@ drawComposerStatus state =
                 (txt mode)
 
 handlePromptControlClick
-    :: (Text -> ReplLine)
+    :: ApplyLocalUiEvent
+    -> (Text -> ReplLine)
     -> EventM Name AppState ()
-handlePromptControlClick choice = do
+handlePromptControlClick applyUiEvent choice = do
     state <- get
     let ui = state.appUi
         overlayOpen =
@@ -382,27 +388,19 @@ handlePromptControlClick choice = do
                     , fullscreenInputQueued = False
                     , fullscreenInputDisplay = Nothing
                     }
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetAwaitingInput False)
-                            current.appUi
-                    }
+            applyUiEvent (UiSetAwaitingInput False) id
         else
-            modify' \current ->
-                current
-                    { appUi =
-                        reduceUi
-                            (UiSetNotice
-                                (Just
-                                    (warningNotice
-                                        "Prompt settings can be changed when input is ready.")))
-                            current.appUi
-                    }
+            applyUiEvent
+                (UiSetNotice
+                    (Just
+                        (warningNotice
+                            "Prompt settings can be changed when input is ready.")))
+                id
 
-handleEffortControlClick :: EventM Name AppState ()
-handleEffortControlClick = do
+handleEffortControlClick
+    :: ApplyLocalUiEvent
+    -> EventM Name AppState ()
+handleEffortControlClick applyUiEvent = do
     state <- get
     let ui = state.appUi
         overlayOpen =
@@ -410,7 +408,7 @@ handleEffortControlClick = do
                 || maybe False (const True) state.appChoice
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput
-        then handlePromptControlClick ReplChooseEffort
+        then handlePromptControlClick applyUiEvent ReplChooseEffort
         else if ui.uiRunning && not overlayOpen
             then do
                 let efforts = reasoningEfforts
@@ -437,16 +435,12 @@ handleEffortControlClick = do
                         }
                 vScrollToBeginning (viewportScroll OverlayViewport)
             else
-                modify' \current ->
-                    current
-                        { appUi =
-                            reduceUi
-                                (UiSetNotice
-                                    (Just
-                                        (warningNotice
-                                            "Prompt settings cannot be changed right now.")))
-                                current.appUi
-                        }
+                applyUiEvent
+                    (UiSetNotice
+                        (Just
+                            (warningNotice
+                                "Prompt settings cannot be changed right now.")))
+                    id
 
 handleControlMouseDown :: Name -> EventM Name AppState ()
 handleControlMouseDown name =
@@ -474,11 +468,16 @@ handleControlMouseUp name action = do
     when activate action
 
 activateSlashAt
-    :: EventM Name AppState CtrlCDecision
+    :: ApplyLocalUiEvent
+    -> EventM Name AppState CtrlCDecision
     -> (Direction -> EventM Name AppState ())
     -> Int
     -> EventM Name AppState ()
-activateSlashAt handleCtrlC scrollConversationPage index = do
+activateSlashAt
+    applyUiEvent
+    handleCtrlC
+    scrollConversationPage
+    index = do
     state <- get
     case currentSlashMenu state of
         Just menu
@@ -487,6 +486,7 @@ activateSlashAt handleCtrlC scrollConversationPage index = do
                 modify' \current ->
                     current { appSlashIndex = index }
                 handleComposerKey
+                    applyUiEvent
                     handleCtrlC
                     scrollConversationPage
                     (V.EvKey V.KEnter [])
@@ -495,11 +495,16 @@ activateSlashAt handleCtrlC scrollConversationPage index = do
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
 handleComposerKey
-    :: EventM Name AppState CtrlCDecision
+    :: ApplyLocalUiEvent
+    -> EventM Name AppState CtrlCDecision
     -> (Direction -> EventM Name AppState ())
     -> V.Event
     -> EventM Name AppState ()
-handleComposerKey handleCtrlC scrollConversationPage event = do
+handleComposerKey
+    applyUiEvent
+    handleCtrlC
+    scrollConversationPage
+    event = do
     state <- get
     let ui = state.appUi
         slashMenu = currentSlashMenu state
@@ -682,37 +687,37 @@ handleComposerKey handleCtrlC scrollConversationPage event = do
                                 , fullscreenInputQueued = True
                                 , fullscreenInputDisplay = Just draft
                                 }
-                    modify' \current ->
-                        current
-                            { appUi =
-                                reduceUi (UiInputPromoted draft) current.appUi
-                            , appPasted = False
-                            , appHistory = draft : current.appHistory
-                            , appHistoryIndex = Nothing
-                            , appHistoryDraft = ""
-                            , appSlashIndex = 0
-                            , appSlashDismissed = False
-                            }
+                    applyUiEvent
+                        (UiInputPromoted draft)
+                        \current ->
+                            current
+                                { appPasted = False
+                                , appHistory = draft : current.appHistory
+                                , appHistoryIndex = Nothing
+                                , appHistoryDraft = ""
+                                , appSlashIndex = 0
+                                , appSlashDismissed = False
+                                }
                     liftIO state.appRuntime.runtimeCancel
                     vScrollToEnd (viewportScroll ConversationViewport)
 
     enqueueInput state replLine display clearDraft = do
         let queued = not state.appUi.uiAwaitingInput
-        modify' \current ->
-            current
-                { appUi =
-                    if queued
-                        then case display of
-                            Just text -> reduceUi (UiInputQueued text) current.appUi
-                            Nothing -> current.appUi
-                        else reduceUi
-                            (if clearDraft
-                                then UiDraftSubmitted
-                                else UiSetAwaitingInput False)
-                            current.appUi
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+            event =
+                if queued
+                    then UiInputQueued <$> display
+                    else Just
+                        (if clearDraft
+                            then UiDraftSubmitted
+                            else UiSetAwaitingInput False)
+            update current =
+                current
+                    { appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
+        case event of
+            Nothing -> modify' update
+            Just uiEvent -> applyUiEvent uiEvent update
         liftIO $ atomically $
             appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
                 { fullscreenInputLine = replLine
@@ -798,24 +803,18 @@ handleComposerKey handleCtrlC scrollConversationPage event = do
         setCursor (state.appUi.uiCursor + delta)
 
     setCursor cursor =
-        modify' \current ->
-            current
-                { appUi =
-                    reduceUi
-                        (UiSetDraft current.appUi.uiDraft cursor)
-                        current.appUi
-                , appSlashIndex = 0
-                }
+        get >>= \current ->
+            applyUiEvent
+                (UiSetDraft current.appUi.uiDraft cursor)
+                \state -> state { appSlashIndex = 0 }
 
     modifyUi uiEvent =
-        modify' \state ->
-            state { appUi = reduceUi uiEvent state.appUi }
+        applyUiEvent uiEvent id
 
     modifyUiResetSlash uiEvent =
-        modify' \state ->
+        applyUiEvent uiEvent \state ->
             state
-                { appUi = reduceUi uiEvent state.appUi
-                , appSlashIndex = 0
+                { appSlashIndex = 0
                 , appSlashDismissed = False
                 , appHistoryIndex = Nothing
                 , appHistoryDraft =
@@ -825,10 +824,9 @@ handleComposerKey handleCtrlC scrollConversationPage event = do
                 }
 
     modifyUiWithKill killed uiEvent =
-        modify' \state ->
+        applyUiEvent uiEvent \state ->
             state
-                { appUi = reduceUi uiEvent state.appUi
-                , appSlashIndex = 0
+                { appSlashIndex = 0
                 , appSlashDismissed = False
                 , appKillBuffer = killed
                 , appHistoryIndex = Nothing
@@ -847,17 +845,15 @@ handleComposerKey handleCtrlC scrollConversationPage event = do
                     state.appHistoryIndex
                     state.appUi.uiDraft
                     state.appHistoryDraft
-        modify' \currentState ->
-            currentState
-                { appUi =
-                    reduceUi
-                        (UiSetDraft text (Text.length text))
-                        currentState.appUi
-                , appHistoryIndex = index
-                , appHistoryDraft = draft
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+        applyUiEvent
+            (UiSetDraft text (Text.length text))
+            \currentState ->
+                currentState
+                    { appHistoryIndex = index
+                    , appHistoryDraft = draft
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
 
     moveSlash delta count =
         modify' \current ->
