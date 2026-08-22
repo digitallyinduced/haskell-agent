@@ -1939,6 +1939,7 @@ replWithDraft env@SessionEnv
                         stdoutColor
                         (isNothing fullscreen)
                         images
+                    syncFullscreenImagePreviews
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted stdoutColor
@@ -1954,7 +1955,8 @@ replWithDraft env@SessionEnv
                                 displayError err do
                                     errColor <- resolveColor stderr
                                     Text.hPutStrLn stderr (roleError errColor err)
-                            Right message ->
+                            Right message -> do
+                                syncFullscreenImagePreviews
                                 displayInfo message $
                                     Text.putStrLn
                                         (roleMuted stdoutColor
@@ -1997,6 +1999,7 @@ replWithDraft env@SessionEnv
                                     color
                                     (isNothing fullscreen)
                                     images
+                                syncFullscreenImagePreviews
                                 displayInfo message $
                                     Text.putStrLn
                                         (roleMuted color
@@ -2103,6 +2106,7 @@ replWithDraft env@SessionEnv
                                             color
                                             (isNothing fullscreen)
                                             [image]
+                                        syncFullscreenImagePreviews
                                         displayInfo attachMessage $
                                             Text.putStrLn
                                                 (roleMuted color
@@ -2154,6 +2158,7 @@ replWithDraft env@SessionEnv
                                             color
                                             (isNothing fullscreen)
                                             images
+                                        syncFullscreenImagePreviews
                                         displayInfo message $
                                             Text.putStrLn
                                                 (roleMuted color
@@ -2649,6 +2654,10 @@ replWithDraft env@SessionEnv
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
+    syncFullscreenImagePreviews =
+        forM_ fullscreen \runtime ->
+            readIORef attachmentsRef
+                >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiSystemMessage message)
