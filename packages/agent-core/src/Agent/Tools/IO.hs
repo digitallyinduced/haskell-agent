@@ -166,14 +166,19 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
             lastSnapshotRef <- newIORef Nothing
             let collect = do
                     -- Drain stdout and stderr concurrently so a child that
-                    -- fills one pipe cannot deadlock the other.
-                    withAsync sampleSnapshots \_sampler -> do
+                    -- fills one pipe cannot deadlock the other. Leave the
+                    -- sampler's structured scope before the final emission:
+                    -- this cancels and joins it, so an older periodic
+                    -- snapshot cannot overtake the authoritative final one
+                    -- and callbacks are never invoked concurrently.
+                    (out, err) <- withAsync sampleSnapshots \_sampler -> do
                         (out, err) <- concurrently
                             (drainHandle env.toolStdoutCap hout stdoutRef)
                             (drainHandle env.toolStdoutCap herr stderrRef)
-                        code <- waitForProcess processHandle
-                        emitSnapshot
-                        pure (out, err, code)
+                        pure (out, err)
+                    code <- waitForProcess processHandle
+                    emitSnapshot
+                    pure (out, err, code)
                 sampleSnapshots = do
                     threadDelay 100000
                     emitSnapshot
