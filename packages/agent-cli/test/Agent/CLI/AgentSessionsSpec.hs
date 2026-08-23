@@ -220,6 +220,35 @@ spec = describe "Agent.CLI.AgentSessions" do
                     `shouldReturn` Left "could not acquire lock"
                 closeSessionProcessManager manager
 
+    it "does not expose gateway credentials to managed agent children" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let marker = toFilePath root FilePath.</> "leaked"
+            script <- writeFakeAgentBody root
+                ("if [ -n \"$TELEGRAM_BOT_TOKEN\" ] \
+                \|| [ -n \"$TELEGRAM_ALLOWED_USERS\" ]; then \
+                \printf leaked > " <> shellQuote marker <> "; fi\n")
+            withExecutableOverride script $
+                bracket
+                    (do
+                        oldToken <- lookupEnv "TELEGRAM_BOT_TOKEN"
+                        oldUsers <- lookupEnv "TELEGRAM_ALLOWED_USERS"
+                        setEnv "TELEGRAM_BOT_TOKEN" "secret"
+                        setEnv "TELEGRAM_ALLOWED_USERS" "123"
+                        pure (oldToken, oldUsers))
+                    (\(oldToken, oldUsers) -> do
+                        restoreEnv "TELEGRAM_BOT_TOKEN" oldToken
+                        restoreEnv "TELEGRAM_ALLOWED_USERS" oldUsers)
+                    \_ -> do
+                        handle <- createSession (testCreateAt root root)
+                        manager <- newSessionProcessManager root
+                        launchSessionTurn manager False ApproveAll handle "one"
+                            `shouldReturn`
+                                Right
+                                    ("completed session "
+                                        <> handle.sessionMeta.metaId)
+                        Directory.doesFileExist marker `shouldReturn` False
+                        closeSessionProcessManager manager
+
     it "does not terminate background sessions when the manager closes" $
         withTempDir "agent-session-runtime-" \root -> do
             let marker = toFilePath root FilePath.</> "finished"
@@ -351,6 +380,11 @@ withExecutableOverride executable action =
             Nothing -> unsetEnv "HASKELL_AGENT_EXECUTABLE"
             Just value -> setEnv "HASKELL_AGENT_EXECUTABLE" value)
         (const action)
+
+restoreEnv :: String -> Maybe String -> IO ()
+restoreEnv name = \case
+    Nothing -> unsetEnv name
+    Just value -> setEnv name value
 
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 21) (secondsToDiffTime 0)

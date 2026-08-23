@@ -9,6 +9,7 @@ module Agent.Skills
     , SkillWarning(..)
     , defaultSkillCatalogMaxChars
     , discoverSkills
+    , loadSkillFile
     , buildSkillInvocations
     , modelVisibleSkills
     , formatSkillCatalogContext
@@ -209,7 +210,7 @@ discoverSkills options = do
         if exists
             then do
                 files <- findSkillFiles options.skillsMaxDepth root
-                forM files (loadSkill scope origin)
+                forM files (loadSkillFile scope origin)
             else pure []
     let skills = [skill | Right skill <- results]
         warnings = [warning | Left warning <- results]
@@ -279,12 +280,12 @@ findSkillFiles maxDepth root = go Set.empty 0 root
                                     traverse (go (Set.insert canonical seen) (depth + 1)) children
                                 pure ([skillPath | hasSkill] <> nested)
 
-loadSkill
+loadSkillFile
     :: SkillScope
     -> SkillOrigin
     -> FilePath
     -> IO (Either SkillWarning Skill)
-loadSkill scope origin path = do
+loadSkillFile scope origin path = do
     result <- tryAny (retryOnFileBusy (Text.readFile path))
     case result of
         Left err ->

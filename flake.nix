@@ -327,6 +327,7 @@
             {
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
+                packages.agent-telegram = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
@@ -342,6 +343,10 @@
                 apps.default = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-cli;
                     exePath = "/bin/agent-cli";
+                };
+                apps.agent-telegram = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.agent-telegram;
+                    exePath = "/bin/agent-telegram";
                 };
                 apps.agent-openai-login = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-openai-login;

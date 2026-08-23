@@ -91,6 +91,38 @@ agent-cli --worktree
 Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
 override automatic provider detection.
 
+### Telegram
+
+Create a bot with BotFather, find your numeric Telegram user ID, and run the
+interactive setup command:
+
+```console
+agent-telegram setup --provider openai --cwd /path/to/project \
+  --allowed-user 123456789
+agent-telegram start
+agent-telegram status
+```
+
+Setup reads the BotFather token without terminal echo, validates it against
+Telegram, and stores it separately from the non-secret gateway configuration.
+Never paste the bot token into an agent conversation.
+
+Only allowlisted private-chat text messages are handled. Each chat is mapped
+to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
+session and `/session` shows the current session ID. Mutating tools are denied
+unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
+background gateway.
+
+Incoming updates and pending replies are persisted before they are processed.
+Polling continues while agent turns run, conversations are processed in order,
+and separate chats can run concurrently. Pending work resumes when the gateway
+is restarted.
+
+The built-in `telegram-agent` skill lets the normal agent guide this setup.
+Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
+direct secret entry to the interactive setup command, and start the configured
+gateway after setup is complete.
+
 ### Model catalog and local models
 
 The model picker is driven by a versioned catalog. The application ships its
