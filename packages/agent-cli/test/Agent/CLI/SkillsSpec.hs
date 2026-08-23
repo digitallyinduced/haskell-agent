@@ -2,7 +2,10 @@ module Agent.CLI.SkillsSpec (spec) where
 
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
+import Agent.CLI.SessionState (SessionState(..))
 import Agent.CLI.Skills
+import Agent.CLI.TurnState (ConversationState(..))
+import Agent.Loop (emptyTokenUsage)
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Skills
 import Data.IORef (newIORef, readIORef)
@@ -49,11 +52,12 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillModelInvocable) matching `shouldBe` [True]
 
     it "queues skill metadata after existing startup context" do
-        context <- newIORef (Just "agents")
+        context <- newIORef (testSessionState (Just "agents"))
         _ <- queueSkillCatalogContextWithOmissions
             context
             (SkillCatalog [fakeSkill] [])
-        readIORef context >>= \case
+        (.sessionConversation.conversationStartupContext)
+            <$> readIORef context >>= \case
             Nothing -> expectationFailure "expected startup context"
             Just text -> do
                 text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
@@ -69,7 +73,7 @@ spec = describe "Agent.CLI.Skills" do
             }
 
     it "installs a deferred catalog, invocations, and startup context together" do
-        context <- newIORef (Just "agents")
+        context <- newIORef (testSessionState (Just "agents"))
         catalogRef <- newIORef (SkillCatalog [] [])
         invocationsRef <- newIORef []
         let catalog = SkillCatalog [fakeSkill] []
@@ -78,7 +82,8 @@ spec = describe "Agent.CLI.Skills" do
         readIORef catalogRef `shouldReturn` catalog
         readIORef invocationsRef `shouldReturn`
             [SkillInvocation "deploy" fakeSkill True]
-        readIORef context >>= \case
+        (.sessionConversation.conversationStartupContext)
+            <$> readIORef context >>= \case
             Nothing -> expectationFailure "expected startup context"
             Just text ->
                 text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
@@ -107,3 +112,15 @@ fakeSkill = Skill
     , skillScope = UserSkill
     , skillOrigin = AgentSkills
     }
+
+testSessionState :: Maybe Text.Text -> SessionState
+testSessionState startup =
+    SessionState
+        { sessionConversation = ConversationState
+            { conversationPreviousResponseId = Nothing
+            , conversationTranscript = []
+            , conversationStartupContext = startup
+            , conversationUsage = emptyTokenUsage
+            , conversationLastAssistant = Nothing
+            }
+        }

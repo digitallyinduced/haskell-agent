@@ -83,8 +83,8 @@ spec = do
                     record
                     OpenAIProvider
                     Nothing
-                    params
-                    transcript
+                    (readIORef params)
+                    (readIORef transcript)
                     Nothing
             result `shouldSatisfy` either (const False) (const True)
             map requestItems <$> readIORef requests
@@ -104,8 +104,8 @@ spec = do
                     (\_ -> getMaskingState >>= writeIORef recorderMasking)
                     OpenAIProvider
                     Nothing
-                    params
-                    transcript
+                    (readIORef params)
+                    (readIORef transcript)
                     Nothing
             result `shouldSatisfy` either (const False) (const True)
             readIORef senderMasking `shouldReturn` Unmasked
@@ -121,8 +121,8 @@ spec = do
                     (\usage -> modifyIORef' recordedUsage (<> [usage]))
                     OpenAIProvider
                     Nothing
-                    params
-                    transcript
+                    (readIORef params)
+                    (readIORef transcript)
                     (Just "focus")
             result `shouldSatisfy` \case
                 Left message ->
@@ -141,8 +141,8 @@ spec = do
                     (\usage -> modifyIORef' recordedUsage (<> [usage]))
                     OpenAIProvider
                     Nothing
-                    params
-                    transcript
+                    (readIORef params)
+                    (readIORef transcript)
                     Nothing
             result `shouldSatisfy` \case
                 Left message -> "offline" `Text.isInfixOf` message
@@ -159,8 +159,8 @@ spec = do
                     (\usage -> modifyIORef' recordedUsage (<> [usage]))
                     OpenAIProvider
                     Nothing
-                    params
-                    transcript
+                    (readIORef params)
+                    (readIORef transcript)
                     Nothing
             result `shouldSatisfy` \case
                 Left message ->
@@ -170,8 +170,11 @@ spec = do
 
     describe "installCompactOutcome" do
         it "clears the previous response id with transcript and token state" do
-            previous <- newIORef (Just "resp-old")
-            transcript <- newIORef [userTextItem "old context"]
+            conversation <-
+                newIORef
+                    ( Just "resp-old"
+                    , [userTextItem "old context"]
+                    ) :: IO (IORef (Maybe Text, [ResponseItem]))
             contextState <- newIORef (Just (100, 1))
             actionMasking <- newIORef MaskedUninterruptible
             let compactedHistory = [userTextItem "compacted context"]
@@ -185,33 +188,35 @@ spec = do
                     getMaskingState >>= writeIORef actionMasking
                     pure (Right outcome)
             installCompactOutcome
-                previous
-                transcript
+                (\installed ->
+                    writeIORef conversation
+                        (Nothing, installed.compactHistory))
                 (Just contextState)
                 compactAction
                 Nothing
                 `shouldReturn` Right outcome
             readIORef actionMasking `shouldReturn` Unmasked
-            readIORef previous `shouldReturn` Nothing
-            readIORef transcript `shouldReturn` compactedHistory
+            readIORef conversation `shouldReturn` (Nothing, compactedHistory)
             readIORef contextState `shouldReturn`
                 Just (outcome.compactAfterTokens, length compactedHistory)
 
         it "leaves live state unchanged when compaction fails" do
             let oldHistory = [userTextItem "old context"]
                 oldContextState = Just (100, length oldHistory)
-            previous <- newIORef (Just "resp-old")
-            transcript <- newIORef oldHistory
+            conversation <-
+                newIORef (Just "resp-old", oldHistory)
+                    :: IO (IORef (Maybe Text, [ResponseItem]))
             contextState <- newIORef oldContextState
             installCompactOutcome
-                previous
-                transcript
+                (\installed ->
+                    writeIORef conversation
+                        (Nothing, installed.compactHistory))
                 (Just contextState)
                 (const (pure (Left "failed")))
                 Nothing
                 `shouldReturn` Left "failed"
-            readIORef previous `shouldReturn` Just "resp-old"
-            readIORef transcript `shouldReturn` oldHistory
+            readIORef conversation `shouldReturn`
+                (Just "resp-old", oldHistory)
             readIORef contextState `shouldReturn` oldContextState
 
     describe "compactOpenAIWith" do

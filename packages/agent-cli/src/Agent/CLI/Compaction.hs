@@ -95,8 +95,14 @@ runProviderCompact
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runProviderCompact =
-    runProviderCompactWith Nothing (const (pure ()))
+runProviderCompact provider tokenProvider paramsRef transcriptRef =
+    runProviderCompactWith
+        Nothing
+        (const (pure ()))
+        provider
+        tokenProvider
+        (readIORef paramsRef)
+        (readIORef transcriptRef)
 
 -- | Run manual compaction, optionally routing OpenAI through the active model
 -- session. Provider-reported compaction usage is recorded as soon as a
@@ -106,14 +112,14 @@ runProviderCompactWith
     -> (TokenUsage -> IO ())
     -> Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> IO ResponseCreateParams
+    -> IO [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runProviderCompactWith openAiSender recordUsage provider tokenProvider
-        paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
-    history <- readIORef transcriptRef
+        getParams getHistory focus = do
+    params <- getParams
+    history <- getHistory
     attempt <- runAttemptAndRecord recordUsage $ case provider of
         OpenAIProvider ->
             case openAiSender of
@@ -188,13 +194,13 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
 runResponsesCompactWith
     :: (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> IO ResponseCreateParams
+    -> IO [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runResponsesCompactWith sender recordUsage paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
-    history <- readIORef transcriptRef
+runResponsesCompactWith sender recordUsage getParams getHistory focus = do
+    params <- getParams
+    history <- getHistory
     attempt <- runAttemptAndRecord recordUsage $
         if null history
             then pure (compactTextFailure "nothing to compact")
@@ -249,20 +255,18 @@ runAttemptAndRecord recordUsage action =
 -- prevents the next request from pairing compacted local history with the
 -- pre-compaction response chain.
 installCompactOutcome
-    :: IORef (Maybe Text)
-    -> IORef [ResponseItem]
+    :: (CompactOutcome -> IO ())
     -> Maybe (IORef (Maybe (Int, Int)))
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-installCompactOutcome previous transcript contextTokens runCompact focus =
+installCompactOutcome install contextTokens runCompact focus =
     mask \restore -> do
         result <- restore (runCompact focus)
         case result of
             Left _ -> pure ()
             Right outcome -> do
-                writeIORef previous Nothing
-                writeIORef transcript outcome.compactHistory
+                install outcome
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->

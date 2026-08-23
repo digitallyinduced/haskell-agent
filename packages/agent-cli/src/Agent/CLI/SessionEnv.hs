@@ -11,14 +11,15 @@ import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.SessionState (SessionState)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
-import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.Loop (ImageAttachment, LoopConfig)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.Responses.Types (ResponseCreateParams)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.Skills (SkillCatalog, SkillInvocation)
@@ -39,11 +40,10 @@ data SessionEnv = SessionEnv
     , sessionDialect :: !Dialect
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
-    , sessionPrevious :: !(IORef (Maybe Text))
+    , sessionState :: !(IORef SessionState)
     , sessionPrinted :: !(IORef Bool)
     , sessionParams :: !(IORef ResponseCreateParams)
     , sessionPolicy :: !(IORef ApprovalPolicy)
-    , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !Persistence
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)
@@ -54,7 +54,6 @@ data SessionEnv = SessionEnv
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
-    , sessionStartupContext :: !(IORef (Maybe Text))
     , sessionSkills :: !(IORef SkillCatalog)
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
@@ -64,14 +63,12 @@ data SessionEnv = SessionEnv
     , sessionInterrupt :: !InterruptState
     , sessionRestartEffort :: !(IORef (Maybe Text))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
-    , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)
     , sessionAccountId :: !(IORef Text)
     , sessionAccountSelectionId :: !(IORef Text)
     , sessionAccountLabel :: !(Credential -> IO Text)
     , sessionSelectAccount
         :: !(Maybe (Text -> IO (Either ApiError Text)))
-    , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionSetWindowTitle :: !(Text -> IO ())

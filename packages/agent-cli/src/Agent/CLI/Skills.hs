@@ -18,6 +18,10 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Render (putTextLn)
+import Agent.CLI.SessionState
+    ( SessionState
+    , appendSessionStartupContext
+    )
 import Agent.CLI.Style
     ( glyphSession
     , glyphWarn
@@ -29,7 +33,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (toText)
 import Agent.Skills
 import Control.Monad (void, when)
-import Data.IORef (IORef, modifyIORef', writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -123,7 +127,7 @@ reportSkillWarning color warning =
                 <> ": "
                 <> warning.skillWarningMessage)
 
-queueSkillCatalogContext :: IORef (Maybe Text) -> SkillCatalog -> IO ()
+queueSkillCatalogContext :: IORef SessionState -> SkillCatalog -> IO ()
 queueSkillCatalogContext contextRef catalog = do
     omitted <- queueSkillCatalogContextWithOmissions contextRef catalog
     when (omitted > 0) do
@@ -136,17 +140,15 @@ queueSkillCatalogContext contextRef catalog = do
                     <> " omitted from model context due to the catalog budget")
 
 queueSkillCatalogContextWithOmissions
-    :: IORef (Maybe Text)
+    :: IORef SessionState
     -> SkillCatalog
     -> IO Int
 queueSkillCatalogContextWithOmissions contextRef catalog =
     case formatSkillCatalogContext defaultSkillCatalogMaxChars catalog of
         (Nothing, omitted) -> pure omitted
         (Just text, omitted) -> do
-            modifyIORef' contextRef \current ->
-                Just $ case current of
-                    Nothing -> text
-                    Just existing -> existing <> "\n\n" <> text
+            atomicModifyIORef' contextRef \state ->
+                (appendSessionStartupContext text state, ())
             pure omitted
 
 -- | Publish a freshly discovered catalog to all session consumers. Keeping
@@ -155,7 +157,7 @@ queueSkillCatalogContextWithOmissions contextRef catalog =
 installSkillCatalog
     :: [Text]
     -> Bool
-    -> IORef (Maybe Text)
+    -> IORef SessionState
     -> IORef SkillCatalog
     -> IORef [SkillInvocation]
     -> SkillCatalog
@@ -173,7 +175,7 @@ installSkillCatalog reservedNames queueContext contextRef catalogRef invocations
 installSkillCatalogWithOmissions
     :: [Text]
     -> Bool
-    -> IORef (Maybe Text)
+    -> IORef SessionState
     -> IORef SkillCatalog
     -> IORef [SkillInvocation]
     -> SkillCatalog

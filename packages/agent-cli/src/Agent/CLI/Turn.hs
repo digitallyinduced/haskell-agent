@@ -53,6 +53,10 @@ import Agent.CLI.Session
     , setGeneratedSessionTitle
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionState
+    ( applySessionConversationPatch
+    , beginSessionTurn
+    )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
     , requestSessionTitle
@@ -76,13 +80,10 @@ import Agent.CLI.Terminal
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
 import Agent.CLI.TurnState
     ( ConversationOutcome(..)
-    , ConversationPatch(..)
-    , FieldUpdate(..)
+    , ConversationState(..)
     , PreparedTurn(..)
-    , StartupUpdate(..)
     , finishConversation
     , inputOnlyTurnItems
-    , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
     )
@@ -94,7 +95,6 @@ import Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TurnInput(..)
-    , addTokenUsage
     , runLoopInputsDetailed
     )
 import Agent.Provider (Provider(..))
@@ -144,17 +144,13 @@ runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
-    , sessionPrevious = previous
+    , sessionState = sessionStateRef
     , sessionPrinted = printed
-    , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
-    , sessionStartupContext = startupContext
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
-    , sessionUsage = usageRef
-    , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
     , sessionSetWindowTitle = setWindowTitle
@@ -211,9 +207,13 @@ runOneTurn env@SessionEnv
                 (requestSessionTitle env.sessionTitleManager
                     handle.sessionMeta.metaId 1 promptText)
         PersistenceDisabled -> pure ()
-    prev <- readIORef previous
-    beforeItems <- readIORef transcriptRef
-    pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
+    conversation <-
+        atomicModifyIORef' sessionStateRef \state ->
+            let (state', snapshot) = beginSessionTurn state
+            in (state', snapshot)
+    let prev = conversation.conversationPreviousResponseId
+        beforeItems = conversation.conversationTranscript
+        pendingStartup = conversation.conversationStartupContext
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
     let planReminder =
@@ -244,23 +244,9 @@ runOneTurn env@SessionEnv
             , preparedConsumedStartup = pendingStartup
             , preparedTurnInputs = turnInputs
             }
-        commitConversationPatch patch = do
-            case patch.patchPreviousResponseId of
-                KeepField -> pure ()
-                SetField value -> writeIORef previous value
-            case patch.patchTranscript of
-                KeepField -> pure ()
-                SetField value -> writeIORef transcriptRef value
-            case patch.patchStartupContext of
-                KeepStartup -> pure ()
-                RestoreStartup consumed ->
-                    atomicModifyIORef' startupContext \current ->
-                        (restoreStartupContext consumed current, ())
-            atomicModifyIORef' usageRef \current ->
-                (addTokenUsage current patch.patchUsageDelta, ())
-            case patch.patchLastAssistant of
-                KeepField -> pure ()
-                SetField value -> writeIORef lastAssistantRef value
+        commitConversationPatch patch =
+            atomicModifyIORef' sessionStateRef \state ->
+                (applySessionConversationPatch patch state, ())
     startedAt <- readIORef render.renderStartedAt
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
