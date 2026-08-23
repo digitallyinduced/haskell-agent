@@ -1,6 +1,7 @@
 -- | Configured model catalogs and pure picker navigation helpers.
 module Agent.CLI.Models
-    ( ModelOption(..)
+    ( ModelTarget(..)
+    , ModelOption(..)
     , PickerState(..)
     , PickerEvent(..)
     , modelOptionFromCatalog
@@ -44,12 +45,20 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+-- | Complete, validated identity of a model selection. This value is passed
+-- through transitions and persistence so connection, wire model, and dialect
+-- cannot drift apart in separate argument lists.
+data ModelTarget = ModelTarget
+    { targetProvider :: !Provider
+    , targetConnectionId :: !Text
+    , targetModelId :: !Text
+    , targetWireModelId :: !Text
+    , targetDialect :: !DialectId
+    }
+    deriving (Eq, Show)
+
 data ModelOption = ModelOption
-    { modelConnectionId :: !Text
-    , modelProvider :: !Provider
-    , modelId :: !Text
-    , modelTransportId :: !Text
-    , modelDialect :: !DialectId
+    { modelTarget :: !ModelTarget
     , modelLabel :: !(Maybe Text)
     , modelFallbackPriority :: !(Maybe Int)
     }
@@ -81,16 +90,17 @@ modelOptionFromCatalog catalog model = do
     connection <- catalogConnection catalog model.catalogModelConnectionId
     let provider = case connection.connectionKind of
             BuiltinConnection value -> value
-            -- Provider remains the internal transport/auth family in existing
-            -- persistence and tool code. Custom endpoints use the generic
-            -- Responses backend and never OpenRouter auth/account behavior.
+            -- Custom endpoints currently reuse the provider-independent
+            -- Responses plumbing hosted under the OpenRouter runtime branch.
             CustomResponsesConnection _ -> OpenRouterProvider
     pure ModelOption
-        { modelConnectionId = model.catalogModelConnectionId
-        , modelProvider = provider
-        , modelId = model.catalogModelId
-        , modelTransportId = model.catalogModelWireId
-        , modelDialect = model.catalogModelDialect
+        { modelTarget = ModelTarget
+            { targetProvider = provider
+            , targetConnectionId = model.catalogModelConnectionId
+            , targetModelId = model.catalogModelId
+            , targetWireModelId = model.catalogModelWireId
+            , targetDialect = model.catalogModelDialect
+            }
         , modelLabel = model.catalogModelLabel
         , modelFallbackPriority = model.catalogModelFallbackPriority
         }
@@ -102,12 +112,12 @@ modelCatalog catalog =
 modelsForProvider :: ModelCatalog -> Provider -> [ModelOption]
 modelsForProvider catalog provider =
     filter
-        ((== builtinConnectionId provider) . (.modelConnectionId))
+        ((== builtinConnectionId provider) . (.modelTarget.targetConnectionId))
         (modelCatalog catalog)
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
-    nub . map (.modelId) . modelCatalog
+    nub . map (.modelTarget.targetModelId) . modelCatalog
 
 defaultModelOptionFor :: ModelCatalog -> Provider -> Maybe ModelOption
 defaultModelOptionFor catalog provider =
@@ -116,7 +126,7 @@ defaultModelOptionFor catalog provider =
 
 defaultModelFor :: ModelCatalog -> Provider -> Maybe Text
 defaultModelFor catalog provider =
-    (.modelId) <$> defaultModelOptionFor catalog provider
+    (.modelTarget.targetModelId) <$> defaultModelOptionFor catalog provider
 
 resolveConfiguredModel :: ModelCatalog -> Text -> Maybe ModelOption
 resolveConfiguredModel catalog modelId =
@@ -125,11 +135,13 @@ resolveConfiguredModel catalog modelId =
 rawModelOption :: Provider -> Text -> ModelOption
 rawModelOption provider model =
     ModelOption
-        { modelConnectionId = builtinConnectionId provider
-        , modelProvider = provider
-        , modelId = model
-        , modelTransportId = model
-        , modelDialect = dialectIdForModel provider model
+        { modelTarget = ModelTarget
+            { targetProvider = provider
+            , targetConnectionId = builtinConnectionId provider
+            , targetModelId = model
+            , targetWireModelId = model
+            , targetDialect = dialectIdForModel provider model
+            }
         , modelLabel = Nothing
         , modelFallbackPriority = Nothing
         }
@@ -147,11 +159,13 @@ ensureCurrentInList connectionId provider current currentDialect options
     | any (isCurrent connectionId current currentDialect) options = options
     | otherwise =
         ModelOption
-            { modelConnectionId = connectionId
-            , modelProvider = provider
-            , modelId = current
-            , modelTransportId = current
-            , modelDialect = currentDialect
+            { modelTarget = ModelTarget
+                { targetProvider = provider
+                , targetConnectionId = connectionId
+                , targetModelId = current
+                , targetWireModelId = current
+                , targetDialect = currentDialect
+                }
             , modelLabel = Just "current"
             , modelFallbackPriority = Nothing
             }
@@ -192,8 +206,8 @@ initialPickerStateResolved
 
 prioritizeCurrentConnection :: Text -> [ModelOption] -> [ModelOption]
 prioritizeCurrentConnection current options =
-    filter ((== current) . (.modelConnectionId)) options
-        <> filter ((/= current) . (.modelConnectionId)) options
+    filter ((== current) . (.modelTarget.targetConnectionId)) options
+        <> filter ((/= current) . (.modelTarget.targetConnectionId)) options
 
 pickerStateFromOptions
     :: Text
@@ -227,10 +241,11 @@ visibleOptions state
     | otherwise =
         filter
             (\opt ->
-                needle `Text.isInfixOf` Text.toLower opt.modelId
+                needle `Text.isInfixOf`
+                    Text.toLower opt.modelTarget.targetModelId
                     || needle
                         `Text.isInfixOf`
-                            Text.toLower opt.modelConnectionId
+                            Text.toLower opt.modelTarget.targetConnectionId
                     || maybe
                         False
                         ((needle `Text.isInfixOf`) . Text.toLower)
@@ -275,9 +290,9 @@ modelTargetRequiresRebuild
     -> ModelOption
     -> Bool
 modelTargetRequiresRebuild connectionId provider dialect option =
-    option.modelConnectionId /= connectionId
-        || option.modelProvider /= provider
-        || option.modelDialect /= dialect
+    option.modelTarget.targetConnectionId /= connectionId
+        || option.modelTarget.targetProvider /= provider
+        || option.modelTarget.targetDialect /= dialect
 
 -- | Keep an explicitly persisted dialect while the effective transport model
 -- is unchanged. When a recorded alias/default now resolves elsewhere, use the
@@ -285,28 +300,32 @@ modelTargetRequiresRebuild connectionId provider dialect option =
 resolvePersistedDialect
     :: DialectId
     -> Maybe Text
-    -> ModelOption
+    -> ModelTarget
     -> (DialectId, Bool)
 resolvePersistedDialect storedDialect storedTransportModel inferred =
     case storedTransportModel of
         Just previous
-            | previous /= inferred.modelTransportId ->
-                (inferred.modelDialect, True)
+            | previous /= inferred.targetWireModelId ->
+                (inferred.targetDialect, True)
         _ -> (storedDialect, False)
 
 resolveModelOptionDialect :: ModelOption -> IO ModelOption
 resolveModelOptionDialect option
-    | option.modelConnectionId == builtinConnectionId OpenRouterProvider = do
+    | option.modelTarget.targetConnectionId
+        == builtinConnectionId OpenRouterProvider = do
         options <- OpenRouter.clientOptionsFromEnv
         let transportedModel
-                | option.modelTransportId /= option.modelId =
-                    option.modelTransportId
+                | option.modelTarget.targetWireModelId
+                    /= option.modelTarget.targetModelId =
+                        option.modelTarget.targetWireModelId
                 | otherwise =
-                    OpenRouter.mapModel options option.modelId
+                    OpenRouter.mapModel options option.modelTarget.targetModelId
         pure option
-            { modelTransportId = transportedModel
-            , modelDialect =
-                dialectIdForModel option.modelProvider transportedModel
+            { modelTarget = option.modelTarget
+                { targetWireModelId = transportedModel
+                , targetDialect =
+                    dialectIdForModel OpenRouterProvider transportedModel
+                }
             }
     | otherwise = pure option
 
@@ -341,6 +360,6 @@ isFilterChar c =
 
 isCurrent :: Text -> Text -> DialectId -> ModelOption -> Bool
 isCurrent connectionId current dialect option =
-    option.modelConnectionId == connectionId
-        && option.modelId == current
-        && option.modelDialect == dialect
+    option.modelTarget.targetConnectionId == connectionId
+        && option.modelTarget.targetModelId == current
+        && option.modelTarget.targetDialect == dialect

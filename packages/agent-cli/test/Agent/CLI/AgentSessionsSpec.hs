@@ -1,6 +1,7 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
@@ -265,11 +266,13 @@ withTempEnv action =
 testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
-    , createProvider = XAIProvider
-    , createConnection = "xai"
-    , createModel = "model-1"
-    , createTransportModel = "model-1"
-    , createDialect = GrokBuildDialect
+    , createTarget = ModelTarget
+        { targetProvider = XAIProvider
+        , targetConnectionId = "xai"
+        , targetModelId = "model-1"
+        , targetWireModelId = "model-1"
+        , targetDialect = GrokBuildDialect
+        }
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"

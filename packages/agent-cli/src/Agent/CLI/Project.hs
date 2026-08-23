@@ -14,6 +14,7 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect
     ( DialectId
     , dialectSlug
@@ -63,11 +64,7 @@ projectSettingsPath projectRoot =
         </> unsafeEncodeUtf "settings.json"
 
 data ProjectModel = ProjectModel
-    { projectModelProvider :: !Provider
-    , projectModelConnection :: !Text
-    , projectModelName :: !Text
-    , projectModelTransportName :: !(Maybe Text)
-    , projectModelDialect :: !DialectId
+    { projectModelTarget :: !ModelTarget
     } deriving (Eq, Show)
 
 data ProjectSettings = ProjectSettings
@@ -85,12 +82,14 @@ defaultProjectSettings = ProjectSettings
 
 instance ToJSON ProjectModel where
     toJSON model = object
-        [ "provider" .= providerSlug model.projectModelProvider
-        , "connection" .= model.projectModelConnection
-        , "model" .= model.projectModelName
-        , "transportModel" .= model.projectModelTransportName
-        , "dialect" .= dialectSlug model.projectModelDialect
+        [ "provider" .= providerSlug target.targetProvider
+        , "connection" .= target.targetConnectionId
+        , "model" .= target.targetModelId
+        , "transportModel" .= Just target.targetWireModelId
+        , "dialect" .= dialectSlug target.targetDialect
         ]
+      where
+        target = model.projectModelTarget
 
 instance FromJSON ProjectModel where
     parseJSON = withObject "ProjectModel" \o -> do
@@ -100,7 +99,7 @@ instance FromJSON ProjectModel where
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
         model <- o .: "model"
         connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
-        transportModel <- o .:? "transportModel"
+        transportModel <- fromMaybe model <$> o .:? "transportModel"
         dialectText <- o .:? "dialect"
         dialect <- case dialectText of
             Nothing -> pure (legacyDialectIdForProvider provider)
@@ -119,11 +118,13 @@ instance FromJSON ProjectModel where
             else if Text.null (Text.strip model)
                 then fail "model must not be empty"
                 else pure ProjectModel
-                { projectModelProvider = provider
-                , projectModelConnection = connection
-                , projectModelName = model
-                , projectModelTransportName = transportModel
-                , projectModelDialect = dialect
+                { projectModelTarget = ModelTarget
+                    { targetProvider = provider
+                    , targetConnectionId = connection
+                    , targetModelId = model
+                    , targetWireModelId = transportModel
+                    , targetDialect = dialect
+                    }
                 }
 
 instance ToJSON ProjectSettings where
@@ -183,42 +184,32 @@ saveProjectAutoApprove projectRoot autoApprove =
 -- | Remember the most recently selected provider/model pair for this project.
 saveProjectModel
     :: OsPath
-    -> Provider
-    -> Text
-    -> Text
-    -> Text
-    -> DialectId
+    -> ModelTarget
     -> IO ()
-saveProjectModel
-        projectRoot provider connection model transportModel dialect =
+saveProjectModel projectRoot target =
     updateProjectSettings projectRoot \settings ->
         settings
             { settingsLastModel = Just ProjectModel
-                { projectModelProvider = provider
-                , projectModelConnection = connection
-                , projectModelName = model
-                , projectModelTransportName = Just transportModel
-                , projectModelDialect = dialect
-                }
+                { projectModelTarget = target }
             }
 
 projectModelProvider :: ProjectSettings -> Maybe Provider
 projectModelProvider settings =
-    (.projectModelProvider) <$> settings.settingsLastModel
+    (.projectModelTarget.targetProvider) <$> settings.settingsLastModel
 
 -- | Return the remembered model only when it belongs to the active provider.
 projectModelFor :: Provider -> ProjectSettings -> Maybe Text
 projectModelFor provider settings = do
     remembered <- settings.settingsLastModel
-    if remembered.projectModelProvider == provider
-        then Just remembered.projectModelName
+    if remembered.projectModelTarget.targetProvider == provider
+        then Just remembered.projectModelTarget.targetModelId
         else Nothing
 
 projectDialectFor :: Provider -> ProjectSettings -> Maybe DialectId
 projectDialectFor provider settings = do
     remembered <- settings.settingsLastModel
-    if remembered.projectModelProvider == provider
-        then Just remembered.projectModelDialect
+    if remembered.projectModelTarget.targetProvider == provider
+        then Just remembered.projectModelTarget.targetDialect
         else Nothing
 
 updateProjectSettings

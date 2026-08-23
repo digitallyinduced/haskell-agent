@@ -50,6 +50,7 @@ import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
     )
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Dialect
     ( DialectId
@@ -297,11 +298,7 @@ data SessionHandle = SessionHandle
 -- | Parameters for creating a session on the first persisted turn.
 data SessionCreate = SessionCreate
     { createRoot :: !OsPath
-    , createProvider :: !Provider
-    , createConnection :: !Text
-    , createModel :: !Text
-    , createTransportModel :: !Text
-    , createDialect :: !DialectId
+    , createTarget :: !ModelTarget
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
@@ -388,16 +385,17 @@ createReservedSession spec sessionId tempDir = do
             , metaId = sessionId
             , metaCreatedAt = now
             , metaUpdatedAt = now
-            , metaProvider = spec.createProvider
-            , metaConnection = spec.createConnection
-            , metaModel = spec.createModel
-            , metaTransportModel = Just spec.createTransportModel
-            , metaDialect = spec.createDialect
+            , metaProvider = spec.createTarget.targetProvider
+            , metaConnection = spec.createTarget.targetConnectionId
+            , metaModel = spec.createTarget.targetModelId
+            , metaTransportModel = Just spec.createTarget.targetWireModelId
+            , metaDialect = spec.createTarget.targetDialect
             , metaLegacySubagentTarget = Just LegacySubagentTarget
-                { legacyTargetProvider = spec.createProvider
-                , legacyTargetConnection = spec.createConnection
-                , legacyTargetEffectiveModel = spec.createTransportModel
-                , legacyTargetDialect = spec.createDialect
+                { legacyTargetProvider = spec.createTarget.targetProvider
+                , legacyTargetConnection = spec.createTarget.targetConnectionId
+                , legacyTargetEffectiveModel =
+                    spec.createTarget.targetWireModelId
+                , legacyTargetDialect = spec.createTarget.targetDialect
                 }
             , metaCwd = spec.createCwd
             , metaEffort = spec.createEffort

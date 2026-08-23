@@ -9,7 +9,7 @@ module Agent.CLI.ProviderFallback
     ) where
 
 import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Models (ModelOption(..), modelCatalog)
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Data.List (nubBy, sortOn)
@@ -55,7 +55,7 @@ rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
     hasPriority option =
         option.modelFallbackPriority /= Nothing
             -- Custom connections are deliberately manual-only.
-            && option.modelConnectionId
+            && option.modelTarget.targetConnectionId
                 `elem` ["openai", "xai", "openrouter"]
     modelRank = maybe maxBound id . (.modelFallbackPriority)
 
@@ -73,12 +73,13 @@ fallbackCandidates catalog unavailable current err
     | otherwise =
         filter
             (\option ->
-                option.modelProvider /= current
-                    && option.modelProvider `notElem` unavailable)
+                option.modelTarget.targetProvider /= current
+                    && option.modelTarget.targetProvider `notElem` unavailable)
             (nubBy sameProvider (rankedModels catalog))
   where
     sameProvider left right =
-        left.modelProvider == right.modelProvider
+        left.modelTarget.targetProvider
+            == right.modelTarget.targetProvider
 
 isUsageExhausted :: ApiError -> Bool
 isUsageExhausted = \case

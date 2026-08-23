@@ -1,6 +1,7 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
@@ -316,11 +317,13 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createConnection = "openrouter"
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 loadSession root handle.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
@@ -333,11 +336,13 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createConnection = "openrouter"
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 rewriteMetaObject handle.sessionMetaPath $
                     KeyMap.delete "legacySubagentTarget"
@@ -364,11 +369,13 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createConnection = "openrouter"
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 let legacyTarget =
                         sessionLegacySubagentTarget handle.sessionMeta
@@ -534,11 +541,13 @@ spec = describe "Agent.CLI.Session" do
 testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
-    , createProvider = XAIProvider
-    , createConnection = "xai"
-    , createModel = "grok-4"
-    , createTransportModel = "grok-4"
-    , createDialect = GrokBuildDialect
+    , createTarget = ModelTarget
+        { targetProvider = XAIProvider
+        , targetConnectionId = "xai"
+        , targetModelId = "grok-4"
+        , targetWireModelId = "grok-4"
+        , targetDialect = GrokBuildDialect
+        }
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing

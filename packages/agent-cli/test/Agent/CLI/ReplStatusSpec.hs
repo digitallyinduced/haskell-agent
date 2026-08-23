@@ -16,7 +16,7 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
@@ -71,9 +71,9 @@ spec = do
                         "gpt-5.6-sol"
                         CodexDialect
                         XAIProvider
-            target.modelProvider `shouldBe` XAIProvider
-            target.modelId `shouldBe` "grok-4.6"
-            target.modelDialect `shouldBe` GrokBuildDialect
+            target.modelTarget.targetProvider `shouldBe` XAIProvider
+            target.modelTarget.targetModelId `shouldBe` "grok-4.6"
+            target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
 
         it "keeps the current model when only the account backend restarts" do
             let target =
@@ -85,9 +85,9 @@ spec = do
                         "gpt-5.6-sol"
                         CodexDialect
                         OpenAIProvider
-            target.modelProvider `shouldBe` OpenAIProvider
-            target.modelId `shouldBe` "gpt-5.6-sol"
-            target.modelDialect `shouldBe` CodexDialect
+            target.modelTarget.targetProvider `shouldBe` OpenAIProvider
+            target.modelTarget.targetModelId `shouldBe` "gpt-5.6-sol"
+            target.modelTarget.targetDialect `shouldBe` CodexDialect
 
         it "preserves a legacy OpenRouter dialect on an account restart" do
             let target =
@@ -99,10 +99,10 @@ spec = do
                         "openai/gpt-5.1"
                         GrokBuildDialect
                         OpenRouterProvider
-            target.modelProvider `shouldBe` OpenRouterProvider
-            target.modelId `shouldBe` "openai/gpt-5.1"
-            target.modelTransportId `shouldBe` "openai/gpt-5.1"
-            target.modelDialect `shouldBe` GrokBuildDialect
+            target.modelTarget.targetProvider `shouldBe` OpenRouterProvider
+            target.modelTarget.targetModelId `shouldBe` "openai/gpt-5.1"
+            target.modelTarget.targetWireModelId `shouldBe` "openai/gpt-5.1"
+            target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
 
     describe "devArgs" do
         it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do

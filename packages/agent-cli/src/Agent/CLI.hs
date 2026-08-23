@@ -141,6 +141,7 @@ import Agent.CLI.ModelConfig
     )
 import Agent.CLI.Models
     ( ModelOption(..)
+    , ModelTarget(..)
     , PickerState(..)
     , catalogModelIds
     , defaultModelFor
@@ -1187,20 +1188,22 @@ runAgentInitializedWithLock
         unavailableProviders =
             maybe [] (.transitionUnavailableProviders) transition
         configuredOptionTarget =
-            options.optModel >>= resolveConfiguredModel catalog
+            (.modelTarget)
+                <$> (options.optModel >>= resolveConfiguredModel catalog)
         savedTarget provider connection model transport dialect =
             case resolveConfiguredModel catalog model of
-                Just target
-                    | target.modelConnectionId == connection ->
-                        Right target
+                Just option
+                    | option.modelTarget.targetConnectionId == connection ->
+                        Right option.modelTarget
                 _
                     | connection == builtinConnectionId provider ->
-                        Right $
-                            (rawModelOption provider model)
-                                { modelTransportId =
-                                    fromMaybe model transport
-                                , modelDialect = dialect
-                                }
+                        Right ModelTarget
+                            { targetProvider = provider
+                            , targetConnectionId = connection
+                            , targetModelId = model
+                            , targetWireModelId = fromMaybe model transport
+                            , targetDialect = dialect
+                            }
                     | otherwise ->
                         Left $
                             "saved model "
@@ -1226,12 +1229,14 @@ runAgentInitializedWithLock
             | otherwise = case projectSettings.settingsLastModel of
             Nothing -> Right Nothing
             Just remembered ->
+                let target = remembered.projectModelTarget
+                in
                 Just <$> savedTarget
-                    remembered.projectModelProvider
-                    remembered.projectModelConnection
-                    remembered.projectModelName
-                    remembered.projectModelTransportName
-                    remembered.projectModelDialect
+                    target.targetProvider
+                    target.targetConnectionId
+                    target.targetModelId
+                    (Just target.targetWireModelId)
+                    target.targetDialect
     resumedTarget <-
         either (startupDie startup . Text.unpack) pure resumedTargetResult
     projectTarget <-
@@ -1244,13 +1249,13 @@ runAgentInitializedWithLock
                     then projectTarget
                     else Nothing
         requestedProvider =
-            (.modelProvider) <$> targetHint
+            (.targetProvider) <$> targetHint
                 <|> options.optProvider
                 <|> if isNothing options.optModel
                     then projectModelProvider projectSettings
                     else Nothing
         targetConnection =
-            targetHint >>= catalogConnection catalog . (.modelConnectionId)
+            targetHint >>= catalogConnection catalog . (.targetConnectionId)
         customResponses = targetConnection >>= \connection ->
             case connection.connectionKind of
                 CustomResponsesConnection responses -> Just
@@ -1300,9 +1305,9 @@ runAgentInitializedWithLock
                 )
     case (transitionTarget, resumed) of
         (Just target, _)
-            | loaded.loadedProvider /= target.modelProvider ->
+            | loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
-                    <> Text.unpack (providerSlug target.modelProvider)
+                    <> Text.unpack (providerSlug target.targetProvider)
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         (Nothing, Just (meta, _))
@@ -1492,9 +1497,9 @@ runAgentInitializedWithLock
                 (error "validated default model is missing")
                 (defaultModelFor catalog provider)
         model = fromMaybe
-            (maybe fallbackModel (.modelId) targetHint)
+            (maybe fallbackModel (.targetModelId) targetHint)
             options.optModel
-        rawTarget = rawModelOption provider model
+        rawTarget = (rawModelOption provider model).modelTarget
         inferredTarget0 =
             fromMaybe rawTarget $
                 transitionTarget
@@ -1507,32 +1512,32 @@ runAgentInitializedWithLock
             Just _ ->
                 \name ->
                     case resolveConfiguredModel catalog name of
-                        Just target
-                            | target.modelConnectionId
-                                == inferredTarget0.modelConnectionId ->
-                                target.modelTransportId
+                        Just option
+                            | option.modelTarget.targetConnectionId
+                                == inferredTarget0.targetConnectionId ->
+                                option.modelTarget.targetWireModelId
                         _
                             | name == model ->
-                                inferredTarget0.modelTransportId
+                                inferredTarget0.targetWireModelId
                             | otherwise -> name
             _ -> case provider of
                 OpenRouterProvider -> OpenRouter.mapModel openRouterOptions
                 _ -> id
         inferredTarget =
             inferredTarget0
-                { modelTransportId =
-                    if inferredTarget0.modelConnectionId
+                { targetWireModelId =
+                    if inferredTarget0.targetConnectionId
                         == builtinConnectionId OpenRouterProvider
-                        && inferredTarget0.modelTransportId
-                            == inferredTarget0.modelId
+                        && inferredTarget0.targetWireModelId
+                            == inferredTarget0.targetModelId
                         then transportModel model
-                        else inferredTarget0.modelTransportId
+                        else inferredTarget0.targetWireModelId
                 }
         customGenericOptions = do
             (_, responses) <- customResponses
             pure GenericClientOptions
                 { baseUrl = Text.unpack responses.responsesBaseUrl
-                , model = inferredTarget.modelTransportId
+                , model = inferredTarget.targetWireModelId
                 , bearerToken = customBearerToken
                 , requestTimeoutSeconds =
                     responses.responsesRequestTimeoutSeconds
@@ -1545,10 +1550,11 @@ runAgentInitializedWithLock
                     )
             Nothing -> do
                 remembered <- projectSettings.settingsLastModel
-                if remembered.projectModelProvider == provider
+                let target = remembered.projectModelTarget
+                if target.targetProvider == provider
                     then Just
-                        ( remembered.projectModelDialect
-                        , remembered.projectModelTransportName
+                        ( target.targetDialect
+                        , Just target.targetWireModelId
                         )
                     else Nothing
         resolvedPersistedTarget =
@@ -1561,21 +1567,21 @@ runAgentInitializedWithLock
         mappedTargetChanged =
             maybe False snd resolvedPersistedTarget
         dialectId = case transitionTarget of
-            Just target -> target.modelDialect
+            Just target -> target.targetDialect
             Nothing -> case options.optModel of
-                Just _ -> inferredTarget.modelDialect
+                Just _ -> inferredTarget.targetDialect
                 Nothing
-                    | mappedTargetChanged -> inferredTarget.modelDialect
+                    | mappedTargetChanged -> inferredTarget.targetDialect
                     | otherwise ->
                         maybe
-                            inferredTarget.modelDialect
+                            inferredTarget.targetDialect
                             fst
                             resolvedPersistedTarget
         dialect = dialectForId dialectId
         resumeTargetChanged = case fst <$> resumed of
             Just meta ->
                 provider /= meta.metaProvider
-                    || inferredTarget.modelConnectionId /= meta.metaConnection
+                    || inferredTarget.targetConnectionId /= meta.metaConnection
                     || model /= meta.metaModel
                     || mappedTargetChanged
                     || dialectId /= meta.metaDialect
@@ -1593,13 +1599,8 @@ runAgentInitializedWithLock
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
-        saveProjectModel
-            projectRoot
-            provider
-            inferredTarget.modelConnectionId
-            model
-            inferredTarget.modelTransportId
-            dialectId
+        saveProjectModel projectRoot
+            inferredTarget { targetDialect = dialectId }
     sessionProcessManager <- newSessionProcessManager root
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
@@ -1626,9 +1627,9 @@ runAgentInitializedWithLock
             , multiResumeFromDisk = Just
                 (restoreAgentFromDisk
                     provider
-                    inferredTarget.modelConnectionId
+                    inferredTarget.targetConnectionId
                     transportModel
-                    inferredTarget.modelTransportId
+                    inferredTarget.targetWireModelId
                     dialectId
                     legacySubagentTarget
                     subagentStoreRoot
@@ -1648,9 +1649,9 @@ runAgentInitializedWithLock
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider
-                    inferredTarget.modelConnectionId
+                    inferredTarget.targetConnectionId
                     transportModel
-                    inferredTarget.modelTransportId
+                    inferredTarget.targetWireModelId
                     dialectId
                     legacySubagentTarget
                     subagentSessions subagentStoreRoot agentTypesRef
@@ -1660,8 +1661,8 @@ runAgentInitializedWithLock
     prompt <- loadPrompt options
     persist <-
         preparePersistence
-            fullscreen options root provider inferredTarget.modelConnectionId model
-                inferredTarget.modelTransportId dialectId
+            fullscreen options root
+                inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort prompt resumed
     writeIORef persistSlotRef persist
     (sessionTmp, ephemeralSessionId) <-
@@ -1713,9 +1714,9 @@ runAgentInitializedWithLock
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root
             , toolsProvider = provider
-            , toolsConnection = inferredTarget.modelConnectionId
+            , toolsConnection = inferredTarget.targetConnectionId
             , toolsModel = model
-            , toolsTransportModel = inferredTarget.modelTransportId
+            , toolsTransportModel = inferredTarget.targetWireModelId
             , toolsDialect = dialectId
             , toolsCwd = cwd
             , toolsEffort = effort
@@ -1771,7 +1772,7 @@ runAgentInitializedWithLock
                 , subagentStoreRoot = subagentStoreRoot
                 , subagentTypes = agentTypesRef
                 , subagentLegacyTarget = legacySubagentTarget
-                , subagentConnection = inferredTarget.modelConnectionId
+                , subagentConnection = inferredTarget.targetConnectionId
                 , subagentMapModel = transportModel
                 , subagentSessionTmp = toolEnv.toolSessionTmp
                 }
@@ -2094,7 +2095,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.modelConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2158,7 +2159,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.modelConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2231,7 +2232,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.modelConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2261,11 +2262,7 @@ preparePersistence
     :: Maybe FullscreenRuntime
     -> CliOptions
     -> OsPath
-    -> Provider
-    -> Text
-    -> Text
-    -> Text
-    -> DialectId
+    -> ModelTarget
     -> Bool
     -> OsPath
     -> Text
@@ -2273,36 +2270,38 @@ preparePersistence
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
 preparePersistence
-        fullscreen options root provider connection model transportModel dialectId
+        fullscreen options root target
         retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
             now <- getCurrentTime
             let targetChanged =
                     retargetResumed
-                        && ( provider /= meta.metaProvider
-                            || connection /= meta.metaConnection
-                            || model /= meta.metaModel
+                        && ( target.targetProvider /= meta.metaProvider
+                            || target.targetConnectionId /= meta.metaConnection
+                            || target.targetModelId /= meta.metaModel
                             || maybe
                                 False
-                                (/= transportModel)
+                                (/= target.targetWireModelId)
                                 meta.metaTransportModel
-                            || dialectId /= meta.metaDialect
+                            || target.targetDialect /= meta.metaDialect
                            )
                 metadataChanged =
                     retargetResumed
                         && ( targetChanged
-                            || meta.metaTransportModel /= Just transportModel
+                            || meta.metaTransportModel
+                                /= Just target.targetWireModelId
                             || isNothing meta.metaLegacySubagentTarget
                            )
                 activeMeta
                     | metadataChanged =
                         meta
-                            { metaProvider = provider
-                            , metaConnection = connection
-                            , metaModel = model
-                            , metaTransportModel = Just transportModel
-                            , metaDialect = dialectId
+                            { metaProvider = target.targetProvider
+                            , metaConnection = target.targetConnectionId
+                            , metaModel = target.targetModelId
+                            , metaTransportModel =
+                                Just target.targetWireModelId
+                            , metaDialect = target.targetDialect
                             , metaLegacySubagentTarget =
                                 Just (sessionLegacySubagentTarget meta)
                             , metaLastResponseId =
@@ -2346,11 +2345,7 @@ preparePersistence
                 -- an abandoned REPL does not leave empty session folders.
                 newPendingPersistence SessionCreate
                     { createRoot = root
-                    , createProvider = provider
-                    , createConnection = connection
-                    , createModel = model
-                    , createTransportModel = transportModel
-                    , createDialect = dialectId
+                    , createTarget = target
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
@@ -2969,7 +2964,7 @@ loadTransitionAuth transition requestedProvider =
         Just active
             | Just selectionId <- active.transitionAccountSelectionId ->
                 loadSelectedAccountAuth
-                    active.transitionTarget.modelProvider
+                    active.transitionTarget.targetProvider
                     selectionId
                     (fromMaybe selectionId active.transitionAccountId)
         _ -> loadAuth requestedProvider
@@ -3831,12 +3826,16 @@ replWithDraft env@SessionEnv
                         chooseModel "" continue
                     ReplSetModel name -> do
                         color <- resolveColor stdout
+                        let rawChoice = rawModelOption provider name
                         choice <-
                             resolveModelOptionDialect $
                                 fromMaybe
-                                    ((rawModelOption provider name)
-                                        { modelConnectionId = connectionId
-                                        , modelDialect = dialectId dialect
+                                    (rawChoice
+                                        { modelTarget =
+                                            rawChoice.modelTarget
+                                                { targetConnectionId = connectionId
+                                                , targetDialect = dialectId dialect
+                                                }
                                         })
                                     (resolveConfiguredModel catalog name)
                         if modelTargetRequiresRebuild
@@ -3853,7 +3852,8 @@ replWithDraft env@SessionEnv
                             else do
                                 message <- applyModelChange
                                     projectRoot provider connectionId name
-                                    choice.modelTransportId choice.modelDialect
+                                    choice.modelTarget.targetWireModelId
+                                    choice.modelTarget.targetDialect
                                     paramsRef render previous persist
                                 displayInfo message $
                                     Text.putStrLn
@@ -4029,7 +4029,9 @@ replWithDraft env@SessionEnv
                                     create = case slot of
                                         PersistencePending pending _ _ ->
                                             pending
-                                                { createModel = model
+                                                { createTarget =
+                                                    pending.createTarget
+                                                        { targetModelId = model }
                                                 , createEffort = effort
                                                 , createTitleHint = Nothing
                                                 , createTitleIsManual = False
@@ -4038,15 +4040,18 @@ replWithDraft env@SessionEnv
                                             SessionCreate
                                                 { createRoot =
                                                     takeDirectory handle.sessionDir
-                                                , createProvider = provider
-                                                , createConnection = connectionId
-                                                , createModel = model
-                                                , createTransportModel =
-                                                    fromMaybe
-                                                        model
-                                                        handle.sessionMeta.metaTransportModel
-                                                , createDialect =
-                                                    (dialectId dialect)
+                                                , createTarget = ModelTarget
+                                                    { targetProvider = provider
+                                                    , targetConnectionId =
+                                                        connectionId
+                                                    , targetModelId = model
+                                                    , targetWireModelId =
+                                                        fromMaybe
+                                                            model
+                                                            handle.sessionMeta.metaTransportModel
+                                                    , targetDialect =
+                                                        dialectId dialect
+                                                    }
                                                 , createCwd =
                                                     handle.sessionMeta.metaCwd
                                                 , createEffort = effort
@@ -4333,16 +4338,16 @@ replWithDraft env@SessionEnv
             Nothing -> next
             Just rawChoice -> do
                 choice <- resolveModelOptionDialect rawChoice
-                if choice.modelProvider == provider
-                    && choice.modelConnectionId == connectionId
-                    && choice.modelId == current
-                    && choice.modelDialect == dialectId dialect
+                if choice.modelTarget.targetProvider == provider
+                    && choice.modelTarget.targetConnectionId == connectionId
+                    && choice.modelTarget.targetModelId == current
+                    && choice.modelTarget.targetDialect == dialectId dialect
                   then do
                     let message =
                             "model: "
                                 <> connectionId
                                 <> "/"
-                                <> choice.modelId
+                                <> choice.modelTarget.targetModelId
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -4353,8 +4358,10 @@ replWithDraft env@SessionEnv
                             connectionId provider (dialectId dialect) choice)
                   then do
                     message <- applyModelChange
-                        projectRoot provider connectionId choice.modelId
-                        choice.modelTransportId choice.modelDialect
+                        projectRoot provider connectionId
+                        choice.modelTarget.targetModelId
+                        choice.modelTarget.targetWireModelId
+                        choice.modelTarget.targetDialect
                         paramsRef render previous persist
                     displayInfo message $
                         Text.putStrLn
@@ -4575,11 +4582,11 @@ modelChoice
                 catalog connectionId provider current currentDialect
         let options = picker.pickerAll
             rows =
-                [ ( option.modelConnectionId
+                [ ( option.modelTarget.targetConnectionId
                         <> " · "
-                        <> option.modelId
+                        <> option.modelTarget.targetModelId
                         <> " · "
-                        <> dialectSlug option.modelDialect
+                        <> dialectSlug option.modelTarget.targetDialect
                   , fromMaybe "" option.modelLabel
                   )
                 | option <- options
@@ -4911,8 +4918,13 @@ applyModelChange
         paramsRef render previous persist = do
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
-    saveProjectModel
-        projectRoot provider connection name transportModel dialectId
+    saveProjectModel projectRoot ModelTarget
+        { targetProvider = provider
+        , targetConnectionId = connection
+        , targetModelId = name
+        , targetWireModelId = transportModel
+        , targetDialect = dialectId
+        }
     clearedChain <- case provider of
         OpenAIProvider ->
             atomicModifyIORef' previous \prev ->
@@ -4927,10 +4939,13 @@ applyModelChange
                     writeIORef slotRef
                         (PersistencePending
                             pending
-                                { createConnection = connection
-                                , createModel = name
-                                , createTransportModel = transportModel
-                                , createDialect = dialectId
+                                { createTarget = ModelTarget
+                                    { targetProvider = provider
+                                    , targetConnectionId = connection
+                                    , targetModelId = name
+                                    , targetWireModelId = transportModel
+                                    , targetDialect = dialectId
+                                    }
                                 }
                             sessionId
                             tempDir)
@@ -4965,9 +4980,9 @@ requestModelTargetSwitch fullscreen choice draft persist =
                 color <- resolveColor stdout
                 let message =
                         "switching to "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> "/"
-                            <> choice.modelId
+                            <> choice.modelTarget.targetModelId
                             <> " (conversation continued locally)"
                 case fullscreen of
                     Nothing ->
@@ -5025,7 +5040,7 @@ requestAccountProviderSwitch
                 Right () -> do
                     sessionId <- ensureTransitionSessionId persist
                     let transition = ProviderTransition
-                            { transitionTarget = choice
+                            { transitionTarget = choice.modelTarget
                             , transitionAccountSelectionId =
                                 Just selectionId
                             , transitionAccountId = Just accountId
@@ -5040,11 +5055,11 @@ requestAccountProviderSwitch
                             | currentProvider == selectedProvider =
                                 providerSlug selectedProvider
                                     <> "/"
-                                    <> choice.modelId
+                                    <> choice.modelTarget.targetModelId
                             | otherwise =
                                 providerSlug selectedProvider
                                     <> "/"
-                                    <> choice.modelId
+                                    <> choice.modelTarget.targetModelId
                                     <> " (provider changed)"
                     color <- resolveColor stdout
                     case fullscreen of
@@ -5074,11 +5089,15 @@ accountSwitchTarget
         currentTransportModel currentDialect
         selectedProvider =
     if currentProvider == selectedProvider
-        then (rawModelOption selectedProvider currentModelId)
-            { modelConnectionId = currentConnection
-            , modelTransportId = currentTransportModel
-            , modelDialect = currentDialect
-            }
+        then
+            let current = rawModelOption selectedProvider currentModelId
+            in current
+                { modelTarget = current.modelTarget
+                    { targetConnectionId = currentConnection
+                    , targetWireModelId = currentTransportModel
+                    , targetDialect = currentDialect
+                    }
+                }
         else
             fromMaybe
                 (error "validated default model is missing")
@@ -5090,7 +5109,7 @@ persistenceTransportModel fallback = \case
     PersistenceEnabled slotRef ->
         readIORef slotRef >>= \case
             PersistencePending pending _ _ ->
-                pure pending.createTransportModel
+                pure pending.createTarget.targetWireModelId
             PersistenceActive handle ->
                 pure $
                     fromMaybe
@@ -5187,7 +5206,7 @@ continueAutomaticFallback fullscreen failed apiError =
                         catalog
                         fullscreen
                         billing
-                        failed.transitionTarget.modelProvider
+                        failed.transitionTarget.targetProvider
                         failed.transitionUnavailableProviders
                         failed.transitionSessionId
                         pending
@@ -5219,7 +5238,7 @@ chooseAutomaticProviderTransition
                 Left err -> do
                     let message =
                             "skipping "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> ": "
                             <> err
                     case fullscreen of
@@ -5229,15 +5248,15 @@ chooseAutomaticProviderTransition
                         Just runtime ->
                             emitUiEvent runtime (UiSystemMessage message)
                     tryCandidates
-                        (markUnavailable choice.modelProvider unavailable)
+                        (markUnavailable choice.modelTarget.targetProvider unavailable)
                         rest
                 Right () -> do
                     let message =
                             providerSlug current
                             <> " unavailable; trying this turn with "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> "/"
-                            <> choice.modelId
+                            <> choice.modelTarget.targetModelId
                     case fullscreen of
                         Nothing -> do
                             color <- resolveColor stderr
@@ -5246,7 +5265,7 @@ chooseAutomaticProviderTransition
                         Just runtime ->
                             emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
-                        { transitionTarget = choice
+                        { transitionTarget = choice.modelTarget
                         , transitionAccountSelectionId = Nothing
                         , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
@@ -5281,25 +5300,25 @@ chooseStartupProviderTransition
                 Left err -> do
                     let message =
                             "skipping "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> ": "
                             <> err
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
                     tryCandidates
-                        (markUnavailable choice.modelProvider unavailable)
+                        (markUnavailable choice.modelTarget.targetProvider unavailable)
                         rest
                 Right () -> do
                     let message =
                             providerSlug current
                             <> " account unavailable; switched to "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> "/"
-                            <> choice.modelId
+                            <> choice.modelTarget.targetModelId
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
-                        { transitionTarget = choice
+                        { transitionTarget = choice.modelTarget
                         , transitionAccountSelectionId = Nothing
                         , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
@@ -5325,7 +5344,7 @@ prepareProviderTransition cause unavailable pending draft rawChoice persist = do
         Right () -> do
             sessionId <- ensureTransitionSessionId persist
             pure $ Right ProviderTransition
-                { transitionTarget = choice
+                { transitionTarget = choice.modelTarget
                 , transitionAccountSelectionId = Nothing
                 , transitionAccountId = Nothing
                 , transitionSessionId = sessionId
@@ -5338,7 +5357,7 @@ prepareProviderTransition cause unavailable pending draft rawChoice persist = do
 
 validateProviderTarget :: ModelOption -> IO (Either Text ())
 validateProviderTarget choice =
-    if choice.modelConnectionId
+    if choice.modelTarget.targetConnectionId
         `notElem` map builtinConnectionId
             [OpenAIProvider, XAIProvider, OpenRouterProvider]
     then pure (Right ())
@@ -5365,18 +5384,18 @@ loadValidatedProviderTarget :: ModelOption -> IO (Either Text LoadedAuth)
 loadValidatedProviderTarget choice =
     if not
         (providerSupportsDialect
-            choice.modelProvider
-            choice.modelDialect)
+            choice.modelTarget.targetProvider
+            choice.modelTarget.targetDialect)
     then
         pure $ Left $
             "dialect "
-                <> dialectSlug choice.modelDialect
+                <> dialectSlug choice.modelTarget.targetDialect
                 <> " is incompatible with provider "
-                <> providerSlug choice.modelProvider
-    else loadAuth (Just choice.modelProvider) >>= \case
+                <> providerSlug choice.modelTarget.targetProvider
+    else loadAuth (Just choice.modelTarget.targetProvider) >>= \case
         Left err -> pure $ Left $
             "cannot switch to "
-                <> providerSlug choice.modelProvider
+                <> providerSlug choice.modelTarget.targetProvider
                 <> ": "
                 <> err
         Right loaded ->
@@ -5385,14 +5404,14 @@ loadValidatedProviderTarget choice =
                     now <- getCurrentTime
                     pure $ Left $
                         "cannot switch to "
-                            <> providerSlug choice.modelProvider
+                            <> providerSlug choice.modelTarget.targetProvider
                             <> ": "
                             <> formatApiErrorInlineAt now err
                 Right usable
-                    | usable.loadedProvider /= choice.modelProvider ->
+                    | usable.loadedProvider /= choice.modelTarget.targetProvider ->
                         pure $ Left $
                             "cannot switch to "
-                                <> providerSlug choice.modelProvider
+                                <> providerSlug choice.modelTarget.targetProvider
                                 <> ": auth resolved "
                                 <> providerSlug usable.loadedProvider
                     | otherwise -> pure (Right usable)
@@ -5412,13 +5431,7 @@ commitProviderTransition
     -> IO ()
 commitProviderTransition _ Nothing _ = pure ()
 commitProviderTransition projectRoot (Just transition) persist = do
-    saveProjectModel
-        projectRoot
-        transition.transitionTarget.modelProvider
-        transition.transitionTarget.modelConnectionId
-        transition.transitionTarget.modelId
-        transition.transitionTarget.modelTransportId
-        transition.transitionTarget.modelDialect
+    saveProjectModel projectRoot transition.transitionTarget
     case persist of
         PersistenceDisabled -> pure ()
         PersistenceEnabled slotRef -> do
@@ -5427,29 +5440,20 @@ commitProviderTransition projectRoot (Just transition) persist = do
                 PersistencePending pending sessionId tempDir ->
                     writeIORef slotRef $ PersistencePending
                         pending
-                            { createProvider =
-                                transition.transitionTarget.modelProvider
-                            , createConnection =
-                                transition.transitionTarget.modelConnectionId
-                            , createModel = transition.transitionTarget.modelId
-                            , createTransportModel =
-                                transition.transitionTarget.modelTransportId
-                            , createDialect =
-                                transition.transitionTarget.modelDialect
-                            }
+                            { createTarget = transition.transitionTarget }
                         sessionId
                         tempDir
                 PersistenceActive handle -> do
                     now <- getCurrentTime
                     let previousMeta = handle.sessionMeta
                         meta = previousMeta
-                            { metaProvider = transition.transitionTarget.modelProvider
+                            { metaProvider = transition.transitionTarget.targetProvider
                             , metaConnection =
-                                transition.transitionTarget.modelConnectionId
-                            , metaModel = transition.transitionTarget.modelId
+                                transition.transitionTarget.targetConnectionId
+                            , metaModel = transition.transitionTarget.targetModelId
                             , metaTransportModel =
-                                Just transition.transitionTarget.modelTransportId
-                            , metaDialect = transition.transitionTarget.modelDialect
+                                Just transition.transitionTarget.targetWireModelId
+                            , metaDialect = transition.transitionTarget.targetDialect
                             , metaLegacySubagentTarget =
                                 Just
                                     (sessionLegacySubagentTarget previousMeta)

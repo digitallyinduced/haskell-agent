@@ -1,6 +1,6 @@
 module Agent.CLI.ProviderTransitionSpec (spec) where
 
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
@@ -57,14 +57,12 @@ transition
     -> Maybe PendingTurn
     -> ProviderTransition
 transition sessionId pending = ProviderTransition
-    { transitionTarget = ModelOption
-        { modelConnectionId = "openai"
-        , modelProvider = OpenAIProvider
-        , modelId = "gpt-5.6-sol"
-        , modelTransportId = "gpt-5.6-sol"
-        , modelDialect = CodexDialect
-        , modelLabel = Nothing
-        , modelFallbackPriority = Just 1
+    { transitionTarget = ModelTarget
+        { targetProvider = OpenAIProvider
+        , targetConnectionId = "openai"
+        , targetModelId = "gpt-5.6-sol"
+        , targetWireModelId = "gpt-5.6-sol"
+        , targetDialect = CodexDialect
         }
     , transitionAccountSelectionId = Nothing
     , transitionAccountId = Nothing

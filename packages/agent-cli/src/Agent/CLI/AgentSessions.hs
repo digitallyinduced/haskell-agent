@@ -30,6 +30,7 @@ import Agent.CLI.SessionLock
     )
 import Agent.CLI.Models
     ( ModelOption(..)
+    , ModelTarget(..)
     , resolveModelOptionDialect
     )
 import Agent.OsPath (fromText, unsafeToFilePath)
@@ -366,22 +367,26 @@ runCreateAgentSession env args
         target <- case args.model of
             Nothing ->
                 pure ModelOption
-                    { modelConnectionId = env.toolsConnection
-                    , modelProvider = env.toolsProvider
-                    , modelId = model
-                    , modelTransportId = env.toolsTransportModel
-                    , modelDialect = env.toolsDialect
+                    { modelTarget = ModelTarget
+                        { targetProvider = env.toolsProvider
+                        , targetConnectionId = env.toolsConnection
+                        , targetModelId = model
+                        , targetWireModelId = env.toolsTransportModel
+                        , targetDialect = env.toolsDialect
+                        }
                     , modelLabel = Nothing
                     , modelFallbackPriority = Nothing
                     }
             Just _ ->
                 resolveModelOptionDialect ModelOption
-                    { modelConnectionId = env.toolsConnection
-                    , modelProvider = env.toolsProvider
-                    , modelId = model
-                    , modelTransportId = model
-                    , modelDialect =
-                        dialectIdForModel env.toolsProvider model
+                    { modelTarget = ModelTarget
+                        { targetProvider = env.toolsProvider
+                        , targetConnectionId = env.toolsConnection
+                        , targetModelId = model
+                        , targetWireModelId = model
+                        , targetDialect =
+                            dialectIdForModel env.toolsProvider model
+                        }
                     , modelLabel = Nothing
                     , modelFallbackPriority = Nothing
                     }
@@ -390,11 +395,7 @@ runCreateAgentSession env args
                 _ -> sessionTitleFromPrompt args.message
             spec = SessionCreate
                 { createRoot = env.toolsRoot
-                , createProvider = env.toolsProvider
-                , createConnection = target.modelConnectionId
-                , createModel = model
-                , createTransportModel = target.modelTransportId
-                , createDialect = target.modelDialect
+                , createTarget = target.modelTarget
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
                 , createTitleHint = Just title

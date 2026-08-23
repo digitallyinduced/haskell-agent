@@ -5,7 +5,7 @@ import Agent.CLI.ModelConfig
     , decodeModelConfig
     , packagedModelCatalogPath
     )
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
@@ -42,12 +42,16 @@ spec = do
 
     describe "rankedModels" do
         it "prefers sol over luna" do
-            let ids = map (.modelId) (rankedModels catalog)
+            let ids = map (.modelTarget.targetModelId) (rankedModels catalog)
             elemIndex "gpt-5.6-sol" ids
                 `shouldSatisfy` (< elemIndex "gpt-5.6-luna" ids)
 
         it "puts the strongest OpenAI model first" do
-            fmap (\model -> (model.modelProvider, model.modelId))
+            fmap
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
                 (safeHead (rankedModels catalog))
                 `shouldBe` Just (OpenAIProvider, "gpt-5.6-sol")
 
@@ -57,7 +61,11 @@ spec = do
                     (UTCTime (fromGregorian 2026 8 20) 0)
 
         it "selects the best model for each other provider" do
-            map (\model -> (model.modelProvider, model.modelId))
+            map
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
                 (fallbackCandidates catalog [] XAIProvider exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
@@ -65,7 +73,11 @@ spec = do
                     ]
 
         it "falls back from OpenAI to the best configured alternatives" do
-            map (\model -> (model.modelProvider, model.modelId))
+            map
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
                 (fallbackCandidates catalog [] OpenAIProvider exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
@@ -73,7 +85,7 @@ spec = do
                     ]
 
         it "skips providers already found unavailable" do
-            map (.modelProvider)
+            map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog [OpenAIProvider] XAIProvider exhausted)
                 `shouldBe` [OpenRouterProvider]
 
@@ -98,11 +110,11 @@ spec = do
                 `shouldBe` []
 
         it "can continue past a replacement provider with rejected auth" do
-            map (.modelProvider)
+            map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog [XAIProvider] OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [OpenRouterProvider]
-            map (.modelProvider)
+            map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog [XAIProvider] OpenAIProvider
                     (CredentialError "credential file is invalid"))
                 `shouldBe` [OpenRouterProvider]

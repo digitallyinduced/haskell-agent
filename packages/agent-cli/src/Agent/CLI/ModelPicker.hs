@@ -181,14 +181,14 @@ glyphSessionLike = "⧉ "
 
 formatOptionName :: ModelOption -> Text
 formatOptionName opt =
-    opt.modelConnectionId
+    opt.modelTarget.targetConnectionId
         <> " · "
-        <> opt.modelId
+        <> opt.modelTarget.targetModelId
         <> " · "
-        <> dialectSlug opt.modelDialect
+        <> dialectSlug opt.modelTarget.targetDialect
 
 isCurrent :: Text -> Text -> DialectId -> ModelOption -> Bool
 isCurrent connectionId current dialect opt =
-    opt.modelConnectionId == connectionId
-        && opt.modelId == current
-        && opt.modelDialect == dialect
+    opt.modelTarget.targetConnectionId == connectionId
+        && opt.modelTarget.targetModelId == current
+        && opt.modelTarget.targetDialect == dialect
