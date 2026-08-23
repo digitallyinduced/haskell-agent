@@ -38,7 +38,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception (SomeException)
+import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -173,6 +173,10 @@ data LoopError
     = LoopTransport ApiError
     | LoopMaxTurns TurnOutput
     | LoopNoResponseId
+    -- | An unexpected synchronous exception escaped a backend, approval
+    -- callback, event sink, or other loop-owned IO action. Keeping it in-band
+    -- lets interactive callers fail this turn without terminating the agent.
+    | LoopUnexpected Text
     -- | Soft-cancel after tools ran. Carries the completed tool results for
     -- callers that retain the in-progress turn; callers may instead roll the
     -- whole turn back to its last committed response boundary.
@@ -210,7 +214,26 @@ runLoopInputs
     -> Maybe Text
     -> [TurnInput]
     -> IO (Either LoopError LoopResult)
-runLoopInputs config0 previousResponseId firstInputs = do
+runLoopInputs config previousResponseId firstInputs =
+    tryAny (runLoopInputsUnsafe config previousResponseId firstInputs) >>= \case
+        Left exception ->
+            pure (Left (LoopUnexpected (exceptionSummary exception)))
+        Right result ->
+            pure result
+
+exceptionSummary :: SomeException -> Text
+exceptionSummary =
+    fst
+        . Text.breakOn "\nHasCallStack backtrace:"
+        . Text.pack
+        . displayException
+
+runLoopInputsUnsafe
+    :: LoopConfig
+    -> Maybe Text
+    -> [TurnInput]
+    -> IO (Either LoopError LoopResult)
+runLoopInputsUnsafe config0 previousResponseId firstInputs = do
     -- Parallel-safe tool batches run with mapConcurrently. Serialize onEvent
     -- so a printer (hPutStrLn on String is not atomic) cannot interleave
     -- characters.

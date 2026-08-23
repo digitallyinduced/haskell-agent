@@ -22,6 +22,7 @@ import Control.Concurrent.MVar
     , takeMVar
     , tryReadMVar
     )
+import qualified Control.Exception as Exception
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Text (Text)
@@ -386,6 +387,35 @@ spec = describe "runLoop" do
         config <- testConfig backend
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
+
+    it "turns synchronous backend exceptions into a failed turn" do
+        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+            Exception.throwIO (userError "backend exploded")
+        result <- runLoop config Nothing "hello"
+        result `shouldBe`
+            Left (LoopUnexpected "user error (backend exploded)")
+
+    it "turns synchronous approval exceptions into a failed turn" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopApprove = \_ ->
+                    Exception.throwIO (userError "approval exploded")
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe`
+            Left (LoopUnexpected "user error (approval exploded)")
+
+    it "does not turn asynchronous backend cancellation into a failed turn" do
+        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+            Exception.throwIO Exception.ThreadKilled
+        runLoop config Nothing "hello"
+            `shouldThrow` (== Exception.ThreadKilled)
 
     it "emits TurnStarted and TurnFinished around each backend submit" do
         events <- newIORef []
