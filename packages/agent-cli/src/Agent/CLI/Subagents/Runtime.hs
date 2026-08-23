@@ -63,6 +63,7 @@ import Agent.InterAgentMessage
     )
 import Agent.Loop
     ( Backend(..)
+    , BackendStateStore(..)
     , LoopConfig(..)
     , LoopError(..)
     , LoopEvent
@@ -516,12 +517,11 @@ restoreAgentFromDisk
 freshOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
-freshOpenAiBackend provider getParams transcript = Backend \previous inputs onEvent ->
+freshOpenAiBackend provider getParams = Backend \state previous inputs onEvent ->
     withCodexWsRetrying provider \conn _credential ->
-        let Backend submit = openAiBackend conn getParams transcript
-        in submit previous inputs onEvent
+        let Backend submit = openAiBackend conn getParams
+        in submit state previous inputs onEvent
 
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
@@ -598,14 +598,12 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     let websocketBackend =
                             freshOpenAiBackend tokenProvider
                                 (readIORef childParamsRef)
-                                prepared.preparedSession.subSessionTranscript
                         httpBackend =
                             statelessResponsesBackend
                                 (\request _onEvent ->
                                     OpenAI.createCodexMessageWithProvider
                                         tokenProvider request)
                                 (readIORef childParamsRef)
-                                prepared.preparedSession.subSessionTranscript
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
@@ -617,7 +615,6 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                     runtime.subagentOptions.optCompactThreshold
                                     tokenProvider
                                     (readIORef childParamsRef)
-                                    prepared.preparedSession.subSessionTranscript
                                     prepared.preparedSession.subSessionContextTokens
                                     baseBackend
                     runPreparedChild
@@ -632,7 +629,7 @@ runHttpSubagent
     -> Dialect
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
+    -> (IORef ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
@@ -744,9 +741,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                     childParamsRef <- newIORef childParams
                     let backend =
                             withConnectionRecovery $
-                                mkBackend
-                                    childParamsRef
-                                    prepared.preparedSession.subSessionTranscript
+                                mkBackend childParamsRef
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent
@@ -864,6 +859,10 @@ runPreparedChild
 runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
     let config = LoopConfig
             { loopBackend = backend
+            , loopBackendState = BackendStateStore
+                { readBackendState = readIORef session.subSessionTranscript
+                , commitBackendState = writeIORef session.subSessionTranscript
+                }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns

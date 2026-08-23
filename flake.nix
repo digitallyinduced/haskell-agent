@@ -39,6 +39,15 @@
                     ];
                 };
 
+                agentResponsesTypesSource = nix-filter.lib {
+                    root = ./packages/agent-responses-types;
+                    include = [
+                        "src"
+                        "agent-responses-types.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
                 agentCodexDialectSource = nix-filter.lib {
                     root = ./packages/agent-codex-dialect;
                     include = [
@@ -182,9 +191,17 @@
                                         '';
                                 });
                         agent-core =
-                            pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                            pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            };
+                            })
+                            [
+                                pkgs.git
+                                pkgs.ripgrep
+                            ];
+                        agent-responses-types = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
+                            src = agentResponsesTypesSource;
+                        };
                         agent-codex-dialect = pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-codex-dialect/package.nix { })
                             {
@@ -233,6 +250,7 @@
                 agentCodexDialectPackage = haskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = haskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = haskellPackages.agent-syntax;
+                agentResponsesTypesPackage = haskellPackages.agent-responses-types;
                 agentResponsesPackage = haskellPackages.agent-responses;
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
@@ -335,6 +353,7 @@
                 packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
                 packages.skylighting-syntaxes = skylightingSyntaxes;
+                packages.agent-responses-types = agentResponsesTypesPackage;
                 packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
@@ -362,6 +381,7 @@
                         packages.agent-grok-build-dialect
                         packages.agent-syntax
                         packages.agent-tui
+                        packages.agent-responses-types
                         packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
@@ -394,6 +414,7 @@
                     agent-grok-build-dialect = agentGrokBuildDialectPackage;
                     agent-syntax = agentSyntaxPackage;
                     agent-tui = agentTuiPackage;
+                    agent-responses-types = agentResponsesTypesPackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;

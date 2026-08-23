@@ -4,6 +4,7 @@ import Agent.CLI.Btw
 import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , TurnInput(..)
     , emptyTurnOutput
     )
@@ -70,13 +71,18 @@ spec = do
             seenInputs <- newIORef []
             seenPrivateParams <- newIORef Nothing
             seenPrivateTranscript <- newIORef []
-            let factory privateParams privateTranscript =
-                    Backend \previous inputs _onEvent -> do
+            let factory privateParams =
+                    Backend \privateTranscript previous inputs _onEvent -> do
                         writeIORef seenPrevious previous
                         writeIORef seenInputs inputs
                         writeIORef seenPrivateParams . Just =<< readIORef privateParams
-                        readIORef privateTranscript >>= writeIORef seenPrivateTranscript
-                        pure (Right (emptyTurnOutput "side-response" [] (Just "side answer")))
+                        writeIORef seenPrivateTranscript privateTranscript
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "side-response" [] (Just "side answer")
+                            , backendState = privateTranscript
+                            }
             result <- runBtwWithCancel (\_ action -> action)
                 factory mainParams mainTranscript "why?"
             result `shouldBe` Right "side answer"
@@ -101,10 +107,13 @@ spec = do
             params <- newIORef defaultResponseCreateParams
             transcript <- newIORef []
             submissions <- newIORef (0 :: Int)
-            let factory _ _ = Backend \_ _ _ -> do
+            let factory _ = Backend \state _ _ _ -> do
                     modifyIORef' submissions (+ 1)
-                    pure $ Right $ emptyTurnOutput "side-response"
-                        [functionToolCall "call-1" "shell_command" "{}"] Nothing
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "side-response"
+                            [functionToolCall "call-1" "shell_command" "{}"] Nothing
+                        , backendState = state
+                        }
             result <- runBtwWithCancel (\_ action -> action)
                 factory params transcript "do something"
             result `shouldBe` Left BtwUnexpectedToolCall
@@ -113,10 +122,14 @@ spec = do
         it "surfaces transport and empty-response failures" do
             params <- newIORef defaultResponseCreateParams
             transcript <- newIORef []
-            let transport _ _ = Backend \_ _ _ ->
+            let transport _ = Backend \_ _ _ _ ->
                     pure (Left (ConnectionError "offline"))
-                empty _ _ = Backend \_ _ _ ->
-                    pure (Right (emptyTurnOutput "side-response" [] (Just "  ")))
+                empty _ = Backend \state _ _ _ ->
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "side-response" [] (Just "  ")
+                        , backendState = state
+                        }
             runBtwWithCancel (\_ action -> action)
                 transport params transcript "why?"
                 `shouldReturn` Left (BtwTransport (ConnectionError "offline"))

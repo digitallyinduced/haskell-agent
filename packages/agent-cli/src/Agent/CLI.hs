@@ -2195,17 +2195,15 @@ runAgentInitializedWithLock
                                             tokenProvider
                                             activeConnectionRef
                                             (readIORef paramsRef)
-                                            transcriptRef
                                             contextTokensRef
                                             recordCompactionUsage
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
-                                    btwBackend privateParams privateTranscript =
+                                    btwBackend privateParams =
                                         freshOpenAiBackend
                                             tokenProvider
                                             (readIORef privateParams)
-                                            privateTranscript
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2265,18 +2263,18 @@ runAgentInitializedWithLock
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         xaiBackend xaiOptions tokenProvider
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2293,7 +2291,7 @@ runAgentInitializedWithLock
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
-                        let makeBackend params transcript =
+                        let makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2309,10 +2307,9 @@ runAgentInitializedWithLock
                                                     request
                                                     onEvent)
                                             params
-                                            transcript
                                     Nothing ->
                                         openRouterBackend openRouterOptions
-                                            tokenProvider params transcript
+                                            tokenProvider params
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2321,18 +2318,18 @@ runAgentInitializedWithLock
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             makeBackend
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         makeBackend
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 makeBackend
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -2921,6 +2918,10 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                 emitUiEvent runtime (UiLoop event)
         config = LoopConfig
             { loopBackend = backend
+            , loopBackendState = BackendStateStore
+                { readBackendState = readIORef transcriptRef
+                , commitBackendState = writeIORef transcriptRef
+                }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
@@ -5674,8 +5675,8 @@ commitBackendOnSuccess
     -> Backend
     -> Backend
 commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
-    Backend \previous inputs onEvent -> do
-        result <- submit previous inputs onEvent
+    Backend \state previous inputs onEvent -> do
+        result <- submit state previous inputs onEvent
         case result of
             Right _ -> do
                 shouldCommit <- atomicModifyIORef' committed \done ->
@@ -6083,12 +6084,11 @@ lockedOpenAiSession
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold wsLock provider activeConnection
-        getParams transcript contextTokens
+        getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -6120,7 +6120,7 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 onEvent
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWith sendResponse getParams transcript
+                openAiBackendWith sendResponse getParams
         compactSender request =
             sendAuxiliary request Nothing (const (pure ()))
         compactingBackend =
@@ -6129,12 +6129,11 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 compactSender
                 recordCompactionUsage
                 getParams
-                transcript
                 contextTokens
                 baseBackend
-        serializedBackend = Backend \previous inputs onEvent ->
+        serializedBackend = Backend \state previous inputs onEvent ->
             withMVar wsLock \_ ->
-                compactingBackend.submitTurn previous inputs onEvent
+                compactingBackend.submitTurn state previous inputs onEvent
     in (compactSender, serializedBackend)
 
 -- | Drop live conversation state without touching persisted session files.
