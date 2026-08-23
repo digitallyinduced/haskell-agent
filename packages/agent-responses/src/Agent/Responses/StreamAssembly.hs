@@ -1,12 +1,16 @@
 -- | Provider-neutral terminal response assembly for Responses SSE streams.
 module Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
+    , assembleDoneResponse
     , buildStreamResponse
     , failedResponseMessage
     ) where
 
 import Agent.Error (ApiError(..))
-import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import Agent.Responses.ResponseMerge
+    ( mergeCompletedResponseOutput
+    , mergeDoneResponse
+    )
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
@@ -33,11 +37,17 @@ buildStreamResponse
     :: StreamAssemblyConfig
     -> [ResponseStreamEvent]
     -> Either ApiError Response
-buildStreamResponse config events = case lastMaybe terminalResponses of
-    Just terminal -> decodeMerged terminal
+buildStreamResponse config events = case lastMaybe terminalEvents of
+    Just ResponseCompletedEvent { response } -> decodeMerged response
+    Just ResponseIncompleteEvent { response } -> decodeMerged response
+    Just ResponseDoneEvent { responseValue } ->
+        assembleDoneResponse latestLifecycleResponse doneItems responseValue
+    Just _ -> Left missingCompletion
     Nothing -> Left (Maybe.fromMaybe missingCompletion (firstFailure config events))
   where
-    terminalResponses = Maybe.mapMaybe terminalResponse events
+    terminalEvents = filter isTerminalEvent events
+    latestLifecycleResponse =
+        lastMaybe (Maybe.mapMaybe lifecycleResponse events)
     doneItems =
         [ Aeson.toJSON item
         | ResponseOutputItemDoneEvent { item } <- events
@@ -55,6 +65,22 @@ buildStreamResponse config events = case lastMaybe terminalResponses of
         config.missingCompletionMessage
         (jsonPreview events)
 
+assembleDoneResponse
+    :: Maybe Response
+    -> [Aeson.Value]
+    -> Aeson.Value
+    -> Either ApiError Response
+assembleDoneResponse baseResponse doneItems doneResponse =
+    let merged = mergeDoneResponse
+            (Aeson.toJSON <$> baseResponse)
+            doneItems
+            doneResponse
+    in case Aeson.fromJSON merged of
+        Aeson.Success response -> Right response
+        Aeson.Error err -> Left $ JsonDecodeError
+            (Text.pack err)
+            (jsonPreview merged)
+
 firstFailure
     :: StreamAssemblyConfig
     -> [ResponseStreamEvent]
@@ -70,10 +96,18 @@ firstFailure config = Maybe.listToMaybe . Maybe.mapMaybe failure
             Just (config.classifyFailedResponse response)
         _ -> Nothing
 
-terminalResponse :: ResponseStreamEvent -> Maybe Response
-terminalResponse = \case
-    ResponseCompletedEvent { response } -> Just response
-    ResponseIncompleteEvent { response } -> Just response
+isTerminalEvent :: ResponseStreamEvent -> Bool
+isTerminalEvent = \case
+    ResponseCompletedEvent{} -> True
+    ResponseDoneEvent{} -> True
+    ResponseIncompleteEvent{} -> True
+    _ -> False
+
+lifecycleResponse :: ResponseStreamEvent -> Maybe Response
+lifecycleResponse = \case
+    ResponseCreatedEvent { response } -> Just response
+    ResponseInProgressEvent { response } -> Just response
+    ResponseQueuedEvent { response } -> Just response
     _ -> Nothing
 
 -- | Best available text from a failed terminal response.
