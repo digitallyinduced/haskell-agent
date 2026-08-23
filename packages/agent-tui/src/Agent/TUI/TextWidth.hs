@@ -2,14 +2,19 @@
 module Agent.TUI.TextWidth
     ( charCellWidth
     , displayCharCellWidth
+    , displayTerminalChar
+    , displayTerminalText
     , isWideCharacter
     ) where
 
 import Data.Char
     ( GeneralCategory(..)
+    , chr
     , generalCategory
     , ord
     )
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Width of a Unicode character before any control-character visualization.
 --
@@ -36,6 +41,27 @@ displayCharCellWidth char
     | otherwise = charCellWidth char
   where
     code = ord char
+
+-- | Replace terminal control characters with visible, inert glyphs.
+--
+-- Newlines remain structural so width-aware renderers can split on them.
+-- Every other replacement has the width reported by 'displayCharCellWidth'.
+displayTerminalChar :: Char -> Text
+displayTerminalChar char
+    | char == '\n' = "\n"
+    | char == '\r' = "↵"
+    | char == '\t' = "⇥"
+    | code >= 0 && code <= 0x1f =
+        Text.singleton (chr (0x2400 + code))
+    | code == 0x7f = "␡"
+    | code >= 0x80 && code <= 0x9f = "�"
+    | generalCategory char == Format = "�"
+    | otherwise = Text.singleton char
+  where
+    code = ord char
+
+displayTerminalText :: Text -> Text
+displayTerminalText = Text.concatMap displayTerminalChar
 
 -- | Approximate the wide/full-width ranges used by terminal emulators.
 isWideCharacter :: Char -> Bool

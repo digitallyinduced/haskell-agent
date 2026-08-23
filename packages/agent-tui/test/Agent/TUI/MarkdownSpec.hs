@@ -13,6 +13,7 @@ import Brick
     , viewport
     )
 import Control.Monad (forM_)
+import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.List (findIndex, isInfixOf)
 import qualified Data.Text as Text
@@ -74,6 +75,13 @@ spec = describe "fullscreen Markdown rendering" do
             any (hasUrlWithStyle "https://example.com/316" V.bold)
         rendered `shouldSatisfy` (not . isInfixOf "[PR #316]")
 
+    it "does not attach terminal hyperlink metadata to unsafe URLs" do
+        let widget :: Widget ()
+            widget = markdownWidget "[docs](https://example.com/\ESC]8;;owned)"
+            rendered = show (renderWidget Nothing [widget] (80, 3))
+        rendered `shouldSatisfy`
+            (not . isInfixOf "attrURL = SetTo")
+
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
@@ -93,6 +101,15 @@ spec = describe "fullscreen Markdown rendering" do
             rows = renderRows 12 ("```\n" <> code <> "\n```")
         map rowDisplayWidth rows `shouldSatisfy` all (<= 12)
         Text.filter (/= ' ') (Text.concat rows) `shouldBe` code
+
+    it "renders terminal controls as inert visible glyphs" do
+        let unsafe = "\ESC]0;owned\BEL\t\r"
+            prose = Text.concat (renderRows 40 unsafe)
+            code = Text.concat (renderRows 40 ("```\n" <> unsafe <> "\n```"))
+        prose `shouldSatisfy` Text.isInfixOf "␛]0;owned␇⇥↵"
+        code `shouldSatisfy` Text.isInfixOf "␛]0;owned␇⇥↵"
+        prose `shouldSatisfy` not . Text.any isControl
+        code `shouldSatisfy` not . Text.any isControl
 
     it "renders numbered controls for fenced code block headers" do
         let widget :: Widget ()

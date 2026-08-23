@@ -19,7 +19,10 @@ import Agent.Syntax
     , SyntaxSpan(..)
     , highlightCode
     )
-import Agent.TUI.TextWidth (displayCharCellWidth)
+import Agent.TUI.TextWidth
+    ( displayCharCellWidth
+    , displayTerminalText
+    )
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
@@ -183,7 +186,7 @@ renderCodeBody syntaxHighlighter language bodyLines =
                         traverse (traverse resolveSyntaxSpan) highlightedLines
                 _ ->
                     pure
-                        [ [(codeAttr, line)]
+                        [ [(codeAttr, displayTerminalText line)]
                         | line <- bodyLines
                         ]
         let availableWidth = max 1 context.availWidth
@@ -215,7 +218,7 @@ renderCodeBody syntaxHighlighter language bodyLines =
                 (Text.intercalate "\n" bodyLines)
     resolveSyntaxSpan span_ = do
         attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
-        pure (attr, span_.syntaxText)
+        pure (attr, displayTerminalText span_.syntaxText)
 
 renderCodeRow
     :: V.Attr
@@ -792,14 +795,18 @@ resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
     pure
         ( case inlineStyle of
             InlineLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             InlineStrongLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             InlineEmphasisLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             _ -> attr
-        , inlineText
+        , displayTerminalText inlineText
         )
+  where
+    safeUrl url =
+        not (Text.null url)
+            && displayTerminalText url == url
 
 styleAttr :: InlineStyle -> AttrName
 styleAttr = \case
