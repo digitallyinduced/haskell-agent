@@ -11,6 +11,13 @@ import Agent.OpenAI.LoopBackend
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    )
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -18,6 +25,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -595,10 +603,84 @@ spec = do
             reverse observedEvents `shouldBe` [TextDelta "partial"]
 
     describe "openAiBackendWithConnectionRecovery" do
+        it "serializes a reusable-socket failure across concurrent senders" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            firstCurrentStarted <- newEmptyMVar
+            laterCurrentStarted <- newEmptyMVar
+            releaseCurrent <- newEmptyMVar
+            secondSenderStarted <- newEmptyMVar
+            healthy <- newConnectionHealth True
+            let connectionFailure = ConnectionError "socket closed"
+                response = testResponse "resp-fresh" [assistantItem "ok"]
+                sendCurrent _request _previous _onEvent = do
+                    callNumber <- atomicModifyIORef' currentCalls \n ->
+                        let next = n + 1
+                        in (next, next)
+                    if callNumber == 1
+                        then putMVar firstCurrentStarted ()
+                        else putMVar laterCurrentStarted ()
+                    readMVar releaseCurrent
+                    pure (Left connectionFailure)
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure (Right response)
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            withAsync
+                (sender baseParams Nothing (const (pure ())))
+                \firstSender -> do
+                    takeMVar firstCurrentStarted
+                    withAsync
+                        ( putMVar secondSenderStarted ()
+                            >> sender baseParams Nothing (const (pure ()))
+                        )
+                        \secondSender -> do
+                            takeMVar secondSenderStarted
+                            overlappingCurrent <- timeout
+                                concurrencyProbeMicros
+                                (takeMVar laterCurrentStarted)
+                            overlappingCurrent `shouldBe` Nothing
+                            putMVar releaseCurrent ()
+                            firstResult <- wait firstSender
+                            secondResult <- wait secondSender
+                            firstResult `shouldBe` Right response
+                            secondResult `shouldBe` Right response
+            readConnectionHealth healthy `shouldReturn` False
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 2
+
+        it "marks a throwing reusable connection unhealthy and releases ownership" do
+            currentCalls <- newIORef (0 :: Int)
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newConnectionHealth True
+            let response = testResponse "resp-fresh" [assistantItem "ok"]
+                sendCurrent _request _previous _onEvent = do
+                    modifyIORef' currentCalls (+ 1)
+                    ioError (userError "socket read failed")
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure (Right response)
+                sender =
+                    openAiAuxiliaryResponseSenderWithConnectionRecovery
+                        healthy
+                        sendCurrent
+                        sendFresh
+            sender baseParams Nothing (const (pure ()))
+                `shouldThrow` anyIOException
+            readConnectionHealth healthy `shouldReturn` False
+            sender baseParams Nothing (const (pure ()))
+                `shouldReturn` Right response
+            readIORef currentCalls `shouldReturn` 1
+            readIORef freshCalls `shouldReturn` 1
+
         it "keeps auxiliary requests on the healthy reusable connection" do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let response = testResponse "resp-current" [assistantItem "ok"]
                 sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
@@ -613,7 +695,7 @@ spec = do
                         sendFresh
             sender baseParams Nothing (const (pure ()))
                 `shouldReturn` Right response
-            readIORef healthy `shouldReturn` True
+            readConnectionHealth healthy `shouldReturn` True
             readIORef currentCalls `shouldReturn` 1
             readIORef freshCalls `shouldReturn` 0
 
@@ -621,7 +703,7 @@ spec = do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
             failures <- newIORef []
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let connectionFailure = ConnectionError "socket closed"
             let sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
@@ -641,7 +723,7 @@ spec = do
                 Right (testResponse "resp-fresh" [assistantItem "ok"])
             second `shouldBe`
                 Right (testResponse "resp-fresh" [assistantItem "ok"])
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef currentCalls `shouldReturn` 1
             readIORef freshCalls `shouldReturn` 2
             readIORef failures `shouldReturn`
@@ -649,7 +731,7 @@ spec = do
 
         it "does not replay auxiliary requests after an output item arrived" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let connectionFailure = ConnectionError "socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
                     { item = assistantItem "partial"
@@ -671,12 +753,12 @@ spec = do
             sender baseParams Nothing (const (pure ()))
                 `shouldReturn` Left
                     (replayUnsafeAuxiliaryFailure connectionFailure)
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 0
 
         it "does not replay after a terminal auxiliary response arrived" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let connectionFailure = ConnectionError "decode failed"
                 completedEvent = ResponseCompletedEvent
                     { responseValue = Aeson.toJSON
@@ -703,7 +785,7 @@ spec = do
 
         it "does not replay a failed auxiliary response with partial output" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let connectionFailure = ConnectionError "failed response"
                 failedEvent = ResponseFailedEvent
                     { responseValue = Aeson.toJSON
@@ -731,7 +813,7 @@ spec = do
         it "marks output from an initially fresh auxiliary connection as replay-unsafe" do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef False
+            healthy <- newConnectionHealth False
             let connectionFailure = ConnectionError "fresh socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
                     { item = assistantItem "partial"
@@ -759,7 +841,7 @@ spec = do
 
         it "marks fresh auxiliary output after a pre-output current failure" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             let currentFailure = ConnectionError "current socket closed"
                 freshFailure = ConnectionError "fresh socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
@@ -783,13 +865,13 @@ spec = do
             sender baseParams Nothing (const (pure ()))
                 `shouldReturn` Left
                     (replayUnsafeAuxiliaryFailure freshFailure)
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
 
         it "replays on a fresh connection when the reusable socket dies before output" do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
@@ -804,13 +886,13 @@ spec = do
                 [UserMessage "two"] (const (pure ()))
             first `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             second `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef currentCalls `shouldReturn` 1
             readIORef freshCalls `shouldReturn` 2
 
         it "still replays after an informational Codex rate-limit warning" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             events <- newIORef []
             let rateLimitsEvent =
@@ -834,12 +916,12 @@ spec = do
                 [ WarningRaised
                     "Codex usage is low: primary 8% left. Check /usage for reset details."
                 ]
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
 
         it "does not replay after loop-visible output was already streamed" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             events <- newIORef []
             let sendCurrent _request _previous onEvent = do
@@ -854,12 +936,12 @@ spec = do
                 (modifyIORef' events . (:))
             result `shouldBe` Left (ConnectionError "socket closed")
             reverse <$> readIORef events `shouldReturn` [TextDelta "partial"]
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 0
 
         it "does not treat provider errors as a dead connection" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent =
                     pure $ Left $ ProviderError InvalidRequestError "bad request" Nothing
@@ -871,13 +953,13 @@ spec = do
             result <- submitWithState transcript providerErrorBackend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ProviderError InvalidRequestError "bad request" Nothing)
-            readIORef healthy `shouldReturn` True
+            readConnectionHealth healthy `shouldReturn` True
             readIORef freshCalls `shouldReturn` 0
 
         it "reconnects immediately after a websocket connection-limit error" do
             currentCalls <- newIORef (0 :: Int)
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
@@ -891,13 +973,13 @@ spec = do
             result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef currentCalls `shouldReturn` 1
             readIORef freshCalls `shouldReturn` 1
 
         it "reacquires a credential after an in-band usage-limit error" do
             freshCalls <- newIORef (0 :: Int)
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef []
             let sendCurrent _request _previous _onEvent =
                     pure $ Left $ ProviderError UsageLimitReached
@@ -910,11 +992,11 @@ spec = do
             result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
-            readIORef healthy `shouldReturn` False
+            readConnectionHealth healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
 
         it "reports the exhausted reusable connection before replaying on a fresh account" do
-            healthy <- newIORef True
+            healthy <- newConnectionHealth True
             transcript <- newIORef (turnInputsToItems [UserMessage "old"])
             failures <- newIORef []
             seen <- newIORef []
@@ -988,8 +1070,93 @@ spec = do
                 ]
 
     describe "openAiBackendWithTransportFallback" do
+        it "allows only one concurrent primary failure before fallback activation" do
+            fallbackActive <- newTransportFallbackState False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            firstPrimaryStarted <- newEmptyMVar
+            laterPrimaryStarted <- newEmptyMVar
+            releasePrimary <- newEmptyMVar
+            secondTurnStarted <- newEmptyMVar
+            firstTranscript <- newIORef []
+            secondTranscript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent -> do
+                    callNumber <- atomicModifyIORef' primaryCalls \n ->
+                        let next = n + 1
+                        in (next, next)
+                    if callNumber == 1
+                        then putMVar firstPrimaryStarted ()
+                        else putMVar laterPrimaryStarted ()
+                    readMVar releasePrimary
+                    pure (Left (ConnectionError "socket closed"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+                submit transcript message =
+                    submitWithState transcript backend Nothing
+                        [UserMessage message] (const (pure ()))
+                expected =
+                    Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            withAsync (submit firstTranscript "one") \firstTurn -> do
+                takeMVar firstPrimaryStarted
+                withAsync
+                    (putMVar secondTurnStarted () >> submit secondTranscript "two")
+                    \secondTurn -> do
+                        takeMVar secondTurnStarted
+                        overlappingPrimary <- timeout
+                            concurrencyProbeMicros
+                            (takeMVar laterPrimaryStarted)
+                        overlappingPrimary `shouldBe` Nothing
+                        putMVar releasePrimary ()
+                        firstResult <- wait firstTurn
+                        secondResult <- wait secondTurn
+                        firstResult `shouldBe` expected
+                        secondResult `shouldBe` expected
+            readTransportFallbackState fallbackActive `shouldReturn` True
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 2
+
+        it "keeps fallback active when the fallback backend throws" do
+            fallbackActive <- newTransportFallbackState False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent -> do
+                    modifyIORef' primaryCalls (+ 1)
+                    pure (Left (ConnectionError "socket closed"))
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    callNumber <- atomicModifyIORef' fallbackCalls \n ->
+                        let next = n + 1
+                        in (next, next)
+                    if callNumber == 1
+                        then ioError (userError "fallback failed")
+                        else pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-http" [] (Just "ok")
+                            , backendState = state
+                            }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+                submit =
+                    submitWithState transcript backend Nothing
+                        [UserMessage "one"] (const (pure ()))
+            submit `shouldThrow` anyIOException
+            readTransportFallbackState fallbackActive `shouldReturn` True
+            submit `shouldReturn`
+                Right (emptyTurnOutput "resp-http" [] (Just "ok"))
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 2
+
         it "switches permanently to fallback after a pre-output connection error" do
-            fallbackActive <- newIORef False
+            fallbackActive <- newTransportFallbackState False
             primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
             transcript <- newIORef []
@@ -1013,12 +1180,12 @@ spec = do
                 [UserMessage "two"] (const (pure ()))
             first `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
             second `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
-            readIORef fallbackActive `shouldReturn` True
+            readTransportFallbackState fallbackActive `shouldReturn` True
             readIORef primaryCalls `shouldReturn` 1
             readIORef fallbackCalls `shouldReturn` 2
 
         it "does not replay a failed turn after model output was exposed" do
-            fallbackActive <- newIORef False
+            fallbackActive <- newTransportFallbackState False
             fallbackCalls <- newIORef (0 :: Int)
             transcript <- newIORef []
             let primary = Backend \_state _previous _inputs onEvent -> do
@@ -1037,11 +1204,11 @@ spec = do
             result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ConnectionError "socket closed")
-            readIORef fallbackActive `shouldReturn` True
+            readTransportFallbackState fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
         it "falls back immediately after a websocket connection-limit error" do
-            fallbackActive <- newIORef False
+            fallbackActive <- newTransportFallbackState False
             primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
             events <- newIORef []
@@ -1072,7 +1239,7 @@ spec = do
             readIORef fallbackCalls `shouldReturn` 1
 
         it "preserves non-transport provider failures" do
-            fallbackActive <- newIORef False
+            fallbackActive <- newTransportFallbackState False
             fallbackCalls <- newIORef (0 :: Int)
             transcript <- newIORef []
             let primary = Backend \_state _previous _inputs _onEvent ->
@@ -1092,12 +1259,15 @@ spec = do
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ProviderError InvalidRequestError
                 "bad request" Nothing)
-            readIORef fallbackActive `shouldReturn` False
+            readTransportFallbackState fallbackActive `shouldReturn` False
             readIORef fallbackCalls `shouldReturn` 0
 
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
+
+concurrencyProbeMicros :: Int
+concurrencyProbeMicros = 100_000
 
 submitWithState
     :: IORef [ResponseItem]
@@ -1280,7 +1450,7 @@ inputItems request = case request.input of
 
 shouldRetryFreshAuxiliaryFailure :: ApiError -> Expectation
 shouldRetryFreshAuxiliaryFailure initialFailure = do
-    healthy <- newIORef False
+    healthy <- newConnectionHealth False
     currentCalls <- newIORef (0 :: Int)
     freshCalls <- newIORef (0 :: Int)
     let response = testResponse "resp-retried" [assistantItem "ok"]
@@ -1312,7 +1482,7 @@ shouldRetryFreshAuxiliaryFailure initialFailure = do
 
 shouldMarkPostOutputAuxiliaryFailure :: ApiError -> Expectation
 shouldMarkPostOutputAuxiliaryFailure failure = do
-    healthy <- newIORef True
+    healthy <- newConnectionHealth True
     currentCalls <- newIORef (0 :: Int)
     freshCalls <- newIORef (0 :: Int)
     let outputEvent = ResponseOutputItemDoneEvent

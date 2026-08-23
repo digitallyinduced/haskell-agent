@@ -80,7 +80,8 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
-    ( openAiBackend
+    ( newTransportFallbackState
+    , openAiBackend
     , openAiBackendWithTransportFallback
     , statelessResponsesBackend
     )
@@ -616,7 +617,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     childParamsRef <- newIORef childParams
-                    httpFallbackActive <- newIORef False
+                    httpFallbackActive <- newTransportFallbackState False
                     let websocketBackend =
                             freshOpenAiBackend tokenProvider
                                 (readIORef childParamsRef)
