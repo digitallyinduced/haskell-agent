@@ -213,6 +213,48 @@ and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
 
+## Haskell programmatic tool calling
+
+Every provider can expose `run_haskell_program`, which executes an approved
+Haskell expression in a fresh GHCi process. Programs can call registered tools
+with `callTool`, invoke isolated raw model requests with
+`callLLM :: ResponseCreateParams -> IO Response`, and return only selected
+stdout through `emitText`.
+
+For common response shapes, `callLLMText` extracts assistant text and
+`callLLMJson` decodes typed JSON while preserving raw `callLLM` as the escape
+hatch. `encodeJsonText` serializes final typed/Aeson values without fragile
+manual JSON construction. Successful identical model requests are memoized for
+the current parent turn, including across repaired `run_haskell_program`
+attempts; failed requests are not cached.
+
+Independent calls can use the preimported `Concurrently` applicative:
+
+```haskell
+do
+  (first, second) <- runConcurrently $ (,)
+    <$> Concurrently (callLLM requestA)
+    <*> Concurrently (callLLM requestB)
+  emitText (first.responseId <> "|" <> second.responseId)
+```
+
+Nested tool calls retain the harness's normal approval, cancellation, and
+execution-policy behavior. Raw Responses values retain unknown fields and tool
+calls, but do not start an automatic nested agent loop. Provider transports may
+enforce required wire settings; OpenAI Codex uses streaming, non-stored
+requests.
+
+The GHCi process is not OS-sandboxed, so every outer program requires approval
+and the tool is unavailable in Plan Mode. Use `--no-haskell-program` to disable
+it, including for subagents. Use `--no-direct-shell` to hide the parent
+`shell_command` / `run_terminal_cmd` surface while retaining shell access
+through nested `callTool` calls. In that mode the agent is instructed to repair
+and retry failed Haskell programs rather than falling back to a direct shell.
+
+`agent-benchmark` compares direct tools, optional or forced Haskell
+orchestration, a retry-capable `haskell-only` arm, and a forced-shell control
+against generated real-model tasks.
+
 ## Development
 
 All compiler and package dependencies come from the pinned Nix flake.

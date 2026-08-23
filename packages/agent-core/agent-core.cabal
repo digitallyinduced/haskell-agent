@@ -13,6 +13,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
+data-files:         src/Agent/Responses/Types.hs
 
 common common-opts
     default-language: Haskell2010
@@ -27,6 +28,8 @@ common common-opts
                       , TypeApplications
                       , ScopedTypeVariables
                       , PackageImports
+                      , DerivingStrategies
+                      , FlexibleContexts
     ghc-options:      -Wall
                       -Werror=incomplete-patterns
                       -Werror=incomplete-uni-patterns
@@ -37,6 +40,8 @@ common common-opts
 
 library
     import:           common-opts
+    autogen-modules:  Paths_agent_core
+    other-modules:    Paths_agent_core
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
                     , Agent.Error
@@ -44,6 +49,7 @@ library
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Provider.Options
+                    , Agent.Responses.Types
                     , Agent.Loop
                     , Agent.JsonText
                     , Agent.OsPath
@@ -83,6 +89,7 @@ library
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
                     , Agent.Tools.Ghci.Tool
+                    , Agent.Tools.HaskellProgram
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
@@ -151,6 +158,7 @@ test-suite agent-core-test
                     , Agent.Tools.GrokSpec
                     , Agent.Tools.Grok.TaskSpec
                     , Agent.Tools.GhciSpec
+                    , Agent.Tools.HaskellProgramSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec

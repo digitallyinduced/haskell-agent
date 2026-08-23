@@ -2,6 +2,8 @@
 /.direnv/
 /result
 /result-*
+/benchmark-results/
 /.ghc.environment.*
+/.haskell-agent/
 *.hi
 *.o

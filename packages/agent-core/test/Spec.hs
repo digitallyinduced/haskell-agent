@@ -23,6 +23,7 @@ import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.GrokSpec as GrokToolsSpec
 import qualified Agent.Tools.Grok.TaskSpec as GrokTaskSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
+import qualified Agent.Tools.HaskellProgramSpec as HaskellProgramSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
@@ -52,6 +53,7 @@ main = hspec do
     GrokToolsSpec.spec
     GrokTaskSpec.spec
     GhciSpec.spec
+    HaskellProgramSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec
     PlanModeSpec.spec

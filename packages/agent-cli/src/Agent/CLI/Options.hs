@@ -81,6 +81,12 @@ data CliOptions = CliOptions
       -- ^ Discover and inject AGENTS.md at session start (default: True).
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
+    , optHaskellProgram :: !Bool
+      -- ^ Expose run_haskell_program and its prompt guidance (default: True).
+    , optNoDirectShell :: !Bool
+      -- ^ Hide parent shell tools while retaining them for nested callTool.
+    , optToolEventLog :: !(Maybe FilePath)
+      -- ^ Optional JSONL diagnostics for top-level and nested tool starts.
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -102,6 +108,9 @@ defaultCliOptions = CliOptions
     , optSaveSession = False
     , optAgentsMd = True
     , optSkills = True
+    , optHaskellProgram = True
+    , optNoDirectShell = False
+    , optToolEventLog = Nothing
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -198,6 +207,16 @@ parseOptions options = \case
         parseOptions options { optSkills = True } rest
     "--no-skills" : rest ->
         parseOptions options { optSkills = False } rest
+    "--haskell-program" : rest ->
+        parseOptions options { optHaskellProgram = True } rest
+    "--no-haskell-program" : rest ->
+        parseOptions options { optHaskellProgram = False } rest
+    "--no-direct-shell" : rest ->
+        parseOptions options { optNoDirectShell = True } rest
+    "--direct-shell" : rest ->
+        parseOptions options { optNoDirectShell = False } rest
+    "--tool-event-log" : value : rest ->
+        parseOptions options { optToolEventLog = Just value } rest
     "--fullscreen" : rest ->
         parseOptions options { optScreenMode = ScreenFullscreen } rest
     "--minimal" : rest ->
@@ -221,6 +240,8 @@ validate options
         Left "--max-turns must be at least 1"
     | isJust options.optResume && options.optWorktree =
         Left "use either --resume or --worktree, not both"
+    | options.optNoDirectShell && not options.optHaskellProgram =
+        Left "--no-direct-shell requires --haskell-program"
     | otherwise = Right options
 
 parseInt :: String -> String -> Either String Int
@@ -268,6 +289,14 @@ usage = unlines
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --skills            Discover Agent Skills (default)"
     , "      --no-skills         Disable skill discovery and invocation"
+    , "      --haskell-program   Enable Haskell programmatic tool calling (default)"
+    , "      --no-haskell-program"
+    , "                          Disable run_haskell_program and its prompt guidance"
+    , "      --no-direct-shell   Hide parent shell tools; keep them available only"
+    , "                          through run_haskell_program callTool"
+    , "      --direct-shell      Re-enable parent shell tools (default)"
+    , "      --tool-event-log PATH"
+    , "                          Append tool-start diagnostics as JSONL"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

@@ -573,10 +573,12 @@ testConfig backend = do
             [ typedTool "echo" $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
+        , loopNestedTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()
         , loopApprove = \_ -> pure (Right True)
+        , loopNestedApprove = Nothing
         , loopCancel = cancel
         }
 

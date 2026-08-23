@@ -43,8 +43,9 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.Responses.Types
-                    , Agent.Responses.Codec
+    reexported-modules:
+                      agent-core:Agent.Responses.Types
+    exposed-modules:  Agent.Responses.Codec
                     , Agent.Responses.Error
                     , Agent.Responses.HttpSSE
                     , Agent.Responses.SSE

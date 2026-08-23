@@ -180,6 +180,32 @@ spec = do
                 [ApprovalSuccess "✓ always allow write this session"]
             readIORef allowed `shouldReturn` Set.singleton "write"
 
+        it "prompts and reports every PromptEveryCall invocation" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                report notice = modifyIORef' notices (<> [notice])
+                approve = approveToolDecisionWithReporter
+                    request report policy allowed
+                    (registry [perCallTool]) plan perCallCall
+
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef notices `shouldReturn`
+                [ ApprovalSuccess
+                    "✓ allowed once; program requires approval for every call"
+                , ApprovalSuccess
+                    "✓ allowed once; program requires approval for every call"
+                ]
+            readIORef allowed `shouldReturn` Set.empty
+
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do
             childApprove ApproveAll (registry [mutatingTool]) mutatingCall
@@ -213,6 +239,9 @@ readOnlyCall = functionToolCall "call-read" "read" "{}"
 mutatingCall :: ToolCall
 mutatingCall = functionToolCall "call-write" "write" "{}"
 
+perCallCall :: ToolCall
+perCallCall = functionToolCall "call-program" "program" "{}"
+
 dynamicReadCall :: ToolCall
 dynamicReadCall = functionToolCall "call-dynamic-read" "dynamic" "read"
 
@@ -228,6 +257,9 @@ readOnlyTool = tool "read" AlwaysReadOnly
 
 mutatingTool :: AppTool
 mutatingTool = tool "write" AlwaysPrompt
+
+perCallTool :: AppTool
+perCallTool = tool "program" PromptEveryCall
 
 dynamicTool :: AppTool
 dynamicTool = tool "dynamic" (ClassifyReadOnly (\call -> pure (call == dynamicReadCall)))

@@ -6,7 +6,13 @@ import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.ToolDSL (PropertySchema(..))
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools
+    ( CodingTools(..)
+    , appToolHandlers
+    , codingToolsFor
+    , codingToolsForWithHaskellProgram
+    , defaultToolEnv
+    )
 import Agent.Tools.Types (jsonToolParameters)
 import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
 import Agent.Tools.Grok.Task (GrokSubagentSpec)
@@ -72,9 +78,17 @@ spec = describe "Agent.Tools.Grok" do
             xai <- codingToolsFor XAIProvider session.grokEnv Nothing Nothing
             openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing Nothing
             (do
-                map (.appToolName) xai.codingAppTools `shouldBe` names
-                map (.appToolName) openrouter.codingAppTools `shouldBe` names)
+                map (.appToolName) xai.codingAppTools
+                    `shouldBe` names ++ ["run_haskell_program"]
+                map (.appToolName) openrouter.codingAppTools
+                    `shouldBe` names ++ ["run_haskell_program"])
                 `finally` (xai.codingClose >> openrouter.codingClose)
+
+            disabled <- codingToolsForWithHaskellProgram
+                False XAIProvider session.grokEnv Nothing Nothing
+            map (.appToolName) disabled.codingAppTools
+                `shouldBe` names
+            disabled.codingClose
 
 
     it "registers task when a multi-agent context is provided" do

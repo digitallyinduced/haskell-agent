@@ -38,6 +38,7 @@ import Agent.Tools.Types
     ( ToolRegistry
     , lookupRegisteredTool
     , toolAllowsWithoutPrompt
+    , toolRequiresPerCallApproval
     )
 import Data.IORef
     ( IORef
@@ -110,7 +111,10 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
         Nothing -> do
-            readOnly <- case lookupRegisteredTool call.name tools of
+            let registeredTool = lookupRegisteredTool call.name tools
+                perCallApproval =
+                    maybe False toolRequiresPerCallApproval registeredTool
+            readOnly <- case registeredTool of
                 Nothing -> pure False
                 Just tool -> toolAllowsWithoutPrompt tool call
             -- Plan mode hard-denies writes even under yolo. The dedicated
@@ -128,7 +132,8 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                         then pure (Right True)
                         else do
                             allowed <- readIORef allowedToolsRef
-                            if Set.member call.name allowed
+                            if not perCallApproval
+                                && Set.member call.name allowed
                                 then pure (Right True)
                                 else case policy of
                                     ApproveAll -> pure (Right True)
@@ -141,14 +146,22 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                                 Just PermissionAllowOnce ->
                                                     pure (Right True)
                                                 Just PermissionAllowTool -> do
-                                                    modifyIORef' allowedToolsRef
-                                                        (Set.insert call.name)
-                                                    report $
-                                                        ApprovalSuccess
-                                                            (glyphOk
-                                                                <> "always allow "
-                                                                <> call.name
-                                                                <> " this session")
+                                                    if perCallApproval
+                                                        then report $
+                                                            ApprovalSuccess
+                                                                (glyphOk
+                                                                    <> "allowed once; "
+                                                                    <> call.name
+                                                                    <> " requires approval for every call")
+                                                        else do
+                                                            modifyIORef' allowedToolsRef
+                                                                (Set.insert call.name)
+                                                            report $
+                                                                ApprovalSuccess
+                                                                    (glyphOk
+                                                                        <> "always allow "
+                                                                        <> call.name
+                                                                        <> " this session")
                                                     pure (Right True)
                                                 Just PermissionDeny ->
                                                     pure (Right False)

@@ -72,9 +72,48 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "Python, Node, bash"
         grok `shouldSatisfy` Text.isInfixOf "run_ghci"
         openai `shouldSatisfy` Text.isInfixOf "run_ghci"
+        grok `shouldSatisfy` Text.isInfixOf "run_haskell_program"
+        openai `shouldSatisfy` Text.isInfixOf "run_haskell_program"
+        openai `shouldSatisfy` Text.isInfixOf "selected output returns to the model"
+        openai `shouldSatisfy` Text.isInfixOf "runConcurrently"
+        openai `shouldSatisfy` Text.isInfixOf "parallel-safe"
+        openai `shouldSatisfy` Text.isInfixOf "callLLMText"
+        openai `shouldSatisfy` Text.isInfixOf "callLLMJson"
+        openai `shouldSatisfy` Text.isInfixOf "encodeJsonText"
+        openai `shouldSatisfy` Text.isInfixOf "Identical successful callLLM requests"
+        openai `shouldSatisfy` Text.isInfixOf "not OS-sandboxed"
         grok `shouldSatisfy` Text.isInfixOf "OverloadedStrings"
         openai `shouldSatisfy` Text.isInfixOf "LambdaCase"
         grok `shouldSatisfy` Text.isInfixOf "Pure expressions do not need user approval"
+
+    it "omits Haskell programmatic-tool guidance when disabled" do
+        let prompt = systemPromptWithHaskellProgram
+                False
+                OpenAIProvider
+                (fromFilePath "/tmp/repo")
+                (fromGregorian 2026 8 19)
+                True
+        prompt `shouldSatisfy` Text.isInfixOf "run_ghci"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_haskell_program"
+
+    it "replaces direct-shell guidance in programmatic-only mode" do
+        let prompt = systemPromptWithToolAccess
+                True
+                False
+                OpenAIProvider
+                (fromFilePath "/tmp/repo")
+                (fromGregorian 2026 8 19)
+                True
+        prompt `shouldSatisfy`
+            Text.isInfixOf "Direct shell tools are unavailable"
+        prompt `shouldSatisfy`
+            Text.isInfixOf "repair the complete program"
+        prompt `shouldSatisfy`
+            Text.isInfixOf "callTool \"shell_command\""
+        prompt `shouldNotSatisfy`
+            Text.isInfixOf "Inspect the repo with shell_command"
+        prompt `shouldNotSatisfy`
+            Text.isInfixOf "Prefer shell tools"
 
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.6"

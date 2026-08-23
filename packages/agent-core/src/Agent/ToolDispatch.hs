@@ -5,9 +5,11 @@ module Agent.ToolDispatch
     , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolRuntime(..)
     , ToolHandler
     , typedTool
     , typedToolWithCall
+    , typedToolWithRuntimeAndCall
     , typedStreamingTool
     , noArgsTool
     , functionToolCall
@@ -20,6 +22,7 @@ module Agent.ToolDispatch
     , decodeToolArguments
     ) where
 
+import Agent.Responses.Types (Response, ResponseCreateParams)
 import Agent.ToolArgs (stripAesonPrefix)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, tryAny)
@@ -91,11 +94,28 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFormatException :: Text -> SomeException -> Text
     , toolDispatchOnException :: Text -> SomeException -> IO ()
     , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
+    , toolDispatchRuntime :: !(Maybe ToolRuntime)
+    , toolDispatchCallResponses
+        :: !(Maybe
+            ([ResponseCreateParams] -> IO [Either Text Response]))
+    }
+
+-- | Capabilities supplied by the active agent loop to a tool handler.
+--
+-- Nested calls use the same approval, event, registry, and dispatch path as
+-- model-authored calls, but their results remain local to the invoking tool.
+data ToolRuntime = ToolRuntime
+    { invokeNestedTool :: ToolCall -> IO ToolCallResult
+    , invokeNestedTools :: [ToolCall] -> IO [ToolCallResult]
+    , invokeNestedResponses
+        :: [ResponseCreateParams] -> IO [Either Text Response]
     }
 
 data ToolHandler
     = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
     | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
+    | forall args. FromJSON args => TypedToolWithRuntimeAndCall Text
+        (ToolRuntime -> ToolCall -> args -> IO (Either Text Text))
     | forall args. FromJSON args => TypedStreamingTool Text ((Text -> IO ()) -> args -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
@@ -104,6 +124,13 @@ typedTool = TypedTool
 
 typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
 typedToolWithCall = TypedToolWithCall
+
+typedToolWithRuntimeAndCall
+    :: FromJSON args
+    => Text
+    -> (ToolRuntime -> ToolCall -> args -> IO (Either Text Text))
+    -> ToolHandler
+typedToolWithRuntimeAndCall = TypedToolWithRuntimeAndCall
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
@@ -135,6 +162,7 @@ dispatchToolHandler config maybeHandler call = do
             Just handler ->
                 runHandler
                     (config.toolDispatchOnOutput call)
+                    config.toolDispatchRuntime
                     call
                     input
                     handler
@@ -176,6 +204,7 @@ findHandler name handlers =
 -- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
 canonicalToolName :: Text -> Text
 canonicalToolName name
+    | Just rest <- Text.stripPrefix "functions." name = rest
     | Just rest <- Text.stripPrefix "collaboration." name = rest
     | Just rest <- Text.stripPrefix "collaboration" name
     , rest `elem` multiAgentBareNames =
@@ -203,18 +232,26 @@ handlerName :: ToolHandler -> Text
 handlerName = \case
     TypedTool name _ -> name
     TypedToolWithCall name _ -> name
+    TypedToolWithRuntimeAndCall name _ -> name
     TypedStreamingTool name _ -> name
     NoArgsTool name _ -> name
 
 runHandler
     :: (Text -> IO ())
+    -> Maybe ToolRuntime
     -> ToolCall
     -> Value
     -> ToolHandler
     -> IO (Either Text Text)
-runHandler emitOutput call value = \case
+runHandler emitOutput runtime call value = \case
     TypedTool _ run -> decodeAndRun value run
     TypedToolWithCall _ run -> decodeAndRun value (run call)
+    TypedToolWithRuntimeAndCall _ run ->
+        case runtime of
+            Nothing ->
+                pure (Left "This tool requires an active agent-loop runtime.")
+            Just activeRuntime ->
+                decodeAndRun value (run activeRuntime call)
     TypedStreamingTool _ run -> decodeAndRun value (run emitOutput)
     NoArgsTool _ run ->
         run

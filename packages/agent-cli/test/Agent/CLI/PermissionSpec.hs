@@ -2,6 +2,7 @@ module Agent.CLI.PermissionSpec (spec) where
 
 import Agent.CLI.Permission
 import Agent.CLI.Picker (PickerKey(..))
+import Agent.ToolDispatch (functionToolCall)
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -43,3 +44,18 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "Allow once"
             frame `shouldSatisfy` Text.isInfixOf "Always allow this tool this session"
             frame `shouldSatisfy` Text.isInfixOf "Deny"
+
+    describe "summarizePermissionCall" do
+        it "shows the complete Haskell source being authorized" do
+            let summary = summarizePermissionCall
+                    (functionToolCall
+                        "program-1"
+                        "run_haskell_program"
+                        "{\"source\":\"do\\n  writeFile \\\"secret\\\" \\\"x\\\"\\n  pure ()\",\
+                        \\"description\":\"write a file\"}")
+            summary `shouldSatisfy`
+                Text.isInfixOf "Haskell program (write a file)"
+            summary `shouldSatisfy`
+                Text.isInfixOf "writeFile \"secret\" \"x\""
+            summary `shouldSatisfy`
+                Text.isSuffixOf "pure ()"

@@ -7,14 +7,22 @@ module Agent.Tools.Ghci.Runtime
     ( GhciSession
     , GhciOutcome(..)
     , GhciResult(..)
+    , GhciProgramRequest(..)
+    , GhciProgramResponse(..)
     , newGhciSession
+    , newGhciProgramSession
     , closeGhciSession
     , evalGhci
+    , evalGhciProgram
     , classifyGhci
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Responses.Types
+    ( Response
+    , ResponseCreateParams
+    )
 import Agent.Tools.Ghci.Classify
     ( GhciClass(..)
     , classifyGhciInput
@@ -30,6 +38,7 @@ import Control.Concurrent.Async
     , cancel
     , race
     , waitCatch
+    , withAsync
     )
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -50,14 +59,20 @@ import Control.Concurrent.STM
     )
 import Control.Exception.Safe
     ( SomeException
+    , catchAny
     , finally
     , mask
     , onException
     , try
     )
-import Control.Monad (void)
+import Control.Monad (forever, void)
+import Data.Aeson (FromJSON(..), ToJSON(..), Value, (.:), (.:?), (.!=))
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (withObject)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -65,6 +80,22 @@ import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
+import System.Directory
+    ( createDirectory
+    , doesFileExist
+    , getTemporaryDirectory
+    , listDirectory
+    , renameFile
+    , removeDirectoryRecursive
+    , removeFile
+    )
+import System.FilePath
+    ( dropExtension
+    , takeDirectory
+    , takeExtension
+    , (</>)
+    )
+import System.Environment (getExecutablePath, lookupEnv)
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -84,7 +115,10 @@ import System.Process
     , proc
     )
 import System.Posix.Signals (sigINT, signalProcessGroup)
+import System.Posix.Files (setFileMode)
+import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessGroupID)
+import Paths_agent_core (getDataFileName)
 
 data GhciOutcome
     = GhciCompleted
@@ -105,6 +139,23 @@ data GhciResult = GhciResult
     , ghciTruncated :: !Bool
     , ghciRestarted :: !Bool
     } deriving (Eq, Show)
+
+data GhciProgramRequest
+    = GhciToolRequest !Text !Value
+    | GhciLlmRequest !ResponseCreateParams
+    deriving (Eq, Show)
+
+data GhciProgramResponse
+    = GhciToolResponse !Text
+    | GhciLlmResponse !(Either Text Response)
+    | GhciProgramError !Text
+    deriving (Eq, Show)
+
+instance ToJSON GhciProgramResponse where
+    toJSON = \case
+        GhciToolResponse output -> toJSON (Right output :: Either Text Text)
+        GhciLlmResponse response -> toJSON response
+        GhciProgramError err -> toJSON (Left err :: Either Text Text)
 
 data GhciStream
     = GhciStdout
@@ -140,15 +191,34 @@ data GhciSession = GhciSession
     , ghciNextMarker :: !(IORef Int)
     , ghciMarkerSeed :: !Text
     , ghciClassificationCache :: !(IORef (Maybe (Text, GhciClass)))
+    , ghciRpcDir :: !(Maybe FilePath)
+    , ghciResponsesTypesSource :: !(Maybe FilePath)
     }
 
 newGhciSession :: ToolEnv -> IO GhciSession
-newGhciSession env = do
+newGhciSession env = newGhciSessionWithRpc env False
+
+-- | Dedicated GHCi runtime with the file-based nested-tool bridge installed.
+-- Each program evaluation gets a fresh process so prior source cannot poison
+-- helper bindings or leave background Haskell threads running.
+newGhciProgramSession :: ToolEnv -> IO GhciSession
+newGhciProgramSession env = newGhciSessionWithRpc env True
+
+newGhciSessionWithRpc :: ToolEnv -> Bool -> IO GhciSession
+newGhciSessionWithRpc env enableRpc = do
     lock <- newMVar ()
     state <- newIORef GhciNotStarted
     nextMarkerRef <- newIORef 0
     seed <- Text.pack . show <$> getMonotonicTimeNSec
     classificationCache <- newIORef Nothing
+    rpcDir <-
+        if enableRpc
+            then Just <$> createRpcDirectory seed
+            else pure Nothing
+    responsesTypesSource <-
+        if enableRpc
+            then Just <$> locateResponsesTypesSource
+            else pure Nothing
     pure GhciSession
         { ghciEnv = env
         , ghciLock = lock
@@ -156,7 +226,43 @@ newGhciSession env = do
         , ghciNextMarker = nextMarkerRef
         , ghciMarkerSeed = seed
         , ghciClassificationCache = classificationCache
+        , ghciRpcDir = rpcDir
+        , ghciResponsesTypesSource = responsesTypesSource
         }
+
+locateResponsesTypesSource :: IO FilePath
+locateResponsesTypesSource = do
+    configured <- lookupEnv "AGENT_RESPONSES_TYPES_SOURCE"
+    dataFile <- getDataFileName "src/Agent/Responses/Types.hs"
+    executable <- getExecutablePath
+    firstExisting
+        ( maybe [] pure configured
+            <> [dataFile]
+        )
+        >>= \case
+            Just path -> pure path
+            Nothing ->
+                findFromAncestor (takeDirectory executable) >>= \case
+                    Just path -> pure path
+                    Nothing -> pure dataFile
+  where
+    firstExisting [] = pure Nothing
+    firstExisting (path : rest) = do
+        exists <- doesFileExist path
+        if exists then pure (Just path) else firstExisting rest
+
+    findFromAncestor directory = do
+        found <- firstExisting
+            [ directory </> "packages/agent-core/src/Agent/Responses/Types.hs"
+            , directory </> "src/Agent/Responses/Types.hs"
+            ]
+        case found of
+            Just path -> pure (Just path)
+            Nothing ->
+                let parent = takeDirectory directory
+                in if parent == directory
+                    then pure Nothing
+                    else findFromAncestor parent
 
 closeGhciSession :: GhciSession -> IO ()
 closeGhciSession session =
@@ -168,6 +274,7 @@ closeGhciSession session =
             GhciRunning process -> shutdownProcess process
             GhciNotStarted -> pure ()
             GhciClosed -> pure ()
+        mapM_ removeRpcDirectory session.ghciRpcDir
 
 -- | Evaluate @expression@ in the persistent GHCi, classifying side effects first.
 -- The timeout is an overall budget for classification and execution.
@@ -189,6 +296,70 @@ evalGhci session expression requestedTimeout =
             else do
                 result <- evalRawGhci session expression remaining
                 pure result { ghciClass = classification }
+
+-- | Evaluate an approval-gated Haskell program with a local nested-tool
+-- callback. Requests and responses travel through a private temporary
+-- directory, so intermediate tool results never enter GHCi stdout or the
+-- model transcript unless the program explicitly emits them.
+evalGhciProgram
+    :: GhciSession
+    -> Text
+    -> Int
+    -> ([GhciProgramRequest] -> IO [GhciProgramResponse])
+    -> IO GhciResult
+evalGhciProgram session expression requestedTimeout invokeProgramRequests =
+    withGhciLock session do
+        case session.ghciRpcDir of
+            Nothing ->
+                pure $ emptyResult GhciProcessFailed GhciEffectful
+                    "This GHCi session does not have the nested-tool bridge."
+            Just rpcDir -> do
+                clearRpcDirectory rpcDir
+                stopGhciProcess session
+                let timeoutMs = normalizeTimeout requestedTimeout
+                started <- getMonotonicTimeNSec
+                token <- programRpcToken session
+                inFlight <- newIORef (0 :: Int)
+                (do
+                    result <-
+                        withAsync
+                            (serveRpcRequests
+                                rpcDir token inFlight invokeProgramRequests)
+                            \_worker -> do
+                                bound <- evalRawGhci
+                                    session
+                                    (bindProgramHelpers token)
+                                    (min 5000 timeoutMs)
+                                if bound.ghciOutcome /= GhciCompleted
+                                    || not bound.ghciOk
+                                    then pure bound
+                                    else do
+                                        remaining <-
+                                            remainingMillis started timeoutMs
+                                        if remaining <= 0
+                                            then pure $ emptyResult
+                                                GhciTimedOut
+                                                GhciEffectful
+                                                "Timed out while preparing the Haskell program."
+                                            else do
+                                                evaluated <- evalRawGhci
+                                                    session expression remaining
+                                                -- The submitted expression has
+                                                -- returned. Stop its process
+                                                -- before draining accepted RPCs
+                                                -- so delayed forked threads
+                                                -- cannot start new tool calls.
+                                                stopGhciProcess session
+                                                finishProgramRequests
+                                                    rpcDir
+                                                    inFlight
+                                                    started
+                                                    timeoutMs
+                                                    evaluated
+                    pure result { ghciClass = GhciEffectful })
+                    `finally` do
+                        stopGhciProcess session
+                        clearRpcDirectory rpcDir
 
 -- | Classify without evaluating. Fail closed on ambiguity.
 classifyGhci :: GhciSession -> Text -> IO GhciClass
@@ -415,7 +586,15 @@ startProcess session = mask \restore ->
                     "GHCi produced excessive output during startup."
             else do
                 marker <- nextMarker session
-                sent <- try @_ @SomeException (sendMarker process marker)
+                sent <- try @_ @SomeException do
+                    case ( session.ghciRpcDir
+                         , session.ghciResponsesTypesSource
+                         ) of
+                        (Just rpcDir, Just responsesTypesSource) ->
+                            installRpcHelpers
+                                process rpcDir responsesTypesSource
+                        _ -> pure ()
+                    sendMarker process marker
                 case sent of
                     Left err -> do
                         shutdownProcess process
@@ -456,6 +635,21 @@ restartProcess session = do
         GhciClosed -> pure False
         _ -> either (const False) (const True) <$> startProcess session
 
+-- | Stop the current process without starting a replacement. Programmatic
+-- evaluations use this at both boundaries to isolate helper bindings and
+-- terminate any Haskell threads forked by the submitted source.
+stopGhciProcess :: GhciSession -> IO ()
+stopGhciProcess session = do
+    current <- atomicModifyIORef' session.ghciState \state ->
+        (case state of
+            GhciClosed -> GhciClosed
+            _ -> GhciNotStarted, state)
+    case current of
+        GhciRunning process -> shutdownProcess process
+        GhciNotStarted -> pure ()
+        GhciClosed -> pure ()
+    writeIORef session.ghciClassificationCache Nothing
+
 ghciArgs :: [String]
 ghciArgs =
     [ "-ignore-dot-ghci"
@@ -466,7 +660,8 @@ ghciArgs =
 
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
-    let spec = (proc "ghci" ghciArgs)
+    ghciExecutable <- maybe "ghci" id <$> lookupEnv "AGENT_GHCI"
+    let spec = (proc ghciExecutable ghciArgs)
             { cwd = Just (unsafeToFilePath env.toolCwd)
             , std_in = CreatePipe
             , std_out = CreatePipe
@@ -613,6 +808,376 @@ sendMarker process marker = do
             <> "AgentGhciIOInternal.hFlush AgentGhciIOInternal.stdout "
             <> "AgentGhciPreludeInternal.>> "
             <> "AgentGhciIOInternal.hFlush AgentGhciIOInternal.stderr"
+
+installRpcHelpers :: GhciProcess -> FilePath -> FilePath -> IO ()
+installRpcHelpers process rpcDir responsesTypesSource = do
+    sendLine process
+        (":load " <> Text.pack (show responsesTypesSource))
+    mapM_ (sendLine process)
+        [ "import Prelude"
+        , "import qualified Prelude as AgentGhciPreludeInternal"
+        , "import Agent.Responses.Types"
+        , "import qualified Agent.Responses.Types as Responses"
+        , "import Control.Concurrent.Async (Concurrently(..), runConcurrently)"
+        , "import Data.Aeson (FromJSON, ToJSON, Value, object, (.=))"
+        , "import qualified Data.Aeson as AgentGhciAesonInternal"
+        , "import qualified Data.ByteString.Lazy as AgentGhciLazyBytesInternal"
+        , "import Data.List (group, nub, sort, sortOn)"
+        , "import Data.Maybe (catMaybes, fromMaybe, mapMaybe)"
+        , "import Data.Text (Text)"
+        , "import qualified Data.Text as Text"
+        , "import qualified Data.Text as T"
+        , "import qualified Data.Text as AgentGhciTextInternal"
+        , "import qualified Data.Text.Encoding as AgentGhciTextEncodingInternal"
+        , "import qualified Data.Text.IO as AgentGhciTextIOInternal"
+        , "import qualified Data.Unique as AgentGhciUniqueInternal"
+        , "import qualified Control.Concurrent as AgentGhciConcurrentInternal"
+        , "import qualified System.Directory as AgentGhciDirectoryInternal"
+        , "import qualified System.FilePath as AgentGhciFilePathInternal"
+        , "import qualified System.IO as AgentGhciIOInternal"
+        ]
+    sendLine process ":{"
+    mapM_ (sendLine process)
+        [ "let agentGhciAwaitResponseInternal responsePath = do"
+        , "      exists <- AgentGhciDirectoryInternal.doesFileExist responsePath"
+        , "      if exists"
+        , "        then AgentGhciLazyBytesInternal.readFile responsePath"
+        , "        else AgentGhciConcurrentInternal.threadDelay 10000 >> agentGhciAwaitResponseInternal responsePath"
+        , "    agentGhciRpcInternal requestPrefix payload = do"
+        , "      unique <- AgentGhciUniqueInternal.newUnique"
+        , "      let requestId = requestPrefix AgentGhciPreludeInternal.++ \"-\" AgentGhciPreludeInternal.++ AgentGhciPreludeInternal.show (AgentGhciUniqueInternal.hashUnique unique)"
+        , "          requestPath = AgentGhciFilePathInternal.combine "
+            <> quotedRpcDir <> " (requestId AgentGhciPreludeInternal.++ \".request\")"
+        , "          requestTmp = requestPath AgentGhciPreludeInternal.++ \".tmp\""
+        , "          responsePath = AgentGhciFilePathInternal.combine "
+            <> quotedRpcDir <> " (requestId AgentGhciPreludeInternal.++ \".response\")"
+        , "      AgentGhciLazyBytesInternal.writeFile requestTmp"
+        , "        (AgentGhciAesonInternal.encode payload)"
+        , "      AgentGhciDirectoryInternal.renameFile requestTmp requestPath"
+        , "      responseBytes <- agentGhciAwaitResponseInternal responsePath"
+        , "      AgentGhciDirectoryInternal.removeFile responsePath"
+        , "      AgentGhciPreludeInternal.pure responseBytes"
+        , "    agentGhciCallToolInternal :: AgentGhciPreludeInternal.String -> AgentGhciTextInternal.Text -> Value -> IO AgentGhciTextInternal.Text"
+        , "    agentGhciCallToolInternal requestPrefix name arguments = do"
+        , "      responseBytes <- agentGhciRpcInternal requestPrefix"
+        , "        (object [\"kind\" .= (\"tool\" :: Text), \"name\" .= name, \"arguments\" .= arguments])"
+        , "      case AgentGhciAesonInternal.eitherDecode responseBytes of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError (\"Invalid tool response: \" AgentGhciPreludeInternal.++ err))"
+        , "        AgentGhciPreludeInternal.Right (AgentGhciPreludeInternal.Left err) ->"
+        , "          AgentGhciPreludeInternal.pure err"
+        , "        AgentGhciPreludeInternal.Right (AgentGhciPreludeInternal.Right output) ->"
+        , "          AgentGhciPreludeInternal.pure output"
+        , "    agentGhciCallLLMInternal :: AgentGhciPreludeInternal.String -> ResponseCreateParams -> IO Response"
+        , "    agentGhciCallLLMInternal requestPrefix request = do"
+        , "      responseBytes <- agentGhciRpcInternal requestPrefix"
+        , "        (object [\"kind\" .= (\"llm\" :: Text), \"request\" .= request])"
+        , "      case AgentGhciAesonInternal.eitherDecode responseBytes of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError (\"Invalid LLM response: \" AgentGhciPreludeInternal.++ err))"
+        , "        AgentGhciPreludeInternal.Right (AgentGhciPreludeInternal.Left err) ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError (AgentGhciTextInternal.unpack err))"
+        , "        AgentGhciPreludeInternal.Right (AgentGhciPreludeInternal.Right response) ->"
+        , "          AgentGhciPreludeInternal.pure response"
+        , "    agentGhciCallLLMTextInternal :: AgentGhciPreludeInternal.String -> ResponseCreateParams -> IO AgentGhciTextInternal.Text"
+        , "    agentGhciCallLLMTextInternal requestPrefix request = do"
+        , "      response <- agentGhciCallLLMInternal requestPrefix request"
+        , "      case responseOutputText response of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError"
+        , "              (AgentGhciTextInternal.unpack err))"
+        , "        AgentGhciPreludeInternal.Right outputText ->"
+        , "          AgentGhciPreludeInternal.pure outputText"
+        , "    decodeJsonText :: FromJSON value => AgentGhciTextInternal.Text -> AgentGhciPreludeInternal.Either AgentGhciTextInternal.Text value"
+        , "    decodeJsonText value = case AgentGhciAesonInternal.eitherDecodeStrict'"
+        , "      (AgentGhciTextEncodingInternal.encodeUtf8 value) of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.Left (AgentGhciTextInternal.pack err)"
+        , "        AgentGhciPreludeInternal.Right decoded ->"
+        , "          AgentGhciPreludeInternal.Right decoded"
+        , "    encodeJsonText :: ToJSON value => value -> AgentGhciTextInternal.Text"
+        , "    encodeJsonText = AgentGhciTextEncodingInternal.decodeUtf8"
+        , "      AgentGhciPreludeInternal.. AgentGhciLazyBytesInternal.toStrict"
+        , "      AgentGhciPreludeInternal.. AgentGhciAesonInternal.encode"
+        , "    agentGhciCallLLMJsonInternal :: FromJSON value => AgentGhciPreludeInternal.String -> ResponseCreateParams -> IO value"
+        , "    agentGhciCallLLMJsonInternal requestPrefix request = do"
+        , "      outputText <- agentGhciCallLLMTextInternal requestPrefix request"
+        , "      case decodeJsonText outputText of"
+        , "        AgentGhciPreludeInternal.Left err ->"
+        , "          AgentGhciPreludeInternal.ioError"
+        , "            (AgentGhciPreludeInternal.userError"
+        , "              (\"Invalid JSON assistant output: \""
+        , "                AgentGhciPreludeInternal.++ AgentGhciTextInternal.unpack err))"
+        , "        AgentGhciPreludeInternal.Right decoded ->"
+        , "          AgentGhciPreludeInternal.pure decoded"
+        , "    callTool = agentGhciCallToolInternal \"inactive\""
+        , "    callLLM = agentGhciCallLLMInternal \"inactive\""
+        , "    callLLMText = agentGhciCallLLMTextInternal \"inactive\""
+        , "    callLLMJson = agentGhciCallLLMJsonInternal \"inactive\""
+        , "    emitText :: AgentGhciTextInternal.Text -> IO ()"
+        , "    emitText text = do"
+        , "      AgentGhciTextIOInternal.putStrLn text"
+        , "      AgentGhciIOInternal.hFlush AgentGhciIOInternal.stdout"
+        ]
+    sendLine process ":}"
+  where
+    quotedRpcDir = Text.pack (show rpcDir)
+
+instance FromJSON GhciProgramRequest where
+    parseJSON = withObject "GHCi program request" \object -> do
+        kind <- object .:? "kind" .!= ("tool" :: Text)
+        case kind of
+            "tool" ->
+                GhciToolRequest
+                    <$> object .: "name"
+                    <*> object .: "arguments"
+            "llm" -> GhciLlmRequest <$> object .: "request"
+            other -> fail
+                ("Unknown GHCi program request kind: " <> Text.unpack other)
+
+createRpcDirectory :: Text -> IO FilePath
+createRpcDirectory seed = do
+    root <- getTemporaryDirectory
+    pid <- getProcessID
+    let path =
+            root
+                </> ( "haskell-agent-ghci-rpc-"
+                        <> show pid
+                        <> "-"
+                        <> Text.unpack seed
+                    )
+    createDirectory path
+    setFileMode path 0o700
+    pure path
+
+removeRpcDirectory :: FilePath -> IO ()
+removeRpcDirectory path =
+    removeDirectoryRecursive path `catchAny` \_ -> pure ()
+
+clearRpcDirectory :: FilePath -> IO ()
+clearRpcDirectory path =
+    (listDirectory path >>= mapM_ removeEntry)
+        `catchAny` \_ -> pure ()
+  where
+    removeEntry entry =
+        removeFile (path </> entry) `catchAny` \_ -> pure ()
+
+serveRpcRequests
+    :: FilePath
+    -> Text
+    -> IORef Int
+    -> ([GhciProgramRequest] -> IO [GhciProgramResponse])
+    -> IO ()
+serveRpcRequests rpcDir token inFlight invokeTools = forever do
+    entries <- sort <$> listDirectory rpcDir
+    let requests = requestEntries entries
+    if null requests
+        then threadDelay 10000
+        else do
+            -- Concurrently-authored callTool actions publish their request
+            -- files close together. Wait for a short quiet period, claim the
+            -- complete batch, then route it through the loop's normal
+            -- execution-policy scheduler.
+            batch <- collectBatch requests
+            claimed <- claimBatch batch
+            serveBatch claimed
+  where
+    tokenPrefix = token <> "-"
+
+    requestEntries entries =
+        [ entry
+        | entry <- entries
+        , takeExtension entry == ".request"
+        ]
+
+    collectBatch initial = go initial (0 :: Int) (0 :: Int)
+      where
+        pollMicros = 2000
+        quietTarget = 2
+        maxPolls = 10
+
+        go previous quiet polls
+            | quiet >= quietTarget || polls >= maxPolls = pure previous
+            | otherwise = do
+                threadDelay pollMicros
+                current <- requestEntries . sort <$> listDirectory rpcDir
+                go current
+                    (if current == previous then quiet + 1 else 0)
+                    (polls + 1)
+
+    claimBatch entries =
+        fmap concat $ traverse claim entries
+      where
+        claim entry =
+            let requestPath = rpcDir </> entry
+                processingEntry = dropExtension entry <> ".processing"
+                processingPath = rpcDir </> processingEntry
+            in (renameFile requestPath processingPath
+                    >> pure [processingEntry])
+                `catchAny` \_ -> pure []
+
+    serveBatch [] = pure ()
+    serveBatch entries = do
+        let claimedCount = length entries
+        atomicModifyIORef' inFlight \count ->
+            (count + claimedCount, ())
+        (do
+            decoded <- traverse readRequest entries
+            let accepted =
+                    [ request
+                    | (_, Right request) <- decoded
+                    ]
+            outputs <-
+                if null accepted
+                    then pure []
+                    else
+                        (normalizeOutputs accepted
+                            <$> invokeTools accepted)
+                            `catchAny` \exception ->
+                                pure
+                                    [ failureResponse request
+                                        ("Nested program bridge failed: "
+                                            <> Text.pack (show exception))
+                                    | request <- accepted
+                                    ]
+            writeDecoded decoded outputs)
+            `finally` atomicModifyIORef' inFlight \count ->
+                (max 0 (count - claimedCount), ())
+
+    readRequest entry =
+        ((\request -> (entry, request)) <$> readOne entry)
+            `catchAny` \exception ->
+                (removeFile (rpcDir </> entry) `catchAny` \_ -> pure ())
+                    >> pure
+                    ( entry
+                    , Left
+                        ("Nested tool bridge failed: "
+                            <> Text.pack (show exception))
+                    )
+
+    readOne entry = do
+        let processingPath = rpcDir </> entry
+        bytes <- LBS.readFile processingPath
+            `finally`
+                (removeFile processingPath `catchAny` \_ -> pure ())
+        if tokenPrefix `Text.isPrefixOf` Text.pack entry
+            then case Aeson.eitherDecode bytes
+                    :: Either String GhciProgramRequest of
+                Left err ->
+                    pure (Left
+                        ("Invalid nested program request: " <> Text.pack err))
+                Right request ->
+                    pure (Right request)
+            else pure (Left
+                "Error: this callTool capability belongs to an earlier \
+                \run_haskell_program invocation")
+
+    normalizeOutputs requests outputs
+        | length outputs == length requests = outputs
+        | otherwise =
+            zipWith
+                (\request output ->
+                    maybe
+                        (failureResponse request
+                            "Nested program bridge failed: result count mismatch")
+                        id
+                        output)
+                requests
+                (map Just outputs <> repeat Nothing)
+
+    failureResponse request message = case request of
+        GhciToolRequest{} -> GhciToolResponse message
+        GhciLlmRequest{} -> GhciLlmResponse (Left message)
+
+    writeDecoded
+        :: [(FilePath, Either Text GhciProgramRequest)]
+        -> [GhciProgramResponse]
+        -> IO ()
+    writeDecoded [] _ = pure ()
+    writeDecoded ((entry, Left output) : rest) outputs =
+        writeResponse entry (GhciProgramError output)
+            >> writeDecoded rest outputs
+    writeDecoded ((entry, Right _) : rest) (output : outputs) =
+        writeResponse entry output >> writeDecoded rest outputs
+    writeDecoded ((entry, Right request) : rest) [] =
+        writeResponse entry
+            (failureResponse request
+                "Nested program bridge failed: missing result")
+            >> writeDecoded rest []
+
+    writeResponse :: FilePath -> GhciProgramResponse -> IO ()
+    writeResponse entry output = do
+        let base = dropExtension entry
+            responsePath = rpcDir </> (base <> ".response")
+            responseTmp = responsePath <> ".tmp"
+        LBS.writeFile responseTmp (Aeson.encode output)
+        renameFile responseTmp responsePath
+
+programRpcToken :: GhciSession -> IO Text
+programRpcToken session = do
+    now <- getMonotonicTimeNSec
+    pure (session.ghciMarkerSeed <> "-" <> Text.pack (show now))
+
+bindProgramHelpers :: Text -> Text
+bindProgramHelpers token =
+    "let callTool = agentGhciCallToolInternal "
+        <> quoted
+        <> "; callLLM = agentGhciCallLLMInternal "
+        <> quoted
+        <> "; callLLMText = agentGhciCallLLMTextInternal "
+        <> quoted
+        <> "; callLLMJson = agentGhciCallLLMJsonInternal "
+        <> quoted
+  where
+    quoted = Text.pack (show (Text.unpack token))
+
+finishProgramRequests
+    :: FilePath
+    -> IORef Int
+    -> Word64
+    -> Int
+    -> GhciResult
+    -> IO GhciResult
+finishProgramRequests rpcDir inFlight started timeoutMs result
+    | result.ghciOutcome /= GhciCompleted = pure result
+    | otherwise = do
+        remaining <- remainingMillis started timeoutMs
+        drained <- waitForRpcDrain rpcDir inFlight remaining
+        if drained
+            then pure result
+            else pure $ emptyResult
+                GhciTimedOut
+                GhciEffectful
+                "Timed out waiting for nested tool calls to finish."
+
+waitForRpcDrain :: FilePath -> IORef Int -> Int -> IO Bool
+waitForRpcDrain rpcDir inFlight = go (0 :: Int)
+  where
+    go quiet remaining
+        | remaining <= 0 = drainedNow
+        | otherwise = do
+            drained <- drainedNow
+            if drained && quiet >= 1
+                then pure True
+                else do
+                    let delayMs = min 10 remaining
+                    threadDelay (delayMs * 1000)
+                    go (if drained then quiet + 1 else 0) (remaining - delayMs)
+
+    drainedNow = do
+        active <- readIORef inFlight
+        entries <- listDirectory rpcDir `catchAny` \_ -> pure []
+        let bridgeFiles =
+                [ entry
+                | entry <- entries
+                , takeExtension entry `elem`
+                    [".request", ".processing", ".tmp"]
+                ]
+        pure (active == 0 && null bridgeFiles)
 
 sendLine :: GhciProcess -> Text -> IO ()
 sendLine process text = do

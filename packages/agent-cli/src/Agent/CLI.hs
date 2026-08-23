@@ -158,7 +158,10 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectModel
     )
-import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Prompt
+    ( defaultModelFor
+    , systemPromptWithToolAccess
+    )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
@@ -245,7 +248,11 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( requireToolRegistry
+    , schemasFromAppTools
+    , withoutDirectShellTools
+    )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
@@ -293,7 +300,7 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Cancel (CancelFlag, requestCancel, resetCancel, waitCancel)
 import Agent.Loop
 import Agent.Error (ApiError(..))
 import Agent.ProjectInstructions
@@ -321,11 +328,13 @@ import Agent.OpenAI.Compaction
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
+import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
     ( openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWith
     , openAiResponseSenderReconnecting
     )
+import Agent.Responses.LoopBackend (responseTokenUsage)
 import Agent.Responses.Types
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
@@ -344,6 +353,7 @@ import Agent.Provider
     , TokenProvider
     , getNextToken
     , providerSlug
+    , runWithTokenProvider
     , tokenProvider
     , tokenProviderBillingMode
     )
@@ -364,7 +374,10 @@ import Agent.Subagents
     , setSubagentOnComplete
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Tools
+    ( CodingTools(..)
+    , codingToolsForWithTypesAndHaskellProgram
+    )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
@@ -385,12 +398,23 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , defaultToolEnv
     )
+import Agent.ToolDispatch (ToolCall(..), ToolDispatchConfig(..))
+import qualified Agent.OpenRouter.Client as OpenRouterClient
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter.Options as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
+import Data.Aeson (encode, object, (.=))
+import qualified Data.ByteString.Lazy as LBS
+import qualified Agent.XAI.Client as XAIClient
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
-import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
+import Control.Concurrent.Async
+    ( link
+    , mapConcurrently
+    , race
+    , waitSTM
+    , withAsync
+    )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -1377,7 +1401,13 @@ runAgentInitializedWithLock
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
-    coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
+    coding <- codingToolsForWithTypesAndHaskellProgram
+        options.optHaskellProgram
+        provider
+        toolEnv
+        (Just planHooks)
+        multiCtx
+        agentTypesRef
     case multiCtx of
         Just ctx ->
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1419,6 +1449,10 @@ runAgentInitializedWithLock
                 sessionProcessStatus sessionProcessManager
             }
         tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
+        parentTools
+            | options.optNoDirectShell =
+                withoutDirectShellTools tools
+            | otherwise = tools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1437,9 +1471,15 @@ runAgentInitializedWithLock
             coding.codingClose
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let instructions = systemPrompt provider cwd today (isOneShot options)
+        let instructions = systemPromptWithToolAccess
+                options.optHaskellProgram
+                (not options.optNoDirectShell)
+                provider
+                cwd
+                today
+                (isOneShot options)
             params = requestParams model instructions
-                (schemasFromAppTools provider tools) effort
+                (schemasFromAppTools provider parentTools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
@@ -1483,17 +1523,19 @@ runAgentInitializedWithLock
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        usageLock <- newMVar ()
         let recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
-                    mask_ do
-                        case persist of
-                            PersistenceDisabled -> pure ()
-                            PersistenceEnabled slotRef -> do
-                                handle <- ensureSession slotRef
-                                claimCurrentSession handle
-                                updated <- addSessionUsage usage handle
-                                writeIORef slotRef (PersistenceActive updated)
-                        modifyIORef' usageRef (`addTokenUsage` usage)
+                    withMVar usageLock \_ ->
+                        mask_ do
+                            case persist of
+                                PersistenceDisabled -> pure ()
+                                PersistenceEnabled slotRef -> do
+                                    handle <- ensureSession slotRef
+                                    claimCurrentSession handle
+                                    updated <- addSessionUsage usage handle
+                                    writeIORef slotRef (PersistenceActive updated)
+                            modifyIORef' usageRef (`addTokenUsage` usage)
         case persist of
             PersistenceEnabled slotRef -> do
                 slot <- readIORef slotRef
@@ -1735,6 +1777,7 @@ runAgentInitializedWithLock
                                             runCodexSubagent
                                                 subagentRuntime
                                                 selectableTokenProvider
+                                                recordCompactionUsage
                                                 ctx.multiSendToRoot
                                     Nothing -> pure ()
                                 let (compactSender, lockedBackend) =
@@ -1747,6 +1790,20 @@ runAgentInitializedWithLock
                                             transcriptRef
                                             contextTokensRef
                                             recordCompactionUsage
+                                    -- Use independent REST connections here
+                                    -- rather than the session WebSocket so
+                                    -- Concurrently callLLM actions actually
+                                    -- overlap. The Codex transport requires
+                                    -- streaming and non-stored responses.
+                                    rawResponseCaller request =
+                                        OpenAIClient.createCodexMessageWithProvider
+                                            tokenProvider
+                                            request { store = Just False }
+                                    programResponseCaller =
+                                        batchedProgramResponses
+                                            toolEnv.toolCancel
+                                            recordCompactionUsage
+                                            rawResponseCaller
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -1776,7 +1833,7 @@ runAgentInitializedWithLock
                                     link switchWorker
                                     runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1814,6 +1871,15 @@ runAgentInitializedWithLock
                                         (\childParamsRef childTranscript ->
                                             xaiBackend xaiOptions tokenProvider
                                                 (readIORef childParamsRef) childTranscript)
+                                        (\request ->
+                                            runWithTokenProvider
+                                                tokenProvider
+                                                \credential ->
+                                                    XAIClient.createResponseWith
+                                                        xaiOptions
+                                                        credential
+                                                        request)
+                                        recordCompactionUsage
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -1832,12 +1898,21 @@ runAgentInitializedWithLock
                                         (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
+                            rawResponseCaller request =
+                                runWithTokenProvider tokenProvider \credential ->
+                                    XAIClient.createResponseWith
+                                        xaiOptions credential request
+                            programResponseCaller =
+                                batchedProgramResponses
+                                    toolEnv.toolCancel
+                                    recordCompactionUsage
+                                    rawResponseCaller
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend
                     OpenRouterProvider -> do
                         openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
@@ -1850,6 +1925,15 @@ runAgentInitializedWithLock
                                             openRouterBackend openRouterOptions
                                                 tokenProvider
                                                 (readIORef childParamsRef) childTranscript)
+                                        (\request ->
+                                            runWithTokenProvider
+                                                tokenProvider
+                                                \credential ->
+                                                    OpenRouterClient.createResponseWith
+                                                        openRouterOptions
+                                                        credential
+                                                        request)
+                                        recordCompactionUsage
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -1868,12 +1952,21 @@ runAgentInitializedWithLock
                                         (Just tokenProvider)
                                         paramsRef
                                         transcriptRef
+                            rawResponseCaller request =
+                                runWithTokenProvider tokenProvider \credential ->
+                                    OpenRouterClient.createResponseWith
+                                        openRouterOptions credential request
+                            programResponseCaller =
+                                batchedProgramResponses
+                                    toolEnv.toolCancel
+                                    recordCompactionUsage
+                                    rawResponseCaller
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner programResponseCaller activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -2002,6 +2095,67 @@ isJustCwd options = case options.optCwd of
     Just _ -> True
     Nothing -> False
 
+appendToolEvent :: Maybe FilePath -> LoopEvent -> IO ()
+appendToolEvent Nothing _ = pure ()
+appendToolEvent (Just path) event = case event of
+    ToolStarted call ->
+        LBS.appendFile path
+            ( encode (object
+                [ "event" .= ("tool_started" :: Text)
+                , "callId" .= call.callId
+                , "name" .= call.name
+                , "arguments" .=
+                    if call.argumentsEncrypted
+                        then ("<redacted>" :: Text)
+                        else call.arguments
+                ])
+                <> "\n"
+            )
+    _ -> pure ()
+
+appendProgramResponseEvents :: Maybe FilePath -> Int -> IO ()
+appendProgramResponseEvents Nothing _ = pure ()
+appendProgramResponseEvents (Just path) count =
+    forM_ [1 .. count] \index ->
+        LBS.appendFile path
+            ( encode (object
+                [ "event" .= ("tool_started" :: Text)
+                , "callId" .=
+                    ("program/haskell/callLLM/" <> Text.pack (show index))
+                , "name" .= ("callLLM" :: Text)
+                , "arguments" .= ("{}" :: Text)
+                ])
+                <> "\n"
+            )
+
+type RawResponseCaller =
+    ResponseCreateParams -> IO (Either ApiError Response)
+
+type ProgramResponseCaller =
+    [ResponseCreateParams] -> IO [Either Text Response]
+
+batchedProgramResponses
+    :: CancelFlag
+    -> (TokenUsage -> IO ())
+    -> RawResponseCaller
+    -> ProgramResponseCaller
+batchedProgramResponses cancel recordUsage send =
+    fmap concat . traverse (mapConcurrently callOne) . chunksOf 4
+  where
+    callOne request =
+        race (waitCancel cancel) (send request) >>= \case
+            Left () -> pure (Left "callLLM cancelled")
+            Right (Left apiError) -> do
+                now <- getCurrentTime
+                pure (Left (formatApiErrorInlineAt now apiError))
+            Right (Right response) -> do
+                recordUsage (responseTokenUsage response)
+                pure (Right response)
+
+    chunksOf _ [] = []
+    chunksOf size values =
+        let (chunk, rest) = splitAt size values
+        in chunk : chunksOf size rest
 
 runSession
     :: CliOptions
@@ -2044,10 +2198,11 @@ runSession
     -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> ProgramResponseCaller
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner programResponseCaller backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2073,7 +2228,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                           (Just resultTitle))
                       _ -> pure ()
   withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
-    toolRegistry <- requireToolRegistry tools
+    let parentTools
+            | options.optNoDirectShell =
+                withoutDirectShellTools tools
+            | otherwise = tools
+    toolRegistry <- requireToolRegistry parentTools
+    nestedToolRegistry <-
+        if options.optNoDirectShell
+            then Just <$> requireToolRegistry tools
+            else pure Nothing
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -2313,47 +2476,58 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                         options.optMotionMode
             , renderMotionMode = options.optMotionMode
             }
-        emitLoop event = case fullscreen of
-            Nothing -> renderEvent render event
-            Just runtime -> do
-                case event of
-                    TurnStarted -> do
-                        now <- getCurrentTime
-                        writeIORef startedAtRef (Just now)
-                        writeIORef activityRef "Thinking…"
-                    TextDelta _ -> writeIORef printed True
-                    ToolStarted _ ->
-                        writeIORef activityRef "Running tool…"
-                    _ -> pure ()
-                emitUiEvent runtime (UiLoop event)
+        emitLoop event = do
+            appendToolEvent options.optToolEventLog event
+            case fullscreen of
+                Nothing -> renderEvent render event
+                Just runtime -> do
+                    case event of
+                        TurnStarted -> do
+                            now <- getCurrentTime
+                            writeIORef startedAtRef (Just now)
+                            writeIORef activityRef "Thinking…"
+                        TextDelta _ -> writeIORef printed True
+                        ToolStarted _ ->
+                            writeIORef activityRef "Running tool…"
+                        _ -> pure ()
+                    emitUiEvent runtime (UiLoop event)
+        loggedProgramResponseCaller requests = do
+            appendProgramResponseEvents
+                options.optToolEventLog
+                (length requests)
+            programResponseCaller requests
+        approveWith registry call =
+            withMVar ioLock \_ ->
+                case fullscreen of
+                    Nothing ->
+                        withStdinPaused escPaused $
+                            approveToolDecision
+                                policyRef allowedToolsRef registry planMode call
+                    Just runtime ->
+                        approveToolDecisionWithReporter
+                            (requestFullscreenPermission runtime)
+                            (\case
+                                ApprovalWarning _ -> pure ()
+                                ApprovalSuccess message ->
+                                    emitUiEvent runtime
+                                        (UiSetNotice
+                                            (Just
+                                                (successNotice message))))
+                            policyRef
+                            allowedToolsRef
+                            registry
+                            planMode
+                            call
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
+            , loopNestedTools = nestedToolRegistry
             , loopDispatch = defaultLoopDispatch
+                { toolDispatchCallResponses = Just loggedProgramResponseCaller }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
-            , loopApprove = \call ->
-                withMVar ioLock \_ ->
-                    case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode call
-                        Just runtime ->
-                            approveToolDecisionWithReporter
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+            , loopApprove = approveWith toolRegistry
+            , loopNestedApprove = approveWith <$> nestedToolRegistry
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do

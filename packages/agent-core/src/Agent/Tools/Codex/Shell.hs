@@ -150,16 +150,32 @@ continueCodexShellCommand session commandId input yieldMs = do
                                         waitForContinuation
                                             session commandId task yieldMs
                                     Left err ->
-                                        tryReadMVar
-                                            task.managedRunning.runningResult
-                                                >>= \case
-                                                    Just result ->
-                                                        finishCommand
-                                                            session
-                                                            commandId
-                                                            task
-                                                            result
-                                                    Nothing -> pure (Left err)
+                                        completedAfterInputFailure
+                                            task
+                                            yieldMs >>= \case
+                                                Just result ->
+                                                    finishCommand
+                                                        session
+                                                        commandId
+                                                        task
+                                                        result
+                                                Nothing -> pure (Left err)
+
+-- A child may close stdin just before the supervisor publishes its completed
+-- result. Give that handoff a short grace period so a late write returns the
+-- command's final output rather than a transient broken-pipe error.
+completedAfterInputFailure
+    :: ManagedCommand
+    -> Int
+    -> IO (Maybe CommandResult)
+completedAfterInputFailure task yieldMs =
+    race
+        (threadDelay (graceMs * 1000))
+        (readMVar task.managedRunning.runningResult) >>= \case
+            Left () -> pure Nothing
+            Right result -> pure (Just result)
+  where
+    graceMs = max 100 (min 1000 yieldMs)
 
 waitForInitialYield
     :: CodexShellSession

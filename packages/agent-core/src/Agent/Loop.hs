@@ -25,10 +25,15 @@ module Agent.Loop
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
+import Agent.Responses.Types
+    ( Response
+    , ResponseCreateParams
+    )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolRuntime(..)
     )
 import Agent.Tools.Types
     ( ToolExecutionPolicy(..)
@@ -37,11 +42,15 @@ import Agent.Tools.Types
     , toolExecutionPolicyFor
     )
 import Control.Concurrent.Async (mapConcurrently, race)
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
+import qualified Data.Aeson as Aeson
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -149,13 +158,21 @@ data LoopEvent
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
+      -- | Tools callable directly by the parent model.
     , loopTools :: !ToolRegistry
+      -- | Optional broader registry for calls made from inside tools such as
+      -- run_haskell_program. This lets a harness hide direct shell access
+      -- while retaining shell_command behind the programmatic boundary.
+    , loopNestedTools :: !(Maybe ToolRegistry)
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+      -- | Optional approval callback paired with 'loopNestedTools'.
+    , loopNestedApprove
+        :: !(Maybe (ToolCall -> IO (Either Text Bool)))
       -- | Soft-cancel latch. The caller owns resetting it before publishing
       -- the turn to input/interrupt handlers. When set, the loop stops after
       -- the current tool batch instead of asking the model for another step.
@@ -198,6 +215,8 @@ defaultLoopDispatch = ToolDispatchConfig
         "Tool " <> name <> " crashed: " <> Text.pack (show exception)
     , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
     , toolDispatchOnOutput = \_call _output -> pure ()
+    , toolDispatchRuntime = Nothing
+    , toolDispatchCallResponses = Nothing
     }
 
 runLoop
@@ -238,9 +257,15 @@ runLoopInputsUnsafe config0 previousResponseId firstInputs = do
     -- so a printer (hPutStrLn on String is not atomic) cannot interleave
     -- characters.
     eventLock <- newMVar ()
+    responseCache <- newMVar Map.empty
     let config = config0
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event
+            , loopDispatch = config0.loopDispatch
+                { toolDispatchCallResponses =
+                    memoizedResponseCaller responseCache
+                        <$> config0.loopDispatch.toolDispatchCallResponses
+                }
             }
         go prev turnsUsed inputs lastOutput usageAcc
             | turnsUsed >= config.loopMaxTurns =
@@ -291,6 +316,58 @@ runLoopInputsUnsafe config0 previousResponseId firstInputs = do
                                                         else go (Just turn.responseId) nextTurnsUsed
                                                             (map CompletedTool results) (Just turn) usageAcc'
     go previousResponseId 0 firstInputs Nothing emptyTokenUsage
+
+-- | Reuse successful isolated model calls while one parent user turn is
+-- running. A repaired run_haskell_program invocation often submits the same
+-- requests again; replaying their complete lossless Responses avoids duplicate
+-- provider work without retaining data across user turns. Failures are not
+-- cached, so transient provider errors remain retryable.
+memoizedResponseCaller
+    :: MVar (Map.Map ByteString Response)
+    -> ([ResponseCreateParams] -> IO [Either Text Response])
+    -> [ResponseCreateParams]
+    -> IO [Either Text Response]
+memoizedResponseCaller cache invoke requests =
+    modifyMVar cache \cached -> do
+        let keyed = [(responseRequestKey request, request) | request <- requests]
+            missing = uniqueMissing cached keyed
+        fetched <- if null missing
+            then pure []
+            else invoke (map snd missing)
+        let fetchedByKey = Map.fromList
+                [ (key, result)
+                | ((key, _), result) <-
+                    zip missing
+                        (fetched
+                            <> repeat
+                                (Left
+                                    "Nested LLM bridge failed: missing result"))
+                ]
+            newlyCached = Map.fromList
+                [ (key, response)
+                | (key, Right response) <- Map.toList fetchedByKey
+                ]
+            cached' = Map.union cached newlyCached
+            resultFor key =
+                case Map.lookup key cached of
+                    Just response -> Right response
+                    Nothing -> fromMaybe
+                        (Left "Nested LLM bridge failed: missing result")
+                        (Map.lookup key fetchedByKey)
+        pure (cached', map (resultFor . fst) keyed)
+  where
+    uniqueMissing cached =
+        reverse . snd . foldl' collect (Map.empty, [])
+      where
+        collect (seen, values) pair@(key, _)
+            | Map.member key cached || Map.member key seen =
+                (seen, values)
+            | otherwise =
+                (Map.insert key () seen, pair : values)
+
+responseRequestKey :: ResponseCreateParams -> ByteString
+responseRequestKey =
+    LBS.toStrict . Aeson.encode
 
 -- | Preserve model order around stateful tools while retaining concurrency
 -- for maximal consecutive runs of explicitly parallel-safe calls.
@@ -350,6 +427,14 @@ runPreparedToolCall
     -> IO ToolCallResult
 runPreparedToolCall config (PreparedToolCall call approval) = do
     config.loopOnEvent (ToolStarted call)
+    let nestedConfig = config
+            { loopTools =
+                fromMaybe config.loopTools config.loopNestedTools
+            , loopNestedTools = Nothing
+            , loopApprove =
+                fromMaybe config.loopApprove config.loopNestedApprove
+            , loopNestedApprove = Nothing
+            }
     result <- case approval of
         ToolApprovalDenied denial ->
             pure ToolCallResult
@@ -370,6 +455,17 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                         config.loopDispatch.toolDispatchOnOutput progressCall output
                             >> config.loopOnEvent
                                 (ToolOutputUpdated progressCall.callId output)
+                    , toolDispatchRuntime = Just ToolRuntime
+                        { invokeNestedTool = runOne nestedConfig
+                        , invokeNestedTools = runToolCalls nestedConfig
+                        , invokeNestedResponses =
+                            case config.loopDispatch.toolDispatchCallResponses of
+                                Just invoke -> invoke
+                                Nothing -> \requests ->
+                                    pure (replicate (length requests)
+                                        (Left
+                                            "callLLM is unavailable in this agent runtime"))
+                        }
                     }
                 config.loopTools
                 call

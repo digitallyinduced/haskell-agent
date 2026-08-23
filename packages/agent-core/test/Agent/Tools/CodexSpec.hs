@@ -13,7 +13,13 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools
+    ( CodingTools(..)
+    , appToolHandlers
+    , codingToolsFor
+    , codingToolsForWithHaskellProgram
+    , defaultToolEnv
+    )
 import Agent.Tools.Types (jsonToolParameters, toolAllowsWithoutPrompt)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
@@ -67,9 +73,18 @@ spec = describe "Agent.Tools.Codex" do
                 , "enter_plan_mode"
                 , "write_plan"
                 , "ask_user_question"
+                , "run_haskell_program"
                 ]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
+            coding.codingClose
+
+    it "can omit Haskell programmatic tool calling" do
+        withTempEnv \env -> do
+            coding <- codingToolsForWithHaskellProgram
+                False OpenAIProvider env Nothing Nothing
+            map (.appToolName) coding.codingAppTools
+                `shouldNotContain` ["run_haskell_program"]
             coding.codingClose
 
     it "registers multi-agent tools when a registry is provided" do
@@ -371,7 +386,7 @@ spec = describe "Agent.Tools.Codex" do
                     "{\"session_id\":" <> Text.pack (show sessionId)
                         <> ",\"chars\":\"late\",\"yield_time_ms\":1000}"
                 finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
-                finished `shouldSatisfy` Text.isInfixOf "done"
+                (started <> finished) `shouldSatisfy` Text.isInfixOf "done"
 
     it "keeps completed sessions available until they are polled" do
         withTempEnv \env ->
@@ -386,7 +401,7 @@ spec = describe "Agent.Tools.Codex" do
                     "{\"session_id\":" <> Text.pack (show firstId)
                         <> ",\"yield_time_ms\":10}"
                 finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
-                finished `shouldSatisfy` Text.isInfixOf "first"
+                (first <> finished) `shouldSatisfy` Text.isInfixOf "first"
 
     it "returns new output even after the capture cap has rolled forward" do
         withTempEnv \base -> do
