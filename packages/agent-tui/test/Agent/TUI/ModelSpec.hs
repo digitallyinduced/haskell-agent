@@ -141,6 +141,22 @@ spec = describe "fullscreen UI reducer" do
                 block.blockTitle `shouldBe` "Continued session 3"
             _ -> expectationFailure "expected one running shell block"
 
+    it "stores GHCi source separately from its compact shell heading" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_ghci"
+                    "{\"expression\":\"do { putStrLn \\\"one\\\"; putStrLn \\\"two\\\" }\"}"
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ ghci"
+                block.blockDetail
+                    `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
+                state.uiActivity `shouldBe` "$ ghci"
+            _ -> expectationFailure "expected one running GHCi block"
+
     it "renders the public Grok terminal alias as a shell block" do
         let call = functionToolCall
                 "c1"

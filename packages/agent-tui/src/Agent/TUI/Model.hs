@@ -35,7 +35,8 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
-    , summarizeToolCall
+    , toolCallInput
+    , toolCallTitle
     )
 import Agent.TUI.Motion
     ( completionStatusDurationMillis
@@ -467,16 +468,18 @@ reduceLoop event state = case event of
     ToolStarted call ->
         let
             kind = toolBlockKind call.name
+            title = toolCallTitle call
             body = case call.name of
                 "search_replace" ->
                     formatSearchReplaceDiff call.arguments
                 _ -> ""
-        in appendBlock kind (summarizeToolCall call) body ""
+            detail = toolCallInput call
+        in appendBlock kind title body detail
             BlockRunning (Just call.callId)
             state
                 { uiRunning = True
                 , uiAwaitingInput = False
-                , uiActivity = summarizeToolCall call
+                , uiActivity = title
                 , uiToolCalls = Map.insert call.callId call state.uiToolCalls
                 }
     ToolOutputUpdated callId output ->
