@@ -39,6 +39,28 @@
                     ];
                 };
 
+                agentCodexDialectSource = nix-filter.lib {
+                    root = ./packages/agent-codex-dialect;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-codex-dialect.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
+                agentGrokBuildDialectSource = nix-filter.lib {
+                    root = ./packages/agent-grok-build-dialect;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-grok-build-dialect.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentSyntaxSource = nix-filter.lib {
                     root = ./packages/agent-syntax;
                     include = [
@@ -158,14 +180,21 @@
                                             export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                                         '';
                                 });
-                        agent-core = pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                        agent-core =
+                            pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            })
-                            [
-                                pkgs.git
-                                pkgs.ripgrep
-                            ];
+                            };
+                        agent-codex-dialect = pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-codex-dialect/package.nix { })
+                            {
+                                src = agentCodexDialectSource;
+                            };
+                        agent-grok-build-dialect =
+                            pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-grok-build-dialect/package.nix { })
+                                {
+                                    src = agentGrokBuildDialectSource;
+                                };
                         agent-responses = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
                             src = agentResponsesSource;
                         };
@@ -200,6 +229,8 @@
                 );
 
                 agentCorePackage = haskellPackages.agent-core;
+                agentCodexDialectPackage = haskellPackages.agent-codex-dialect;
+                agentGrokBuildDialectPackage = haskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = haskellPackages.agent-syntax;
                 agentResponsesPackage = haskellPackages.agent-responses;
                 agentOpenaiPackage = haskellPackages.agent-openai;
@@ -297,6 +328,8 @@
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-codex-dialect = agentCodexDialectPackage;
+                packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
                 packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
                 packages.skylighting-syntaxes = skylightingSyntaxes;
@@ -319,6 +352,8 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-codex-dialect
+                        packages.agent-grok-build-dialect
                         packages.agent-syntax
                         packages.agent-tui
                         packages.agent-responses
@@ -349,6 +384,8 @@
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-codex-dialect = agentCodexDialectPackage;
+                    agent-grok-build-dialect = agentGrokBuildDialectPackage;
                     agent-syntax = agentSyntaxPackage;
                     agent-tui = agentTuiPackage;
                     agent-responses = agentResponsesPackage;

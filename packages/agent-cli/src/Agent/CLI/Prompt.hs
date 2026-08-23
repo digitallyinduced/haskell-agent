@@ -6,17 +6,21 @@ module Agent.CLI.Prompt
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
+import Agent.Codex.Dialect.Prompt
+    ( codexSystemPrompt
+    , codexSystemPromptForTools
+    )
 import Agent.Dialect
     ( Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
-import Agent.OsPath (toText)
-import Agent.Tools.Grok.Prompt
+import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
     , grokSystemPromptForTools
     )
+import Agent.OsPath (toText)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
@@ -142,68 +146,6 @@ ghciGuidanceForTools dialect available
                 <> Text.intercalate " or " names
                 <> ") for OS commands, package installs, servers, and anything that is not Haskell evaluation."
             ]
-
-codexSystemPrompt :: OsPath -> Day -> Text
-codexSystemPrompt cwd today =
-    Text.unlines
-        [ "You are a coding agent working in " <> toText cwd <> "."
-        , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
-        , ""
-        , "Use these tools:"
-        , "- Inspect files with read_file, grep, and list_dir. Outside Plan Mode, shell_command is also available; always set workdir."
-        , "- Edit files with apply_patch. Never call applypatch or apply-patch."
-        , "- Track multi-step work with update_plan (progress checklist; unavailable in Plan Mode)."
-        , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
-        , "- Look up current public information with web_search."
-        , "- Enter Plan Mode with enter_plan_mode; write its plan with write_plan; ask planning questions with ask_user_question."
-        , ""
-        , "Web search citation references such as turn2search5 are internal."
-        , "Use them only when interacting with web_search; never expose internal reference IDs"
-        , "or citation-marker syntax such as <cite|...> in user-visible output."
-        , "Cite web sources using descriptive Markdown links instead."
-        , ""
-        , "Plan Mode: use it for software implementation or architectural planning when code"
-        , "changes are expected after approval, or when the user explicitly requests Plan Mode."
-        , "Do not enter it for conversational plans such as business, writing, or travel plans."
-        , "The transition requires user approval."
-        , "When a developer reminder says plan mode is active, explore read-only,"
-        , "write the design with write_plan only, and present the final plan in a <proposed_plan>"
-        , "block (opening and closing tags on their own lines). Do not implement until plan"
-        , "mode ends. update_plan is not Plan Mode."
-        , "Be concise. Do not mention tools this session does not register."
-        ]
-
-codexSystemPromptForTools :: [Text] -> OsPath -> Day -> Text
-codexSystemPromptForTools available cwd today =
-    Text.unlines $
-        [ "You are a coding agent working in " <> toText cwd <> "."
-        , "Today's date is " <> formattedToday <> "."
-        , ""
-        , "Use the registered tools:"
-        ]
-            <> toolLine "shell_command"
-                "- Inspect the repo and run system commands with shell_command. Always set workdir."
-            <> toolLine "apply_patch"
-                "- Edit files with apply_patch. Never call applypatch or apply-patch."
-            <> toolLine "update_plan"
-                "- Track multi-step work with update_plan."
-            <> toolLine "run_ghci"
-                "- Evaluate Haskell with run_ghci."
-            <> toolLine "web_search"
-                "- Look up current public information with web_search."
-            <> planLines
-            <> ["Be concise. Do not mention tools this session does not register."]
-  where
-    formattedToday =
-        Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today)
-    toolLine name line
-        | name `elem` available = [line]
-        | otherwise = []
-    planLines =
-        toolLine "enter_plan_mode"
-            "- Enter Plan Mode with enter_plan_mode for genuinely ambiguous architectural work."
-            <> toolLine "ask_user_question"
-                "- Ask planning questions with ask_user_question."
 
 genericSystemPrompt :: OsPath -> Day -> Bool -> Text
 genericSystemPrompt cwd today isNonInteractive =

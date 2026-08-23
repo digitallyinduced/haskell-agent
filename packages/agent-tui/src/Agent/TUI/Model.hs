@@ -459,6 +459,11 @@ reduceLoop event state = case event of
             { uiActivity = "Writing…" }
     ActivityUpdated activity ->
         state { uiActivity = activity }
+    WarningRaised warning ->
+        state
+            { uiNotice = Just (warningNotice warning)
+            , uiNoticeElapsedMillis = 0
+            }
     ToolStarted call ->
         let
             kind = toolBlockKind call.name

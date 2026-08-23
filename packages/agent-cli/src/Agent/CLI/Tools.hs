@@ -20,7 +20,7 @@ import Agent.Dialect
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
-import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types
     ( AppTool(..)

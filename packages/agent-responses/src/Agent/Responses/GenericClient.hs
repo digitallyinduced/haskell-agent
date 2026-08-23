@@ -26,7 +26,7 @@ import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , buildStreamResponse
-    , failedResponseMessage
+    , failedStreamResponseMessage
     )
 import Agent.Responses.Types
 import Control.Retry
@@ -155,7 +155,7 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
         "No terminal response event found in Responses SSE stream"
     , classifyStreamError
     , classifyFailedResponse =
-        ConnectionError . failedResponseMessage
+        ConnectionError . failedStreamResponseMessage
     }
 
 transientResultPolicy :: RetryPolicyM IO

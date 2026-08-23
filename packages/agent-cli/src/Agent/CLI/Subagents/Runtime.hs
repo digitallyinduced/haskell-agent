@@ -38,6 +38,12 @@ import Agent.CLI.SubagentStore
     , saveSubagentState
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Dialects
+    ( CodingTools(..)
+    , codingToolsFor
+    , filterChildGrokTools
+    )
+import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
     ( ChildAgentProtocol(..)
     , Dialect
@@ -100,12 +106,11 @@ import Agent.Subagents.TaskPath
     ( parseTaskPath
     , taskPathRoot
     )
-import Agent.Tools
-    ( CodingTools(..)
-    , codingToolsFor
-    , filterChildGrokTools
+import Agent.GrokBuild.Dialect.Prompt
+    ( codingGrokPromptTools
+    , grokSubagentSystemPrompt
     )
-import Agent.Tools.Grok.Task
+import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
     , GrokSubagentSpecs
     , defaultSubagentType
@@ -113,10 +118,6 @@ import Agent.Tools.Grok.Task
     , lookupAgentReasoningEffort
     , lookupAgentType
     , recordAgentSpec
-    )
-import Agent.Tools.Grok.Prompt
-    ( codingGrokPromptTools
-    , grokSubagentSystemPrompt
     )
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
@@ -870,13 +871,6 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
         env.subId
         session
     pure result
-
-codexSubagentSuffix :: SubagentId -> Text
-codexSubagentSuffix agentId =
-    "You are a Codex subagent. Complete the assigned task and report results clearly. \
-    \Your agent id is "
-        <> agentId.unSubagentId
-        <> "."
 
 genericSubagentSuffix :: Text -> SubagentId -> Text
 genericSubagentSuffix agentType agentId =

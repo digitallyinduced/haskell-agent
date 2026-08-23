@@ -3236,6 +3236,7 @@ uiEventRestartsMotionSchedule event previous next newFlashes =
   where
     explicitReset = case event of
         UiLoop TurnStarted -> True
+        UiLoop (WarningRaised _) -> True
         UiSetNotice (Just _) -> True
         UiInputPromoted _ -> True
         UiTurnRestarted -> True
