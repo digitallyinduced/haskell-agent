@@ -66,13 +66,13 @@
       "id": "opus",
       "connection": "claude-code",
       "dialect": "claude-code",
-      "label": "frontier · subscription"
+      "label": "previous frontier · subscription"
     },
     {
       "id": "fable",
       "connection": "claude-code",
       "dialect": "claude-code",
-      "label": "fast · subscription"
+      "label": "frontier · subscription"
     }
   ]
 }
