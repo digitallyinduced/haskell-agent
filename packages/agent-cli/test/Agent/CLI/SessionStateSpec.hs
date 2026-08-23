@@ -72,11 +72,39 @@ spec = describe "Agent.CLI.SessionState" do
             { conversationStartupContext = Just "fresh"
             }
 
+    it "applies account updates without disturbing unrelated session state" do
+        let initial = testState
+                { sessionAccount = SessionAccountState
+                    { accountLabel = "old@example.com"
+                    , accountId = "account-old"
+                    , accountSelectionId = "selection-old"
+                    }
+                }
+            updated = applySessionAccountPatch
+                SessionAccountPatch
+                    { patchAccountLabel = SetField "new@example.com"
+                    , patchAccountId = SetField "account-new"
+                    , patchAccountSelectionId = KeepField
+                    }
+                initial
+        updated.sessionAccount `shouldBe` SessionAccountState
+            { accountLabel = "new@example.com"
+            , accountId = "account-new"
+            , accountSelectionId = "selection-old"
+            }
+        updated.sessionConversation `shouldBe` initialConversation
+        updated.sessionSkillCatalog `shouldBe` SkillCatalog [] []
+
 testState :: SessionState
 testState = SessionState
     { sessionConversation = initialConversation
     , sessionSkillCatalog = SkillCatalog [] []
     , sessionSkillInvocations = []
+    , sessionAccount = SessionAccountState
+        { accountLabel = ""
+        , accountId = ""
+        , accountSelectionId = ""
+        }
     }
 
 initialConversation :: ConversationState

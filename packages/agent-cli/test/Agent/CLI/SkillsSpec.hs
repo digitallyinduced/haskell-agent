@@ -2,7 +2,7 @@ module Agent.CLI.SkillsSpec (spec) where
 
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
-import Agent.CLI.SessionState (SessionState(..))
+import Agent.CLI.SessionState (SessionAccountState(..), SessionState(..))
 import Agent.CLI.Skills
 import Agent.CLI.TurnState (ConversationState(..))
 import Agent.Loop (emptyTokenUsage)
@@ -123,4 +123,9 @@ testSessionState startup =
             }
         , sessionSkillCatalog = SkillCatalog [] []
         , sessionSkillInvocations = []
+        , sessionAccount = SessionAccountState
+            { accountLabel = ""
+            , accountId = ""
+            , accountSelectionId = ""
+            }
         }
