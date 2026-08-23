@@ -66,10 +66,7 @@ import System.Console.ANSI
     , SGR(..)
     , hSetTitle
     )
-import System.Console.ANSI.Codes
-    ( clearFromCursorToLineEndCode
-    , setSGRCode
-    )
+import System.Console.ANSI.Codes (setSGRCode)
 import System.Environment (lookupEnv)
 import System.OsPath (OsPath)
 import System.IO (Handle)
@@ -136,8 +133,13 @@ endBackground color
     | not color = ""
     | otherwise = Text.pack (setSGRCode [Reset])
 
--- | Prefix each line with @bg@, extend the wash to the terminal edge via
--- clear-to-EOL, then reset. Preserves a trailing newline on @text@.
+-- | Prefix each line with @bg@, then reset. Preserves a trailing newline on
+-- @text@.
+--
+-- Do not use erase-to-end-of-line to extend the wash. Some terminals erase
+-- with their configured default background rather than the active SGR
+-- background, which leaves visible patches when that default differs from the
+-- agent palette.
 paintBackgroundLines :: Bool -> [SGR] -> Text -> Text
 paintBackgroundLines color bgAttrs text
     | not color || null bgAttrs || Text.null text = text
@@ -155,7 +157,6 @@ paintLine :: [SGR] -> Text -> Text
 paintLine bgAttrs line =
     Text.pack (setSGRCode bgAttrs)
         <> line
-        <> Text.pack clearFromCursorToLineEndCode
         <> Text.pack (setSGRCode [Reset])
 
 rolePrompt :: Bool -> Text -> Text
