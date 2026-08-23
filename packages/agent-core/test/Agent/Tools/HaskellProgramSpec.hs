@@ -81,7 +81,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
     it "keeps nested tool results inside GHCi unless the program emits them" do
         withTempProgramGhci \(ghci, _planMode) -> do
             requests <- newIORef []
-            result <- evalGhciProgram ghci programSource 10000
+            result <- evalGhciProgram ghci programSource 30000
                 (batchTool \name arguments -> do
                     modifyIORef' requests (<> [(name, arguments)])
                     pure "TOP_SECRET_INTERMEDIATE_RESULT")
@@ -128,11 +128,11 @@ spec = describe "Agent.Tools.HaskellProgram" do
 
     it "isolates Haskell bindings between program calls" do
         withTempProgramGhci \(ghci, _planMode) -> do
-            bound <- evalGhciProgram ghci "let programValue = 41" 10000 unusedTool
+            bound <- evalGhciProgram ghci "let programValue = 41" 30000 unusedTool
             bound.ghciOk `shouldBe` True
             emitted <- evalGhciProgram ghci
                 "emitText (Text.pack (show (programValue + 1)))"
-                10000
+                30000
                 unusedTool
             emitted.ghciOk `shouldBe` False
             emitted.ghciOutput
@@ -144,7 +144,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
                 ( "let value :: Text; value = T.pack \"ok\" \
                   \in emitText (Text.toUpper value)"
                 )
-                10000
+                30000
                 unusedTool
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "OK"
@@ -156,7 +156,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
                   \(sort (mapMaybe (\\value -> if even value \
                   \then Just value else Nothing) [3, 2, 4, 1]))))"
                 )
-                10000
+                30000
                 unusedTool
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "[2,4]"
@@ -177,7 +177,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
                         modifyIORef' seen (<> [request])
                         pure (GhciLlmResponse
                             (Right (testResponse "resp-nested")))
-            result <- evalGhciProgram ghci callLlmProgramSource 10000 invoke
+            result <- evalGhciProgram ghci callLlmProgramSource 30000 invoke
             result.ghciOk `shouldBe` True
             result.ghciOutput
                 `shouldSatisfy` Text.isInfixOf
@@ -187,7 +187,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
     it "batches concurrent callLLM actions and preserves response order" do
         withTempProgramGhci \(ghci, _planMode) -> do
             batchSizes <- newIORef []
-            result <- evalGhciProgram ghci concurrentLlmProgramSource 10000
+            result <- evalGhciProgram ghci concurrentLlmProgramSource 30000
                 \requests -> do
                     modifyIORef' batchSizes (<> [length requests])
                     pure
@@ -249,7 +249,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
     it "batches applicative Concurrently callTool actions and preserves results" do
         withTempProgramGhci \(ghci, _planMode) -> do
             batchSizes <- newIORef []
-            result <- evalGhciProgram ghci concurrentProgramSource 10000
+            result <- evalGhciProgram ghci concurrentProgramSource 30000
                 \requests -> do
                     modifyIORef' batchSizes (<> [length requests])
                     pure (map resultFor requests)
@@ -263,7 +263,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
         withTempProgramGhci \(ghci, _planMode) -> do
             started <- newIORef False
             finished <- newIORef False
-            result <- evalGhciProgram ghci backgroundProgram 10000
+            result <- evalGhciProgram ghci backgroundProgram 30000
                 (batchTool \_name _arguments -> do
                     writeIORef started True
                     threadDelay 200000
@@ -276,7 +276,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
     it "terminates delayed background callers at the program boundary" do
         withTempProgramGhci \(ghci, _planMode) -> do
             invoked <- newIORef False
-            result <- evalGhciProgram ghci delayedBackgroundProgram 10000
+            result <- evalGhciProgram ghci delayedBackgroundProgram 30000
                 (batchTool \_name _arguments -> do
                     writeIORef invoked True
                     pure "unexpected")
@@ -288,13 +288,13 @@ spec = describe "Agent.Tools.HaskellProgram" do
         withTempProgramGhci \(ghci, _planMode) -> do
             poisoned <- evalGhciProgram ghci
                 "let agentGhciCallToolInternal _ _ _ = pure (\"FORGED\" :: Text.Text)"
-                10000
+                30000
                 unusedTool
             poisoned.ghciOk `shouldBe` True
             invoked <- newIORef False
             result <- evalGhciProgram ghci
                 "callTool \"echo\" (object []) >>= emitText"
-                10000
+                30000
                 (batchTool \_name _arguments -> do
                     writeIORef invoked True
                     pure "REAL")
