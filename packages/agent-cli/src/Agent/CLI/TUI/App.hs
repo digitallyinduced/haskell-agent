@@ -1120,81 +1120,73 @@ handleDeleteConfirmation state browser sessionId = \case
     _ -> pure ()
 
 handleResumeSearch :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeSearch browser = \case
-    V.EvKey V.KEsc [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KEnter [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KBS [] ->
-        setAndReveal $
-            insertResumeSearch ""
-                browser
-                    { resumeBrowserQuery =
-                        Text.dropEnd 1 browser.resumeBrowserQuery
-                    , resumeBrowserIndex = 0
-                    }
-    V.EvKey (V.KChar 'u') modifiers
-        | V.MCtrl `elem` modifiers ->
+handleResumeSearch browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEsc [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KEnter [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KBS [] ->
             setAndReveal $
                 insertResumeSearch ""
                     browser
-                        { resumeBrowserQuery = ""
+                        { resumeBrowserQuery =
+                            Text.dropEnd 1 browser.resumeBrowserQuery
                         , resumeBrowserIndex = 0
                         }
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal (insertResumeSearch (Text.singleton char) browser)
-    _ -> pure ()
+        V.EvKey (V.KChar 'u') modifiers
+            | V.MCtrl `elem` modifiers ->
+                setAndReveal $
+                    insertResumeSearch ""
+                        browser
+                            { resumeBrowserQuery = ""
+                            , resumeBrowserIndex = 0
+                            }
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal (insertResumeSearch (Text.singleton char) browser)
+        _ -> pure ()
 
 handleResumeNormal :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeNormal browser = \case
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KEnter [] ->
-        resolveResume True
-    V.EvKey V.KEsc [] ->
-        resolveResume False
-    V.EvKey (V.KChar 'e') [] ->
-        expandSelectedResume browser
-    V.EvKey (V.KChar 'f') [] -> do
-        setBrowser (cycleResumeSource browser)
-        revealSelectedResume
-    V.EvKey (V.KChar 'd') [] ->
-        case selectedResumeBrowser browser of
-            Nothing -> pure ()
-            Just entry ->
-                setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
-    V.EvKey (V.KChar '/') [] ->
-        setBrowser (beginResumeSearch browser)
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal
-                (insertResumeSearch
-                    (Text.singleton char)
-                    (beginResumeSearch browser))
-    _ -> pure ()
+handleResumeNormal browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEnter [] ->
+            resolveResume True
+        V.EvKey V.KEsc [] ->
+            resolveResume False
+        V.EvKey (V.KChar 'e') [] ->
+            expandSelectedResume browser
+        V.EvKey (V.KChar 'f') [] -> do
+            setBrowser (cycleResumeSource browser)
+            revealSelectedResume
+        V.EvKey (V.KChar 'd') [] ->
+            case selectedResumeBrowser browser of
+                Nothing -> pure ()
+                Just entry ->
+                    setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
+        V.EvKey (V.KChar '/') [] ->
+            setBrowser (beginResumeSearch browser)
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal
+                    (insertResumeSearch
+                        (Text.singleton char)
+                        (beginResumeSearch browser))
+        _ -> pure ()
+
+resumeNavigationDelta :: V.Event -> Maybe Int
+resumeNavigationDelta = \case
+    V.EvKey V.KUp [] -> Just (-1)
+    V.EvKey V.KDown [] -> Just 1
+    V.EvKey V.KPageUp [] -> Just (-10)
+    V.EvKey V.KPageDown [] -> Just 10
+    V.EvMouseDown _ _ V.BScrollUp _ -> Just (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ -> Just mouseScrollLines
+    _ -> Nothing
 
 expandSelectedResume :: ResumeBrowser -> EventM Name AppState ()
 expandSelectedResume browser =

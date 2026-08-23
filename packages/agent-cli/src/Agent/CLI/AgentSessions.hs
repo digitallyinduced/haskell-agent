@@ -439,16 +439,11 @@ runCreateAgentSession env args
                     maybe False (not . Text.null . Text.strip) args.title
                 }
         handle <- createSession spec
-        env.toolsLaunchTurn handle args.message >>= \case
+        launchToolSessionTurn env handle args.message >>= \case
             Left err -> pure $ Left $
                 "created session " <> handle.sessionMeta.metaId
                     <> " but failed to start it: " <> err
-            Right launchResult -> do
-                status <- statusAfterLaunch env handle.sessionMeta.metaId launchResult
-                pure $ Right $ encodeJson $ object
-                    [ "session_id" .= handle.sessionMeta.metaId
-                    , "status" .= status
-                    ]
+            Right result -> pure (Right result)
 
 data ReadAgentSessionArgs = ReadAgentSessionArgs
     { sessionId :: Text
@@ -525,16 +520,27 @@ runSendAgentSessionMessage env args
             then pure (Left "cannot message the current agent session")
             else loadSession env.toolsRoot args.sessionId >>= \case
                 Left err -> pure (Left err)
-                Right (meta, _) -> do
-                    env.toolsLaunchTurn (sessionHandle env.toolsRoot meta) args.message
-                        >>= \case
-                            Left err -> pure (Left err)
-                            Right launchResult -> do
-                                status <- statusAfterLaunch env args.sessionId launchResult
-                                pure $ Right $ encodeJson $ object
-                                    [ "session_id" .= args.sessionId
-                                    , "status" .= status
-                                    ]
+                Right (meta, _) ->
+                    launchToolSessionTurn
+                        env
+                        (sessionHandle env.toolsRoot meta)
+                        args.message
+
+launchToolSessionTurn
+    :: AgentSessionToolsEnv
+    -> SessionHandle
+    -> Text
+    -> IO (Either Text Text)
+launchToolSessionTurn env handle message =
+    env.toolsLaunchTurn handle message >>= \case
+        Left err -> pure (Left err)
+        Right launchResult -> do
+            let sessionId = handle.sessionMeta.metaId
+            status <- statusAfterLaunch env sessionId launchResult
+            pure $ Right $ encodeJson $ object
+                [ "session_id" .= sessionId
+                , "status" .= status
+                ]
 
 sessionHandle :: OsPath -> SessionMeta -> SessionHandle
 sessionHandle root meta =
