@@ -3,6 +3,8 @@ module Agent.CLI.DialectsSpec (spec) where
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
+    , filterBashTools
+    , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     )
@@ -13,9 +15,22 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.Tools.Types (defaultToolEnv)
+import Agent.ToolDispatch (noArgsTool)
+import Agent.Tools.Secret (SecretPromptHooks(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(AlwaysReadOnly)
+    , ToolEnv
+    , defaultToolEnv
+    , jsonAppTool
+    )
+import Control.Exception.Safe (bracket, finally)
+import Control.Monad (forM_)
 import qualified Data.Text as Text
+import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
+import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
@@ -53,6 +68,55 @@ spec = describe "Agent.CLI.Dialects" do
 
     it "does not allocate host tools for Claude Code" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
-        coding <- codingToolsFor claudeCodeDialect env Nothing Nothing
+        coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing
         length coding.codingAppTools `shouldBe` 0
         coding.codingClose
+
+    it "registers ask_secret only when root prompt hooks are supplied" do
+        withTempToolEnv \env ->
+            forM_ [codexDialect, grokBuildDialect] \dialect -> do
+                withoutSecret <-
+                    codingToolsFor dialect env Nothing Nothing Nothing
+                map (.appToolName) withoutSecret.codingAppTools
+                    `shouldNotContain` ["ask_secret"]
+                withoutSecret.codingClose
+
+                let hooks = SecretPromptHooks
+                        (const (pure (Right Nothing)))
+                withSecret <-
+                    codingToolsFor dialect env Nothing (Just hooks) Nothing
+                (map (.appToolName) withSecret.codingAppTools
+                    `shouldContain` ["ask_secret"])
+                    `finally` withSecret.codingClose
+
+    it "filters shell and ghci tools independently" do
+        let tools = map fakeTool
+                [ "run_ghci"
+                , "read_file"
+                , "shell_command"
+                , "write_stdin"
+                , "run_terminal_cmd"
+                ]
+            names = map (.appToolName)
+        names (filterBashTools False tools)
+            `shouldBe` ["run_ghci", "read_file"]
+        names (filterGhciTools False tools)
+            `shouldBe`
+                [ "read_file"
+                , "shell_command"
+                , "write_stdin"
+                , "run_terminal_cmd"
+                ]
+
+withTempToolEnv :: (ToolEnv -> IO a) -> IO a
+withTempToolEnv action = do
+    root <- getTemporaryDirectory
+    bracket
+        (mkdtemp (root </> "agent-cli-dialects-"))
+        removeDirectoryRecursive
+        (\directory ->
+            defaultToolEnv (unsafeEncodeUtf directory) >>= action)
+
+fakeTool name =
+    jsonAppTool name "" [] AlwaysReadOnly
+        (noArgsTool name (pure (Right "")))

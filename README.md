@@ -1,5 +1,7 @@
 # haskell-agent
 
+<img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
+
 **An independent agent harness, written in Haskell.**
 
 `haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI,
@@ -74,6 +76,19 @@ Start an interactive session:
 agent-cli
 ```
 
+`run_ghci` is the primary execution and scripting tool and is enabled by
+default. Enable the provider's explicit shell tool when needed:
+
+```console
+agent-cli --bash
+```
+
+For bash-only operation, disable GHCi explicitly:
+
+```console
+agent-cli --no-ghci --bash
+```
+
 Run a one-shot task:
 
 ```console
@@ -90,6 +105,98 @@ agent-cli --worktree
 Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
 `--provider claude-code` to override automatic provider detection. Claude Code
 is selected explicitly rather than by auto-detection.
+
+### Telegram
+
+Create a bot with BotFather, find your numeric Telegram user ID, and run the
+interactive setup command:
+
+```console
+agent-telegram setup --provider openai --cwd /path/to/project \
+  --allowed-user 123456789
+agent-telegram start
+agent-telegram status
+```
+
+Setup reads the BotFather token without terminal echo, validates it against
+Telegram, and stores it separately from the non-secret gateway configuration.
+Never paste the bot token into an agent conversation.
+
+Only allowlisted private-chat text messages are handled. Each chat is mapped
+to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
+session and `/session` shows the current session ID. Mutating tools are denied
+unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
+background gateway.
+
+Incoming updates and pending replies are persisted before they are processed.
+Polling continues while agent turns run, conversations are processed in order,
+and separate chats can run concurrently. Pending work resumes when the gateway
+is restarted.
+
+The built-in `telegram-agent` skill lets the normal agent guide this setup.
+Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
+direct secret entry to the interactive setup command, and start the configured
+gateway after setup is complete.
+
+### Model catalog and local models
+
+The model picker is driven by a versioned catalog. The application ships its
+default OpenAI, xAI, and OpenRouter entries, then merges an optional user file:
+
+```text
+~/.haskell-agent/models.json
+```
+
+User entries with the same `id` replace shipped entries; new entries are
+appended. The `id` is the stable name accepted by `/model` and `--model`.
+Secrets are not stored in this file: custom connections name an environment
+variable containing their API key.
+
+For example, an unauthenticated local server exposing the streaming OpenAI
+Responses API at `POST /v1/responses` can be configured as:
+
+```json
+{
+  "version": 1,
+  "connections": {
+    "ollama": {
+      "api": "responses",
+      "base_url": "http://localhost:11434/v1",
+      "api_key_optional": true,
+      "request_timeout_seconds": 600
+    }
+  },
+  "models": [
+    {
+      "id": "qwen-local",
+      "connection": "ollama",
+      "model": "qwen2.5-coder:32b",
+      "dialect": "generic-responses",
+      "label": "local"
+    }
+  ]
+}
+```
+
+Select it with `agent-cli --model qwen-local` or from `/model`. For an
+authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
+that variable. Omit `"api_key_optional": true` when the key is required.
+
+Supported dialects are:
+
+- `codex` for Codex-style prompts and tools
+- `grok-build` for the Grok Build protocol
+- `generic-responses` for portable Responses-compatible models
+
+Custom connections are selected manually and are not considered for automatic
+billing fallback. Built-in connection names (`openai`, `xai`, and
+`openrouter`) are reserved. A malformed catalog is reported at startup with
+the file and invalid field instead of being silently ignored.
+
+The built-in `add-model` skill handles requests such as “use the model running
+at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
+Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
+naturally and let the agent activate it.
 
 ### Authentication
 
@@ -135,6 +242,46 @@ not replace that approval requirement; consult the linked documents for
 current terms. See
 [`packages/agent-claude/README.md`](packages/agent-claude/README.md)
 for implementation and embedding details.
+
+### Local MCP servers
+
+Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "seo-mcp": {
+      "command": "nix",
+      "args": ["run", "/absolute/path/to/seo-mcp"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/credentials.json"
+      },
+      "startupTimeoutSeconds": 120,
+      "requestTimeoutSeconds": 60
+    }
+  }
+}
+```
+
+The harness starts enabled servers once per root session and shares their tools
+with subagents. MCP tool names are preserved, so they must not collide with
+built-in or other configured tools. Only tools explicitly annotated
+`readOnlyHint: true` are exposed.
+
+### Secret entry
+
+Interactive root agents can request API keys and tokens with the built-in
+`ask_secret` tool. The harness reads the value through a masked terminal
+prompt, writes it to a private temporary file, and returns only the file path
+to the model. This keeps the secret out of chat history, tool arguments,
+transcripts, and command text.
+
+Secret files are created below the session scratch directory with owner-only
+permissions and removed when the agent's tool runtime closes. Commands should
+delete them sooner after consumption when possible. This protects against
+accidental persistence; it is not an isolation boundary against commands
+running unsandboxed as the same operating-system user.
 
 ## Vision
 

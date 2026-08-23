@@ -8,7 +8,7 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import System.OsPath (unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -134,6 +134,69 @@ spec = describe "systemPrompt" do
         prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
         prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"
         prompt `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        prompt `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
+
+    it "adds secret guidance only when ask_secret is registered" do
+        let withSecret =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "ask_secret"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutSecret =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "Never ask the user to paste a token"
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "It returns a private temporary file path"
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "Never read, print, summarize"
+        withoutSecret `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
+
+    it "renders ghci-only and bash-only root prompts from registered tools" do
+        let day = fromGregorian 2026 8 19
+            ghciOnly =
+                systemPromptForTools
+                    codexDialect
+                    ["read_file", "grep", "list_dir", "apply_patch", "run_ghci"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    day
+                    False
+            bashOnly =
+                systemPromptForTools
+                    codexDialect
+                    ["read_file", "grep", "list_dir", "apply_patch", "shell_command"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    day
+                    False
+        ghciOnly `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        ghciOnly `shouldNotSatisfy` Text.isInfixOf "shell_command"
+        bashOnly `shouldSatisfy` Text.isInfixOf "shell_command"
+        bashOnly `shouldNotSatisfy` Text.isInfixOf "run_ghci"
+        bashOnly `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+
+    it "omits hidden Grok terminal names from ghci-only prompts" do
+        let prompt =
+                systemPromptForTools
+                    grokBuildDialect
+                    ["read_file", "grep", "list_dir", "search_replace", "run_ghci"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldSatisfy` Text.isInfixOf "run_ghci"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_command"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
 
     it "keeps OpenAI web-search references internal" do
         let openai =
@@ -203,9 +266,22 @@ spec = describe "systemPrompt" do
             "relative paths still resolve against the workspace"
         rootPrompt `shouldSatisfy` Text.isInfixOf "HASKELL_AGENT_TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf "TMPDIR"
-
     it "picks the documented default models" do
         defaultModelFor XAIProvider `shouldBe` "grok-4.6"
         defaultModelFor OpenAIProvider `shouldBe` "gpt-5.6-luna"
         defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"
         defaultModelFor ClaudeCodeProvider `shouldBe` "sonnet"
+
+    it "recommends Luna only for subscription-backed OpenAI subagents" do
+        let subscriptionGuidance =
+                subscriptionSubagentModelGuidance
+                    OpenAIProvider
+                    SubscriptionBilled
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "`gpt-5.6-luna`")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "small, bounded tasks")
+        subscriptionSubagentModelGuidance OpenAIProvider ApiBilled
+            `shouldBe` Nothing
+        subscriptionSubagentModelGuidance XAIProvider SubscriptionBilled
+            `shouldBe` Nothing

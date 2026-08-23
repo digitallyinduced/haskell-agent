@@ -7,6 +7,7 @@ import Agent.ProjectInstructions
     ( InstructionFile(..)
     , LoadedAgentsMd
     , loadedInstructionFiles
+    , nonEmptyInstructionContent
     )
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -39,11 +40,6 @@ formatGrokAgentsMd loaded =
         , neutralizeReminderTags content
         , "\n"
         ]
-
-nonEmptyInstructionContent :: InstructionFile -> Maybe Text
-nonEmptyInstructionContent file =
-    let text = file.instructionContent
-    in if Text.null (Text.strip text) then Nothing else Just text
 
 neutralizeReminderTags :: Text -> Text
 neutralizeReminderTags =

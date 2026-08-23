@@ -16,12 +16,15 @@ module Agent.CLI.Command
     , setReasoningEffort
     , slashCommands
     , slashCompletionCandidates
+    , slashCompletionCandidatesWithModels
     , slashCompletionCandidatesWithSkills
+    , slashCompletionCandidatesWithSkillsAndModels
     , slashMenuFor
+    , slashMenuForWithModels
     , slashMenuForWithSkills
+    , slashMenuForWithSkillsAndModels
     ) where
 
-import Agent.CLI.Models (catalogModelIds)
 import Agent.CLI.Options (parseEffort, reasoningEfforts)
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Responses.Types
@@ -428,20 +431,38 @@ formatSkillHelpRow color skill =
 -- 'completeWordWithPrev' convention). Empty when the buffer is not a slash
 -- line.
 slashCompletionCandidates :: String -> String -> [String]
-slashCompletionCandidates = slashCompletionCandidatesWithSkills []
+slashCompletionCandidates = slashCompletionCandidatesWithSkillsAndModels [] []
+
+slashCompletionCandidatesWithModels
+    :: [Text]
+    -> String
+    -> String
+    -> [String]
+slashCompletionCandidatesWithModels =
+    slashCompletionCandidatesWithSkillsAndModels []
 
 slashCompletionCandidatesWithSkills
     :: [SkillCommand]
     -> String
     -> String
     -> [String]
-slashCompletionCandidatesWithSkills skills reversedPrev word =
+slashCompletionCandidatesWithSkills skills =
+    slashCompletionCandidatesWithSkillsAndModels skills []
+
+slashCompletionCandidatesWithSkillsAndModels
+    :: [SkillCommand]
+    -> [Text]
+    -> String
+    -> String
+    -> [String]
+slashCompletionCandidatesWithSkillsAndModels
+        skills modelIds reversedPrev word =
     let prev = reverse reversedPrev
     in if not (isSlashLine prev word)
         then []
         else case words prev of
             [] -> completeSlashNames skills word
-            cmd : _ -> completeSlashArgs cmd word
+            cmd : _ -> completeSlashArgs modelIds cmd word
 
 isSlashLine :: String -> String -> Bool
 isSlashLine prev word = case dropWhile isSpace prev of
@@ -459,20 +480,20 @@ completeSlashNames skills word =
     in filter (\name -> needle `Text.isPrefixOf` Text.drop 1 (Text.toLower (Text.pack name)))
         (map Text.unpack (names <> skillNames))
 
-completeSlashArgs :: String -> String -> [String]
-completeSlashArgs cmd word =
+completeSlashArgs :: [Text] -> String -> String -> [String]
+completeSlashArgs modelIds cmd word =
     case lookupSlashCommand (Text.pack cmd) of
         Nothing -> []
         Just spec ->
             let needle = Text.toLower (Text.pack word)
-                options = argCompletions spec
+                options = argCompletions modelIds spec
             in map Text.unpack $
                 filter (Text.isPrefixOf needle . Text.toLower) options
 
-argCompletions :: SlashCommand -> [Text]
-argCompletions spec = case spec.slashName of
+argCompletions :: [Text] -> SlashCommand -> [Text]
+argCompletions modelIds spec = case spec.slashName of
     "effort" -> reasoningEfforts
-    "model" -> catalogModelIds
+    "model" -> modelIds
     "help" -> map (.slashName) slashCommands
     "rename" -> ["--auto"]
     "paste" -> ["--send"]
@@ -498,17 +519,29 @@ data SlashMenu = SlashMenu
 
 -- | Derive a live menu from a leading slash command at the cursor.
 slashMenuFor :: Text -> Int -> Maybe SlashMenu
-slashMenuFor = slashMenuForWithSkills []
+slashMenuFor = slashMenuForWithSkillsAndModels [] []
+
+slashMenuForWithModels :: [Text] -> Text -> Int -> Maybe SlashMenu
+slashMenuForWithModels = slashMenuForWithSkillsAndModels []
 
 slashMenuForWithSkills :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
-slashMenuForWithSkills skills text cursor
+slashMenuForWithSkills skills =
+    slashMenuForWithSkillsAndModels skills []
+
+slashMenuForWithSkillsAndModels
+    :: [SkillCommand]
+    -> [Text]
+    -> Text
+    -> Int
+    -> Maybe SlashMenu
+slashMenuForWithSkillsAndModels skills modelIds text cursor
     | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
     | otherwise =
         let commandToken = Text.takeWhile (not . isSpace) text
             commandEnd = Text.length commandToken
         in if cursor <= commandEnd
             then commandMenu skills (Text.take cursor text) commandEnd
-            else argumentMenu commandToken commandEnd text cursor
+            else argumentMenu modelIds commandToken commandEnd text cursor
 
 commandMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 commandMenu skills token replaceEnd =
@@ -566,8 +599,8 @@ scoreCommand query (order, command)
             (score, positions) : _ ->
                 Just (score, order, command, positions)
 
-argumentMenu :: Text -> Int -> Text -> Int -> Maybe SlashMenu
-argumentMenu commandToken commandEnd text cursor = do
+argumentMenu :: [Text] -> Text -> Int -> Text -> Int -> Maybe SlashMenu
+argumentMenu modelIds commandToken commandEnd text cursor = do
     command <- lookupSlashCommand commandToken
     let before = Text.take cursor text
         suffix = Text.takeWhileEnd (not . isSpace) before
@@ -580,7 +613,7 @@ argumentMenu commandToken commandEnd text cursor = do
             Text.words
                 (Text.take (argStart - commandEnd) (Text.drop commandEnd text))
         options
-            | null precedingArgs = argCompletions command
+            | null precedingArgs = argCompletions modelIds command
             | otherwise = []
         query = Text.toLower suffix
         ordered = sortOn (\(score, option, _) -> (Down score, option))

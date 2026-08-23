@@ -12,6 +12,7 @@ module Agent.CLI.Compaction
     , installCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
+    , runResponsesCompactWith
     ) where
 
 import Agent.CLI.Error (formatApiError)
@@ -21,7 +22,6 @@ import Agent.Loop
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnInput(..)
-    , TurnOutput(..)
     , emptyTokenUsage
     )
 import qualified Agent.OpenAI.Client as OpenAI
@@ -185,6 +185,31 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
                     history
                     (estimateItemsTokens history)
                     focus
+
+-- | Run local-summary compaction through any stateless Responses-compatible
+-- sender, including user-configured local endpoints.
+runResponsesCompactWith
+    :: (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runResponsesCompactWith sender recordUsage paramsRef transcriptRef focus = do
+    params <- readIORef paramsRef
+    history <- readIORef transcriptRef
+    attempt <- runAttemptAndRecord recordUsage $
+        if null history
+            then pure (compactTextFailure "nothing to compact")
+            else
+                mapCompactAttemptError formatApiError
+                    <$> summarizeLocalAttempt
+                        sender
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        focus
+    pure attempt.compactAttemptResult
 
 compactTextFailure :: Text -> CompactAttempt Text
 compactTextFailure message =
@@ -391,7 +416,6 @@ summarizeLocalAttempt send params history before focus
 autoCompactOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
@@ -404,18 +428,16 @@ autoCompactOpenAiBackendWithThreshold
     :: Maybe Int
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
-        getParams transcriptRef contextTokensRef backend =
+        getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithSender
         configuredThreshold
         (sendOpenAIRemoteCompaction tokenProvider)
         (const (pure ()))
         getParams
-        transcriptRef
         contextTokensRef
         backend
 
@@ -427,17 +449,15 @@ autoCompactOpenAiBackendWithSender
     -> OpenAiCompactionSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
-        getParams transcriptRef contextTokensRef backend =
+        getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithLimit
         getLimit
         compactAction
         recordUsage
-        transcriptRef
         contextTokensRef
         backend
   where
@@ -446,9 +466,8 @@ autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         pure $ fromMaybe
             (codexAutoCompactTokenLimitFor params.model)
             configuredThreshold
-    compactAction = do
+    compactAction history = do
         params <- getParams
-        history <- readIORef transcriptRef
         compactRemoteV2Attempt
             send
             params
@@ -457,43 +476,44 @@ autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
-autoCompactOpenAiBackendWith =
-    autoCompactOpenAiBackendWithApi
-        . fmap (either (Left . textCompactionError) Right)
+autoCompactOpenAiBackendWith compactAction =
+    autoCompactOpenAiBackendWithLimit
+        (pure codexAutoCompactTokenLimit)
+        (const
+            (CompactAttempt emptyTokenUsage
+                <$> fmap (either (Left . textCompactionError) Right)
+                    compactAction))
+        (const (pure ()))
   where
     textCompactionError message =
         ProviderError ApiErrorType message Nothing
 
 autoCompactOpenAiBackendWithApi
     :: IO (Either ApiError CompactOutcome)
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
-        (CompactAttempt emptyTokenUsage <$> compactAction)
+        (const (CompactAttempt emptyTokenUsage <$> compactAction))
         (const (pure ()))
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
-    -> IO (CompactAttempt ApiError)
+    -> ([ResponseItem] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
-        transcriptRef contextTokensRef
+        contextTokensRef
         (Backend submit) =
-    Backend \previous inputs onEvent -> do
+    Backend \history previous inputs onEvent -> do
         contextState <- readIORef contextTokensRef
-        history <- readIORef transcriptRef
         tokenLimit <- getLimit
         let historyLength = length history
             pendingItems = turnInputsToItems inputs
@@ -509,13 +529,16 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                     && projectedTokens >= tokenLimit
         if shouldCompact
             then if any isCompletedTool inputs
-                then compactToolContinuation contextState inputs onEvent
-                else compactThenSubmit contextState inputs onEvent
-            else submitAndTrack contextState previous inputs onEvent
+                then compactToolContinuation
+                    contextState history inputs onEvent
+                else compactThenSubmit
+                    contextState history inputs onEvent
+            else submitAndTrack
+                contextState history previous inputs onEvent
   where
-    runCompaction =
+    runCompaction history =
         (.compactAttemptResult)
-            <$> runAttemptAndRecord recordUsage compactAction
+            <$> runAttemptAndRecord recordUsage (compactAction history)
 
     isCompletedTool = \case
         CompletedTool{} -> True
@@ -524,17 +547,14 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
     -- Tool outputs must be part of the checkpoint, but the wrapped backend has
     -- not committed them yet. Absorb them into history before compaction, then
     -- resume from the new checkpoint without sending them a second time.
-    compactToolContinuation oldTokens inputs onEvent = do
+    compactToolContinuation oldTokens oldHistory inputs onEvent = do
         mask \restore -> do
-            oldHistory <- readIORef transcriptRef
             let (toolItems, remainingInputs) = absorbCompletedTools inputs
-                rollback = do
-                    writeIORef transcriptRef oldHistory
-                    writeIORef contextTokensRef oldTokens
-            writeIORef transcriptRef (oldHistory <> toolItems)
+                compactHistory = oldHistory <> toolItems
+                rollback = writeIORef contextTokensRef oldTokens
             (do
                 onEvent (ActivityUpdated "Compacting context…")
-                restore runCompaction >>= \case
+                restore (runCompaction compactHistory) >>= \case
                     Left err -> do
                         rollback
                         pure (Left (automaticCompactionError err))
@@ -547,17 +567,14 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                             onEvent
                 ) `onException` rollback
 
-    compactThenSubmit oldTokens inputs onEvent = do
-        oldHistory <- readIORef transcriptRef
+    compactThenSubmit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
-        runCompaction >>= \case
+        runCompaction oldHistory >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
                 Right outcome ->
                     mask \restore -> do
-                        let rollback = do
-                                writeIORef transcriptRef oldHistory
-                                writeIORef contextTokensRef oldTokens
+                        let rollback = writeIORef contextTokensRef oldTokens
                         installSubmitAndTrack
                             restore
                             rollback
@@ -566,36 +583,31 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                             onEvent
                             `onException` rollback
 
-    installCompactedHistory outcome = do
-        let history = outcome.compactHistory
-            contextState =
-                Just (outcome.compactAfterTokens, length history)
-        writeIORef transcriptRef history
-        writeIORef contextTokensRef contextState
-
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
-        installCompactedHistory outcome
-        result <- restore (submit Nothing inputs onEvent)
+        let compactedHistory = outcome.compactHistory
+        writeIORef contextTokensRef $
+            Just (outcome.compactAfterTokens, length compactedHistory)
+        result <- restore (submit compactedHistory Nothing inputs onEvent)
         case result of
             Left _ -> rollback
-            Right output -> trackSuccessfulOutput output
+            Right _ -> invalidateContextTokens
         pure result
 
-    submitAndTrack oldTokens previous inputs onEvent = do
+    submitAndTrack oldTokens history previous inputs onEvent = do
         result <-
-            submit previous inputs onEvent
+            submit history previous inputs onEvent
                 `onException` writeIORef contextTokensRef oldTokens
         case result of
             Left _ -> writeIORef contextTokensRef oldTokens
-            Right output -> trackSuccessfulOutput output
+            Right _ -> invalidateContextTokens
         pure result
 
-    trackSuccessfulOutput output = do
-        historyLength <- length <$> readIORef transcriptRef
-        writeIORef contextTokensRef $ Just
-            ( output.tokenUsage.inputTokens + output.tokenUsage.outputTokens
-            , historyLength
-            )
+    -- Transcript state is committed by the loop after validating the response.
+    -- Keep this separate cache conservative until it becomes part of that
+    -- explicit state; otherwise cancellation or an invalid response id could
+    -- leave token metadata describing an uncommitted transcript.
+    invalidateContextTokens =
+        writeIORef contextTokensRef Nothing
 
     absorbCompletedTools =
         foldr

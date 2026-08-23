@@ -33,8 +33,12 @@ import Data.IORef (IORef, modifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Paths_agent_cli (getDataFileName)
+import qualified System.Directory as Directory
+import qualified System.Environment as Environment
+import qualified System.FilePath as FilePath
 import System.IO (stderr)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 
 reservedSlashNames :: [Text]
 reservedSlashNames =
@@ -73,13 +77,41 @@ loadSkillsCatalogQuiet
     -> IO SkillCatalog
 loadSkillsCatalogQuiet options home projectRoot cwd
     | not options.optSkills = pure (SkillCatalog [] [])
-    | otherwise =
+    | otherwise = do
+        builtinRoot <- packagedSkillsRoot
         discoverSkills SkillDiscoverOptions
             { skillsHome = home
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
             , skillsMaxDepth = 6
+            , skillsBuiltinRoots =
+                [(AgentSkills, unsafeEncodeUtf builtinRoot)]
             }
+
+packagedSkillsRoot :: IO FilePath
+packagedSkillsRoot = do
+    installedSkill <- getDataFileName "skills/add-model/SKILL.md"
+    executable <- Environment.getExecutablePath
+    cwd <- Directory.getCurrentDirectory
+    let roots =
+            take 16 (iterate FilePath.takeDirectory executable)
+                <> take 8 (iterate FilePath.takeDirectory cwd)
+        candidates =
+            FilePath.takeDirectory (FilePath.takeDirectory installedSkill)
+                : [ root FilePath.</> "packages/agent-cli/skills"
+                  | root <- roots
+                  ]
+    firstExisting candidates >>= \case
+        Just path -> pure path
+        Nothing ->
+            pure (FilePath.takeDirectory (FilePath.takeDirectory installedSkill))
+  where
+    firstExisting = \case
+        [] -> pure Nothing
+        path : rest ->
+            Directory.doesDirectoryExist path >>= \case
+                True -> pure (Just path)
+                False -> firstExisting rest
 
 reportSkillWarning :: Bool -> SkillWarning -> IO ()
 reportSkillWarning color warning =
@@ -171,6 +203,7 @@ skillSourceLabel skill =
     scope <> " · " <> origin
   where
     scope = case skill.skillScope of
+        BuiltinSkill -> "built-in"
         UserSkill -> "user"
         RepositorySkill _ True -> "local"
         RepositorySkill _ False -> "repo"

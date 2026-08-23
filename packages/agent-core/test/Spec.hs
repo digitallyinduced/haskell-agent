@@ -7,6 +7,7 @@ import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
+import qualified Agent.MCPSpec as MCPSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
@@ -24,6 +25,7 @@ import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
+import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
 
@@ -36,6 +38,7 @@ main = hspec do
     HttpHeaderSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec
+    MCPSpec.spec
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec
@@ -52,5 +55,6 @@ main = hspec do
     IOSpec.spec
     MultiAgentsSpec.spec
     PlanModeSpec.spec
+    SecretSpec.spec
     DangerousSpec.spec
     WebSocketSpec.spec

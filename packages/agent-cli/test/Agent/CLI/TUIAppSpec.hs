@@ -16,14 +16,19 @@ import Agent.CLI.TUI.App
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
+    , maskedSecretText
+    , normalizeTextOverlayInsertion
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , selectedAgentConversation
+    , textOverlayDisplayText
     , uiEventRestartsMotionSchedule
     )
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , TextInputMode(..)
+    , TextOverlay(..)
     )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
@@ -48,6 +53,29 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "secret text overlay" do
+        it "renders only fixed-width masking glyphs" do
+            maskedSecretText "top-secret-123"
+                `shouldBe` Text.replicate 14 "•"
+            let overlay = TextOverlay
+                    { textTitle = "Secret requested by agent"
+                    , textBody = "Enter an API key"
+                    , textDraft = "top-secret-123"
+                    , textCursor = 14
+                    , textInputMode = TextInputSecret
+                    }
+            textOverlayDisplayText overlay
+                `shouldBe` Text.replicate 14 "•"
+            textOverlayDisplayText overlay
+                `shouldNotSatisfy` Text.isInfixOf "secret"
+
+        it "preserves plain overlays and keeps secret pastes single-line" do
+            let value = "first\nsecond\rthird"
+            normalizeTextOverlayInsertion TextInputPlain value
+                `shouldBe` value
+            normalizeTextOverlayInsertion TextInputSecret value
+                `shouldBe` "first"
+
     describe "choice overlay lifecycle" do
         it "closes a running-turn choice on success or cancellation" do
             let running =

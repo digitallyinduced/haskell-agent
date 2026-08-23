@@ -14,6 +14,7 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , TextInputMode(..)
     , TextOverlay(..)
     ) where
 
@@ -83,6 +84,7 @@ data AppEvent
         ![(Text, Text)]
         !(TMVar (Maybe Int))
     | AppAskText
+        !TextInputMode
         !Text
         !Text
         !Text
@@ -94,6 +96,7 @@ data AppEvent
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
+    | AppSetModelIds ![Text]
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -183,6 +186,7 @@ data AppState = AppState
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
+    , appModelIds :: ![Text]
     , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
@@ -231,4 +235,10 @@ data TextOverlay = TextOverlay
     , textBody :: !Text
     , textDraft :: !Text
     , textCursor :: !Int
+    , textInputMode :: !TextInputMode
     }
+
+data TextInputMode
+    = TextInputPlain
+    | TextInputSecret
+    deriving (Eq, Show)

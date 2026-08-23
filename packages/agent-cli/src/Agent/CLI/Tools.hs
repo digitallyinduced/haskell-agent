@@ -71,23 +71,35 @@ isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool dialect tool =
-    case dialectFunctionSchemaStyle dialect of
-        NoFunctionSchemas ->
-            Nothing
-        StrictFunctionSchemas ->
-            Just (buildSchema buildTool)
-        LooseFunctionSchemas ->
-            Just (buildSchema buildGrokTool)
-  where
-    buildSchema build = case tool.appToolSchema of
+    case tool.appToolSchema of
         JsonFunctionSchema parameters ->
-            let (name, description, projectedParameters) =
-                    projectFunctionTool dialect tool parameters
-            in build name description projectedParameters
+            case dialectFunctionSchemaStyle dialect of
+                NoFunctionSchemas ->
+                    Nothing
+                StrictFunctionSchemas ->
+                    Just (buildSchema buildTool parameters)
+                LooseFunctionSchemas ->
+                    Just (buildSchema buildGrokTool parameters)
+        RawJsonFunctionSchema parameters ->
+            Just (FunctionToolValue FunctionTool
+                { name = tool.appToolName
+                , description = Just tool.appToolDescription
+                , parameters = Just parameters
+                , strict = case dialectFunctionSchemaStyle dialect of
+                    StrictFunctionSchemas -> Just False
+                    LooseFunctionSchemas -> Nothing
+                    NoFunctionSchemas -> Nothing
+                , extraFields = KeyMap.empty
+                })
         FreeformApplyPatchSchema ->
-            applyPatchCustomTool
-                tool.appToolName
-                tool.appToolDescription
+            case dialectFunctionSchemaStyle dialect of
+                NoFunctionSchemas -> Nothing
+                _ -> Just (applyPatchCustomTool tool.appToolName tool.appToolDescription)
+  where
+    buildSchema build parameters =
+        let (name, description, projectedParameters) =
+                projectFunctionTool dialect tool parameters
+        in build name description projectedParameters
 
 projectFunctionTool
     :: Dialect
@@ -157,6 +169,7 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
 appToolJsonParameters :: AppTool -> [PropertySchema]
 appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
+    RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.

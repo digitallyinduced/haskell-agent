@@ -141,6 +141,28 @@ spec = do
                     expectationFailure
                         ("expected JSON request object, got " <> show other)
 
+        it "strips prompt cache retention from the HTTP request body" do
+            recorded <- newIORef []
+            let handler _request = pure $ jsonCompleted "Apartment"
+                request = withPromptCacheRetention
+                    (Just "24h")
+                    (helloRequest "hi")
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<< createCodexMessageWithProviderAt
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    request
+                pure ()
+
+            [recordedRequest] <- readIORef recorded
+            case recordedRequest.body of
+                Aeson.Object object ->
+                    KeyMap.lookup "prompt_cache_retention" object
+                        `shouldBe` Nothing
+                other ->
+                    expectationFailure
+                        ("expected JSON request object, got " <> show other)
+
         it "sends chatgpt-account-id when the credential has one" do
             recorded <- newIORef []
             let handler _request = pure $ jsonCompleted "ok"
@@ -323,6 +345,12 @@ helloRequest prompt = defaultResponseCreateParams
     , instructions = Just "You are a test agent."
     , input = Just (ResponseInputText prompt)
     }
+
+withPromptCacheRetention
+    :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withPromptCacheRetention nextRetention
+        ResponseCreateParams { promptCacheRetention = _, .. } =
+    ResponseCreateParams { promptCacheRetention = nextRetention, .. }
 
 decodeResponse :: Aeson.Value -> Response
 decodeResponse value = case Aeson.fromJSON value of

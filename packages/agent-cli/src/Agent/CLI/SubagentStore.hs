@@ -7,7 +7,12 @@
 --   <sessionDir>/agents/<agentId>/transcript.json
 -- @
 module Agent.CLI.SubagentStore
-    ( SubagentDiskMeta(..)
+    ( SubagentDiskFields(..)
+    , SubagentTarget(..)
+    , LegacySubagentTargetFields(..)
+    , SubagentDiskMeta(..)
+    , SubagentStateSnapshot(..)
+    , subagentDiskFields
     , isValidSubagentStoreId
     , subagentStoreDir
     , forkSubagentTranscript
@@ -28,6 +33,7 @@ import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolArgs (readExactInt)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
 import qualified Data.Aeson as Aeson
@@ -44,12 +50,14 @@ import System.Directory.OsPath
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 
-data SubagentDiskMeta = SubagentDiskMeta
+-- | Metadata shared by current and legacy subagent stores.
+--
+-- Current writers always persist a status, while older stores may omit it.
+-- The target fields are kept out of this record because their completeness is
+-- what distinguishes current metadata from legacy metadata.
+data SubagentDiskFields = SubagentDiskFields
     { diskPreviousResponseId :: !(Maybe Text)
     , diskStatus :: !(Maybe SubagentStatus)
-    , diskProvider :: !(Maybe Provider)
-    , diskEffectiveModel :: !(Maybe Text)
-    , diskDialect :: !(Maybe DialectId)
     , diskAgentType :: !(Maybe Text)
     , diskAgentModel :: !(Maybe Text)
     , diskReasoningEffort :: !(Maybe Text)
@@ -59,21 +67,79 @@ data SubagentDiskMeta = SubagentDiskMeta
     , diskDepth :: !(Maybe Int)
     } deriving (Eq, Show)
 
+-- | Complete target metadata written by current versions.
+data SubagentTarget = SubagentTarget
+    { targetProvider :: !Provider
+    , targetConnection :: !Text
+    , targetEffectiveModel :: !Text
+    , targetDialect :: !DialectId
+    } deriving (Eq, Show)
+
+-- | Partial target metadata accepted from older @meta.json@ files.
+data LegacySubagentTargetFields = LegacySubagentTargetFields
+    { legacyDiskProvider :: !(Maybe Provider)
+    , legacyDiskConnection :: !(Maybe Text)
+    , legacyDiskEffectiveModel :: !(Maybe Text)
+    , legacyDiskDialect :: !(Maybe DialectId)
+    } deriving (Eq, Show)
+
+-- | Persisted metadata is either current, with a complete restoration target,
+-- or legacy, with a target that must be normalized against the parent
+-- session's durable legacy target before use.
+data SubagentDiskMeta
+    = CurrentSubagentDiskMeta !SubagentDiskFields !SubagentTarget
+    | LegacySubagentDiskMeta !SubagentDiskFields !LegacySubagentTargetFields
+    deriving (Eq, Show)
+
+-- | Named inputs for a subagent snapshot save.
+data SubagentStateSnapshot = SubagentStateSnapshot
+    { snapshotItems :: ![ResponseItem]
+    , snapshotPreviousResponseId :: !(Maybe Text)
+    , snapshotStatus :: !SubagentStatus
+    , snapshotTarget :: !SubagentTarget
+    , snapshotAgentType :: !(Maybe Text)
+    , snapshotAgentModel :: !(Maybe Text)
+    , snapshotReasoningEffort :: !(Maybe Text)
+    , snapshotCwd :: !(Maybe OsPath)
+    , snapshotIdentity :: !(Maybe SubagentIdentity)
+    }
+
+subagentDiskFields :: SubagentDiskMeta -> SubagentDiskFields
+subagentDiskFields = \case
+    CurrentSubagentDiskMeta fields _ -> fields
+    LegacySubagentDiskMeta fields _ -> fields
+
 instance ToJSON SubagentDiskMeta where
     toJSON meta = object
-        [ "previousResponseId" .= meta.diskPreviousResponseId
-        , "status" .= fmap encodeDiskStatus meta.diskStatus
-        , "provider" .= fmap providerSlug meta.diskProvider
-        , "effectiveModel" .= meta.diskEffectiveModel
-        , "dialect" .= fmap dialectSlug meta.diskDialect
-        , "agentType" .= meta.diskAgentType
-        , "agentModel" .= meta.diskAgentModel
-        , "reasoningEffort" .= meta.diskReasoningEffort
-        , "cwd" .= fmap unsafeToFilePath meta.diskCwd
-        , "taskPath" .= meta.diskTaskPath
-        , "parentId" .= meta.diskParentId
-        , "depth" .= meta.diskDepth
+        [ "previousResponseId" .= fields.diskPreviousResponseId
+        , "status" .= fmap encodeDiskStatus fields.diskStatus
+        , "provider" .= fmap providerSlug provider
+        , "connection" .= connection
+        , "effectiveModel" .= effectiveModel
+        , "dialect" .= fmap dialectSlug dialect
+        , "agentType" .= fields.diskAgentType
+        , "agentModel" .= fields.diskAgentModel
+        , "reasoningEffort" .= fields.diskReasoningEffort
+        , "cwd" .= fmap unsafeToFilePath fields.diskCwd
+        , "taskPath" .= fields.diskTaskPath
+        , "parentId" .= fields.diskParentId
+        , "depth" .= fields.diskDepth
         ]
+      where
+        fields = subagentDiskFields meta
+        (provider, connection, effectiveModel, dialect) = case meta of
+            CurrentSubagentDiskMeta _ target ->
+                ( Just target.targetProvider
+                , Just target.targetConnection
+                , Just target.targetEffectiveModel
+                , Just target.targetDialect
+                )
+            LegacySubagentDiskMeta _ legacy ->
+                ( legacy.legacyDiskProvider
+                , legacy.legacyDiskConnection
+                , legacy.legacyDiskEffectiveModel
+                , legacy.legacyDiskDialect
+                )
 
 instance FromJSON SubagentDiskMeta where
     parseJSON = withObject "SubagentDiskMeta" \o -> do
@@ -81,14 +147,15 @@ instance FromJSON SubagentDiskMeta where
         diskStatus <- traverse decodeDiskStatus statusValue
         providerText <- o .:? "provider"
         diskProvider <- traverse parseDiskProvider providerText
+        storedConnection <- o .:? "connection"
+        let diskConnection =
+                storedConnection <|> (providerSlug <$> diskProvider)
         dialectText <- o .:? "dialect"
         diskDialect <- traverse parseDiskDialect dialectText
-        SubagentDiskMeta
+        diskEffectiveModel <- o .:? "effectiveModel"
+        fields <- SubagentDiskFields
             <$> o .:? "previousResponseId"
             <*> pure diskStatus
-            <*> pure diskProvider
-            <*> o .:? "effectiveModel"
-            <*> pure diskDialect
             <*> o .:? "agentType"
             <*> o .:? "agentModel"
             <*> o .:? "reasoningEffort"
@@ -96,6 +163,23 @@ instance FromJSON SubagentDiskMeta where
             <*> o .:? "taskPath"
             <*> o .:? "parentId"
             <*> o .:? "depth"
+        pure $ case
+                (diskProvider, diskConnection, diskEffectiveModel, diskDialect)
+                of
+            (Just provider, Just connection, Just effectiveModel, Just dialect) ->
+                CurrentSubagentDiskMeta fields SubagentTarget
+                    { targetProvider = provider
+                    , targetConnection = connection
+                    , targetEffectiveModel = effectiveModel
+                    , targetDialect = dialect
+                    }
+            _ ->
+                LegacySubagentDiskMeta fields LegacySubagentTargetFields
+                    { legacyDiskProvider = diskProvider
+                    , legacyDiskConnection = diskConnection
+                    , legacyDiskEffectiveModel = diskEffectiveModel
+                    , legacyDiskDialect = diskDialect
+                    }
 
 parseDiskDialect :: Text -> Parser DialectId
 parseDiskDialect text =
@@ -185,22 +269,9 @@ takeRecentTurns count items =
 saveSubagentState
     :: OsPath
     -> SubagentId
-    -> [ResponseItem]
-    -> Maybe Text
-    -> SubagentStatus
-    -> Provider
-    -> Text
-    -> DialectId
-    -> Maybe Text
-    -> Maybe Text
-    -> Maybe Text
-    -> Maybe OsPath
-    -> Maybe SubagentIdentity
+    -> SubagentStateSnapshot
     -> IO (Either Text ())
-saveSubagentState
-        sessionDir agentId items previous status provider effectiveModel dialect
-        agentType agentModel
-        reasoningEffort cwd identity =
+saveSubagentState sessionDir agentId snapshot =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
         Right dir -> do
@@ -208,21 +279,29 @@ saveSubagentState
                 transcriptPath = dir </> unsafeEncodeUtf "transcript.json"
             createDirectoryIfMissing True dir
             _ <- tryAny (setFileMode (unsafeToFilePath dir) 0o700)
-            writeLazyFileAtomically metaPath 0o600 $ Aeson.encode SubagentDiskMeta
-                { diskPreviousResponseId = previous
-                , diskStatus = Just status
-                , diskProvider = Just provider
-                , diskEffectiveModel = Just effectiveModel
-                , diskDialect = Just dialect
-                , diskAgentType = agentType
-                , diskAgentModel = agentModel
-                , diskReasoningEffort = reasoningEffort
-                , diskCwd = cwd
-                , diskTaskPath = taskPathText . (.identityTaskPath) <$> identity
-                , diskParentId = identity >>= (.identityParent)
-                , diskDepth = (.identityDepth) <$> identity
-                }
-            writeLazyFileAtomically transcriptPath 0o600 (Aeson.encode items)
+            let fields = SubagentDiskFields
+                    { diskPreviousResponseId =
+                        snapshot.snapshotPreviousResponseId
+                    , diskStatus = Just snapshot.snapshotStatus
+                    , diskAgentType = snapshot.snapshotAgentType
+                    , diskAgentModel = snapshot.snapshotAgentModel
+                    , diskReasoningEffort = snapshot.snapshotReasoningEffort
+                    , diskCwd = snapshot.snapshotCwd
+                    , diskTaskPath =
+                        taskPathText . (.identityTaskPath)
+                            <$> snapshot.snapshotIdentity
+                    , diskParentId =
+                        snapshot.snapshotIdentity >>= (.identityParent)
+                    , diskDepth =
+                        (.identityDepth) <$> snapshot.snapshotIdentity
+                    }
+                meta =
+                    CurrentSubagentDiskMeta fields snapshot.snapshotTarget
+            writeLazyFileAtomically metaPath 0o600 (Aeson.encode meta)
+            writeLazyFileAtomically
+                transcriptPath
+                0o600
+                (Aeson.encode snapshot.snapshotItems)
             pure (Right ())
 
 loadSubagentState
@@ -242,8 +321,12 @@ loadSubagentState sessionDir agentId =
                 else do
                     metaResult <- if hasMeta
                         then decodeFile metaPath
-                        else pure (Right (SubagentDiskMeta
-                            Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
+                        else pure (Right (LegacySubagentDiskMeta
+                            (SubagentDiskFields
+                                Nothing Nothing Nothing Nothing Nothing
+                                Nothing Nothing Nothing Nothing)
+                            (LegacySubagentTargetFields
+                                Nothing Nothing Nothing Nothing)))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])

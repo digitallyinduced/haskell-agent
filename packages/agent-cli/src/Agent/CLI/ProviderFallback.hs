@@ -2,16 +2,20 @@
 module Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
+    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
     , rankedModels
     ) where
 
-import Agent.CLI.Models (ModelOption(..), modelCatalog)
+import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Data.List (nubBy, sortOn)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
 
 -- | Keep brief provider cooldowns invisible to the user when no fallback
@@ -42,50 +46,55 @@ automaticCooldownRetryDelay now = \case
             else Nothing
     _ -> Nothing
 
+-- | Live status text for a brief automatic provider retry. Keep the remaining
+-- time in seconds so a one-minute cooldown visibly counts down instead of
+-- staying at the coarser "1m" duration for most of the wait.
+automaticRetryCountdownText :: Int -> Text
+automaticRetryCountdownText rawSeconds =
+    "Provider temporarily unavailable; retrying automatically in "
+        <> Text.pack (show (max 0 rawSeconds))
+        <> "s · Esc to cancel"
+
 -- | Curated models ordered from strongest to weakest for automatic selection.
 --
 -- Availability is account-level: once a provider reports that all of its
 -- credentials are exhausted, trying a weaker model on the same account would
 -- only loop. 'fallbackCandidates' therefore keeps the highest-ranked model for
 -- each still-eligible provider.
-rankedModels :: [ModelOption]
-rankedModels = sortOn modelRank modelCatalog
+rankedModels :: ModelCatalog -> [ModelOption]
+rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
   where
-    modelRank option = case (option.modelProvider, option.modelId) of
-        (OpenAIProvider, "gpt-5.6-sol") -> 0 :: Int
-        (XAIProvider, "grok-4.6") -> 10
-        (OpenAIProvider, "gpt-5.6-terra") -> 20
-        (OpenAIProvider, "gpt-5.6-luna") -> 30
-        (XAIProvider, "grok-4.5") -> 40
-        (XAIProvider, "grok-4.5-mini") -> 50
-        (OpenRouterProvider, "openai/gpt-5.1") -> 60
-        (OpenRouterProvider, "anthropic/claude-sonnet-4") -> 70
-        (OpenRouterProvider, "x-ai/grok-4") -> 80
-        (OpenRouterProvider, "google/gemini-2.5-pro") -> 90
-        (XAIProvider, "grok-3") -> 100
-        _ -> 1000
+    hasPriority option =
+        option.modelFallbackPriority /= Nothing
+            -- Custom connections are deliberately manual-only.
+            && option.modelTarget.targetConnectionId
+                `elem` ["openai", "xai", "openrouter"]
+    modelRank = maybe maxBound id . (.modelFallbackPriority)
 
 -- | Return the best model for every provider that may still have a usable
 -- account. Providers already observed as exhausted, including the provider
 -- that produced this error, are excluded.
 fallbackCandidates
-    :: [Provider]
+    :: ModelCatalog
+    -> [Provider]
     -> Provider
     -> ApiError
     -> [ModelOption]
-fallbackCandidates unavailable current err
+fallbackCandidates catalog unavailable current err
     | current == ClaudeCodeProvider = []
     | not (isProviderUnavailable err) = []
     | otherwise =
         filter
             (\option ->
-                option.modelProvider /= current
-                    && option.modelProvider /= ClaudeCodeProvider
-                    && option.modelProvider `notElem` unavailable)
-            (nubBy sameProvider rankedModels)
+                option.modelTarget.targetProvider /= current
+                    && option.modelTarget.targetProvider
+                        /= ClaudeCodeProvider
+                    && option.modelTarget.targetProvider `notElem` unavailable)
+            (nubBy sameProvider (rankedModels catalog))
   where
     sameProvider left right =
-        left.modelProvider == right.modelProvider
+        left.modelTarget.targetProvider
+            == right.modelTarget.targetProvider
 
 isUsageExhausted :: ApiError -> Bool
 isUsageExhausted = \case

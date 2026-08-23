@@ -187,11 +187,13 @@ sampleMeta sid title =
         , metaCreatedAt = posixSecondsToUTCTime 0
         , metaUpdatedAt = posixSecondsToUTCTime 0
         , metaProvider = XAIProvider
+        , metaConnection = "xai"
         , metaModel = "grok-4.6"
         , metaTransportModel = Just "grok-4.6"
         , metaDialect = GrokBuildDialect
         , metaLegacySubagentTarget = Just LegacySubagentTarget
             { legacyTargetProvider = XAIProvider
+            , legacyTargetConnection = "xai"
             , legacyTargetEffectiveModel = "grok-4.6"
             , legacyTargetDialect = GrokBuildDialect
             }

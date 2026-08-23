@@ -22,6 +22,32 @@ spec = describe "Agent.CLI.Skills" do
             False
         catalog `shouldBe` SkillCatalog [] []
 
+    it "loads the packaged Telegram setup skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "telegram-agent") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+
+    it "loads the packaged add-model skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "add-model") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")
         _ <- queueSkillCatalogContextWithOmissions

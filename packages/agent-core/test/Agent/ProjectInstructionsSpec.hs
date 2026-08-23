@@ -18,6 +18,15 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.ProjectInstructions" do
+    describe "nonEmptyInstructionContent" do
+        it "keeps original non-empty content and rejects whitespace-only files" do
+            nonEmptyInstructionContent
+                (InstructionFile (fromFilePath "/repo/AGENTS.md") " rules \n")
+                `shouldBe` Just " rules \n"
+            nonEmptyInstructionContent
+                (InstructionFile (fromFilePath "/repo/EMPTY.md") " \t\n")
+                `shouldBe` Nothing
+
     describe "discoverProjectInstructions" do
         it "loads root to cwd files with deeper last" do
             withTempDir \dir -> do

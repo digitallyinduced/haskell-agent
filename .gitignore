@@ -2,6 +2,7 @@
 /.direnv/
 /result
 /result-*
+/eval-results/
 /.ghc.environment.*
 *.hi
 *.o

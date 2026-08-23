@@ -1,0 +1,51 @@
+cabal-version:      2.2
+name:               agent-responses-types
+version:            0.1.0.0
+synopsis:           Canonical wire types for Responses-compatible APIs
+description:        Lossless request, response, item, tool, and streaming
+                    event types shared by the agent loop and provider adapters.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , DeriveGeneric
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , TypeApplications
+                      , ScopedTypeVariables
+                      , DerivingStrategies
+                      , GeneralizedNewtypeDeriving
+                      , DataKinds
+                      , FlexibleContexts
+                      , TupleSections
+                      , PackageImports
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.Responses.Types
+    hs-source-dirs:   src
+    build-depends:    base       >= 4.14 && < 5
+                    , aeson      >= 2.0
+                    , scientific
+                    , text
