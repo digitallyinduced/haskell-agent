@@ -125,7 +125,7 @@ runRipgrep rgPath path args = do
             GrepCount -> ["--count"]
         rgArgs = concat
             [ modeFlags
-            , ["--color=never", "--max-columns", "1000"]
+            , ["--no-config", "--color=never", "--max-columns", "1000"]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before
             , maybe [] (\n -> ["-A", show n]) args.after

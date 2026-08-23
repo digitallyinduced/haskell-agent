@@ -3,6 +3,7 @@ module Agent.CLI.Turn
     ( IncompleteTurnCheckpoint(..)
     , applyPendingSessionTitles
     , checkpointIncompleteTurn
+    , restorePlanStateAfterIncomplete
     , runOneTurn
     ) where
 
@@ -78,10 +79,12 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
+import Agent.Provider (Provider(..))
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
+    , PlanCompletion(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , PlanModeState(..)
@@ -140,8 +143,8 @@ runOneTurn env@SessionEnv
         then id
         else withEscCancel config.loopCancel escPaused) do
     applyPendingSessionTitles env
-    pending <- readIORef planMode.planStateRef
-    when (pending == PlanPending) (activatePlanMode planMode)
+    initialPlanState <- readIORef planMode.planStateRef
+    when (initialPlanState == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents
     -- can persist under agents/<id>/ as they complete.
     case persist of
@@ -186,7 +189,12 @@ runOneTurn env@SessionEnv
     planPath <- planFilePath planMode
     let planReminder =
             if planActive
-                then Just (planModeReminder planPath)
+                then Just $
+                    planModeReminder
+                        (case env.sessionProvider of
+                            OpenAIProvider -> CompleteWithProposedPlan
+                            _ -> CompleteWithExitTool)
+                        planPath
                 else Nothing
         baseInputs = case pendingStartup of
             Just context -> UserMessage context : inputs
@@ -209,7 +217,10 @@ runOneTurn env@SessionEnv
     rootTurnId <- beginSubagentTurn
     result <- runLoopInputs config prev turnInputs
         `onException`
-            (restoreStartupContext >> abortSubagentTurn rootTurnId)
+            ( restoreStartupContext
+                >> restorePlanStateAfterIncomplete planMode initialPlanState
+                >> abortSubagentTurn rootTurnId
+            )
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-
@@ -254,6 +265,7 @@ runOneTurn env@SessionEnv
                 , pendingPlanState = planState
                 }
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
+            restorePlanStateAfterIncomplete planMode initialPlanState
             finishTerminal (isNothing fullscreen)
                 terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
@@ -302,6 +314,7 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
                         terminal wallStarted finishedAt 1 "Agent turn failed"
                     let checkpoint =
@@ -474,6 +487,16 @@ applyPendingSessionTitles env =
                             env.sessionSetWindowTitle
                                 (cliWindowTitle updated.sessionMeta.metaCwd
                                     (Just updated.sessionMeta.metaTitle))
+
+-- | Roll a cancelled or failed turn back to the interaction mode it started
+-- in. In particular, an agent-initiated enter_plan_mode must not trap the next
+-- user prompt in Plan Mode after the turn is interrupted.
+restorePlanStateAfterIncomplete
+    :: PlanModeEnv
+    -> PlanModeState
+    -> IO ()
+restorePlanStateAfterIncomplete planMode =
+    writeIORef planMode.planStateRef
 
 finishTerminal
     :: Bool

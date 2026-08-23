@@ -36,6 +36,9 @@ import Agent.Tools.Codex.Shell
     )
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Dangerous (forbiddenRmRfReason, commandLooksLikeRmRf)
+import Agent.Tools.Grok.Grep (grepTool)
+import Agent.Tools.Grok.ListDir (listDirTool)
+import Agent.Tools.Grok.ReadFile (readFileTool)
 import Agent.Tools.IO
     ( CommandResult(..)
     , resolveUnderCwd
@@ -45,8 +48,9 @@ import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool
-    , enterPlanModeTool
+    , enterCodexPlanModeTool
     , isPlanModeActive
+    , writePlanTool
     )
 import Agent.Tools.Types
     ( AppTool
@@ -76,12 +80,16 @@ codexTools
 codexTools env shellSession ghci planMode multi = do
     planRef <- newIORef []
     pure $
-        [ shellCommandTool env shellSession
+        [ readFileTool env
+        , grepTool env
+        , listDirTool env
+        , shellCommandTool env shellSession
         , writeStdinTool shellSession
         , applyPatchTool env
         , updatePlanTool planMode planRef
         , runGhciTool ghci
-        , enterPlanModeTool planMode
+        , enterCodexPlanModeTool planMode
+        , writePlanTool planMode
         , askUserQuestionTool planMode
         ]
         ++ maybe [] multiAgentTools multi

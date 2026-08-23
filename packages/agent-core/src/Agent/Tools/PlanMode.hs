@@ -8,6 +8,7 @@
 module Agent.Tools.PlanMode
     ( PlanModeState(..)
     , PlanDecision(..)
+    , PlanCompletion(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , newPlanModeEnv
@@ -23,6 +24,8 @@ module Agent.Tools.PlanMode
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
     , enterPlanModeTool
+    , enterCodexPlanModeTool
+    , writePlanTool
     , exitPlanModeTool
     , askUserQuestionTool
     ) where
@@ -55,6 +58,11 @@ data PlanModeState
     | PlanPending
     -- ^ User toggled plan mode; becomes Active on the next prompt.
     | PlanActive
+    deriving (Eq, Show)
+
+data PlanCompletion
+    = CompleteWithExitTool
+    | CompleteWithProposedPlan
     deriving (Eq, Show)
 
 data PlanDecision
@@ -136,17 +144,26 @@ writePlanMarkdown env content = do
         Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
         Right () -> Right ()
 
-planModeReminder :: OsPath -> Text
-planModeReminder path =
+planModeReminder :: PlanCompletion -> OsPath -> Text
+planModeReminder completion path =
     Text.unlines
         [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
         , ""
         , "## Plan File"
-        , "Write your plan to `" <> toText path <> "` using the edit tool."
+        , "Write your plan to `" <> toText path <> "`."
+        , "Use `write_plan` when it is available; otherwise use the provider's dedicated plan-file edit tool."
         , "That is the only file you may create or modify."
+        , "Inspect the repository with dedicated read-only tools such as `read_file`, `grep`, and `list_dir`; shell tools are unavailable in Plan Mode."
         , ""
-        , "When the plan is ready, call `exit_plan_mode` (Grok/OpenRouter) or end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block (OpenAI/Codex) so the user can approve, request changes, or cancel."
+        , completionInstruction completion
         ]
+
+completionInstruction :: PlanCompletion -> Text
+completionInstruction = \case
+    CompleteWithExitTool ->
+        "When the plan is ready, call `exit_plan_mode` so the user can approve, request changes, or cancel."
+    CompleteWithProposedPlan ->
+        "When the plan is ready, end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block so the user can approve, request changes, or cancel."
 
 planApprovedContinuation :: Text
 planApprovedContinuation =
@@ -179,7 +196,16 @@ instance FromJSON EnterPlanArgs where
         <$> optText object "explanation"
 
 enterPlanModeTool :: PlanModeEnv -> AppTool
-enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
+enterPlanModeTool env =
+    enterPlanModeToolWith CompleteWithExitTool env
+
+enterCodexPlanModeTool :: PlanModeEnv -> AppTool
+enterCodexPlanModeTool env =
+    enterPlanModeToolWith CompleteWithProposedPlan env
+
+enterPlanModeToolWith :: PlanCompletion -> PlanModeEnv -> AppTool
+enterPlanModeToolWith completion env = jsonTool "enter_plan_mode"
+    (enterPlanDescription completion)
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional reason this task needs a planning phase before implementation."
     ]
@@ -187,16 +213,24 @@ enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
     -- planConfirmEnter, so it must not also trigger generic tool approval.
     True
     TurnSequential
-    (typedTool "enter_plan_mode" (runEnterPlanMode env))
+    (typedTool "enter_plan_mode" (runEnterPlanMode completion env))
 
-enterPlanDescription :: Text
-enterPlanDescription =
+enterPlanDescription :: PlanCompletion -> Text
+enterPlanDescription completion =
     "Enter plan mode when a task has genuine architectural ambiguity.\n\
     \Requires user approval. While active, only the session plan.md file may be edited;\n\
-    \explore the codebase, write the plan, then call exit_plan_mode for approval."
+    \explore the codebase, write the plan, then "
+        <> case completion of
+            CompleteWithExitTool -> "call exit_plan_mode for approval."
+            CompleteWithProposedPlan ->
+                "present it in a complete <proposed_plan> block for approval."
 
-runEnterPlanMode :: PlanModeEnv -> EnterPlanArgs -> IO (Either Text Text)
-runEnterPlanMode env args = do
+runEnterPlanMode
+    :: PlanCompletion
+    -> PlanModeEnv
+    -> EnterPlanArgs
+    -> IO (Either Text Text)
+runEnterPlanMode completion env args = do
     active <- isPlanModeActive env
     if active
         then pure $ Right "Plan mode is already active."
@@ -211,7 +245,43 @@ runEnterPlanMode env args = do
                     pure $ Right $
                         "You have entered plan mode. Explore the codebase and write an implementation plan to "
                             <> toText path
-                            <> ". Call exit_plan_mode when ready for approval."
+                            <> ". "
+                            <> completionInstruction completion
+
+data WritePlanArgs = WritePlanArgs
+    { content :: Text
+    }
+
+instance FromJSON WritePlanArgs where
+    parseJSON = withObject "write_plan" \object ->
+        WritePlanArgs <$> reqText object "content"
+
+writePlanTool :: PlanModeEnv -> AppTool
+writePlanTool env = jsonTool "write_plan" writePlanDescription
+    [ PropertySchema "content" PropertyString True $ Just
+        "Complete Markdown content to store in the session plan.md file."
+    ]
+    True
+    TurnSequential
+    (typedTool "write_plan" (runWritePlan env))
+
+writePlanDescription :: Text
+writePlanDescription =
+    "Write the current implementation plan to the session plan.md file.\n\
+    \This tool is available only while Plan Mode is active and cannot write any other path."
+
+runWritePlan :: PlanModeEnv -> WritePlanArgs -> IO (Either Text Text)
+runWritePlan env args = do
+    active <- isPlanModeActive env
+    if not active
+        then pure (Left "Plan mode is not active.")
+        else writePlanMarkdown env args.content >>= \case
+            Left err -> pure (Left err)
+            Right () -> do
+                path <- planFilePath env
+                pure $ Right $
+                    "Wrote the plan to " <> toText path
+                        <> ". Continue planning or present it for approval when ready."
 
 data ExitPlanArgs = ExitPlanArgs
     { summary :: Maybe Text
