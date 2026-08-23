@@ -32,6 +32,14 @@ spec = do
         field "store" (buildWsPayloadWithOptions defaultCodexWsOptions request Nothing)
             `shouldBe` Just (Aeson.Bool False)
 
+    it "strips prompt cache retention from Codex requests" do
+        let request = withPromptCacheRetention (Just "24h") sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request (Just "previous-1")
+        field "prompt_cache_retention" payload `shouldBe` Nothing
+        field "previous_response_id" payload
+            `shouldBe` Just (Aeson.String "previous-1")
+
     it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
@@ -178,7 +186,7 @@ field name = \case
 
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams
-    { model = Just "gpt-test"
+    { model = Just "gpt-5.6-sol"
     , instructions = Just "test"
     , input = Just (ResponseInputItems [])
     , tools = Just []
@@ -193,3 +201,9 @@ sampleRequest = defaultResponseCreateParams
     , include = Just []
     , promptCacheKey = Just "cache-key"
     }
+
+withPromptCacheRetention
+    :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withPromptCacheRetention nextRetention
+        ResponseCreateParams { promptCacheRetention = _, .. } =
+    ResponseCreateParams { promptCacheRetention = nextRetention, .. }

@@ -461,6 +461,66 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "starts a fresh chain when inherited cache retention is rejected" do
+            seen <- newIORef []
+            let seed = turnInputsToItems [UserMessage "old"]
+                cacheError = ProviderError
+                    (UnknownErrorType "invalid_parameter")
+                    "prompt_cache_retention is not supported on this model \
+                    \(code: invalid_parameter)"
+                    Nothing
+            transcript <- newIORef seed
+            let send request previous onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    case previous of
+                        Just _ -> pure (Left cacheError)
+                        Nothing -> do
+                            onEvent (deltaEvent EventOutputTextDelta "ok")
+                            pure $ Right
+                                (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWith send (pure baseParams) transcript
+            result <- backend.submitTurn (Just "resp-cache")
+                [CompletedTool (functionResult "c1" "tool output")]
+                (const (pure ()))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            requests <- readIORef seen
+            map snd requests `shouldBe` [Just "resp-cache", Nothing]
+            map (inputItems . fst) requests `shouldBe`
+                [ turnInputsToItems
+                    [CompletedTool (functionResult "c1" "tool output")]
+                , seed <> turnInputsToItems
+                    [CompletedTool (functionResult "c1" "tool output")]
+                ]
+
+        it "strips explicitly requested cache retention and starts a fresh chain" do
+            seen <- newIORef []
+            let seed = turnInputsToItems [UserMessage "old"]
+                cacheError = ProviderError
+                    (UnknownErrorType "invalid_parameter")
+                    "prompt_cache_retention is not supported on this model \
+                    \(code: invalid_parameter)"
+                    Nothing
+                params = withPromptCacheRetention (Just "24h") baseParams
+                send request previous _onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    case previous of
+                        Just _ -> pure (Left cacheError)
+                        Nothing ->
+                            pure $ Right
+                                (testResponse "resp-fresh" [assistantItem "ok"])
+            transcript <- newIORef seed
+            let backend = openAiBackendWith send (pure params) transcript
+            result <- backend.submitTurn (Just "resp-cache")
+                [UserMessage "new"]
+                (const (pure ()))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            requests <- readIORef seen
+            map snd requests `shouldBe` [Just "resp-cache", Nothing]
+            map ((.promptCacheRetention) . fst) requests
+                `shouldBe` [Nothing, Nothing]
+
         it "replays retained messages before an automatic compaction checkpoint" do
             seen <- newIORef []
             let checkpoint = compactionItem "opaque"
@@ -1061,6 +1121,12 @@ baseParams = withModel (Just "gpt-5.6-luna") defaultResponseCreateParams
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =
     ResponseCreateParams { model = nextModel, .. }
+
+withPromptCacheRetention
+    :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withPromptCacheRetention nextRetention
+        ResponseCreateParams { promptCacheRetention = _, .. } =
+    ResponseCreateParams { promptCacheRetention = nextRetention, .. }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
 withEffort effort ResponseCreateParams { reasoning = _, .. } =

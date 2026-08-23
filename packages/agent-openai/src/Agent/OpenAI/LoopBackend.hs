@@ -32,7 +32,8 @@ import Agent.Error
     , isInlineRetryableProviderResponseError
     )
 import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
-import Agent.OpenAI.Error (isPreviousResponseIdError)
+import Agent.OpenAI.Error (isResponseChainCompatibilityError)
+import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
@@ -492,7 +493,7 @@ openAiBackendWithRetryPolicy
     -> Backend
 openAiBackendWithRetryPolicy retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
-        baseParams <- getParams
+        baseParams <- sanitizeCodexRequest <$> getParams
         let newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
             -- Live and resumed transcripts already apply compaction snapshots
@@ -508,7 +509,9 @@ openAiBackendWithRetryPolicy retryPolicy send getParams =
         result <- sendRetrying onLoopEvent initialRequest initialPrevious emit
         recovered <- case result of
             Left err
-                | isPreviousResponseIdError err && not (null history) ->
+                | isJust initialPrevious
+                , isResponseChainCompatibilityError err
+                , not (null history) ->
                     sendRetrying onLoopEvent fullRequest Nothing emit
                 | otherwise -> pure (Left err)
             Right response -> pure (Right response)
