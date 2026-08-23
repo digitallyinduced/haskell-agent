@@ -46,10 +46,10 @@ withConnectionRecoveryUsing
     -> Backend
     -> Backend
 withConnectionRecoveryUsing waitBeforeRetry (Backend submit) =
-    Backend \previous inputs onEvent ->
+    Backend \state previous inputs onEvent ->
         let go attempt = do
                 streamed <- newIORef False
-                result <- submit previous inputs \event -> do
+                result <- submit state previous inputs \event -> do
                     when (isStreamOutput event) (writeIORef streamed True)
                     onEvent event
                 didStream <- readIORef streamed

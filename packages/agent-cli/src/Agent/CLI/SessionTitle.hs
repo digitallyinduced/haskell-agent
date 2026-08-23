@@ -15,10 +15,14 @@ module Agent.CLI.SessionTitle
 
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Error (formatApiErrorInline)
-import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , TurnInput(..)
+    , TurnOutput(..)
+    )
 import Agent.Responses.Types
     ( ResponseCreateParams(..)
-    , ResponseItem
     , ToolChoice(..)
     , ToolChoiceMode(..)
     )
@@ -201,22 +205,23 @@ generateTitle manager job = do
     baseParams <- readIORef manager.titleParams
     let params = titleRequestParams baseParams
     privateParams <- newIORef params
-    privateTranscript <- newIORef ([] :: [ResponseItem])
     let Backend submit =
-            manager.titleBackendFactory privateParams privateTranscript
+            manager.titleBackendFactory privateParams
     timeout 45000000
-        (submit Nothing [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
+        (submit [] Nothing
+            [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
         >>= \case
             Nothing -> pure (Left "timed out after 45 seconds")
             Just response -> case response of
                 Left err -> pure (Left (formatApiErrorInline err))
-                Right turn
-                    | not (null turn.toolCalls) ->
-                        pure (Left "model attempted a tool call")
-                    | otherwise -> pure $ case
-                            turn.assistantText >>= cleanGeneratedTitle of
-                        Nothing -> Left "provider returned no title text"
-                        Just title -> Right title
+                Right result ->
+                    let turn = result.backendOutput
+                    in if not (null turn.toolCalls)
+                        then pure (Left "model attempted a tool call")
+                        else pure $ case
+                                turn.assistantText >>= cleanGeneratedTitle of
+                            Nothing -> Left "provider returned no title text"
+                            Just title -> Right title
 
 titleRequestParams :: ResponseCreateParams -> ResponseCreateParams
 titleRequestParams ResponseCreateParams{..} =

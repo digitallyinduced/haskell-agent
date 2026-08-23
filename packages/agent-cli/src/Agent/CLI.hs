@@ -84,6 +84,11 @@ import Agent.CLI.Clipboard
     , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
+import Agent.CLI.Config
+    ( HarnessConfig(..)
+    , McpServerConfig(..)
+    , loadHarnessConfig
+    )
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , OpenAiCompactionSender
@@ -189,12 +194,13 @@ import Agent.CLI.Project
 import Agent.CLI.Prompt
     ( secretInputGuidance
     , subscriptionSubagentModelGuidance
-    , systemPrompt
+    , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
+    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     )
@@ -282,6 +288,8 @@ import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsForWithTypes
+    , filterBashTools
+    , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     )
@@ -335,6 +343,7 @@ import Agent.CLI.Worktree
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
 import Agent.Loop
+import qualified Agent.MCP as MCP
 import Agent.Error (ApiError(..))
 import Agent.Dialect
     ( Dialect
@@ -418,6 +427,7 @@ import Agent.Subagents
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -488,6 +498,7 @@ import Text.Printf (printf)
 import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
+    , addUTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
@@ -841,6 +852,38 @@ startupDie startup message =
     case startup.startupFullscreen of
         Nothing -> die message
         Just _ -> throwIO (StartupFailure message)
+
+reportStartupWarning :: StartupRuntime -> Text -> IO ()
+reportStartupWarning startup message =
+    case startup.startupFullscreen of
+        Nothing -> putTextLn stderr ("warning: " <> message)
+        Just runtime ->
+            emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
+
+mcpToolCollision :: [AppTool] -> [MCP.McpToolRegistration] -> Maybe Text
+mcpToolCollision existingTools = go
+  where
+    existing =
+        Map.fromList $
+            ("web_search", "built-in web search")
+                : [ (canonicalToolName tool.appToolName, "built-in tool")
+                  | tool <- existingTools
+                  ]
+
+    go [] = Nothing
+    go (registration : rest) =
+        let tool = registration.mcpRegistrationTool
+            name = canonicalToolName tool.appToolName
+        in case Map.lookup name existing of
+            Nothing -> go rest
+            Just source ->
+                Just $
+                    "MCP tool "
+                        <> tool.appToolName
+                        <> " from server "
+                        <> registration.mcpRegistrationServer
+                        <> " conflicts with "
+                        <> source
 
 formatStartupTimings :: [(Text, NominalDiffTime)] -> Text
 formatStartupTimings timings =
@@ -1503,6 +1546,10 @@ runAgentInitializedWithLock
 
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
+    harnessConfig <-
+        loadHarnessConfig home >>= \case
+            Left err -> startupDie startup (Text.unpack err)
+            Right config -> pure config
     let basePlanHooks =
             cliPlanHooks interrupt escPaused (resolveColor stderr)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
@@ -1706,6 +1753,32 @@ runAgentInitializedWithLock
                 _ <- removeSessionTemp root sessionId
                 pure ()
         toolEnv = baseToolEnv
+        mcpServerConfigs =
+            [ MCP.McpServerConfig
+                { MCP.mcpServerName = label
+                , MCP.mcpServerCommand = Text.unpack config.mcpCommand
+                , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
+                , MCP.mcpServerCwd = Text.unpack <$> config.mcpCwd
+                , MCP.mcpServerEnv =
+                    [ (Text.unpack name, Text.unpack value)
+                    | (name, value) <- Map.toAscList config.mcpEnv
+                    ]
+                , MCP.mcpServerStartupTimeoutSeconds =
+                    config.mcpStartupTimeoutSeconds
+                , MCP.mcpServerRequestTimeoutSeconds =
+                    config.mcpRequestTimeoutSeconds
+                }
+            | (label, config) <-
+                Map.toAscList harnessConfig.configMcpServers
+            , config.mcpEnabled
+            ]
+    mcpFleet <-
+        try @_ @SomeException (MCP.startMcpFleet mcpServerConfigs) >>= \case
+            Left exception ->
+                startupDie startup
+                    ("Failed to initialize MCP tools: " <> show exception)
+            Right fleet -> pure fleet
+    mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     coding <-
         codingToolsForWithTypes
             dialect
@@ -1714,7 +1787,7 @@ runAgentInitializedWithLock
             secretHooks
             multiCtx
             agentTypesRef
-            `onException` cleanupScratch
+            `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1758,10 +1831,16 @@ runAgentInitializedWithLock
             , toolsLaunchTurn =
                 launchSessionTurn sessionProcessManager
                     (not (isOneShot options)) policy
+                    options.optGhci options.optBash
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
-        tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
+        mcpTools = MCP.mcpFleetTools mcpFleet
+        tools =
+            filterGhciTools options.optGhci
+                (filterBashTools options.optBash coding.codingAppTools)
+                ++ mcpTools
+                ++ agentSessionTools sessionToolsEnv
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1777,17 +1856,28 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
+            MCP.closeMcpFleet mcpFleet
             coding.codingClose
             cleanupScratch
     flip finally closeAll do
+        case
+                mcpToolCollision
+                    (coding.codingAppTools ++ agentSessionTools sessionToolsEnv)
+                    mcpFleet.mcpFleetRegistrations
+            of
+                Just err ->
+                    startupDie startup
+                        ("Failed to initialize MCP tools: " <> Text.unpack err)
+                Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
         let instructions =
-                Text.intercalate "\n\n" $
-                    filter (not . Text.null)
-                        [ systemPrompt dialect cwd (Just sessionTmp) today
-                            (isOneShot options)
-                        , secretInputGuidance (map (.appToolName) tools)
-                        ]
+                systemPromptForTools
+                    dialect
+                    (map (.appToolName) tools)
+                    cwd
+                    (Just sessionTmp)
+                    today
+                    (isOneShot options)
             params = requestParams model instructions
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
@@ -1804,6 +1894,7 @@ runAgentInitializedWithLock
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentParams = paramsRef
+                , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
                 , subagentSessions = subagentSessions
                 , subagentStoreRoot = subagentStoreRoot
@@ -2106,17 +2197,15 @@ runAgentInitializedWithLock
                                             tokenProvider
                                             activeConnectionRef
                                             (readIORef paramsRef)
-                                            transcriptRef
                                             contextTokensRef
                                             recordCompactionUsage
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
-                                    btwBackend privateParams privateTranscript =
+                                    btwBackend privateParams =
                                         freshOpenAiBackend
                                             tokenProvider
                                             (readIORef privateParams)
-                                            privateTranscript
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2176,18 +2265,18 @@ runAgentInitializedWithLock
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         xaiBackend xaiOptions tokenProvider
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2204,7 +2293,7 @@ runAgentInitializedWithLock
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
-                        let makeBackend params transcript =
+                        let makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2220,10 +2309,9 @@ runAgentInitializedWithLock
                                                     request
                                                     onEvent)
                                             params
-                                            transcript
                                     Nothing ->
                                         openRouterBackend openRouterOptions
-                                            tokenProvider params transcript
+                                            tokenProvider params
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2232,18 +2320,18 @@ runAgentInitializedWithLock
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             makeBackend
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         makeBackend
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 makeBackend
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -2855,6 +2943,10 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                 emitUiEvent runtime (UiLoop event)
         config = LoopConfig
             { loopBackend = backend
+            , loopBackendState = BackendStateStore
+                { readBackendState = readIORef transcriptRef
+                , commitBackendState = writeIORef transcriptRef
+                }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
@@ -2905,8 +2997,9 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             today <- utctDay <$> getCurrentTime
             modifyIORef' paramsRef $
                 setRequestInstructions
-                    (systemPrompt
+                    (systemPromptForTools
                         dialect
+                        (map (.appToolName) tools)
                         cwd
                         (Just tempDir)
                         today
@@ -3255,32 +3348,57 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    let waitMessage =
-            "provider credentials temporarily unavailable; retrying this turn in "
-                <> formatDuration delay
-                <> " (Esc to cancel)"
-    case env.sessionFullscreen of
-        Just runtime ->
-            emitUiEvent runtime
-                (UiSetNotice (Just (warningNotice waitMessage)))
-        Nothing -> do
-            color <- resolveColor stderr
-            putTextLn stderr $
-                roleWarn color (glyphWarn <> waitMessage)
     let cancel = env.sessionLoop.loopCancel
-        -- Give the provider reset boundary a small margin so the automatic
-        -- retry does not race a rounded server timestamp.
-        waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
-        waitForCancel =
-            isJust <$> timeout waitMicros (waitCancel cancel)
+        renderCountdown seconds =
+            let message = automaticRetryCountdownText seconds
+            in case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just (progressNotice message)))
+                Nothing ->
+                    renderEvent env.sessionRender (ActivityUpdated message)
+        waitForCancel = do
+            startedAt <- getCurrentTime
+            let retryAt = addUTCTime (max 0 delay) startedAt
+                poll lastShown = do
+                    now <- getCurrentTime
+                    let remaining = max 0 (diffUTCTime retryAt now)
+                        seconds = max 0 (ceiling remaining)
+                    when (lastShown /= Just seconds) (renderCountdown seconds)
+                    if remaining <= 0
+                        then do
+                            -- Give the provider reset boundary a small margin
+                            -- so the retry does not race a rounded timestamp.
+                            isJust <$> timeout 250000 (waitCancel cancel)
+                        else do
+                            let waitMicros =
+                                    max 1 $
+                                        min 1000000
+                                            (ceiling
+                                                (realToFrac remaining
+                                                    * 1_000_000
+                                                    :: Double))
+                            cancelled <-
+                                isJust <$> timeout waitMicros (waitCancel cancel)
+                            if cancelled
+                                then pure True
+                                else poll (Just seconds)
+            poll Nothing
         waitAction = case env.sessionFullscreen of
             Just _ -> waitForCancel
             Nothing ->
                 withEscCancel cancel env.sessionEscPaused waitForCancel
     resetCancel cancel
+    case env.sessionFullscreen of
+        Just _ -> pure ()
+        Nothing -> renderEvent env.sessionRender TurnStarted
     cancelled <-
         (withTurnCancel env.sessionInterrupt cancel waitAction)
-            `finally` resetCancel cancel
+            `finally` do
+                resetCancel cancel
+                case env.sessionFullscreen of
+                    Just _ -> pure ()
+                    Nothing -> clearThinking env.sessionRender
     if cancelled
         then do
             case env.sessionFullscreen of
@@ -5582,8 +5700,8 @@ commitBackendOnSuccess
     -> Backend
     -> Backend
 commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
-    Backend \previous inputs onEvent -> do
-        result <- submit previous inputs onEvent
+    Backend \state previous inputs onEvent -> do
+        result <- submit state previous inputs onEvent
         case result of
             Right _ -> do
                 shouldCommit <- atomicModifyIORef' committed \done ->
@@ -5991,12 +6109,11 @@ lockedOpenAiSession
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold wsLock provider activeConnection
-        getParams transcript contextTokens
+        getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -6028,7 +6145,7 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 onEvent
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWith sendResponse getParams transcript
+                openAiBackendWith sendResponse getParams
         compactSender request =
             sendAuxiliary request Nothing (const (pure ()))
         compactingBackend =
@@ -6037,12 +6154,11 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 compactSender
                 recordCompactionUsage
                 getParams
-                transcript
                 contextTokens
                 baseBackend
-        serializedBackend = Backend \previous inputs onEvent ->
+        serializedBackend = Backend \state previous inputs onEvent ->
             withMVar wsLock \_ ->
-                compactingBackend.submitTurn previous inputs onEvent
+                compactingBackend.submitTurn state previous inputs onEvent
     in (compactSender, serializedBackend)
 
 -- | Drop live conversation state without touching persisted session files.

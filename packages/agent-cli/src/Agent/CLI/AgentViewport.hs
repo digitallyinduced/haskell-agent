@@ -42,6 +42,7 @@ import Data.IORef (IORef)
 import Data.List (findIndex, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -66,6 +67,13 @@ data AgentStep = AgentStep
     , agentStepDetail :: !(Maybe Text)
     }
     deriving (Eq, Show)
+
+-- | A flattened tree row with presentation metadata derived from the whole
+-- hierarchy. Renderers consume these rows without rescanning later entries.
+data AgentTreeRow = AgentTreeRow
+    { treeRowEntry :: !AgentEntry
+    , treeRowPrefix :: !Text
+    }
 
 data AgentEntry = AgentEntry
     { agentTarget :: !AgentTarget
@@ -169,16 +177,17 @@ applyAgentViewportKey key state = case key of
 
 renderAgentTree :: Bool -> AgentTarget -> [AgentEntry] -> Text
 renderAgentTree color selected entries
-    | length ordered <= 1 = ""
+    | length rows <= 1 = ""
     | otherwise =
         Text.intercalate "\n" $
             rolePrompt color "agents"
-                : map renderEntry (zip [0 ..] ordered)
+                : map renderEntry rows
                 <> [roleMuted color
                     ("  viewing " <> selectedPath
                         <> " · /agents to switch")]
   where
     ordered = sortOn (.agentPath) entries
+    rows = agentTreeRows ordered
     effectiveSelected =
         case findByTarget selected ordered of
             Just _ -> selected
@@ -186,12 +195,11 @@ renderAgentTree color selected entries
     selectedPath =
         maybe "/root" (.agentPath)
             (findByTarget effectiveSelected ordered)
-    renderEntry (index, entry) =
-        let isSelected = entry.agentTarget == effectiveSelected
+    renderEntry row =
+        let entry = row.treeRowEntry
+            isSelected = entry.agentTarget == effectiveSelected
             marker = if isSelected then "› " else "  "
-            line =
-                marker
-                    <> agentEntryTreeLabel ordered index entry
+            line = marker <> agentTreeRowLabel row
         in if isSelected then roleSuccess color line else line
 
 renderAgentViewportFrame :: Bool -> AgentViewportState -> Text
@@ -256,11 +264,14 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         , splitPaneRightHeading =
             \selected ->
                 "transcript"
-                    <> maybe "" (\entry -> " · " <> entry.agentPath) selected
-        , splitPaneItems = entries
+                    <> maybe
+                        ""
+                        (\row -> " · " <> row.treeRowEntry.agentPath)
+                        selected
+        , splitPaneItems = rows
         , splitPaneSelectedIndex = state.viewportIndex
-        , splitPaneLeftLabel = agentEntryTreeLabel entries
-        , splitPaneTranscript = (.agentTranscript)
+        , splitPaneLeftLabel = \_ -> agentTreeRowLabel
+        , splitPaneTranscript = (.treeRowEntry.agentTranscript)
         , splitPaneEmptyTranscript = "(no agents)"
         , splitPaneFooter = footerText
         , splitPanePromptStyle = rolePrompt color
@@ -268,7 +279,7 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         , splitPaneSelectedStyle = roleSuccess color
         }
   where
-    entries = state.viewportAll
+    rows = agentTreeRows state.viewportAll
 
 pickAgentViewport
     :: Bool
@@ -617,7 +628,9 @@ agentEntryTreeLabelWithGlyph
     -> AgentEntry
     -> Text
 agentEntryTreeLabelWithGlyph glyph entries index entry =
-    treePrefix entries index entry.agentPath
+    treePrefixFrom
+        (laterSiblingIndex (drop (index + 1) entries))
+        (pathSegments entry.agentPath)
         <> agentDisplayName entry.agentPath
         <> "  "
         <> glyph
@@ -630,33 +643,74 @@ agentDisplayName path =
         name : _ -> name
         [] -> "root"
 
-treePrefix :: [AgentEntry] -> Int -> Text -> Text
-treePrefix entries index path =
-    case pathSegments path of
+agentTreeRows :: [AgentEntry] -> [AgentTreeRow]
+agentTreeRows entries =
+    zipWith makeRow entries prefixes
+  where
+    (_, prefixes) = foldr collect (Map.empty, []) entries
+
+    collect entry (laterSiblings, accumulated) =
+        let segments = pathSegments entry.agentPath
+            prefix = treePrefixFrom laterSiblings segments
+        in ( rememberSibling segments laterSiblings
+           , prefix : accumulated
+           )
+
+    makeRow entry prefix = AgentTreeRow
+        { treeRowEntry = entry
+        , treeRowPrefix = prefix
+        }
+
+laterSiblingIndex :: [AgentEntry] -> Map.Map [Text] (Set.Set Text)
+laterSiblingIndex =
+    foldr
+        (rememberSibling . pathSegments . (.agentPath))
+        Map.empty
+
+rememberSibling
+    :: [Text]
+    -> Map.Map [Text] (Set.Set Text)
+    -> Map.Map [Text] (Set.Set Text)
+rememberSibling [] siblings = siblings
+rememberSibling segments siblings =
+    Map.insertWith Set.union
+        (init segments)
+        (Set.singleton (last segments))
+        siblings
+
+treePrefixFrom :: Map.Map [Text] (Set.Set Text) -> [Text] -> Text
+treePrefixFrom laterSiblings segments =
+    case segments of
         [] -> "▾ "
-        segments ->
+        _ ->
             let ancestors =
-                    [ if hasLaterSibling entries index (take level segments)
+                    [ if hasLaterSibling (take level segments)
                         then "│  "
                         else "   "
                     | level <- [1 .. length segments - 1]
                     ]
                 branch =
-                    if hasLaterSibling entries index segments
+                    if hasLaterSibling segments
                         then "├─ "
                         else "└─ "
             in Text.concat ancestors <> branch
-
-hasLaterSibling :: [AgentEntry] -> Int -> [Text] -> Bool
-hasLaterSibling entries index node =
-    any isSibling (drop (index + 1) entries)
   where
-    parent = init node
-    isSibling entry =
-        let candidate = pathSegments entry.agentPath
-        in length candidate == length node
-            && take (length parent) candidate == parent
-            && candidate /= node
+    hasLaterSibling [] = False
+    hasLaterSibling node =
+        maybe
+            False
+            (not . Set.null . Set.delete (last node))
+            (Map.lookup (init node) laterSiblings)
+
+agentTreeRowLabel :: AgentTreeRow -> Text
+agentTreeRowLabel row =
+    let entry = row.treeRowEntry
+    in row.treeRowPrefix
+        <> agentDisplayName entry.agentPath
+        <> "  "
+        <> agentStatusGlyph entry.agentStatus
+        <> " "
+        <> entry.agentStatus
 
 pathSegments :: Text -> [Text]
 pathSegments path =

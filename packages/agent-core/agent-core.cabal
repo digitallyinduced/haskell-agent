@@ -46,6 +46,7 @@ library
                     , Agent.Provider
                     , Agent.Provider.Options
                     , Agent.Loop
+                    , Agent.MCP
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -81,6 +82,7 @@ library
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , agent-responses-types >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
                     , base64-bytestring
@@ -126,6 +128,7 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
+                    , Agent.MCPSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
@@ -148,6 +151,7 @@ test-suite agent-core-test
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-responses-types
                     , aeson
                     , async
                     , base64-bytestring

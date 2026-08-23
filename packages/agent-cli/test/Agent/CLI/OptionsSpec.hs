@@ -22,6 +22,7 @@ spec = do
                 [ "--provider", "xai"
                 , "--model", "grok-4.6"
                 , "--cwd", "/tmp/work"
+                , "--bash"
                 , "--yolo"
                 , "--max-turns", "3"
                 , "--compact-threshold", "1200"
@@ -32,6 +33,7 @@ spec = do
                     { optProvider = Just XAIProvider
                     , optModel = Just "grok-4.6"
                     , optCwd = Just (fromFilePath "/tmp/work")
+                    , optBash = True
                     , optYolo = True
                     , optMaxTurns = 3
                     , optCompactThreshold = Just 1200
@@ -147,6 +149,22 @@ spec = do
                     { optPrompt = Just "hi"
                     , optSkills = True
                     })
+
+        it "keeps bash disabled by default and enables it explicitly" do
+            parseArgs []
+                `shouldBe` Right (RunAgent defaultCliOptions)
+            parseArgs ["--bash"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
+            parseArgs ["--bash", "--no-bash"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optBash = False })
+
+        it "keeps ghci enabled by default and disables it explicitly" do
+            parseArgs []
+                `shouldBe` Right (RunAgent defaultCliOptions)
+            parseArgs ["--no-ghci"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optGhci = False })
+            parseArgs ["--no-ghci", "--ghci"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optGhci = True })
 
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do

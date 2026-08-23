@@ -1,5 +1,7 @@
 # haskell-agent
 
+<img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
+
 **An independent agent harness, written in Haskell.**
 
 `haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI, and
@@ -73,6 +75,19 @@ Start an interactive session:
 agent-cli
 ```
 
+`run_ghci` is the primary execution and scripting tool and is enabled by
+default. Enable the provider's explicit shell tool when needed:
+
+```console
+agent-cli --bash
+```
+
+For bash-only operation, disable GHCi explicitly:
+
+```console
+agent-cli --no-ghci --bash
+```
+
 Run a one-shot task:
 
 ```console
@@ -88,6 +103,38 @@ agent-cli --worktree
 
 Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
 override automatic provider detection.
+
+### Telegram
+
+Create a bot with BotFather, find your numeric Telegram user ID, and run the
+interactive setup command:
+
+```console
+agent-telegram setup --provider openai --cwd /path/to/project \
+  --allowed-user 123456789
+agent-telegram start
+agent-telegram status
+```
+
+Setup reads the BotFather token without terminal echo, validates it against
+Telegram, and stores it separately from the non-secret gateway configuration.
+Never paste the bot token into an agent conversation.
+
+Only allowlisted private-chat text messages are handled. Each chat is mapped
+to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
+session and `/session` shows the current session ID. Mutating tools are denied
+unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
+background gateway.
+
+Incoming updates and pending replies are persisted before they are processed.
+Polling continues while agent turns run, conversations are processed in order,
+and separate chats can run concurrently. Pending work resumes when the gateway
+is restarted.
+
+The built-in `telegram-agent` skill lets the normal agent guide this setup.
+Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
+direct secret entry to the interactive setup command, and start the configured
+gateway after setup is complete.
 
 ### Model catalog and local models
 
@@ -152,6 +199,32 @@ naturally and let the agent activate it.
 ### Authentication
 
 Works with your Codex subscription, Grok subscription, and provider API keys.
+
+### Local MCP servers
+
+Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "seo-mcp": {
+      "command": "nix",
+      "args": ["run", "/absolute/path/to/seo-mcp"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/credentials.json"
+      },
+      "startupTimeoutSeconds": 120,
+      "requestTimeoutSeconds": 60
+    }
+  }
+}
+```
+
+The harness starts enabled servers once per root session and shares their tools
+with subagents. MCP tool names are preserved, so they must not collide with
+built-in or other configured tools. Only tools explicitly annotated
+`readOnlyHint: true` are exposed.
 
 ### Secret entry
 

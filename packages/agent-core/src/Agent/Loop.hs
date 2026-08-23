@@ -5,10 +5,14 @@
 -- only sees 'ToolCall' / 'ToolCallResult' and a 'Backend' callback.
 module Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
+    , BackendStateStore(..)
     , ImageAttachment(..)
     , LoopConfig(..)
+    , LoopExecution(..)
     , LoopEvent(..)
     , LoopError(..)
+    , LoopProgress(..)
     , LoopResult(..)
     , TokenUsage(..)
     , TurnInput(..)
@@ -20,11 +24,13 @@ module Agent.Loop
     , emptyTurnOutput
     , runLoop
     , runLoopInputs
+    , runLoopInputsDetailed
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
+import Agent.Responses.Types (ResponseItem)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -38,7 +44,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async (mapConcurrently, race)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception.Safe (SomeException, displayException, tryAny)
+import Control.Exception.Safe (SomeException, displayException, mask, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -119,6 +125,17 @@ data TurnOutput = TurnOutput
     , tokenUsage :: !TokenUsage
     } deriving (Eq, Show)
 
+data LoopProgress
+    = NoResponseCommitted
+    | ResponseCommitted
+    deriving (Eq, Show)
+
+data LoopExecution = LoopExecution
+    { executionState :: ![ResponseItem]
+    , executionProgress :: !LoopProgress
+    , executionResult :: !(Either LoopError LoopResult)
+    } deriving (Eq, Show)
+
 emptyTurnOutput :: Text -> [ToolCall] -> Maybe Text -> TurnOutput
 emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     { responseId
@@ -127,12 +144,26 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , tokenUsage = emptyTokenUsage
     }
 
+data BackendResult = BackendResult
+    { backendOutput :: !TurnOutput
+    , backendState :: ![ResponseItem]
+    } deriving (Eq, Show)
+
 newtype Backend = Backend
     { submitTurn
-        :: Maybe Text
+        :: [ResponseItem]
+        -> Maybe Text
         -> [TurnInput]
         -> (LoopEvent -> IO ())
-        -> IO (Either ApiError TurnOutput)
+        -> IO (Either ApiError BackendResult)
+    }
+
+data BackendStateStore = BackendStateStore
+    { readBackendState :: !(IO [ResponseItem])
+      -- | Publish a completed provider response for live observers and later
+      -- tool continuations. Higher-level turn policy may still deliberately
+      -- roll this state back after cancellation or terminal failure.
+    , commitBackendState :: !([ResponseItem] -> IO ())
     }
 
 data LoopEvent
@@ -152,6 +183,7 @@ data LoopEvent
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
+    , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
@@ -218,11 +250,19 @@ runLoopInputs
     -> [TurnInput]
     -> IO (Either LoopError LoopResult)
 runLoopInputs config previousResponseId firstInputs =
-    tryAny (runLoopInputsUnsafe config previousResponseId firstInputs) >>= \case
-        Left exception ->
-            pure (Left (LoopUnexpected (exceptionSummary exception)))
-        Right result ->
-            pure result
+    (.executionResult)
+        <$> runLoopInputsDetailed config previousResponseId firstInputs
+
+-- | Run a loop while retaining the latest explicitly committed backend state.
+runLoopInputsDetailed
+    :: LoopConfig
+    -> Maybe Text
+    -> [TurnInput]
+    -> IO LoopExecution
+runLoopInputsDetailed config previousResponseId firstInputs = do
+    initialState <- config.loopBackendState.readBackendState
+    runLoopInputsUnsafe
+        config initialState previousResponseId firstInputs
 
 exceptionSummary :: SomeException -> Text
 exceptionSummary =
@@ -233,10 +273,11 @@ exceptionSummary =
 
 runLoopInputsUnsafe
     :: LoopConfig
+    -> [ResponseItem]
     -> Maybe Text
     -> [TurnInput]
-    -> IO (Either LoopError LoopResult)
-runLoopInputsUnsafe config0 previousResponseId firstInputs = do
+    -> IO LoopExecution
+runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     -- Parallel-safe tool batches run with mapConcurrently. Serialize onEvent
     -- so a printer (hPutStrLn on String is not atomic) cannot interleave
     -- characters.
@@ -245,55 +286,92 @@ runLoopInputsUnsafe config0 previousResponseId firstInputs = do
             { loopOnEvent = \event ->
                 withMVar eventLock \_ -> config0.loopOnEvent event
             }
-        go prev turnsUsed inputs lastOutput usageAcc
+        finish state progress result =
+            pure LoopExecution
+                { executionState = state
+                , executionProgress = progress
+                , executionResult = result
+                }
+        unexpected state progress exception =
+            finish state progress
+                (Left (LoopUnexpected (exceptionSummary exception)))
+        protect state progress action =
+            tryAny action >>= either (unexpected state progress) pure
+        go state progress prev turnsUsed inputs lastOutput usageAcc
             | turnsUsed >= config.loopMaxTurns =
-                pure $ case lastOutput of
+                finish state progress $ case lastOutput of
                     Just turn -> Left (LoopMaxTurns turn)
                     Nothing -> Left LoopNoResponseId
-            | otherwise = do
+            | otherwise = protect state progress do
                 cancelled <- isCancelled config.loopCancel
                 if cancelled
-                    then pure (Left (LoopCancelled []))
+                    then finish state progress (Left (LoopCancelled []))
                     else do
                         config.loopOnEvent TurnStarted
                         -- Race the model call against cancel so Ctrl-C / Esc
                         -- can stop reasoning mid-stream, not only between tools.
-                        raced <- race
-                            (waitCancel config.loopCancel)
-                            (config.loopBackend.submitTurn prev inputs config.loopOnEvent)
+                        raced <- mask \restore -> do
+                            result <- restore $ race
+                                (waitCancel config.loopCancel)
+                                (config.loopBackend.submitTurn
+                                    state prev inputs config.loopOnEvent)
+                            case result of
+                                Right (Right BackendResult{..})
+                                    | not
+                                        (Text.null
+                                            backendOutput.responseId) ->
+                                        config.loopBackendState.commitBackendState
+                                            backendState
+                                _ -> pure ()
+                            pure result
                         case raced of
                             Left () ->
-                                pure (Left (LoopCancelled []))
+                                finish state progress (Left (LoopCancelled []))
                             Right (Left err) ->
-                                pure (Left (LoopTransport err))
-                            Right (Right turn)
+                                finish state progress (Left (LoopTransport err))
+                            Right (Right BackendResult{backendOutput = turn})
                                 | Text.null turn.responseId ->
-                                    pure (Left LoopNoResponseId)
-                                | otherwise -> do
-                                    -- A cancel that landed during submitTurn
-                                    -- after the race chose Right still counts.
-                                    cancelledMid <- isCancelled config.loopCancel
-                                    let usageAcc' = addTokenUsage usageAcc turn.tokenUsage
-                                    if cancelledMid
-                                        then pure (Left (LoopCancelled []))
-                                        else do
-                                            config.loopOnEvent (TurnFinished turn)
-                                            let nextTurnsUsed = turnsUsed + 1
-                                            if null turn.toolCalls
-                                                then pure $ Right LoopResult
-                                                    { finalResponseId = turn.responseId
-                                                    , finalText = turn.assistantText
-                                                    , turnsUsed = nextTurnsUsed
-                                                    , tokenUsage = usageAcc'
-                                                    }
-                                                else do
-                                                    results <- runToolCalls config turn.toolCalls
-                                                    cancelledAfter <- isCancelled config.loopCancel
-                                                    if cancelledAfter
-                                                        then pure (Left (LoopCancelled results))
-                                                        else go (Just turn.responseId) nextTurnsUsed
-                                                            (map CompletedTool results) (Just turn) usageAcc'
-    go previousResponseId 0 firstInputs Nothing emptyTokenUsage
+                                    finish state progress (Left LoopNoResponseId)
+                            Right (Right BackendResult{..}) -> do
+                                continueCommitted
+                                    backendState backendOutput turnsUsed usageAcc
+        continueCommitted state turn turnsUsed usageAcc =
+            protect state ResponseCommitted do
+                -- A cancel that landed during submitTurn after the race chose
+                -- Right still counts, but its returned state is committed.
+                cancelledMid <- isCancelled config.loopCancel
+                let usageAcc' = addTokenUsage usageAcc turn.tokenUsage
+                if cancelledMid
+                    then finish state ResponseCommitted
+                        (Left (LoopCancelled []))
+                    else do
+                        config.loopOnEvent (TurnFinished turn)
+                        let nextTurnsUsed = turnsUsed + 1
+                        if null turn.toolCalls
+                            then finish state ResponseCommitted $
+                                Right LoopResult
+                                    { finalResponseId = turn.responseId
+                                    , finalText = turn.assistantText
+                                    , turnsUsed = nextTurnsUsed
+                                    , tokenUsage = usageAcc'
+                                    }
+                            else do
+                                results <- runToolCalls config turn.toolCalls
+                                cancelledAfter <-
+                                    isCancelled config.loopCancel
+                                if cancelledAfter
+                                    then finish state ResponseCommitted
+                                        (Left (LoopCancelled results))
+                                    else go
+                                        state
+                                        ResponseCommitted
+                                        (Just turn.responseId)
+                                        nextTurnsUsed
+                                        (map CompletedTool results)
+                                        (Just turn)
+                                        usageAcc'
+    go initialState NoResponseCommitted previousResponseId 0 firstInputs
+        Nothing emptyTokenUsage
 
 -- | Preserve model order around stateful tools while retaining concurrency
 -- for maximal consecutive runs of explicitly parallel-safe calls.

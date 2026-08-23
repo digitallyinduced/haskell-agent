@@ -27,6 +27,7 @@ import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
+import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , applyStreamEvent
@@ -356,7 +357,7 @@ sendWsRequestWithEventsAndOptions options cc request previousResponseId onEvent 
 -- All fields are flattened at the top level (not nested inside "response").
 buildWsPayloadWithOptions :: CodexWsOptions -> ResponseCreateParams -> Maybe Text -> Aeson.Value
 buildWsPayloadWithOptions options request previousResponseId =
-    case Aeson.toJSON request of
+    case Aeson.toJSON (sanitizeCodexRequest request) of
         Aeson.Object object -> Aeson.Object
             $ addContextManagement
             $ addPreviousResponseId

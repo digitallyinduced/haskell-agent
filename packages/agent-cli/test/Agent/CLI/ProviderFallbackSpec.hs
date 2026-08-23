@@ -9,6 +9,7 @@ import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
+    , automaticRetryCountdownText
     , fallbackCandidates
     , rankedModels
     )
@@ -135,6 +136,16 @@ spec = do
             automaticCooldownRetryDelay now
                 (ProviderError AuthenticationError "expired" Nothing)
                 `shouldBe` Nothing
+
+    describe "automaticRetryCountdownText" do
+        it "shows the remaining wait in seconds" do
+            automaticRetryCountdownText 60
+                `shouldBe`
+                    "Provider temporarily unavailable; retrying automatically in 60s · Esc to cancel"
+
+        it "never displays a negative countdown" do
+            automaticRetryCountdownText (-1)
+                `shouldSatisfy` Text.isInfixOf "in 0s"
 
 safeHead :: [a] -> Maybe a
 safeHead = \case

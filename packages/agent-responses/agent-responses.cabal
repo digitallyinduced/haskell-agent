@@ -1,10 +1,10 @@
 cabal-version:      2.2
 name:               agent-responses
 version:            0.1.0.0
-synopsis:           Provider-neutral OpenAI Responses protocol types and adapters
-description:        Canonical Responses API types, codecs, stream merging, and
-                    loop adapters shared by provider transports.
-license:            MIT
+synopsis:           Provider-neutral Responses codecs and adapters
+description:        Responses API codecs, stream merging, and loop adapters
+                    built on the canonical agent-responses-types data model.
+license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
@@ -43,12 +43,13 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.Responses.Types
-                    , Agent.Responses.Codec
+    exposed-modules:  Agent.Responses.Codec
+                    , Agent.Responses.Client
                     , Agent.Responses.Error
                     , Agent.Responses.GenericBackend
                     , Agent.Responses.GenericClient
                     , Agent.Responses.HttpSSE
+                    , Agent.Responses.Request
                     , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
                     , Agent.Responses.StreamAssembly
@@ -56,6 +57,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , aeson                 >= 2.0
                     , base64-bytestring
                     , bytestring
@@ -74,7 +76,8 @@ test-suite agent-responses-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.Responses.LoopBackendSpec
+    other-modules:    Agent.Responses.ClientSpec
+                    , Agent.Responses.LoopBackendSpec
                     , Agent.Responses.GenericClientSpec
                     , Agent.Responses.ResponseMergeSpec
                     , Agent.Responses.SSESpec
@@ -82,6 +85,7 @@ test-suite agent-responses-test
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-responses
+                    , agent-responses-types
                     , aeson >= 2.0
                     , bytestring
                     , hspec

@@ -8,6 +8,7 @@ module Agent.TUI.Markdown.Inline
 import Data.Char
     ( isAlphaNum
     , isAscii
+    , isControl
     , isSpace
     )
 import qualified Data.List as List
@@ -75,6 +76,10 @@ parseSequence closing initialPrevious = go initialPrevious
                                 else " (" <> url <> ")")
                         <|> previous
             in InlineLink url children : go previous' rest
+        | maybe True (not . isWordCharacter) previous
+        , Just (url, rest) <- bareUrlSpan text =
+            InlineLink url [InlineText url]
+                : go (lastCharacter url <|> previous) rest
         | Just (node, visible, rest) <- styledSpan previous "**" InlineStrong text =
             node : go (lastCharacter visible <|> previous) rest
         | Just (node, visible, rest) <- styledSpan previous "__" InlineStrong text =
@@ -246,6 +251,43 @@ takeDestination depth consumed remaining =
                 (consumed <> Text.singleton character)
                 rest
 
+bareUrlSpan :: Text -> Maybe (Text, Text)
+bareUrlSpan text = do
+    afterScheme <-
+        Text.stripPrefix "https://" text
+            <|> Text.stripPrefix "http://" text
+    let schemeLength = Text.length text - Text.length afterScheme
+        candidate = Text.takeWhile isUrlCharacter text
+        url = trimBareUrl candidate
+    if Text.length url > schemeLength
+        then Just (url, Text.drop (Text.length url) text)
+        else Nothing
+  where
+    isUrlCharacter character =
+        not (isSpace character)
+            && not (isControl character)
+
+trimBareUrl :: Text -> Text
+trimBareUrl candidate =
+    case Text.unsnoc candidate of
+        Just (prefix, character)
+            | character `elem` (".,;:!?\"'" :: String) ->
+                trimBareUrl prefix
+            | character == ')'
+            , unmatchedClosing '(' ')' candidate ->
+                trimBareUrl prefix
+            | character == ']'
+            , unmatchedClosing '[' ']' candidate ->
+                trimBareUrl prefix
+            | character == '}'
+            , unmatchedClosing '{' '}' candidate ->
+                trimBareUrl prefix
+        _ -> candidate
+  where
+    unmatchedClosing opening closing text =
+        Text.count (Text.singleton closing) text
+            > Text.count (Text.singleton opening) text
+
 escapedPunctuation :: Text -> Maybe (Char, Text)
 escapedPunctuation text = do
     afterSlash <- Text.stripPrefix "\\" text
@@ -288,16 +330,33 @@ isWordCharacter :: Char -> Bool
 isWordCharacter character = isAlphaNum character || character == '_'
 
 takePlain :: Maybe Text -> Text -> (Text, Text)
-takePlain closing =
-    Text.span \character ->
-        character /= '\\'
-            && character /= '`'
-            && character /= '['
-            && character /= '*'
-            && character /= '_'
-            && maybe True
-                (\marker -> character /= Text.head marker)
+takePlain closing text =
+    case
+        [ index
+        | Just index <-
+            [ Text.findIndex isMarkupStart text
+            , prefixIndex "https://" text
+            , prefixIndex "http://" text
+            ]
+        ] of
+        [] -> (text, "")
+        indexes -> Text.splitAt (minimum indexes) text
+  where
+    isMarkupStart character =
+        character == '\\'
+            || character == '`'
+            || character == '['
+            || character == '*'
+            || character == '_'
+            || maybe False
+                (\marker -> character == Text.head marker)
                 closing
+
+    prefixIndex prefix source =
+        let (before, match) = Text.breakOn prefix source
+        in if Text.null match
+            then Nothing
+            else Just (Text.length before)
 
 lastCharacter :: Text -> Maybe Char
 lastCharacter text = snd <$> Text.unsnoc text

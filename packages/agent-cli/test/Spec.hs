@@ -11,6 +11,7 @@ import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
@@ -49,6 +50,7 @@ import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
+import qualified Agent.TelegramSpec as TelegramSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
@@ -70,6 +72,7 @@ main = hspec do
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    ConfigSpec.spec
     CompactionSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
@@ -104,6 +107,7 @@ main = hspec do
     TimestampSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
+    TelegramSpec.spec
     TextLayoutSpec.spec
     SessionSpec.spec
     SessionTitleSpec.spec

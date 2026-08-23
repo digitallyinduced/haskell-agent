@@ -4,6 +4,7 @@ import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , TurnInput(..)
     , emptyTurnOutput
     )
@@ -18,10 +19,15 @@ spec = describe "withPendingInputs" do
         pending <- newIORef [UserMessage "child result"]
         seen <- newIORef []
         let backend = withPendingInputs pending $ Backend
-                \_ inputs _ -> do
+                \state _ inputs _ -> do
                     writeIORef seen inputs
-                    pure (Right (emptyTurnOutput "response" [] Nothing))
-        _ <- backend.submitTurn Nothing [UserMessage "parent"] (const (pure ()))
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "response" [] Nothing
+                        , backendState = state
+                        }
+        _ <- backend.submitTurn [] Nothing
+            [UserMessage "parent"] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "child result", UserMessage "parent"]
         readIORef pending `shouldReturn` []
@@ -30,16 +36,18 @@ spec = describe "withPendingInputs" do
         let queued = [UserMessage "child result"]
         pending <- newIORef queued
         let backend = withPendingInputs pending $ Backend
-                \_ _ _ -> pure (Left (ConnectionError "offline"))
-        _ <- backend.submitTurn Nothing [UserMessage "parent"] (const (pure ()))
+                \_ _ _ _ -> pure (Left (ConnectionError "offline"))
+        _ <- backend.submitTurn [] Nothing
+            [UserMessage "parent"] (const (pure ()))
         readIORef pending `shouldReturn` queued
 
     it "requeues inputs when submission is interrupted by an exception" do
         let queued = [UserMessage "child result"]
         pending <- newIORef queued
         let backend = withPendingInputs pending $ Backend
-                \_ _ _ -> ioError (userError "interrupted")
+                \_ _ _ _ -> ioError (userError "interrupted")
         result <- tryAny $
-            backend.submitTurn Nothing [UserMessage "parent"] (const (pure ()))
+            backend.submitTurn [] Nothing
+                [UserMessage "parent"] (const (pure ()))
         result `shouldSatisfy` isLeft
         readIORef pending `shouldReturn` queued

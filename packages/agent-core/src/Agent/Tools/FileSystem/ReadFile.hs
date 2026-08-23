@@ -66,7 +66,7 @@ runReadFile env args = resolveUnderCwd env (fromText args.targetFile) >>= \case
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
             pure $ Left
-                "PDF rendering is not available. Use run_terminal_command with pdftotext, or convert the file to text first."
+                "PDF rendering is not available. Use an explicit terminal conversion tool if available, or convert the file to text first."
         | otherwise -> doesFileExist path >>= \case
             False -> pure $ Left $ "File not found: " <> args.targetFile
             True -> readTextFile path >>= \case
