@@ -101,6 +101,7 @@ agentStatusGlyph status = case Text.toLower status of
 
 data AgentViewportEnv = AgentViewportEnv
     { viewportSelected :: !(IORef AgentTarget)
+    , viewportSelect :: !(AgentTarget -> IO ())
     , viewportEntries :: !(IO [AgentEntry])
     }
 

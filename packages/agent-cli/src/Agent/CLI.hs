@@ -216,7 +216,8 @@ import Agent.CLI.Subagents.Runtime
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
-    , persistSubagentSnapshotWithStatus
+    , lookupOrCreateSubagentSession
+    , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
     , runCodexSubagent
@@ -371,13 +372,16 @@ import Agent.Subagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
+    , getStatus
     , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
     , setSubagentOnComplete
+    , setSubagentOnSettled
     , setSubagentRunner
     )
 import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Tools.Grok.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
@@ -429,7 +433,7 @@ import Control.Exception.Safe
     , throwIO
     , try
     )
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
@@ -1472,16 +1476,19 @@ runAgentInitializedWithLock
         codingToolsForWithTypes
             dialect toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
-        Just ctx ->
+        Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
+            setSubagentOnSettled ctx.multiRegistry \agentId status -> do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
-                    Just session ->
-                        persistSubagentSnapshotWithStatus
-                            subagentStoreRoot ctx.multiRegistry agentTypesRef
-                            agentId status session
+                    Just session -> do
+                        _ <-
+                            persistAndEvictSubagentSessionWithStatus
+                                subagentStoreRoot ctx.multiRegistry agentTypesRef
+                                agentId status session
+                        pure ()
                     Nothing -> pure ()
         Nothing -> pure ()
     let claimCurrentSession handle = do
@@ -1884,7 +1891,7 @@ runAgentInitializedWithLock
                                     link switchWorker
                                     runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1947,7 +1954,7 @@ runAgentInitializedWithLock
                                 projectRoot transition persist backend
                         runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         case multiCtx of
                             Just ctx ->
@@ -1984,7 +1991,7 @@ runAgentInitializedWithLock
                                 projectRoot transition persist backend
                         runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -2194,6 +2201,8 @@ runSession
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [TurnInput]
     -> SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> Maybe LegacySubagentTarget
     -> IORef TokenUsage
     -> IORef Text
     -> IORef Text
@@ -2205,7 +2214,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2351,13 +2360,60 @@ runSession options provider dialect policy tools toolEnv planMode startup prompt
                     , agentSteps = steps
                     , agentTranscript = transcript
                     }
+        hydrateSelectedAgent agentId = do
+            effectiveModel <- readIORef modelRef
+            lookupOrCreateSubagentSession
+                subagentSessions
+                storeRoot
+                agentTypes
+                provider
+                legacyTarget
+                effectiveModel
+                (dialectId dialect)
+                agentId
+        selectAgent target = do
+            previous <- readIORef selectedAgent
+            when (previous /= target) $
+                releaseSelectedAgent previous
+            case target of
+                AgentRoot -> pure ()
+                AgentChild agentId -> do
+                    session <-
+                        (Just <$>
+                            hydrateSelectedAgent agentId)
+                            `catchAny` \_ -> pure Nothing
+                    forM_ session \selectedSession -> do
+                        withMVar selectedSession.subSessionHydrated \_ ->
+                            writeIORef selectedSession.subSessionPinned True
+                        -- If settlement won the race before the pin was set,
+                        -- refill the same stable object now that it is pinned.
+                        void
+                            (hydrateSelectedAgent agentId)
+                            `catchAny` \_ -> pure ()
+            writeIORef selectedAgent target
+        releaseSelectedAgent = \case
+            AgentRoot -> pure ()
+            AgentChild agentId -> do
+                sessions <- readIORef subagentSessions
+                forM_ (Map.lookup agentId sessions) \session -> do
+                    withMVar session.subSessionHydrated \_ ->
+                        writeIORef session.subSessionPinned False
+                    case multiCtx of
+                        Nothing -> pure ()
+                        Just ctx -> do
+                            status <- getStatus ctx.multiRegistry agentId
+                            void $
+                                persistAndEvictSubagentSessionWithStatus
+                                    storeRoot ctx.multiRegistry agentTypes
+                                    agentId status session
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
+            , viewportSelect = selectAgent
             , viewportEntries = snd <$> loadAgentSnapshot True
             }
     writeIORef startup.startupAgentSnapshot
         (loadAgentSnapshot False)
-    writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
+    writeIORef startup.startupAgentSelect selectAgent
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -3412,7 +3468,7 @@ replWithDraft env@SessionEnv
                                     fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
                                     Just target ->
-                                        writeIORef viewport.viewportSelected target
+                                        viewport.viewportSelect target
                                 continue
 
                     ReplCopyLast -> do
