@@ -19,6 +19,7 @@ module Agent.CLI.Session
     , addSessionUsage
     , deleteSession
     , loadSession
+    , loadSessionHandle
     , isValidSessionId
     , listSessions
     , sessionDirForId
@@ -555,6 +556,29 @@ loadSession root sessionId = runExceptT do
                 <> ")"
     turns <- loadTranscript transcriptPath
     pure (meta, turns)
+
+loadSessionHandle
+    :: OsPath
+    -> Text
+    -> IO (Either Text (SessionHandle, [SessionTurn]))
+loadSessionHandle root sessionId =
+    loadSession root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right (meta, turns) ->
+            pure do
+                dir <- sessionDirForId root sessionId
+                tempDir <- sessionTempDirForId root sessionId
+                Right
+                    ( SessionHandle
+                        { sessionDir = dir
+                        , sessionTempDir = tempDir
+                        , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
+                        , sessionTranscriptPath =
+                            dir </> unsafeEncodeUtf "transcript.jsonl"
+                        , sessionMeta = meta
+                        }
+                    , turns
+                    )
 
 deleteSession :: OsPath -> Text -> IO (Either Text ())
 deleteSession root sessionId = runExceptT do

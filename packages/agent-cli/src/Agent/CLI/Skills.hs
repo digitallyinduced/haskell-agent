@@ -35,6 +35,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (stderr)
 import System.OsPath (OsPath)
+import qualified Paths_agent_cli as Paths
 
 reservedSlashNames :: [Text]
 reservedSlashNames =
@@ -73,12 +74,24 @@ loadSkillsCatalogQuiet
     -> IO SkillCatalog
 loadSkillsCatalogQuiet options home projectRoot cwd
     | not options.optSkills = pure (SkillCatalog [] [])
-    | otherwise =
-        discoverSkills SkillDiscoverOptions
+    | otherwise = do
+        discovered <- discoverSkills SkillDiscoverOptions
             { skillsHome = home
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
             , skillsMaxDepth = 6
+            }
+        bundledPath <- Paths.getDataFileName "skills/telegram-agent/SKILL.md"
+        bundled <- loadSkillFile BuiltinSkill AgentSkills bundledPath
+        pure discovered
+            { catalogSkills =
+                either (const discovered.catalogSkills)
+                    (: discovered.catalogSkills)
+                    bundled
+            , catalogWarnings =
+                either (: discovered.catalogWarnings)
+                    (const discovered.catalogWarnings)
+                    bundled
             }
 
 reportSkillWarning :: Bool -> SkillWarning -> IO ()
@@ -171,6 +184,7 @@ skillSourceLabel skill =
     scope <> " · " <> origin
   where
     scope = case skill.skillScope of
+        BuiltinSkill -> "built-in"
         UserSkill -> "user"
         RepositorySkill _ True -> "local"
         RepositorySkill _ False -> "repo"

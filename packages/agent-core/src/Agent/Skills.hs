@@ -9,6 +9,7 @@ module Agent.Skills
     , SkillWarning(..)
     , defaultSkillCatalogMaxChars
     , discoverSkills
+    , loadSkillFile
     , buildSkillInvocations
     , modelVisibleSkills
     , formatSkillCatalogContext
@@ -67,7 +68,8 @@ data SkillOrigin
     deriving (Eq, Ord, Show)
 
 data SkillScope
-    = UserSkill
+    = BuiltinSkill
+    | UserSkill
     | RepositorySkill
         { skillDepth :: !Int
         , skillAtCwd :: !Bool
@@ -207,7 +209,7 @@ discoverSkills options = do
         if exists
             then do
                 files <- findSkillFiles options.skillsMaxDepth root
-                forM files (loadSkill scope origin)
+                forM files (loadSkillFile scope origin)
             else pure []
     let skills = [skill | Right skill <- results]
         warnings = [warning | Left warning <- results]
@@ -273,12 +275,12 @@ findSkillFiles maxDepth root = go Set.empty 0 root
                                     traverse (go (Set.insert canonical seen) (depth + 1)) children
                                 pure ([skillPath | hasSkill] <> nested)
 
-loadSkill
+loadSkillFile
     :: SkillScope
     -> SkillOrigin
     -> FilePath
     -> IO (Either SkillWarning Skill)
-loadSkill scope origin path = do
+loadSkillFile scope origin path = do
     result <- tryAny (retryOnFileBusy (Text.readFile path))
     case result of
         Left err ->
@@ -391,6 +393,7 @@ skillSortKey skill =
     )
   where
     (scopeRank, depth) = case skill.skillScope of
+        BuiltinSkill -> (-1, 0)
         UserSkill -> (0, 0)
         RepositorySkill d _ -> (1, d)
     originRank = case skill.skillOrigin of
@@ -461,6 +464,7 @@ qualifiedInvocation name siblings index skill =
 
 scopeQualifier :: Skill -> Text
 scopeQualifier skill = case skill.skillScope of
+    BuiltinSkill -> "builtin"
     UserSkill -> "user"
     RepositorySkill _ True -> "local"
     RepositorySkill _ False -> "repo"

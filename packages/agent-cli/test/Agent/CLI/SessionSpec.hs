@@ -141,6 +141,12 @@ spec = describe "Agent.CLI.Session" do
                 listed <- listSessions root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
 
+                loadSessionHandle root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (loadedHandle, _) ->
+                        loadedHandle.sessionTempDir
+                            `shouldBe` handle.sessionTempDir
+
         it "combines append metadata and a caller transition in one result" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)

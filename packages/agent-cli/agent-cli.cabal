@@ -11,6 +11,7 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+data-files:         skills/telegram-agent/SKILL.md
 
 common common-options
     default-language: GHC2021
@@ -37,6 +38,8 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
+    autogen-modules:  Paths_agent_cli
+    other-modules:    Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
@@ -86,6 +89,7 @@ library
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
+                    , Agent.Telegram
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -120,6 +124,8 @@ library
                     , filelock
                     , filepath
                     , haskeline >= 0.8 && < 0.9
+                    , http-client
+                    , http-client-tls
                     , JuicyPixels
                     , mtl
                     , process >= 1.6.26
@@ -140,6 +146,14 @@ executable agent-cli
     -- Keep the heap ceiling without multiplying a large allocation area by
     -- every host core. Four capabilities cover the agent's concurrent I/O;
     -- leave -A at the GHC RTS default.
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+
+executable agent-telegram
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Telegram.hs
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
@@ -203,6 +217,7 @@ test-suite agent-cli-test
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
+                    , Agent.TelegramSpec
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
