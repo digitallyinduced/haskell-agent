@@ -197,10 +197,11 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , automaticCooldownRetryDelay
     , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
+    , ProviderRecoveryPreference(..)
+    , providerRecoveryPreference
     )
 import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.ProviderTransition
@@ -3290,22 +3291,25 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         finishTurnWithCooldownRetry allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
-        in requestAutomaticProviderFallback env apiError pending' >>= \case
-            Just providerTransition ->
-                pure (RunSwitchProvider providerTransition)
-            Nothing -> do
-                now <- getCurrentTime
-                case automaticCooldownRetryDelay now apiError of
-                    Just delay | allowCooldownRetry ->
-                        waitAndRetryPendingTurn env delay pending'
-                    _ -> do
-                        reportProviderUnavailable
-                            env.sessionFullscreen apiError
-                        if exitAfter
-                            then exitFailure
-                            else do
-                                notifyAttention stderr InputRequested
-                                replWithDraft env pending.pendingPromptText
+        in do
+            now <- getCurrentTime
+            case providerRecoveryPreference
+                    allowCooldownRetry now apiError of
+                RetryCurrentProviderAfter delay ->
+                    waitAndRetryPendingTurn env delay pending'
+                TryProviderFallback ->
+                    requestAutomaticProviderFallback env apiError pending'
+                        >>= \case
+                        Just providerTransition ->
+                            pure (RunSwitchProvider providerTransition)
+                        Nothing -> do
+                            reportProviderUnavailable
+                                env.sessionFullscreen apiError
+                            if exitAfter
+                                then exitFailure
+                                else do
+                                    notifyAttention stderr InputRequested
+                                    replWithDraft env pending.pendingPromptText
 
 continueAfterTurn :: SessionEnv -> IO RunResult
 continueAfterTurn env = do
