@@ -1,11 +1,8 @@
 module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Cancel (requestCancel, resetCancel)
-import Agent.Dialect (codexDialect)
-import Agent.Loop (defaultLoopDispatch)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
-import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools.Types (defaultToolEnv)
 import Agent.Tools.Ghci
     ( GhciClass(..)
     , GhciOutcome(..)
@@ -19,15 +16,11 @@ import Agent.Tools.Ghci
     , newGhciSession
     , typeLooksEffectful
     )
-import Agent.Tools.Grok (closeGrokSession, grokTools, newGrokSession)
-import Agent.Tools.PlanMode (newPlanModeEnv)
-import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
-import Data.IORef
-import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
@@ -222,23 +215,6 @@ spec = describe "Agent.Tools.Ghci" do
             result.ghciOutcome `shouldBe` GhciProcessFailed
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "closed"
 
-    it "exposes run_ghci through grokTools dispatch" do
-        withTempTools \tools -> do
-            let handlers = appToolHandlers tools
-            result <- dispatchToolCall defaultLoopDispatch handlers
-                (functionToolCall "c1" "run_ghci"
-                    "{\"expression\":\"3 + 4\",\"timeout\":\"10000\",\"description\":\"add\"}")
-            result.output `shouldSatisfy` Text.isInfixOf "class: pure"
-            result.output `shouldSatisfy` Text.isInfixOf "7"
-            let names = map (.appToolName) tools
-            names `shouldContain` ["run_ghci"]
-
-    it "is registered for OpenAI via codingToolsFor" do
-        withTempEnv \env -> do
-            coding <- codingToolsFor codexDialect env Nothing Nothing
-            map (.appToolName) coding.codingAppTools `shouldContain` ["run_ghci"]
-            coding.codingClose
-
 infiniteOutput :: Text.Text
 infiniteOutput =
     "let loop = putStrLn (replicate 4096 'x') >> loop in loop"
@@ -296,23 +272,5 @@ withTempGhci action =
         ghci <- newGhciSession env
         pure (dir, ghci)
     release (dir, ghci) = do
-        closeGhciSession ghci
-        removeDirectoryRecursive dir
-
-withTempTools :: ([AppTool] -> IO a) -> IO a
-withTempTools action =
-    bracket acquire release \(_, _, tools) -> action tools
-  where
-    acquire = do
-        tmp <- getTemporaryDirectory
-        dir <- mkdtemp (tmp </> "agent-ghci-tools-")
-        env <- defaultToolEnv (fromFilePath dir)
-        session <- newGrokSession env
-        ghci <- newGhciSession env
-        plan <- newPlanModeEnv env.toolCwd Nothing
-        typesRef <- newIORef Map.empty
-        pure (dir, (session, ghci), grokTools session ghci plan Nothing typesRef)
-    release (dir, (session, ghci), _) = do
-        closeGrokSession session
         closeGhciSession ghci
         removeDirectoryRecursive dir
