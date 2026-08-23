@@ -4,6 +4,7 @@ module Agent.Responses.Error
     , mkOpenAIError
     , classifyHttpFailure
     , isPreviousResponseIdError
+    , isResponseChainCompatibilityError
     ) where
 
 import Agent.Error
@@ -257,6 +258,29 @@ isPreviousResponseIdError = \case
         mentionsPreviousResponse message || mentionsPreviousResponse body
     CredentialsExhausted{} -> False
 
+-- | Errors that can be caused by provider-managed state attached to
+-- @previous_response_id@ rather than by the current request body.
+--
+-- The Codex backend can return stored chains carrying
+-- @prompt_cache_retention@ parameter after routing a follow-up to a model that
+-- no longer accepts it. Replaying the local transcript without the continuation
+-- id creates a fresh chain and is safe before any model output is observed.
+isResponseChainCompatibilityError :: ApiError -> Bool
+isResponseChainCompatibilityError error =
+    isPreviousResponseIdError error
+        || apiErrorTextMatches mentionsUnsupportedPromptCacheRetention error
+
+apiErrorTextMatches :: (Text -> Bool) -> ApiError -> Bool
+apiErrorTextMatches predicate = \case
+    ProviderError errorType message _ ->
+        predicate (Text.pack (show errorType)) || predicate message
+    ConnectionError message -> predicate message
+    CredentialError message -> predicate message
+    HttpError _ body -> predicate body
+    JsonDecodeError message body ->
+        predicate message || predicate body
+    CredentialsExhausted{} -> False
+
 mentionsPreviousResponse :: Text -> Bool
 mentionsPreviousResponse value =
     let lowered = Text.toLower value
@@ -264,6 +288,13 @@ mentionsPreviousResponse value =
         || "previous response" `Text.isInfixOf` lowered
         || "response_not_found" `Text.isInfixOf` lowered
         || "previous_response_not_found" `Text.isInfixOf` lowered
+
+mentionsUnsupportedPromptCacheRetention :: Text -> Bool
+mentionsUnsupportedPromptCacheRetention value =
+    let lowered = Text.toLower value
+    in "prompt_cache_retention" `Text.isInfixOf` lowered
+        && ("not supported" `Text.isInfixOf` lowered
+            || "unsupported" `Text.isInfixOf` lowered)
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just value) _ = Just value
