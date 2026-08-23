@@ -118,6 +118,32 @@ spec = describe "systemPrompt" do
         prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
         prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"
         prompt `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        prompt `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
+
+    it "adds secret guidance only when ask_secret is registered" do
+        let withSecret =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "ask_secret"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutSecret =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "Never ask the user to paste a token"
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "It returns a private temporary file path"
+        withSecret `shouldSatisfy` Text.isInfixOf
+            "Never read, print, summarize"
+        withoutSecret `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
 
     it "keeps OpenAI web-search references internal" do
         let openai =

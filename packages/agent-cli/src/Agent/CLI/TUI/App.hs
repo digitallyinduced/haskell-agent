@@ -34,6 +34,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenOnboarding
     , requestFullscreenResume
+    , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
@@ -41,12 +42,16 @@ module Agent.CLI.TUI.App
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
+    , maskedSecretText
+    , normalizeTextOverlayInsertion
+    , textOverlayDisplayText
     , withFullscreenSuspended
     ) where
 
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -158,6 +163,7 @@ import Control.Concurrent.STM
     , readTMVar
     , registerDelay
     , retry
+    , takeTMVar
     , writeTVar
     )
 import Control.Monad (unless, void, when)
@@ -546,8 +552,28 @@ requestFullscreenText
 requestFullscreenText runtime title body initial = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
-        (AppAskText title body initial reply)
+        (AppAskText TextInputPlain title body initial reply)
     atomically (readTMVar reply)
+
+-- | Request a secret through a masked fullscreen prompt.
+--
+-- The returned value exists only in transient overlay state and the reply
+-- 'TMVar'; it is never rendered or added to normal prompt history.
+requestFullscreenSecret
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> IO (Maybe Text)
+requestFullscreenSecret runtime title body = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskText
+            TextInputSecret
+            (sanitizeSecretPromptText title)
+            (sanitizeSecretPromptText body)
+            ""
+            reply)
+    atomically (takeTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
@@ -1405,7 +1431,11 @@ handleTextPromptKey = \case
             _ <- handleCtrlC
             when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
-    V.EvKey V.KEnter [V.MShift] -> insert "\n"
+    V.EvKey V.KEnter [V.MShift] -> do
+        state <- get
+        case (.textInputMode) <$> state.appTextPrompt of
+            Just TextInputPlain -> insert "\n"
+            _ -> pure ()
     V.EvKey V.KPageUp [] ->
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
@@ -1444,11 +1474,16 @@ handleTextPromptKey = \case
         | V.MCtrl `elem` modifiers ->
             edit deleteToLineEnd
     V.EvKey (V.KChar character) [] ->
-        insert (Text.singleton character)
+        insertForMode (Text.singleton character)
     V.EvPaste bytes ->
-        insert (Composer.decodePaste bytes)
+        insertForMode (Composer.decodePaste bytes)
     _ -> pure ()
   where
+    insertForMode raw = do
+        state <- get
+        let mode =
+                maybe TextInputPlain (.textInputMode) state.appTextPrompt
+        insert (normalizeTextOverlayInsertion mode raw)
     edit change =
         modify' \state ->
             state
@@ -3030,13 +3065,33 @@ drawTextPrompt state prompt =
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =
-    let content =
-            if Text.null prompt.textDraft
+    let displayDraft = textOverlayDisplayText prompt
+        content =
+            if Text.null displayDraft
                 then withAttr Theme.mutedAttr (txt " ")
-                else txt prompt.textDraft
+                else txt displayDraft
         (row, column) =
-            Composer.draftCursorLocation prompt.textDraft prompt.textCursor
+            Composer.draftCursorLocation displayDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
+
+-- | Replace every code point with one fixed-width masking glyph.
+maskedSecretText :: Text -> Text
+maskedSecretText value =
+    Text.replicate (Text.length value) "•"
+
+-- | Text that may be painted for an overlay draft.
+textOverlayDisplayText :: TextOverlay -> Text
+textOverlayDisplayText prompt = case prompt.textInputMode of
+    TextInputPlain -> prompt.textDraft
+    TextInputSecret -> maskedSecretText prompt.textDraft
+
+-- | Secret prompts are deliberately single-line. Plain overlays preserve
+-- multiline input, while secret pastes stop before the first line ending.
+normalizeTextOverlayInsertion :: TextInputMode -> Text -> Text
+normalizeTextOverlayInsertion = \case
+    TextInputPlain -> id
+    TextInputSecret -> Text.takeWhile \character ->
+        character /= '\n' && character /= '\r'
 
 choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
 choiceRow appState selected index (label, detail) =
@@ -3520,7 +3575,7 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)
-    AppEvent (AppAskText title body initial reply) -> do
+    AppEvent (AppAskText mode title body initial reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
@@ -3530,6 +3585,7 @@ handleEventInner event = case event of
                     , textBody = body
                     , textDraft = initial
                     , textCursor = Text.length initial
+                    , textInputMode = mode
                     }
                 , appTextReply = Just reply
                 , appAgentHover = Nothing
