@@ -65,7 +65,6 @@ import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Value(..), withObject)
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseFail)
-import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -77,15 +76,14 @@ codexTools
     -> PlanModeEnv
     -> Maybe MultiAgentContext
     -> IO [AppTool]
-codexTools env shellSession ghci planMode multi = do
-    planRef <- newIORef []
+codexTools env shellSession ghci planMode multi =
     pure $
         [ runGhciTool ghci
         , readFileTool env
         , grepTool env
         , listDirTool env
         , applyPatchTool env
-        , updatePlanTool planMode planRef
+        , updatePlanTool planMode
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
@@ -314,8 +312,8 @@ instance FromJSON UpdatePlanArgs where
             Just value -> parseJSON value
         pure UpdatePlanArgs { explanation, plan }
 
-updatePlanTool :: PlanModeEnv -> IORef [PlanItem] -> AppTool
-updatePlanTool planMode planRef = jsonTool "update_plan" updatePlanDescription
+updatePlanTool :: PlanModeEnv -> AppTool
+updatePlanTool planMode = jsonTool "update_plan" updatePlanDescription
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional explanation for this plan update."
     , PropertySchema "plan" (PropertyArray (PropertyObject
@@ -326,7 +324,7 @@ updatePlanTool planMode planRef = jsonTool "update_plan" updatePlanDescription
     ]
     True
     TurnSequential
-    (typedTool "update_plan" (runUpdatePlan planMode planRef))
+    (typedTool "update_plan" (runUpdatePlan planMode))
 
 updatePlanDescription :: Text
 updatePlanDescription =
@@ -335,28 +333,27 @@ updatePlanDescription =
     \At most one step can be in_progress at a time.\n\
     \This is a progress checklist, not Plan Mode. It errors while Plan Mode is active."
 
-runUpdatePlan :: PlanModeEnv -> IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
-runUpdatePlan planMode planRef args = do
+runUpdatePlan :: PlanModeEnv -> UpdatePlanArgs -> IO (Either Text Text)
+runUpdatePlan planMode args = do
     active <- isPlanModeActive planMode
     if active
         then pure $ Left
             "update_plan is unavailable in Plan Mode. Write the design to plan.md \
             \and present it with a <proposed_plan> block when ready."
-        else runUpdatePlanBody planRef args
+        else pure (runUpdatePlanBody args)
 
-runUpdatePlanBody :: IORef [PlanItem] -> UpdatePlanArgs -> IO (Either Text Text)
-runUpdatePlanBody planRef args
+runUpdatePlanBody :: UpdatePlanArgs -> Either Text Text
+runUpdatePlanBody args
     | any (\item -> item.status `notElem` ["pending", "in_progress", "completed"]) args.plan =
-        pure (Left "Each plan status must be pending, in_progress, or completed.")
+        Left "Each plan status must be pending, in_progress, or completed."
     | length (filter (\item -> item.status == "in_progress") args.plan) > 1 =
-        pure (Left "At most one step can be in_progress at a time.")
-    | otherwise = do
-        writeIORef planRef args.plan
+        Left "At most one step can be in_progress at a time."
+    | otherwise =
         let rendered = Text.unlines (map renderItem args.plan)
             header = case args.explanation of
                 Nothing -> "Plan updated:\n"
                 Just explanation -> explanation <> "\nPlan updated:\n"
-        pure $ Right (header <> rendered)
+        in Right (header <> rendered)
   where
     renderItem :: PlanItem -> Text
     renderItem item = "- [" <> item.status <> "] " <> item.step
