@@ -7,7 +7,31 @@ import Data.IORef
 import Test.Hspec
 
 spec :: Spec
-spec = describe "retryingBeforeCommit" do
+spec = do
+  describe "runObservedAttempt" do
+    it "returns explicit output observation metadata" do
+        delivered <- newIORef []
+        outcome <- runObservedAttempt odd
+            (\event -> modifyIORef' delivered (<> [event]))
+            (\emit -> emit (2 :: Int) >> emit 3 >> pure ("done" :: String))
+
+        outcome `shouldBe` AttemptOutcome
+            { attemptObservation = OutputObserved
+            , attemptResult = "done"
+            }
+        readIORef delivered `shouldReturn` [2, 3]
+
+    it "marks output before invoking a failing callback" do
+        outcome <- runObservedAttempt (const True)
+                (\() -> ioError (userError "callback failed"))
+                (\emit -> tryAny (emit ()) >> pure ("caught" :: String))
+
+        outcome `shouldBe` AttemptOutcome
+            { attemptObservation = OutputObserved
+            , attemptResult = "caught"
+            }
+
+  describe "retryingBeforeCommit" do
     it "normalizes synchronous exceptions into the action error channel" do
         result <- handleSyncExceptions
             (const "normalized")

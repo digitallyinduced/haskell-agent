@@ -51,7 +51,7 @@ import Agent.CLI.SessionTitle
     , invalidateSessionTitles
     , requestSessionTitle
     , waitForSessionTitleResults
-    , withSessionTitleManager
+    , withSessionTitleManagerExplicit
     )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
@@ -69,9 +69,9 @@ import Agent.CLI.Approval
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
-    ( BtwBackendFactory
+    ( ExplicitBtwBackendFactory
     , formatBtwError
-    , runBtwWithCancel
+    , runBtwWithCancelExplicit
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
@@ -249,13 +249,13 @@ import Agent.CLI.Subagents.Runtime
     , SubagentSession(..)
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
-    , freshOpenAiBackend
+    , freshOpenAiBackendWithParams
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
     , runCodexSubagent
-    , runHttpSubagent
+    , runHttpSubagentWithParams
     )
 import Agent.CLI.Style
     ( beginBackground
@@ -382,7 +382,10 @@ import Agent.OpenAI.LoopBackend
     , openAiResponseSenderReconnecting
     )
 import Agent.Responses.Types
-import Agent.Responses.GenericBackend (genericResponsesBackendWith)
+import Agent.Responses.GenericBackend
+    ( genericResponsesBackendWith
+    , genericResponsesBackendWithFixedParams
+    )
 import Agent.Responses.GenericClient (GenericClientOptions(..))
 import qualified Agent.Responses.GenericClient as GenericResponses
 import Agent.OpenAI.Usage (fetchUsage)
@@ -451,10 +454,13 @@ import Agent.Tools.Types
     , defaultToolEnv
     , setToolSessionTmp
     )
-import Agent.OpenRouter.LoopBackend (openRouterBackend)
+import Agent.OpenRouter.LoopBackend
+    ( openRouterBackend
+    , openRouterBackendWithParams
+    )
 import qualified Agent.OpenRouter as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
-import Agent.XAI.LoopBackend (xaiBackend)
+import Agent.XAI.LoopBackend (xaiBackend, xaiBackendWithParams)
 import qualified Agent.XAI.Options as XAI
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
@@ -2202,10 +2208,9 @@ runAgentInitializedWithLock
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
-                                    btwBackend privateParams =
-                                        freshOpenAiBackend
+                                    btwBackend =
+                                        freshOpenAiBackendWithParams
                                             tokenProvider
-                                            (readIORef privateParams)
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2260,23 +2265,21 @@ runAgentInitializedWithLock
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
-                                    runHttpSubagent
+                                    runHttpSubagentWithParams
                                         subagentRuntime
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
-                                            xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef))
+                                        (xaiBackendWithParams
+                                            xaiOptions tokenProvider)
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         xaiBackend xaiOptions tokenProvider
                                             (readIORef paramsRef)
-                            btwBackend privateParams =
-                                xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams)
+                            btwBackend =
+                                xaiBackendWithParams xaiOptions tokenProvider
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2293,7 +2296,7 @@ runAgentInitializedWithLock
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
-                        let makeBackend params =
+                        let makeBackend getParams =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2308,30 +2311,47 @@ runAgentInitializedWithLock
                                                         }
                                                     request
                                                     onEvent)
-                                            params
+                                            getParams
                                     Nothing ->
                                         openRouterBackend openRouterOptions
-                                            tokenProvider params
+                                            tokenProvider getParams
+                            makeBackendWithParams params =
+                                case customGenericOptions of
+                                    Just genericOptions ->
+                                        genericResponsesBackendWithFixedParams
+                                            (\request onEvent ->
+                                                GenericResponses.createResponseWithEvents
+                                                    genericOptions
+                                                        { GenericResponses.model =
+                                                            transportModel
+                                                                (fromMaybe
+                                                                    model
+                                                                    request.model)
+                                                        }
+                                                    request
+                                                    onEvent)
+                                            params
+                                    Nothing ->
+                                        openRouterBackendWithParams
+                                            openRouterOptions
+                                            tokenProvider
+                                            params
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
-                                    runHttpSubagent
+                                    runHttpSubagentWithParams
                                         subagentRuntime
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
-                                            makeBackend
-                                                (readIORef childParamsRef))
+                                        makeBackendWithParams
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         makeBackend
                                             (readIORef paramsRef)
-                            btwBackend privateParams =
-                                makeBackend
-                                    (readIORef privateParams)
+                            btwBackend = makeBackendWithParams
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -2589,7 +2609,7 @@ runSession
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
-    -> BtwBackendFactory
+    -> ExplicitBtwBackendFactory
     -> IO RunResult
 runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
@@ -2639,7 +2659,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                                               (roleWarn color
                                                   (glyphWarn <> message))
                       _ -> pure ()
-  withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
+  withSessionTitleManagerExplicit btwBackend (readIORef paramsRef)
+        showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
@@ -4114,8 +4135,10 @@ replWithDraft env@SessionEnv
                                 (Just
                                     (progressNotice
                                         "btw · asking…")))
+                        params <- readIORef paramsRef
+                        transcript <- readIORef transcriptRef
                         result <-
-                            runBtwWithCancel
+                            runBtwWithCancelExplicit
                                 (\cancel action ->
                                     withTurnCancel interrupt cancel $
                                         case fullscreen of
@@ -4124,8 +4147,8 @@ replWithDraft env@SessionEnv
                                                     cancel escPaused action
                                             Just _ -> action)
                                 btwBackend
-                                paramsRef
-                                transcriptRef
+                                params
+                                transcript
                                 question
                         case result of
                             Left err -> do

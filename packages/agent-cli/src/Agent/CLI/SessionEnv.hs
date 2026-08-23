@@ -6,7 +6,7 @@ module Agent.CLI.SessionEnv
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.Btw (ExplicitBtwBackendFactory)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -30,7 +30,7 @@ import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
-    , sessionBtwBackend :: !BtwBackendFactory
+    , sessionBtwBackend :: !ExplicitBtwBackendFactory
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider

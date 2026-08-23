@@ -7,14 +7,18 @@
 -- resumed session can seed it and the CLI can persist it.
 module Agent.XAI.LoopBackend
     ( xaiBackend
+    , xaiBackendWithParams
     , xaiBackendWith
+    , xaiBackendWithFixedParams
     ) where
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendWithParams
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendWithParams
     )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
@@ -35,6 +39,15 @@ xaiBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
 
+xaiBackendWithParams
+    :: ClientOptions
+    -> TokenProvider
+    -> ResponseCreateParams
+    -> Backend
+xaiBackendWithParams options provider =
+    tokenProviderStatelessResponsesBackendWithParams provider
+        (createResponseWithEvents options)
+
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests and
 -- downstream integrations.
 xaiBackendWith
@@ -44,3 +57,12 @@ xaiBackendWith
     -> IO ResponseCreateParams
     -> Backend
 xaiBackendWith = statelessResponsesBackend
+
+xaiBackendWithFixedParams
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Backend
+xaiBackendWithFixedParams =
+    statelessResponsesBackendWithParams

@@ -6,11 +6,15 @@ module Agent.Responses.Client
     ) where
 
 import Agent.Error (ApiError)
+import Agent.Retry
+    ( AttemptObservation(..)
+    , AttemptOutcome(..)
+    , runObservedAttempt
+    )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
 import Control.Retry (RetryPolicyM, retrying)
 import qualified Data.Aeson as Aeson
-import Data.IORef
 import Data.Text (Text)
 import Network.HTTP.Simple (Request)
 
@@ -59,17 +63,17 @@ retryStreamingResultWithPolicy policy retryable request onEvent =
     snd <$> retrying policy shouldRetry runAttempt
   where
     runAttempt _status = do
-        emitted <- newIORef False
-        result <- request \event -> case onEvent of
-            Nothing -> pure ()
-            Just callback -> do
-                writeIORef emitted True
-                callback event
-        didEmit <- readIORef emitted
-        pure (didEmit, result)
+        AttemptOutcome{attemptObservation, attemptResult} <-
+            case onEvent of
+                Nothing ->
+                    AttemptOutcome NoOutputObserved
+                        <$> request (const (pure ()))
+                Just callback ->
+                    runObservedAttempt (const True) callback request
+        pure (attemptObservation, attemptResult)
 
-    shouldRetry _status (emitted, result) = pure $
-        not emitted
+    shouldRetry _status (observation, result) = pure $
+        observation == NoOutputObserved
             && case result of
                 Left apiError -> retryable apiError
                 Right _ -> False

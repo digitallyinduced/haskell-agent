@@ -8,7 +8,12 @@ import Agent.Error
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
-import Agent.Responses.LoopBackend (streamOutputObserved)
+import Agent.Responses.LoopBackend
+    ( ResponsesTurn(..)
+    , completeResponsesTurn
+    , prepareResponsesTurn
+    , streamOutputObserved
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Control.Retry (constantDelay, limitRetries)
@@ -22,6 +27,34 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "ResponsesTurn" do
+        it "keeps delta, replay, and committed transcript order pure" do
+            let history =
+                    turnInputsToItems [UserMessage "old"]
+                        <> [assistantItem "prior answer"]
+                inputs =
+                    [ CompletedTool (functionResult "c1" "tool output")
+                    , UserMessage "next"
+                    ]
+                newItems = turnInputsToItems inputs
+                turn = prepareResponsesTurn baseParams history inputs
+                response = testResponse "resp-next"
+                    [functionCallItem "c2" "read_file" "{}"]
+                completed = completeResponsesTurn turn response
+
+            inputItems turn.responsesDeltaRequest `shouldBe` newItems
+            inputItems turn.responsesFullRequest
+                `shouldBe` history <> newItems
+            completed.backendState
+                `shouldBe`
+                    history
+                        <> newItems
+                        <> [functionCallItem "c2" "read_file" "{}"]
+            completed.backendOutput `shouldBe`
+                emptyTurnOutput "resp-next"
+                    [functionToolCall "c2" "read_file" "{}"]
+                    Nothing
+
     describe "withRequestInput" do
         it "repairs legacy assistant input_text from compacted sessions" do
             let legacySummary = MessageItem ResponseMessage
@@ -460,6 +493,26 @@ spec = do
                 [ turnInputsToItems [UserMessage "new"]
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
+
+        it "does not replay a missing response chain after visible output" do
+            seen <- newIORef []
+            let seed = turnInputsToItems [UserMessage "old"]
+                chainError = ProviderError PreviousResponseNotFound
+                    "previous_response_id was not found" Nothing
+                send request previous onEvent = do
+                    modifyIORef' seen (++ [(request, previous)])
+                    onEvent (deltaEvent EventOutputTextDelta "partial")
+                    pure (Left chainError)
+            transcript <- newIORef seed
+            let backend = openAiBackendWith send (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-missing")
+                [UserMessage "new"]
+                (const (pure ()))
+
+            result `shouldBe` Left chainError
+            map snd <$> readIORef seen
+                `shouldReturn` [Just "resp-missing"]
+            readIORef transcript `shouldReturn` seed
 
         it "starts a fresh chain when inherited cache retention is rejected" do
             seen <- newIORef []
