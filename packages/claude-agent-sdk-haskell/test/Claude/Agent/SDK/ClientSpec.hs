@@ -93,6 +93,55 @@ spec = describe "ClaudeSDKClient subprocess transport" do
             Aeson.eitherDecodeStrict' input
                 `shouldBe` Right (expectedQueryValue "hello from Haskell")
 
+    it "serializes image content in streaming user messages" do
+        withFakeClaude transportProbeScript \directory executable -> do
+            let argsPath = directory </> "args"
+                environmentPath = directory </> "environment"
+                inputPath = directory </> "input"
+                options =
+                    (testOptions executable directory)
+                        { environment =
+                            Just
+                                [ ("FAKE_ARGS", argsPath)
+                                , ("FAKE_ENVIRONMENT", environmentPath)
+                                , ("FAKE_INPUT", inputPath)
+                                ]
+                        }
+
+            queryResult <-
+                queryContent
+                    options
+                    [ UserImageBlock
+                        { mediaType = "image/png"
+                        , imageBytes = "png-bytes"
+                        }
+                    , UserTextBlock "describe this image"
+                    ]
+                    (const (pure ()))
+            _ <- expectRight queryResult
+
+            input <- ByteString.readFile inputPath
+            Aeson.eitherDecodeStrict' input
+                `shouldBe`
+                    Right
+                        (expectedContentQueryValue
+                            [ Aeson.object
+                                [ "type" Aeson..= ("image" :: Text)
+                                , "source" Aeson..= Aeson.object
+                                    [ "type" Aeson..= ("base64" :: Text)
+                                    , "media_type" Aeson..=
+                                        ("image/png" :: Text)
+                                    , "data" Aeson..=
+                                        ("cG5nLWJ5dGVz" :: Text)
+                                    ]
+                                ]
+                            , Aeson.object
+                                [ "type" Aeson..= ("text" :: Text)
+                                , "text" Aeson..=
+                                    ("describe this image" :: Text)
+                                ]
+                            ])
+
     it "supports minimal and full Claude Code system prompts" do
         mapM_
             (\(promptMode, expectMinimalPrompt) ->
@@ -1182,16 +1231,20 @@ expectedArguments =
 
 expectedQueryValue :: Text -> Aeson.Value
 expectedQueryValue prompt =
+    expectedContentQueryValue
+        [ Aeson.object
+            [ "type" Aeson..= ("text" :: Text)
+            , "text" Aeson..= prompt
+            ]
+        ]
+
+expectedContentQueryValue :: [Aeson.Value] -> Aeson.Value
+expectedContentQueryValue content =
     Aeson.object
         [ "type" Aeson..= ("user" :: Text)
         , "message" Aeson..= Aeson.object
             [ "role" Aeson..= ("user" :: Text)
-            , "content" Aeson..=
-                [ Aeson.object
-                    [ "type" Aeson..= ("text" :: Text)
-                    , "text" Aeson..= prompt
-                    ]
-                ]
+            , "content" Aeson..= content
             ]
         , "parent_tool_use_id" Aeson..= Aeson.Null
         , "session_id" Aeson..= testSessionId
