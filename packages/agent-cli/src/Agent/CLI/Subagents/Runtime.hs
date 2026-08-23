@@ -702,7 +702,11 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         True
                                 NoHostChildAgentProtocol ->
                                     systemPrompt
-                                        childDialect env.subCwd today True
+                                        childDialect
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
                         instructions =
                             baseInstructions
                                 <> "\n\n"

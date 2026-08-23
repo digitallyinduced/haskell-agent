@@ -71,6 +71,7 @@ spec = describe "systemPrompt" do
                 systemPrompt
                     claudeCodeDialect
                     (fromFilePath "/tmp/repo")
+                    Nothing
                     (fromGregorian 2026 8 19)
                     False
         claude `shouldSatisfy` Text.isInfixOf "Claude Code's built-in tools"
