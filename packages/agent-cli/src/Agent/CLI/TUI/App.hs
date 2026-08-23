@@ -13,6 +13,7 @@ module Agent.CLI.TUI.App
     , emitUiEvent
     , hasQueuedFullscreenInput
     , motionDemandFor
+    , lambdaArtWidget
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , newFullscreenInputBuffer
@@ -24,6 +25,7 @@ module Agent.CLI.TUI.App
     , readFullscreenLine
     , readFullscreenLineOr
     , repositoryHeaderText
+    , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission
     , requestFullscreenChoice
@@ -47,6 +49,7 @@ import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readReplHistory
+    , terminalTextWidth
     , truncateDisplayText
     )
 import Agent.CLI.AgentViewport
@@ -101,6 +104,7 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
     )
@@ -1522,15 +1526,21 @@ drawImagePreviews native previews =
         context <- getContext
         let maxWidth = viewportPreviewSize context.availWidth
             maxHeight = viewportPreviewSize context.availHeight
-            gaps = max 0 (length previews - 1) * previewGap
+            visible =
+                drop
+                    (max
+                        0
+                        (length previews - previewCountForWidth maxWidth))
+                    previews
+            gaps = max 0 (length visible - 1) * previewGap
             previewWidth =
-                max 1 ((maxWidth - gaps) `div` max 1 (length previews))
+                max 1 ((maxWidth - gaps) `div` max 1 (length visible))
             previewHeight = max 1 (maxHeight - 1)
             content =
                 hBox $
                     intersperse
                         (hLimit previewGap (fill ' '))
-                        (map (drawPreview previewWidth previewHeight) previews)
+                        (map (drawPreview previewWidth previewHeight) visible)
         render $
             hLimit maxWidth $
                 vLimit maxHeight content
@@ -2167,7 +2177,12 @@ lambdaArtWidget frame =
                         ]
                     | y <- [0 .. canvasHeight - 1]
                     ]
-        pure B.emptyResult { B.image = rendered }
+            bounded =
+                V.crop
+                    (max 0 context.availWidth)
+                    (max 0 context.availHeight)
+                    rendered
+        pure B.emptyResult { B.image = bounded }
 
 lambdaComposition :: Int -> Int -> LambdaComposition
 lambdaComposition width height
@@ -2675,12 +2690,18 @@ resumeHeader browser =
             showCursor
                 ResumeSearchCursor
                 (Location
-                    (Text.length prefix + Text.length browser.resumeBrowserQuery, 0))
+                    (resumeSearchCursorColumn
+                        prefix
+                        browser.resumeBrowserQuery, 0))
                 (txt (prefix <> browser.resumeBrowserQuery <> " "))
         | Text.null browser.resumeBrowserQuery =
             withAttr Theme.mutedAttr (txt prefix)
         | otherwise =
             txt (prefix <> browser.resumeBrowserQuery)
+
+resumeSearchCursorColumn :: Text -> Text -> Int
+resumeSearchCursorColumn prefix query =
+    terminalTextWidth prefix + terminalTextWidth query
 
 resumeList :: ResumeBrowser -> Widget Name
 resumeList browser =

@@ -216,6 +216,15 @@ spec = do
                 `shouldBe` Nothing
             streamEventToLoopEvent (deltaEvent EventOutputTextDone "done")
                 `shouldBe` Nothing
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType = EventCodexResponseMetadata
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.singleton
+                        "metadata"
+                        (Aeson.object ["request_id" Aeson..= ("req-1" :: Text)])
+                    })
+                `shouldBe` Nothing
             streamEventToLoopEvent (ResponseOutputItemDoneEvent
                 { item = assistantItem "x"
                 , outputIndex = 0

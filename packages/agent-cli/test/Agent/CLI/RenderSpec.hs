@@ -45,6 +45,12 @@ spec = do
                 `shouldBe` "Listed packages"
             summarizeToolCall (functionToolCall "c3d" "grep" "{\"pattern\":\"foo\"}")
                 `shouldBe` "Searched foo"
+            summarizeToolCall
+                (functionToolCall
+                    "c3e"
+                    "wait_commands_or_subagents"
+                    "{\"task_ids\":[\"t1\"]}")
+                `shouldBe` "Waited"
 
         it "pulls the first path out of an apply_patch body" do
             let patch = "*** Begin Patch\n*** Update File: src/Foo.hs\n@@\n-a\n+b\n*** End Patch"
@@ -115,9 +121,15 @@ spec = do
                 `shouldBe` "◆ $ git status"
             formatToolStarted False (functionToolCall "c3" "search_replace" "{\"file_path\":\"src/A.hs\"}")
                 `shouldBe` "◆ Edited src/A.hs"
+            formatToolStarted False
+                (functionToolCall
+                    "c4"
+                    "wait_commands_or_subagents"
+                    "{\"task_ids\":[\"t1\"]}")
+                `shouldBe` "◆ Waited"
 
         it "keeps unknown tool names" do
-            formatToolStarted False (functionToolCall "c4" "custom_tool" "{\"x\":1}")
+            formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
 
     describe "formatSearchReplaceDiff" do

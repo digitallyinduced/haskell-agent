@@ -6,6 +6,7 @@ import Agent.CLI.TUI.ImagePreview
     , imageDimensions
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , previewImageAt
     )
@@ -113,6 +114,35 @@ spec = do
                         , nativePreviewAttachment = attachment
                         }
                     ]
+
+        it "keeps every native placement inside narrow terminal bounds" do
+            let attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = ""
+                    }
+                preview = TuiImagePreview
+                    { previewMime = "image/png"
+                    , previewBytes = 0
+                    , previewSourceWidth = 1
+                    , previewSourceHeight = 1
+                    , previewSample =
+                        error "native preview bounds forced the ANSI sample"
+                    , previewKittyAttachment = attachment
+                    }
+                previews = replicate 3 (attachment, preview)
+            previewCountForWidth 1 `shouldBe` 1
+            previewCountForWidth 4 `shouldBe` 2
+            previewCountForWidth 7 `shouldBe` 3
+            mapM_
+                (\columns ->
+                    nativePreviewPlacements 100 columns 10 previews
+                        `shouldSatisfy` all
+                            (\placement ->
+                                placement.nativePreviewColumn >= 0
+                                    && placement.nativePreviewColumn
+                                        + placement.nativePreviewColumns
+                                        <= columns))
+                [1 .. 12]
 
         it "preserves thin screenshot details while downsampling" do
             let source =

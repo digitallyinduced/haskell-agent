@@ -5,6 +5,8 @@ module Agent.CLI.Subagents.Runtime
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
+    , lookupOrCreateSubagentSession
+    , persistAndEvictSubagentSessionWithStatus
     , persistSubagentSnapshotWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
@@ -24,6 +26,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( defaultModelFor
+    , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
     )
@@ -112,6 +115,10 @@ import Agent.Tools.Grok.Task
     , lookupAgentType
     , recordAgentSpec
     )
+import Agent.Tools.Grok.Prompt
+    ( codingGrokPromptTools
+    , grokSubagentSystemPrompt
+    )
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
@@ -124,13 +131,24 @@ import Agent.Tools.Types
     , defaultToolEnv
     , setToolSessionTmp
     )
-import Control.Exception.Safe (finally)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newMVar
+    , withMVar
+    )
+import Control.Exception.Safe (finally, throwIO)
+import Control.Monad (unless, void, when)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
+import System.Environment (lookupEnv)
+import qualified System.Info as SystemInfo
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
@@ -138,6 +156,8 @@ data SubagentSession = SubagentSession
     , subSessionProvider :: !Provider
     , subSessionEffectiveModel :: !Text
     , subSessionDialect :: !DialectId
+    , subSessionPinned :: !(IORef Bool)
+    , subSessionHydrated :: !(MVar Bool)
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
@@ -251,23 +271,80 @@ persistSubagentSnapshotWithStatus
     mroot <- readIORef storeRootRef
     case mroot of
         Nothing -> pure ()
-        Just sessionDir -> do
-            items <-
-                trimDanglingToolSuffix
-                    <$> readIORef session.subSessionTranscript
-            previous <- getPreviousResponseId registry agentId
-            agentType <- lookupAgentType typesRef agentId
-            agentModel <- lookupAgentModel typesRef agentId
-            reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
-            agentCwd <- getSubagentCwd registry agentId
-            identity <- getSubagentIdentity registry agentId
-            _ <- saveSubagentState
-                sessionDir agentId items previous status
-                session.subSessionProvider session.subSessionEffectiveModel
-                session.subSessionDialect
-                agentType agentModel
-                reasoningEffort agentCwd identity
-            pure ()
+        Just sessionDir ->
+            void $
+                saveSubagentSnapshotWithStatus
+                    sessionDir registry typesRef agentId status session
+
+-- | Persist a final snapshot, then release its parsed transcript payload.
+--
+-- The stable 'SubagentSession' object stays installed so a concurrent follow-up
+-- cannot split history across two session objects. A failed or disabled save
+-- leaves the resident transcript untouched.
+persistAndEvictSubagentSessionWithStatus
+    :: SubagentStoreRoot
+    -> SubagentRegistry
+    -> GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentStatus
+    -> SubagentSession
+    -> IO (Either Text Bool)
+persistAndEvictSubagentSessionWithStatus
+        storeRootRef registry typesRef agentId status session =
+    modifyMVar session.subSessionHydrated \hydrated ->
+        if not hydrated || not (evictableStatus status)
+            then pure (hydrated, Right False)
+            else readIORef storeRootRef >>= \case
+                Nothing -> pure (True, Right False)
+                Just sessionDir ->
+                    saveSubagentSnapshotWithStatus
+                        sessionDir registry typesRef agentId status session >>= \case
+                            Left err -> pure (True, Left err)
+                            Right () -> do
+                                pinned <- readIORef session.subSessionPinned
+                                if pinned
+                                    then pure (True, Right False)
+                                    else do
+                                        writeIORef session.subSessionTranscript []
+                                        writeIORef
+                                            session.subSessionContextTokens
+                                            Nothing
+                                        pure (False, Right True)
+  where
+    evictableStatus = \case
+        Completed{} -> True
+        Errored{} -> True
+        Interrupted -> True
+        Closed -> True
+        Pending -> False
+        Running -> False
+        NotFound -> False
+
+saveSubagentSnapshotWithStatus
+    :: OsPath
+    -> SubagentRegistry
+    -> GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentStatus
+    -> SubagentSession
+    -> IO (Either Text ())
+saveSubagentSnapshotWithStatus
+        sessionDir registry typesRef agentId status session = do
+    items <-
+        trimDanglingToolSuffix
+            <$> readIORef session.subSessionTranscript
+    previous <- getPreviousResponseId registry agentId
+    agentType <- lookupAgentType typesRef agentId
+    agentModel <- lookupAgentModel typesRef agentId
+    reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
+    agentCwd <- getSubagentCwd registry agentId
+    identity <- getSubagentIdentity registry agentId
+    saveSubagentState
+        sessionDir agentId items previous status
+        session.subSessionProvider session.subSessionEffectiveModel
+        session.subSessionDialect
+        agentType agentModel
+        reasoningEffort agentCwd identity
 
 flushAllSubagentSnapshots
     :: SubagentStoreRoot
@@ -279,8 +356,10 @@ flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
     sessions <- readIORef sessionsRef
     mapM_
         (\(agentId, session) ->
-            persistSubagentSnapshot
-                storeRootRef registry typesRef agentId session)
+            withMVar session.subSessionHydrated \hydrated ->
+                when hydrated $
+                    persistSubagentSnapshot
+                        storeRootRef registry typesRef agentId session)
         (Map.toList sessions)
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
@@ -314,9 +393,17 @@ restoreAgentFromDisk
             Just sessionDir ->
                 loadSubagentState sessionDir agentId >>= \case
                     Left err -> pure (Left err)
-                    Right Nothing ->
+                    Right Nothing -> do
+                        session <-
+                            getOrInstallSubagentSession
+                                sessionsRef
+                                provider
+                                parentEffectiveModel
+                                parentDialect
+                                agentId
                         -- Same-process close with no disk yet: still reopen.
-                        reopenInMemory Nothing Nothing
+                        restoreSession session Nothing \_ ->
+                            reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
                         let expectedEffectiveModel =
                                 maybe
@@ -343,41 +430,41 @@ restoreAgentFromDisk
                                         unsupportedDialectMessage
                                             provider agentId storedDialect
                             Right (storedEffectiveModel, storedDialect) -> do
-                                result <- reopenPersisted meta
-                                case result of
-                                    Left err -> pure (Left err)
-                                    Right () -> do
-                                        case meta.diskAgentType of
-                                            Just agentType ->
-                                                recordAgentSpec
-                                                    typesRef
-                                                    agentId
-                                                    GrokSubagentSpec
-                                                        { agentType
-                                                        , modelOverride =
-                                                            meta.diskAgentModel
-                                                        , reasoningEffortOverride =
-                                                            meta.diskReasoningEffort
-                                                        }
-                                            Nothing -> pure ()
-                                        transcript <- newIORef items
-                                        contextTokens <- newIORef Nothing
-                                        let session =
-                                                SubagentSession
-                                                    { subSessionTranscript =
-                                                        transcript
-                                                    , subSessionContextTokens =
-                                                        contextTokens
-                                                    , subSessionProvider =
-                                                        provider
-                                                    , subSessionEffectiveModel =
-                                                        storedEffectiveModel
-                                                    , subSessionDialect =
-                                                        storedDialect
-                                                    }
-                                        atomicModifyIORef' sessionsRef \m ->
-                                            (Map.insert agentId session m, ())
-                                        pure (Right ())
+                                session <-
+                                    getOrInstallSubagentSession
+                                        sessionsRef
+                                        provider
+                                        storedEffectiveModel
+                                        storedDialect
+                                        agentId
+                                restoreSession session (Just (items, meta)) \_ ->
+                                    reopenPersisted meta >>= \case
+                                        Left err -> pure (Left err)
+                                        Right () -> pure (Right ())
+    restoreSession session loaded reopen =
+        modifyMVar session.subSessionHydrated \hydrated -> do
+            currentStatus <- getStatus registry agentId
+            case currentStatus of
+                NotFound -> finish hydrated
+                Closed -> finish hydrated
+                _ -> do
+                    hydrated' <-
+                        ensureSubagentSessionHydratedLocked
+                            storeRootRef typesRef legacyTarget
+                            agentId session hydrated
+                    pure (hydrated', Right ())
+      where
+        finish hydrated =
+            reopen hydrated >>= \case
+                Left err -> pure (hydrated, Left err)
+                Right () -> do
+                    case loaded of
+                        Nothing -> pure ()
+                        Just (items, meta) -> do
+                            recordPersistedAgentSpec typesRef agentId meta
+                            unless hydrated $
+                                writeIORef session.subSessionTranscript items
+                    pure (True, Right ())
     reopenPersisted meta =
         case meta.diskTaskPath of
             Nothing -> restoreAt taskPathRoot
@@ -568,6 +655,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         (Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    shellPath <-
+                        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
                     let tools = case
                                 dialectChildAgentProtocol childDialect of
                             CodexCollaborationProtocol ->
@@ -588,13 +677,19 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         today
                                         True
                                 GrokTaskProtocol ->
-                                    systemPromptForTools
-                                        childDialect
-                                        (map (.appToolName) tools)
-                                        env.subCwd
-                                        sessionTmp
-                                        today
-                                        True
+                                    Text.intercalate "\n\n" $
+                                        filter (not . Text.null)
+                                            [ grokSubagentSystemPrompt
+                                                codingGrokPromptTools
+                                                ("web_search" : map (.appToolName) tools)
+                                                env.subCwd
+                                                today
+                                                (Text.pack SystemInfo.os)
+                                                shellPath
+                                                agentType
+                                                env.subId.unSubagentId
+                                            , sessionTempGuidance sessionTmp
+                                            ]
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
@@ -611,7 +706,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                     CodexCollaborationProtocol ->
                                         codexSubagentSuffix env.subId
                                     GrokTaskProtocol ->
-                                        grokSubagentSuffix agentType env.subId
+                                        ""
                                     GenericTaskProtocol ->
                                         genericSubagentSuffix agentType env.subId
                         childParams = requestParams model instructions
@@ -631,6 +726,11 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 config
                                 previous
                                 (interAgentMessagePayload prompt))
+
+defaultShell :: String
+defaultShell
+    | SystemInfo.os == "mingw32" = "cmd.exe"
+    | otherwise = "/bin/sh"
 
 prepareChild
     :: SubagentRuntime
@@ -756,29 +856,6 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
         session
     pure result
 
-grokSubagentSuffix :: Text -> SubagentId -> Text
-grokSubagentSuffix agentType agentId =
-    "You are a Grok Build subagent — a focused worker delegated a specific task.\n\
-    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
-    \Report blocked or unverified work explicitly.\n\n\
-    \Subagent type: "
-        <> agentType
-        <> "\nAgent id: "
-        <> agentId.unSubagentId
-        <> case agentType of
-            "explore" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \You have no file editing or command execution tools. Search broadly, narrow down, \
-                \and return absolute file paths and relevant findings."
-            "plan" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete implementation files. Explore the codebase, \
-                \consider trade-offs, and produce a concrete implementation strategy. End with \
-                \a Critical Files for Implementation section listing 3-5 files."
-            _ ->
-                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
-                \Never create documentation files unless explicitly requested."
-
 codexSubagentSuffix :: SubagentId -> Text
 codexSubagentSuffix agentId =
     "You are a Codex subagent. Complete the assigned task and report results clearly. \
@@ -822,46 +899,102 @@ lookupOrCreateSubagentSession
 lookupOrCreateSubagentSession
         sessionsRef storeRootRef typesRef provider legacyTarget
         currentEffectiveModel currentDialect agentId = do
-    sessions <- readIORef sessionsRef
-    case Map.lookup agentId sessions of
-        Just session -> pure session
-        Nothing -> do
-            mroot <- readIORef storeRootRef
-            loaded <- case mroot of
-                Just sessionDir -> loadSubagentState sessionDir agentId
-                Nothing -> pure (Right Nothing)
-            let (items, meta, sessionEffectiveModel, sessionDialect) = case loaded of
-                    Right (Just (xs, m))
-                        | Right (storedEffectiveModel, storedDialect) <-
-                            validatePersistedSubagentTarget
-                                provider
-                                currentEffectiveModel
-                                currentDialect
-                                legacyTarget
-                                m
-                        , providerSupportsDialect provider storedDialect ->
-                            (xs, Just m, storedEffectiveModel, storedDialect)
-                    _ -> ([], Nothing, currentEffectiveModel, currentDialect)
-            transcript <- newIORef items
-            contextTokens <- newIORef Nothing
-            case meta >>= (.diskAgentType) of
-                Just agentType ->
-                    recordAgentSpec typesRef agentId GrokSubagentSpec
-                        { agentType
-                        , modelOverride = meta >>= (.diskAgentModel)
-                        , reasoningEffortOverride =
-                            meta >>= (.diskReasoningEffort)
-                        }
-                Nothing -> pure ()
-            let session = SubagentSession
-                    { subSessionTranscript = transcript
-                    , subSessionContextTokens = contextTokens
-                    , subSessionProvider = provider
-                    , subSessionEffectiveModel = sessionEffectiveModel
-                    , subSessionDialect = sessionDialect
-                    }
-            atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
-            pure session
+    session <-
+        getOrInstallSubagentSession
+            sessionsRef provider currentEffectiveModel currentDialect agentId
+    modifyMVar_ session.subSessionHydrated $
+        ensureSubagentSessionHydratedLocked
+            storeRootRef typesRef legacyTarget agentId session
+    pure session
+
+getOrInstallSubagentSession
+    :: IORef (Map SubagentId SubagentSession)
+    -> Provider
+    -> Text
+    -> DialectId
+    -> SubagentId
+    -> IO SubagentSession
+getOrInstallSubagentSession
+        sessionsRef provider effectiveModel dialect agentId = do
+    transcript <- newIORef []
+    contextTokens <- newIORef Nothing
+    pinned <- newIORef False
+    hydrated <- newMVar False
+    let candidate = SubagentSession
+            { subSessionTranscript = transcript
+            , subSessionContextTokens = contextTokens
+            , subSessionProvider = provider
+            , subSessionEffectiveModel = effectiveModel
+            , subSessionDialect = dialect
+            , subSessionPinned = pinned
+            , subSessionHydrated = hydrated
+            }
+    atomicModifyIORef' sessionsRef \sessions ->
+        case Map.lookup agentId sessions of
+            Just existing -> (sessions, existing)
+            Nothing -> (Map.insert agentId candidate sessions, candidate)
+
+ensureSubagentSessionHydratedLocked
+    :: SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> Maybe LegacySubagentTarget
+    -> SubagentId
+    -> SubagentSession
+    -> Bool
+    -> IO Bool
+ensureSubagentSessionHydratedLocked
+        storeRootRef typesRef legacyTarget agentId session hydrated
+    | hydrated = pure True
+    | otherwise = do
+        mroot <- readIORef storeRootRef
+        loaded <- case mroot of
+            Just sessionDir -> loadSubagentState sessionDir agentId
+            Nothing -> pure (Right Nothing)
+        case loaded of
+            Left err ->
+                throwIO (userError (Text.unpack err))
+            Right Nothing ->
+                pure ()
+            Right (Just (items, meta)) ->
+                case validatePersistedSubagentTarget
+                        session.subSessionProvider
+                        session.subSessionEffectiveModel
+                        session.subSessionDialect
+                        legacyTarget
+                        meta of
+                    Left err ->
+                        throwIO (userError (Text.unpack err))
+                    Right (_, storedDialect)
+                        | not
+                            (providerSupportsDialect
+                                session.subSessionProvider storedDialect) ->
+                            throwIO $
+                                userError $
+                                    Text.unpack $
+                                        unsupportedDialectMessage
+                                            session.subSessionProvider
+                                            agentId
+                                            storedDialect
+                    Right _ -> do
+                        writeIORef session.subSessionTranscript items
+                        writeIORef session.subSessionContextTokens Nothing
+                        recordPersistedAgentSpec typesRef agentId meta
+        pure True
+
+recordPersistedAgentSpec
+    :: GrokSubagentSpecs
+    -> SubagentId
+    -> SubagentDiskMeta
+    -> IO ()
+recordPersistedAgentSpec typesRef agentId meta =
+    case meta.diskAgentType of
+        Just agentType ->
+            recordAgentSpec typesRef agentId GrokSubagentSpec
+                { agentType
+                , modelOverride = meta.diskAgentModel
+                , reasoningEffortOverride = meta.diskReasoningEffort
+                }
+        Nothing -> pure ()
 
 validatePersistedSubagentTarget
     :: Provider

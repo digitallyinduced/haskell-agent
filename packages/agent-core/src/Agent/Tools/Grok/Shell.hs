@@ -10,6 +10,7 @@ module Agent.Tools.Grok.Shell
     , closeGrokSession
     , runForegroundStreaming
     , startBackground
+    , startMonitor
     , readTaskOutput
     , killTask
     , hasUnwaitedBackgroundOp
@@ -74,6 +75,7 @@ data GrokSession = GrokSession
     , grokShell :: !(MVar PersistentShell)
     , grokTasks :: !(MVar (Map Text BackgroundTask))
     , grokNextId :: !(IORef Int)
+    , grokTodos :: !(IORef (Map Text (Text, Text)))
     , grokResources :: !ResourceScope
     }
 
@@ -88,11 +90,13 @@ newGrokSession env = do
             }
         tasks <- newMVar Map.empty
         nextId <- newIORef 0
+        todos <- newIORef Map.empty
         pure GrokSession
             { grokEnv = env
             , grokShell = shell
             , grokTasks = tasks
             , grokNextId = nextId
+            , grokTodos = todos
             , grokResources = resources
             }
   where
@@ -143,7 +147,15 @@ runForegroundStreaming session command timeoutMs onSnapshot =
         pure (next, result)
 
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
-startBackground session command = do
+startBackground session command =
+    startBackgroundCommand session command
+
+startMonitor :: GrokSession -> Text -> Maybe Int -> IO (Either Text Text)
+startMonitor session command timeoutMs =
+    startBackgroundCommand session (monitorCommand command timeoutMs)
+
+startBackgroundCommand :: GrokSession -> Text -> IO (Either Text Text)
+startBackgroundCommand session command = do
     shell <- readMVar session.grokShell
     -- Background wrappers source cwd/env but must not write them back;
     -- a later foreground command owns the persistent session.
@@ -169,22 +181,53 @@ startBackground session command = do
             pure $ Right $
                 "Command moved to background.\n\
                 \task_id: " <> taskId <> "\n\
-                \Use get_task_output to read output. Do not poll in a loop."
+                \Use get_command_or_subagent_output to read output. Do not poll in a loop."
 
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
 readTaskOutput session taskId timeoutMs = do
     tasks <- readMVar session.grokTasks
     case Map.lookup taskId tasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
-        Just task -> case timeoutMs of
-            Nothing -> snapshotTask task
-            Just ms -> do
+        Just task -> do
+            case timeoutMs of
+              Nothing -> snapshotTask task
+              Just ms -> do
                 raced <- race
                     (threadDelay (max 1 ms * 1000))
                     (readMVar task.backgroundRunning.runningResult)
                 case raced of
                     Left () -> snapshotTask task
                     Right result -> pure (formatCommandResult result)
+
+-- The watchdog is part of the spawned process tree, so it outlives the tool
+-- call without requiring an untracked Haskell thread. The outer shell waits
+-- for the monitored command, cancels the watchdog on normal completion, and
+-- escalates from TERM to KILL after the timeout.
+monitorCommand :: Text -> Maybe Int -> Text
+monitorCommand command = \case
+    Nothing -> command
+    Just timeoutMs ->
+        Text.unlines
+            [ "{"
+            , command
+            , "} &"
+            , "monitored_pid=$!"
+            , "("
+            , "  sleep " <> timeoutSeconds timeoutMs
+            , "  kill -TERM \"$monitored_pid\" 2>/dev/null || exit 0"
+            , "  sleep 1"
+            , "  kill -KILL \"$monitored_pid\" 2>/dev/null || true"
+            , ") &"
+            , "watchdog_pid=$!"
+            , "wait \"$monitored_pid\""
+            , "monitored_status=$?"
+            , "kill \"$watchdog_pid\" 2>/dev/null || true"
+            , "wait \"$watchdog_pid\" 2>/dev/null || true"
+            , "exit \"$monitored_status\""
+            ]
+  where
+    timeoutSeconds ms =
+        Text.pack (show (fromIntegral (max 1 ms) / 1000 :: Double))
 
 snapshotTask :: BackgroundTask -> IO Text
 snapshotTask task =

@@ -36,15 +36,11 @@ instance FromJSON ReadFileArgs where
 readFileTool :: ToolEnv -> AppTool
 readFileTool env = jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
-        "The path of the file to read. Relative paths use the workspace; absolute paths may point into the workspace or session temp directory."
+        "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
     , PropertySchema "offset" PropertyInteger False $ Just
         "The line number to start reading from. Only provide if the file is too large to read at once."
     , PropertySchema "limit" PropertyInteger False $ Just
         "The number of lines to read. Only provide if the file is too large to read at once."
-    , PropertySchema "pages" PropertyString False $ Just
-        "Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files."
-    , PropertySchema "format" PropertyString False $ Just
-        "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files."
     ]
     True
     ParallelSafe
@@ -70,7 +66,7 @@ runReadFile env args = resolveUnderCwd env (fromText args.targetFile) >>= \case
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
             pure $ Left
-                "PDF rendering is not available. Use run_terminal_cmd with pdftotext, or convert the file to text first."
+                "PDF rendering is not available. Use run_terminal_command with pdftotext, or convert the file to text first."
         | otherwise -> doesFileExist path >>= \case
             False -> pure $ Left $ "File not found: " <> args.targetFile
             True -> readTextFile path >>= \case

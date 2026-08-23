@@ -96,6 +96,22 @@ spec = do
                         `Text.isInfixOf` Text.toLower message
                 _ -> False
 
+        it "hard-denies dangerous commands through the public Grok shell alias" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            let call = functionToolCall
+                    "call-grok-shell"
+                    "run_terminal_command"
+                    "{\"command\":\"rm -rf /\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "Blocked dangerous shell command")
+                (const False)
+
         it "rejects shell inspection in plan mode in favor of dedicated read tools" do
             policy <- newIORef ApproveAll
             allowed <- newIORef Set.empty
@@ -103,6 +119,23 @@ spec = do
             activatePlanMode plan
             let call = functionToolCall "call-shell" "shell_command"
                     "{\"command\":\"rg -n plan packages | head -20\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
+        it "rejects the public Grok shell alias in plan mode" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let call = functionToolCall
+                    "call-grok-shell"
+                    "run_terminal_command"
+                    "{\"command\":\"git status\"}"
             result <- approveToolDecisionWithReporter
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
@@ -179,6 +212,32 @@ spec = do
             readIORef notices `shouldReturn`
                 [ApprovalSuccess "✓ always allow write this session"]
             readIORef allowed `shouldReturn` Set.singleton "write"
+
+        it "shares remembered approval across public and internal Grok aliases" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                publicCall = functionToolCall
+                    "call-public"
+                    "run_terminal_command"
+                    "{\"command\":\"git status\"}"
+                internalCall = functionToolCall
+                    "call-internal"
+                    "run_terminal_cmd"
+                    "{\"command\":\"git status\"}"
+                tools = registry [tool "run_terminal_cmd" AlwaysPrompt]
+            approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan publicCall
+                `shouldReturn` Right True
+            approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan internalCall
+                `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 1
+            readIORef allowed `shouldReturn` Set.singleton "run_terminal_cmd"
 
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do

@@ -1,6 +1,7 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
     ( defaultModelFor
+    , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
     ) where
@@ -37,7 +38,7 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
-            , ghciGuidance
+            , ghciGuidanceForDialect dialect
             , timeContextGuidance
             ]
   where
@@ -64,7 +65,7 @@ systemPromptForTools
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
-            , ghciGuidanceForTools available
+            , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
   where
@@ -112,8 +113,16 @@ ghciGuidance =
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
-ghciGuidanceForTools :: [Text] -> Text
-ghciGuidanceForTools available
+ghciGuidanceForDialect :: Dialect -> Text
+ghciGuidanceForDialect dialect =
+    case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            Text.replace "run_terminal_cmd" "run_terminal_command"
+                ghciGuidance
+        _ -> ghciGuidance
+
+ghciGuidanceForTools :: Dialect -> [Text] -> Text
+ghciGuidanceForTools dialect available
     | "run_ghci" `notElem` available = ""
     | otherwise =
         Text.unlines $
@@ -127,8 +136,13 @@ ghciGuidanceForTools available
                 <> [ "Drive GHCi with complete expressions; do not expect interactive human input."
                    ]
   where
-    shellNames =
-        filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+    shellNames = case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            [ "run_terminal_command"
+            | "run_terminal_cmd" `elem` available
+                || "run_terminal_command" `elem` available
+            ]
+        _ -> filter (`elem` available) ["run_terminal_cmd", "shell_command"]
     shellGuidance = case shellNames of
         [] -> []
         names ->

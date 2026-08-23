@@ -42,16 +42,18 @@ spec = do
                     (fromGregorian 2026 8 20) False
             prompt `shouldSatisfy` Text.isInfixOf "read_file"
             prompt `shouldSatisfy` Text.isInfixOf "search_replace"
-            prompt `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
-            prompt `shouldSatisfy` Text.isInfixOf "get_task_output"
-            prompt `shouldSatisfy` Text.isInfixOf "kill_task"
+            prompt `shouldSatisfy` Text.isInfixOf "run_terminal_command"
+            prompt `shouldSatisfy` Text.isInfixOf "get_command_or_subagent_output"
+            prompt `shouldSatisfy` Text.isInfixOf "kill_command_or_subagent"
+            prompt `shouldSatisfy` Text.isInfixOf "spawn_subagent"
+            prompt `shouldSatisfy` Text.isInfixOf
+                "make the `spawn_subagent` calls near the start"
             prompt `shouldSatisfy` Text.isInfixOf "web_search"
             prompt `shouldSatisfy` Text.isInfixOf "<tool_calling>"
             prompt `shouldSatisfy` Text.isInfixOf "<work_policy>"
             prompt `shouldSatisfy` Text.isInfixOf "<background_tasks>"
             prompt `shouldNotSatisfy` Text.isInfixOf "shell_command"
             prompt `shouldNotSatisfy` Text.isInfixOf "apply_patch"
-            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_command"
             prompt `shouldSatisfy` Text.isInfixOf "/tmp/repo"
             prompt `shouldSatisfy` Text.isInfixOf "2026-08-20"
 
@@ -71,10 +73,60 @@ spec = do
             prompt `shouldSatisfy` Text.isInfixOf "read_file"
             prompt `shouldSatisfy` Text.isInfixOf "web_search"
             prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
-            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
-            prompt `shouldNotSatisfy` Text.isInfixOf "get_task_output"
+            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_command"
+            prompt `shouldNotSatisfy` Text.isInfixOf "get_command_or_subagent_output"
+            prompt `shouldNotSatisfy` Text.isInfixOf "spawn_subagent"
+            prompt `shouldNotSatisfy` Text.isInfixOf
+                "When the user explicitly asks you to use subagents"
             prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
             prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
+
+    describe "grokSubagentSystemPrompt" do
+        it "renders the dedicated Grok child contract" do
+            let prompt =
+                    grokSubagentSystemPrompt
+                        codingGrokPromptTools
+                        [ "read_file"
+                        , "search_replace"
+                        , "run_terminal_cmd"
+                        , "get_task_output"
+                        ]
+                        (fromFilePath "/tmp/repo")
+                        (fromGregorian 2026 8 20)
+                        "darwin"
+                        "/bin/zsh"
+                        "general-purpose"
+                        "agent-123"
+            prompt `shouldSatisfy` Text.isPrefixOf "You are a Grok Build subagent"
+            prompt `shouldSatisfy` Text.isInfixOf "Do not reproduce"
+            prompt `shouldSatisfy` Text.isInfixOf "Parallelize independent tool calls"
+            prompt `shouldSatisfy` Text.isInfixOf "<system-reminder>"
+            prompt `shouldSatisfy` Text.isInfixOf "<making_code_changes>"
+            prompt `shouldSatisfy` Text.isInfixOf "LINE_NUMBER\8594LINE_CONTENT"
+            prompt `shouldSatisfy` Text.isInfixOf "<project_instructions_spec>"
+            prompt `shouldSatisfy` Text.isInfixOf "Workspace Path: /tmp/repo"
+            prompt `shouldSatisfy` Text.isInfixOf "Shell: /bin/zsh"
+            prompt `shouldSatisfy` Text.isInfixOf "Agent id: agent-123"
+            prompt `shouldSatisfy` Text.isInfixOf "run_terminal_command"
+            prompt `shouldSatisfy` Text.isInfixOf "get_command_or_subagent_output"
+            prompt `shouldNotSatisfy` Text.isInfixOf
+                "Your main goal is to complete the user's request"
+
+        it "omits edit and background guidance for explore children" do
+            let prompt =
+                    grokSubagentSystemPrompt
+                        codingGrokPromptTools
+                        ["read_file", "list_dir", "grep"]
+                        (fromFilePath "/tmp/repo")
+                        (fromGregorian 2026 8 20)
+                        "linux"
+                        "/bin/bash"
+                        "explore"
+                        "agent-456"
+            prompt `shouldSatisfy` Text.isInfixOf "=== READ-ONLY MODE ==="
+            prompt `shouldNotSatisfy` Text.isInfixOf "<making_code_changes>"
+            prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
+            prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
 
 propertyType :: Text -> Aeson.Object -> Maybe Aeson.Value
 propertyType name object = do

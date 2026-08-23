@@ -112,6 +112,7 @@ toolVerb name = case canonicalToolName name of
     "write_stdin" -> "Continued"
     "run_ghci" -> "$"
     "get_task_output" -> "Read"
+    "wait_tasks" -> "Waited"
     "kill_task" -> "Killed"
     "task" -> "Ran"
     "spawn_agent" -> "Spawned agent"
@@ -141,7 +142,7 @@ toolDetail call = case canonicalToolName call.name of
     "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
-    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
+    "ask_user_question" -> askUserQuestionDetail call.arguments
     "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
     "send_message" -> jsonTextFieldDefault "target" call.arguments
     "followup_task" -> jsonTextFieldDefault "target" call.arguments
@@ -199,3 +200,17 @@ firstPatchPath patch =
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')
+
+askUserQuestionDetail :: Text -> Text
+askUserQuestionDetail arguments =
+    case firstLine (jsonTextFieldDefault "question" arguments) of
+        legacy | not (Text.null legacy) -> legacy
+        _ -> fromMaybe "" do
+            Aeson.Object object <-
+                Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
+            Aeson.Array questions <- KeyMap.lookup "questions" object
+            Aeson.Object questionObject <- case toList questions of
+                question : _ -> Just question
+                [] -> Nothing
+            Aeson.String question <- KeyMap.lookup "question" questionObject
+            pure (firstLine question)

@@ -15,6 +15,8 @@ spec = describe "terminal character width" do
         charCellWidth '\BEL' `shouldBe` 0
         displayCharCellWidth '\BEL' `shouldBe` 1
         displayCharCellWidth '\t' `shouldBe` 1
+        displayTerminalText "\ESC]0;owned\BEL\t\r"
+            `shouldBe` "␛]0;owned␇⇥↵"
 
     it "exposes the shared wide-character classification" do
         isWideCharacter '界' `shouldBe` True

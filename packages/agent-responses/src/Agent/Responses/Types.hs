@@ -1455,6 +1455,7 @@ data StreamEventType
     | EventShellCommandDone
     | EventShellOutputDelta
     | EventShellOutputDone
+    | EventCodexResponseMetadata
     | StreamEventUnknown !Text
     deriving stock (Eq, Show)
 
@@ -1519,6 +1520,7 @@ streamEventTypeText = \case
     EventShellCommandDone -> "response.shell_call_command.done"
     EventShellOutputDelta -> "response.shell_call_output_content.delta"
     EventShellOutputDone -> "response.shell_call_output_content.done"
+    EventCodexResponseMetadata -> "codex.response.metadata"
     StreamEventUnknown value -> value
 
 parseStreamEventType :: Text -> StreamEventType
@@ -1582,6 +1584,7 @@ parseStreamEventType value = case value of
     "response.shell_call_command.done" -> EventShellCommandDone
     "response.shell_call_output_content.delta" -> EventShellOutputDelta
     "response.shell_call_output_content.done" -> EventShellOutputDone
+    "codex.response.metadata" -> EventCodexResponseMetadata
     other -> StreamEventUnknown other
 
 -- | Structured payload used by both the documented top-level @error@ event
