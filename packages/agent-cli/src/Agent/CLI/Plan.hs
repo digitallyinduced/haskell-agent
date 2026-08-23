@@ -49,6 +49,7 @@ import Agent.Tools.PlanMode
     )
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
+import Data.Char (toLower)
 import Data.IORef (IORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -111,10 +112,9 @@ applyPlanEnterKey key state@(PlanEnterState reason index) = case key of
     PickerKeyConfirm -> Left (enterChoiceFromIndex index)
     PickerKeyUp -> Right (PlanEnterState reason (movePlanIndex 2 (-1) index))
     PickerKeyDown -> Right (PlanEnterState reason (movePlanIndex 2 1 index))
-    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
-        "a" -> Left PlanEnter
-        "y" -> Left PlanEnter
-        "n" -> Left PlanStayNormal
+    PickerKeyChar c -> case planDecisionForKey c of
+        Just PlanApprove -> Left PlanEnter
+        Just PlanCancel -> Left PlanStayNormal
         _ -> Right state
     PickerKeyBackspace -> Right state
 
@@ -175,14 +175,8 @@ applyPlanExitKey key state@(PlanExitState index) = case key of
     PickerKeyConfirm -> Left (exitChoiceFromIndex index)
     PickerKeyUp -> Right (PlanExitState (movePlanIndex 3 (-1) index))
     PickerKeyDown -> Right (PlanExitState (movePlanIndex 3 1 index))
-    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
-        "a" -> Left PlanApprove
-        "y" -> Left PlanApprove
-        "s" -> Left (PlanRequestChanges "")
-        "c" -> Left (PlanRequestChanges "")
-        "r" -> Left (PlanRequestChanges "")
-        "n" -> Left PlanCancel
-        _ -> Right state
+    PickerKeyChar c ->
+        maybe (Right state) Left (planDecisionForKey c)
     PickerKeyBackspace -> Right state
 
 renderPlanExitFrame :: Bool -> PlanExitState -> Text
@@ -297,19 +291,26 @@ renderPlanMarkdown color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
 parsePlanDecisionAnswer :: Text -> Maybe PlanDecision
-parsePlanDecisionAnswer raw = case Text.toLower (Text.strip raw) of
-    "a" -> Just PlanApprove
-    "approve" -> Just PlanApprove
-    "y" -> Just PlanApprove
-    "yes" -> Just PlanApprove
-    "s" -> Just (PlanRequestChanges "")
-    "c" -> Just (PlanRequestChanges "")
-    "changes" -> Just (PlanRequestChanges "")
-    "r" -> Just (PlanRequestChanges "")
-    "q" -> Just PlanCancel
-    "cancel" -> Just PlanCancel
-    "n" -> Just PlanCancel
-    "no" -> Just PlanCancel
+parsePlanDecisionAnswer raw =
+    case Text.toLower (Text.strip raw) of
+        "approve" -> Just PlanApprove
+        "yes" -> Just PlanApprove
+        "changes" -> Just (PlanRequestChanges "")
+        "q" -> Just PlanCancel
+        "cancel" -> Just PlanCancel
+        "no" -> Just PlanCancel
+        answer -> case Text.unpack answer of
+            [key] -> planDecisionForKey key
+            _ -> Nothing
+
+planDecisionForKey :: Char -> Maybe PlanDecision
+planDecisionForKey key = case toLower key of
+    'a' -> Just PlanApprove
+    'y' -> Just PlanApprove
+    's' -> Just (PlanRequestChanges "")
+    'c' -> Just (PlanRequestChanges "")
+    'r' -> Just (PlanRequestChanges "")
+    'n' -> Just PlanCancel
     _ -> Nothing
 
 -- | Build the synthetic turn that follows a plan decision.
