@@ -429,7 +429,7 @@ hostTranscriptMatches checkpoint transcript previous = do
                     pure False
                 Just _ -> do
                     current <- readIORef transcript
-                    currentName <- makeStableName current
+                    currentName <- current `seq` makeStableName current
                     pure $
                         eqStableName
                             expectedCheckpoint.checkpointTranscript
@@ -462,11 +462,11 @@ commitHostTranscript
     inputs
     assistantText = do
     appendHostTranscript transcript inputs assistantText
-    -- Read the exact object installed in the IORef. GHC is free to rebuild an
-    -- equivalent result returned from atomicModifyIORef', which would give it
-    -- a different StableName despite no host-side transcript change.
+    -- Read and enter the exact object installed in the IORef before taking its
+    -- StableName. Otherwise the lazy append thunk can later be entered by the
+    -- CLI, changing the StableName despite no host-side transcript change.
     committed <- readIORef transcript
-    committedName <- makeStableName committed
+    committedName <- committed `seq` makeStableName committed
     writeIORef checkpoint $
         Just HostTranscriptCheckpoint
             { checkpointTranscript = committedName

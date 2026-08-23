@@ -637,6 +637,11 @@ spec = do
                         \backend -> do
                             first <- expectTurn =<<
                                 submit backend Nothing "one"
+                            -- The CLI traverses the committed transcript before
+                            -- the next prompt. Entering the lazy append must not
+                            -- look like a host-side rollback.
+                            committed <- readIORef transcript
+                            committed `seq` pure ()
                             second <- expectTurn =<<
                                 submit backend
                                     (Just first.responseId)
