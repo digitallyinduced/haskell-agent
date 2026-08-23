@@ -480,6 +480,9 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
+    | RunSwitchWorktree OsPath Provider Text Text
+      -- ^ Fresh worktree path. Starts a new session after the current backend
+      -- and fullscreen UI have shut down, retaining provider, model, and effort.
 
 data PreparedAgent = PreparedAgent
     { preparedFullscreen :: !(Maybe FullscreenRuntime)
@@ -654,6 +657,19 @@ runAgentWithRestarts options = do
                         , optPrompt = Nothing
                         , optPromptFile = Nothing
                         , optResume = Just sessionId
+                        }
+                    Nothing
+            RunSwitchWorktree path provider model effort ->
+                go fullscreenInputs
+                    current
+                        { optProvider = Just provider
+                        , optModel = Just model
+                        , optCwd = Just path
+                        , optWorktree = False
+                        , optEffort = Just effort
+                        , optPrompt = Nothing
+                        , optPromptFile = Nothing
+                        , optResume = Nothing
                         }
                     Nothing
             RunSwitchProvider next ->
@@ -3752,6 +3768,29 @@ replWithDraft env@SessionEnv
                                                 (roleMuted color
                                                     (glyphSession <> message))
                         continue
+                    ReplWorktree -> do
+                        result <- withReplActivity "Creating worktree…" $
+                            createWorktree cwd (worktreeRoot env.sessionHome)
+                        case result of
+                            Left err -> do
+                                color <- resolveColor stderr
+                                displayError err $
+                                    putTextLn stderr (roleError color err)
+                                continue
+                            Right path -> do
+                                color <- resolveColor stderr
+                                params <- readIORef paramsRef
+                                let message = "worktree: " <> toText path
+                                displayInfo message $
+                                    putTextLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> message))
+                                pure
+                                    (RunSwitchWorktree
+                                        path
+                                        provider
+                                        (currentModel params)
+                                        (currentEffort params))
                     ReplRename title -> do
                         color <- resolveColor stderr
                         case persist of
