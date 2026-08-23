@@ -125,6 +125,18 @@ spec = describe "fullscreen UI reducer" do
                 block.blockTitle `shouldBe` "Continued session 3"
             _ -> expectationFailure "expected one running shell block"
 
+    it "renders the public Grok terminal alias as a shell block" do
+        let call = functionToolCall
+                "c1"
+                "run_terminal_command"
+                "{\"command\":\"git status\"}"
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ git status"
+            _ -> expectationFailure "expected one running shell block"
+
     it "applies tool output snapshots only to the matching running block" do
         let first = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"first\"}"
             second = functionToolCall "c2" "run_terminal_cmd" "{\"command\":\"second\"}"

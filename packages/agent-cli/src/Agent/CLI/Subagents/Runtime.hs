@@ -114,6 +114,10 @@ import Agent.Tools.Grok.Task
     , lookupAgentType
     , recordAgentSpec
     )
+import Agent.Tools.Grok.Prompt
+    ( codingGrokPromptTools
+    , grokSubagentSystemPrompt
+    )
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
@@ -141,6 +145,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
+import System.Environment (lookupEnv)
+import qualified System.Info as SystemInfo
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
@@ -640,6 +646,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         (Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    shellPath <-
+                        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
                     let tools = case
                                 dialectChildAgentProtocol childDialect of
                             CodexCollaborationProtocol ->
@@ -656,12 +664,15 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                     systemPrompt
                                         childDialect env.subCwd today True
                                 GrokTaskProtocol ->
-                                    systemPromptForTools
-                                        childDialect
-                                        (map (.appToolName) tools)
+                                    grokSubagentSystemPrompt
+                                        codingGrokPromptTools
+                                        ("web_search" : map (.appToolName) tools)
                                         env.subCwd
                                         today
-                                        True
+                                        (Text.pack SystemInfo.os)
+                                        shellPath
+                                        agentType
+                                        env.subId.unSubagentId
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
@@ -677,7 +688,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                     CodexCollaborationProtocol ->
                                         codexSubagentSuffix env.subId
                                     GrokTaskProtocol ->
-                                        grokSubagentSuffix agentType env.subId
+                                        ""
                                     GenericTaskProtocol ->
                                         genericSubagentSuffix agentType env.subId
                         childParams = requestParams model instructions
@@ -697,6 +708,11 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 config
                                 previous
                                 (interAgentMessagePayload prompt))
+
+defaultShell :: String
+defaultShell
+    | SystemInfo.os == "mingw32" = "cmd.exe"
+    | otherwise = "/bin/sh"
 
 prepareChild
     :: SubagentRuntime
@@ -819,29 +835,6 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
         env.subId
         session
     pure result
-
-grokSubagentSuffix :: Text -> SubagentId -> Text
-grokSubagentSuffix agentType agentId =
-    "You are a Grok Build subagent — a focused worker delegated a specific task.\n\
-    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
-    \Report blocked or unverified work explicitly.\n\n\
-    \Subagent type: "
-        <> agentType
-        <> "\nAgent id: "
-        <> agentId.unSubagentId
-        <> case agentType of
-            "explore" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \You have no file editing or command execution tools. Search broadly, narrow down, \
-                \and return absolute file paths and relevant findings."
-            "plan" ->
-                "\n\n=== READ-ONLY MODE ===\n\
-                \Do not create, modify, or delete implementation files. Explore the codebase, \
-                \consider trade-offs, and produce a concrete implementation strategy. End with \
-                \a Critical Files for Implementation section listing 3-5 files."
-            _ ->
-                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
-                \Never create documentation files unless explicitly requested."
 
 codexSubagentSuffix :: SubagentId -> Text
 codexSubagentSuffix agentId =

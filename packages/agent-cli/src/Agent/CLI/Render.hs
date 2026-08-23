@@ -587,6 +587,7 @@ toolChrome name = case canonicalToolName name of
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
+    "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
     "task" -> ToolChrome "Ran" ToolDetailMuted
     "spawn_agent" -> ToolChrome "Spawned agent" ToolDetailMuted

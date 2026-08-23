@@ -47,7 +47,11 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTokenUsage
     )
-import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallResult(..)
+    , canonicalToolName
+    )
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -771,12 +775,14 @@ toggleSelected state =
                 }
 
 toolBlockKind :: Text -> BlockKind
-toolBlockKind name
+toolBlockKind rawName
     | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci"] =
         BlockShell
     | name `elem` ["search_replace", "apply_patch"] =
         BlockEdit
     | otherwise = BlockTool
+  where
+    name = canonicalToolName rawName
 
 outputLooksFailed :: Text -> Bool
 outputLooksFailed output =
