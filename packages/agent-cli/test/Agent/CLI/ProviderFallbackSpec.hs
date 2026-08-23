@@ -15,7 +15,6 @@ import Agent.CLI.ProviderFallback
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (elemIndex)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
@@ -41,12 +40,7 @@ spec = do
                 `shouldBe` True
 
     describe "rankedModels" do
-        it "prefers sol over luna" do
-            let ids = map (.modelTarget.targetModelId) (rankedModels catalog)
-            elemIndex "gpt-5.6-sol" ids
-                `shouldSatisfy` (< elemIndex "gpt-5.6-luna" ids)
-
-        it "puts the strongest OpenAI model first" do
+        it "puts the frontier OpenAI model first" do
             fmap
                 (\model ->
                     ( model.modelTarget.targetProvider
@@ -69,7 +63,7 @@ spec = do
                 (fallbackCandidates catalog [] XAIProvider exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
-                    , (OpenRouterProvider, "openai/gpt-5.1")
+                    , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
         it "falls back from OpenAI to the best configured alternatives" do
@@ -81,7 +75,7 @@ spec = do
                 (fallbackCandidates catalog [] OpenAIProvider exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
-                    , (OpenRouterProvider, "openai/gpt-5.1")
+                    , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
         it "skips providers already found unavailable" do

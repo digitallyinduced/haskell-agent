@@ -25,6 +25,9 @@ firstId = fmap (.modelTarget.targetModelId) . listToMaybe
 spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
+    let modelIdsFor provider =
+            map (.modelTarget.targetModelId)
+                (modelsForProvider catalog provider)
     describe "modelsForProvider" do
         it "puts the provider default first" do
             firstId (modelsForProvider catalog XAIProvider)
@@ -35,42 +38,24 @@ spec = do
                 `shouldBe` defaultModelFor catalog OpenRouterProvider
 
 
-        it "lists the gpt-5.6 series for OpenAI" do
-            let ids =
-                    map (.modelTarget.targetModelId)
-                        (modelsForProvider catalog OpenAIProvider)
-            ids `shouldBe` ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
-
-        it "lists Ox Alpha instead of Thinking Machines models for OpenRouter" do
-            let ids =
-                    map (.modelTarget.targetModelId)
-                        (modelsForProvider catalog OpenRouterProvider)
-            ids `shouldContain` ["stealth/ox-alpha"]
-            ids `shouldSatisfy`
-                all (not . Text.isPrefixOf "thinkingmachines/")
-
-        it "lists several options per provider" do
-            length (modelsForProvider catalog XAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider catalog OpenAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider catalog OpenRouterProvider) `shouldSatisfy` (>= 2)
+        it "ships only the frontier model for each provider" do
+            modelIdsFor OpenAIProvider `shouldBe` ["gpt-5.6-sol"]
+            modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
+            modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelTarget.targetProvider))
                 (modelsForProvider catalog OpenAIProvider)
                 `shouldBe` True
 
-        it "assigns OpenRouter dialects by model family" do
+        it "assigns the OpenRouter frontier model its portable dialect" do
             let options = modelsForProvider catalog OpenRouterProvider
                 dialectFor model =
                     (.modelTarget.targetDialect)
                         <$> find
                             ((== model) . (.modelTarget.targetModelId))
                             options
-            dialectFor "openai/gpt-5.1" `shouldBe` Just CodexDialect
-            dialectFor "x-ai/grok-4" `shouldBe` Just GrokBuildDialect
-            dialectFor "anthropic/claude-sonnet-4"
-                `shouldBe` Just GenericResponsesDialect
-            dialectFor "google/gemini-2.5-pro"
+            dialectFor "stealth/ox-alpha"
                 `shouldBe` Just GenericResponsesDialect
 
         it "keeps every catalog dialect consistent with model inference" do
@@ -198,7 +183,7 @@ spec = do
                 (filter (\opt -> opt.modelTarget.targetModelId == def) opts)
                 `shouldBe` 1
 
-        it "preserves a legacy OpenRouter dialect for a known model" do
+        it "preserves a legacy OpenRouter dialect for a removed model" do
             let model = "openai/gpt-5.1"
                 opts =
                     ensureCurrentInList
@@ -211,7 +196,7 @@ spec = do
                 `shouldBe` Just GrokBuildDialect
             length
                 (filter ((== model) . (.modelTarget.targetModelId)) opts)
-                `shouldBe` 2
+                `shouldBe` 1
 
         it "ignores unset placeholders" do
             let option =
@@ -296,15 +281,15 @@ spec = do
                             Right s' -> s'
                             Left _ -> s)
                         state0
-                        ("mini" :: String)
+                        ("frontier" :: String)
             not (null (visibleOptions typed)) `shouldBe` True
             all
                 (\opt ->
-                    "mini" `Text.isInfixOf`
+                    "frontier" `Text.isInfixOf`
                         Text.toLower opt.modelTarget.targetModelId
                     || maybe
                         False
-                        (("mini" `Text.isInfixOf`) . Text.toLower)
+                        (("frontier" `Text.isInfixOf`) . Text.toLower)
                         opt.modelLabel)
                 (visibleOptions typed)
                 `shouldBe` True

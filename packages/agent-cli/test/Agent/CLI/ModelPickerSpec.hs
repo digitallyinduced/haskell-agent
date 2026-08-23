@@ -60,10 +60,8 @@ spec = do
                     False
                     "openai"
                     OpenAIProvider
-                    "gpt-5.6-luna"
+                    "gpt-5.6-sol"
                     CodexDialect
-            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
-            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
             listing `shouldSatisfy` Text.isInfixOf "openai"
             listing `shouldSatisfy` Text.isInfixOf "grok-4.6"

@@ -27,13 +27,13 @@ spec = describe "Agent.CLI.ModelConfig" do
         catalog <- expectRight decoded
         fmap (.catalogModelId)
             (catalogDefaultForProvider catalog OpenAIProvider)
-            `shouldBe` Just "gpt-5.6-luna"
+            `shouldBe` Just "gpt-5.6-sol"
         fmap (.catalogModelId)
             (catalogDefaultForProvider catalog XAIProvider)
             `shouldBe` Just "grok-4.6"
         fmap (.catalogModelId)
             (catalogDefaultForProvider catalog OpenRouterProvider)
-            `shouldBe` Just "openai/gpt-5.1"
+            `shouldBe` Just "stealth/ox-alpha"
 
     it "adds a custom Responses connection and model" do
         defaults <- readPackagedDefaults
@@ -88,9 +88,9 @@ spec = describe "Agent.CLI.ModelConfig" do
                 [ "{"
                 , "  \"version\": 1,"
                 , "  \"models\": [{"
-                , "    \"id\": \"gpt-5.6-luna\","
+                , "    \"id\": \"gpt-5.6-sol\","
                 , "    \"connection\": \"openai\","
-                , "    \"model\": \"gpt-5.6-luna\","
+                , "    \"model\": \"gpt-5.6-sol\","
                 , "    \"dialect\": \"codex\","
                 , "    \"label\": \"overridden\","
                 , "    \"default\": true"
@@ -102,11 +102,11 @@ spec = describe "Agent.CLI.ModelConfig" do
                 ("models.default.json", defaults)
                 (Just ("models.json", overlay)))
         let matching =
-                filter ((== "gpt-5.6-luna") . (.catalogModelId))
+                filter ((== "gpt-5.6-sol") . (.catalogModelId))
                     catalog.catalogModels
         length matching `shouldBe` 1
         fmap (.catalogModelWireId) matching
-            `shouldBe` ["gpt-5.6-luna"]
+            `shouldBe` ["gpt-5.6-sol"]
         fmap (.catalogModelLabel) matching
             `shouldBe` [Just "overridden"]
 
