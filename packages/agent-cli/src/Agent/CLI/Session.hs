@@ -17,6 +17,7 @@ module Agent.CLI.Session
     , loadSession
     , isValidSessionId
     , listSessions
+    , sessionDirForId
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
@@ -35,13 +36,17 @@ import Agent.FileRetry
     , retryOnFileBusy
     , writeLazyFileAtomically
     )
+import Agent.CLI.SessionLock
+    ( acquireSessionLock
+    , releaseSessionLock
+    )
 import Agent.Loop (TokenUsage(..))
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (displayException, tryIO)
-import Control.Monad (unless, when)
+import Control.Exception.Safe (displayException, finally, tryIO)
+import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -364,9 +369,8 @@ appendTurnKeepTitle handle turn =
 
 loadSession :: OsPath -> Text -> IO (Either Text (SessionMeta, [SessionTurn]))
 loadSession root sessionId = runExceptT do
-    unless (isValidSessionId sessionId) $
-        throwE "invalid session id"
-    let dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
+    dir <- except (sessionDirForId root sessionId)
+    let
         metaPath = dir </> unsafeEncodeUtf "meta.json"
         transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
     exists <- lift (doesDirectoryExist dir)
@@ -389,17 +393,15 @@ loadSession root sessionId = runExceptT do
 
 deleteSession :: OsPath -> Text -> IO (Either Text ())
 deleteSession root sessionId = runExceptT do
-    unless (isValidSessionId sessionId) $
-        throwE "invalid session id"
-    let dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
-        runningPath = dir </> unsafeEncodeUtf ".agent-running"
+    dir <- except (sessionDirForId root sessionId)
     exists <- lift (doesDirectoryExist dir)
     unless exists $
         throwE ("session not found: " <> sessionId)
-    running <- lift (doesDirectoryExist runningPath)
-    when running $
-        throwE "cannot delete a running session"
-    removed <- lift (tryIO (removePathForcibly dir))
+    lock <- lift (acquireSessionLock dir sessionId) >>= \case
+        Left _ -> throwE "cannot delete a running session"
+        Right lock -> pure lock
+    removed <- lift $
+        tryIO (removePathForcibly dir) `finally` releaseSessionLock lock
     case removed of
         Left err ->
             throwE ("could not delete session: " <> Text.pack (displayException err))
@@ -413,6 +415,12 @@ isValidSessionId sessionId =
         && sessionId /= "."
         && sessionId /= ".."
         && Text.all (\char -> char /= '/' && char /= '\\' && char /= '\NUL') sessionId
+
+sessionDirForId :: OsPath -> Text -> Either Text OsPath
+sessionDirForId root sessionId
+    | isValidSessionId sessionId =
+        Right (root </> unsafeEncodeUtf (Text.unpack sessionId))
+    | otherwise = Left "invalid session id"
 
 listSessions :: OsPath -> IO [SessionMeta]
 listSessions root = do

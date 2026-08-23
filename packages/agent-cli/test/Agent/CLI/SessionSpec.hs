@@ -1,6 +1,7 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.SessionLock
 import Agent.Loop (TokenUsage(..))
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
@@ -325,6 +326,21 @@ spec = describe "Agent.CLI.Session" do
                 doesDirectoryExist handle.sessionDir `shouldReturn` False
                 deleteSession root "../outside"
                     `shouldReturn` Left "invalid session id"
+
+        it "does not delete a session while another process owns its lock" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                acquireSessionLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right lock -> do
+                            deleteSession root handle.sessionMeta.metaId
+                                `shouldReturn`
+                                    Left "cannot delete a running session"
+                            releaseSessionLock lock
+                            deleteSession root handle.sessionMeta.metaId
+                                `shouldReturn` Right ()
 
         it "rejects metadata whose id does not match its directory" $
             withTempDir "agent-sessions-" \root -> do
