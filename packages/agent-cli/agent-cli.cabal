@@ -172,6 +172,7 @@ executable eval-ghci-vs-bash
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
                     , agent-responses
+                    , agent-responses-types
                     , aeson >= 2.0
                     , base >= 4.17 && < 5
                     , bytestring
