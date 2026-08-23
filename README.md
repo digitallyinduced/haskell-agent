@@ -221,6 +221,13 @@ with `callTool`, invoke isolated raw model requests with
 `callLLM :: ResponseCreateParams -> IO Response`, and return only selected
 stdout through `emitText`.
 
+For common response shapes, `callLLMText` extracts assistant text and
+`callLLMJson` decodes typed JSON while preserving raw `callLLM` as the escape
+hatch. `encodeJsonText` serializes final typed/Aeson values without fragile
+manual JSON construction. Successful identical model requests are memoized for
+the current parent turn, including across repaired `run_haskell_program`
+attempts; failed requests are not cached.
+
 Independent calls can use the preimported `Concurrently` applicative:
 
 ```haskell

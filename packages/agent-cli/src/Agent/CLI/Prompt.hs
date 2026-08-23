@@ -72,6 +72,7 @@ ghciGuidance haskellProgramEnabled directShellEnabled =
                 then
                     [ "For multi-tool orchestration or filtering large intermediate results, use run_haskell_program. Its callTool helper accepts registered nested tools, returns their formatted Text results, and routes nested calls through normal approvals while only the Haskell program's selected output returns to the model."
                     , "For independent nested calls, run_haskell_program preimports Concurrently(..) and runConcurrently. Applicative Concurrently callTool actions overlap only when their registered tools are parallel-safe; stateful tools remain serialized."
+                    , "For isolated model calls inside run_haskell_program, prefer callLLMText for assistant text or callLLMJson for typed JSON. Use encodeJsonText instead of manually concatenating or showing final JSON. Use raw callLLM only when the complete Responses value is required. Identical successful callLLM requests are reused when a corrected Haskell program retries during the same parent turn."
                     , "run_haskell_program uses a fresh dedicated GHCi process for each call and is not OS-sandboxed, so the outer program always requires approval."
                     ]
                 else [])

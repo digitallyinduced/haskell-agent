@@ -57,6 +57,8 @@ module Agent.Responses.Types
 
       -- * Response
     , Response(..)
+    , responseOutputText
+    , responseOutputTexts
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)
@@ -1400,6 +1402,31 @@ instance FromJSON Response where
         <*> o .:? "usage"
         <*> o .:? "user"
         <*> pure (without responseFieldNames o)
+
+-- | Collect assistant output-text parts in wire order while ignoring
+-- reasoning, tool calls, refusals, and unknown response items.
+responseOutputTexts :: Response -> [Text]
+responseOutputTexts response =
+    [ outputText
+    | MessageItem message <- response.output
+    , message.role == RoleAssistant
+    , outputText <- case message.content of
+        MessageContentText value -> [value]
+        MessageContentParts parts ->
+            [ value
+            | OutputTextPart { text = value } <- parts
+            ]
+    ]
+
+-- | Return the concatenated assistant output text, or a concise diagnostic
+-- when the raw response contains no output-text parts.
+responseOutputText :: Response -> Either Text Text
+responseOutputText response =
+    case responseOutputTexts response of
+        [] -> Left
+            ("Response " <> response.responseId
+                <> " contained no output_text content.")
+        parts -> Right (Text.concat parts)
 
 --------------------------------------------------------------------------------
 -- Streaming events

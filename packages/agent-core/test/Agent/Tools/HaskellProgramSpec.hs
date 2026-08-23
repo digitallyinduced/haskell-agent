@@ -65,6 +65,7 @@ import Control.Concurrent.MVar
 import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
 import Data.IORef
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -183,6 +184,29 @@ spec = describe "Agent.Tools.HaskellProgram" do
                 `shouldSatisfy` Text.isInfixOf
                     "resp-nested|test-model|future_item"
             readIORef seen `shouldReturn` [expectedRequest]
+
+    it "provides text and typed JSON helpers over raw Responses" do
+        withTempProgramGhci \(ghci, _planMode) -> do
+            result <- evalGhciProgram ghci llmHelperProgramSource 30000
+                \requests ->
+                    pure
+                        [ case request of
+                            GhciLlmRequest llmRequest ->
+                                GhciLlmResponse (Right
+                                    (testTextResponse
+                                        ("resp-" <> fromMaybe "default"
+                                            llmRequest.model)
+                                        (if llmRequest.model == Just "json"
+                                            then "[1,2,3]"
+                                            else "plain-text")))
+                            GhciToolRequest name _ ->
+                                GhciToolResponse
+                                    ("unexpected nested tool call: " <> name)
+                        | request <- requests
+                        ]
+            result.ghciOk `shouldBe` True
+            result.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "plain-text|[1,2,3]"
 
     it "batches concurrent callLLM actions and preserves response order" do
         withTempProgramGhci \(ghci, _planMode) -> do
@@ -387,6 +411,59 @@ spec = describe "Agent.Tools.HaskellProgram" do
                     expectationFailure
                         ("unexpected loop submissions: " <> show other)
 
+    it "memoizes identical successful callLLM requests across program retries" do
+        withTempProgramGhci \(ghci, planMode) -> do
+            providerCalls <- newIORef (0 :: Int)
+            turns <- newIORef (0 :: Int)
+            let outerCall callId = functionToolCall
+                    callId
+                    haskellProgramToolName
+                    (encodeJson (Aeson.object
+                        [ "source" Aeson..= textHelperProgramSource
+                        , "description" Aeson..=
+                            ("reuse an isolated classification" :: Text)
+                        ]))
+                backend = Backend \_previous _inputs _onEvent -> do
+                    turn <- atomicModifyIORef' turns \n -> (n + 1, n)
+                    pure $ Right $ case turn of
+                        0 -> emptyTurnOutput
+                            "response-1" [outerCall "outer-1"] Nothing
+                        1 -> emptyTurnOutput
+                            "response-2" [outerCall "outer-2"] Nothing
+                        _ -> emptyTurnOutput "response-3" [] (Just "done")
+                tools =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry [haskellProgramTool ghci planMode]
+            cancel <- newCancelFlag
+            let config = LoopConfig
+                    { loopBackend = backend
+                    , loopTools = tools
+                    , loopNestedTools = Nothing
+                    , loopDispatch = defaultLoopDispatch
+                        { toolDispatchCallResponses = Just \requests -> do
+                            modifyIORef' providerCalls (+ length requests)
+                            pure
+                                [ Right
+                                    (testTextResponse
+                                        "resp-classifier"
+                                        "classification")
+                                | _ <- requests
+                                ]
+                        }
+                    , loopMaxTurns = 4
+                    , loopOnEvent = \_ -> pure ()
+                    , loopApprove = \_ -> pure (Right True)
+                    , loopNestedApprove = Nothing
+                    , loopCancel = cancel
+                    }
+            runLoop config Nothing "go" `shouldReturn` Right LoopResult
+                { finalResponseId = "response-3"
+                , finalText = Just "done"
+                , turnsUsed = 3
+                , tokenUsage = emptyTokenUsage
+                }
+            readIORef providerCalls `shouldReturn` 1
+
     it "runs nested parallel-safe tools concurrently through the active loop" do
         withTempProgramGhci \(ghci, planMode) -> do
             firstStarted <- newEmptyMVar
@@ -539,6 +616,25 @@ callLlmProgramSource = Text.unlines
     , "    _ -> emitText \"unexpected-output\""
     ]
 
+llmHelperProgramSource :: Text
+llmHelperProgramSource = Text.unlines
+    [ "do"
+    , "  let request :: Text -> ResponseCreateParams"
+    , "      request name = defaultResponseCreateParams { model = Just name }"
+    , "  plain <- callLLMText (request \"text\")"
+    , "  numbers <- (callLLMJson (request \"json\") :: IO [Int])"
+    , "  emitText (plain <> \"|\" <> encodeJsonText numbers)"
+    ]
+
+textHelperProgramSource :: Text
+textHelperProgramSource = Text.unlines
+    [ "do"
+    , "  let request :: ResponseCreateParams"
+    , "      request = defaultResponseCreateParams { model = Just \"classifier\" }"
+    , "  output <- callLLMText request"
+    , "  emitText output"
+    ]
+
 concurrentLlmProgramSource :: Text
 concurrentLlmProgramSource = Text.unlines
     [ "do"
@@ -621,6 +717,29 @@ testResponse responseId =
             , "total_tokens" Aeson..= (5 :: Int)
             ]
         , "future_response_field" Aeson..= ("preserved" :: Text)
+        ]) of
+        Aeson.Success response -> response
+        Aeson.Error err -> error err
+
+testTextResponse :: Text -> Text -> Response
+testTextResponse responseId outputText =
+    case Aeson.fromJSON (Aeson.object
+        [ "id" Aeson..= responseId
+        , "created_at" Aeson..= (0 :: Int)
+        , "model" Aeson..= ("test-model" :: Text)
+        , "status" Aeson..= ("completed" :: Text)
+        , "output" Aeson..=
+            [ Aeson.object
+                [ "type" Aeson..= ("message" :: Text)
+                , "role" Aeson..= ("assistant" :: Text)
+                , "content" Aeson..=
+                    [ Aeson.object
+                        [ "type" Aeson..= ("output_text" :: Text)
+                        , "text" Aeson..= outputText
+                        ]
+                    ]
+                ]
+            ]
         ]) of
         Aeson.Success response -> response
         Aeson.Error err -> error err
