@@ -1,6 +1,9 @@
 module Agent.CLI.TurnSpec (spec) where
 
-import Agent.CLI.Turn (retainTurnInputs)
+import Agent.CLI.Turn
+    ( IncompleteTurnCheckpoint(..)
+    , checkpointIncompleteTurn
+    )
 import Agent.Loop (TurnInput(..))
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
@@ -14,13 +17,17 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Test.Hspec
 
 spec :: Spec
-spec = describe "retainTurnInputs" do
-    it "keeps the exact turn inputs after existing history" do
+spec = describe "checkpointIncompleteTurn" do
+    it "describes the complete input-only checkpoint transition" do
         let history = turnInputsToItems [UserMessage "earlier"]
             inputs = [UserMessage "build failed [2026-08-23 13:10 CEST]"]
             retained = turnInputsToItems inputs
-        retainTurnInputs history inputs
-            `shouldBe` (history <> retained, retained)
+        checkpointIncompleteTurn history inputs `shouldBe`
+            IncompleteTurnCheckpoint
+                { checkpointTranscript = history <> retained
+                , checkpointTurnItems = retained
+                , checkpointPreviousResponseId = Nothing
+                }
 
     it "does not retain partial assistant or tool state" do
         let history = turnInputsToItems [UserMessage "earlier"]
@@ -41,6 +48,9 @@ spec = describe "retainTurnInputs" do
                     , extraFields = KeyMap.empty
                     }
             inputs = [UserMessage "fix the failure"]
-            (transcript, _) = retainTurnInputs history inputs
-        transcript `shouldNotContain` [partialAssistant]
-        transcript `shouldBe` history <> turnInputsToItems inputs
+            partialTranscript = history <> [partialAssistant]
+            checkpoint = checkpointIncompleteTurn history inputs
+        checkpoint.checkpointTranscript
+            `shouldNotBe` partialTranscript <> turnInputsToItems inputs
+        checkpoint.checkpointTranscript
+            `shouldBe` history <> turnInputsToItems inputs

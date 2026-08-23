@@ -1,7 +1,8 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( applyPendingSessionTitles
-    , retainTurnInputs
+    ( IncompleteTurnCheckpoint(..)
+    , applyPendingSessionTitles
+    , checkpointIncompleteTurn
     , runOneTurn
     ) where
 
@@ -259,10 +260,9 @@ runOneTurn env@SessionEnv
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
             -- duplicate the instructions on the next full-history request.
-            let (retainedTranscript, retainedItems) =
-                    retainTurnInputs beforeItems turnInputs
-            writeIORef transcriptRef retainedTranscript
-            writeIORef previous Nothing
+            let checkpoint = checkpointIncompleteTurn beforeItems turnInputs
+            writeIORef transcriptRef checkpoint.checkpointTranscript
+            writeIORef previous checkpoint.checkpointPreviousResponseId
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -276,7 +276,7 @@ runOneTurn env@SessionEnv
                     putTextLn stderr (formatLoopErrorColored color cancelled)
                     putTextLn stderr
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete retainedItems "cancelled"
+            persistIncomplete checkpoint.checkpointTurnItems "cancelled"
             pure TurnSucceeded
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -304,10 +304,11 @@ runOneTurn env@SessionEnv
                 _ -> do
                     finishTerminal (isNothing fullscreen)
                         terminal wallStarted finishedAt 1 "Agent turn failed"
-                    let (retainedTranscript, retainedItems) =
-                            retainTurnInputs beforeItems turnInputs
-                    writeIORef transcriptRef retainedTranscript
-                    writeIORef previous Nothing
+                    let checkpoint =
+                            checkpointIncompleteTurn beforeItems turnInputs
+                    writeIORef transcriptRef checkpoint.checkpointTranscript
+                    writeIORef previous
+                        checkpoint.checkpointPreviousResponseId
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -325,7 +326,7 @@ runOneTurn env@SessionEnv
                                 (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderr
                                 (formatTurnStatus color "error" (elapsedDetail model))
-                    persistIncomplete retainedItems
+                    persistIncomplete checkpoint.checkpointTurnItems
                         (formatLoopErrorPersistedAt finishedAt err)
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
@@ -416,17 +417,27 @@ isPendingPersistence = \case
     PersistencePending _ -> True
     PersistenceActive _ -> False
 
--- | Keep inputs from a cancelled or failed logical turn while discarding any
--- partial assistant output, tool calls, and tool results produced after the
--- turn began. Returning the retained suffix separately lets persistence store
--- the same model-visible checkpoint used by the live transcript.
-retainTurnInputs
+-- | Pure state transition for a cancelled or failed logical turn. It preserves
+-- the exact model inputs while discarding partial assistant/tool state and
+-- invalidates the provider response chain so the next request replays the
+-- complete local transcript.
+data IncompleteTurnCheckpoint = IncompleteTurnCheckpoint
+    { checkpointTranscript :: ![ResponseItem]
+    , checkpointTurnItems :: ![ResponseItem]
+    , checkpointPreviousResponseId :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+checkpointIncompleteTurn
     :: [ResponseItem]
     -> [TurnInput]
-    -> ([ResponseItem], [ResponseItem])
-retainTurnInputs beforeItems turnInputs =
+    -> IncompleteTurnCheckpoint
+checkpointIncompleteTurn beforeItems turnInputs =
     let retainedItems = turnInputsToItems turnInputs
-    in (beforeItems <> retainedItems, retainedItems)
+    in IncompleteTurnCheckpoint
+        { checkpointTranscript = beforeItems <> retainedItems
+        , checkpointTurnItems = retainedItems
+        , checkpointPreviousResponseId = Nothing
+        }
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
