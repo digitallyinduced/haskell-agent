@@ -96,6 +96,7 @@ data AppEvent
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
+    | AppSetModelIds ![Text]
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -185,6 +186,7 @@ data AppState = AppState
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
     , appSkillCommands :: ![SkillCommand]
+    , appModelIds :: ![Text]
     , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]

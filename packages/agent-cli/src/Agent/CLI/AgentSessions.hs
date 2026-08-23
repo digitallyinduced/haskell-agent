@@ -30,6 +30,7 @@ import Agent.CLI.SessionLock
     )
 import Agent.CLI.Models
     ( ModelOption(..)
+    , ModelTarget(..)
     , resolveModelOptionDialect
     )
 import Agent.OsPath (fromText, unsafeToFilePath)
@@ -90,6 +91,7 @@ import System.Process
 data AgentSessionToolsEnv = AgentSessionToolsEnv
     { toolsRoot :: !OsPath
     , toolsProvider :: !Provider
+    , toolsConnection :: !Text
     , toolsModel :: !Text
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
@@ -365,30 +367,35 @@ runCreateAgentSession env args
         target <- case args.model of
             Nothing ->
                 pure ModelOption
-                    { modelProvider = env.toolsProvider
-                    , modelId = model
-                    , modelTransportId = env.toolsTransportModel
-                    , modelDialect = env.toolsDialect
+                    { modelTarget = ModelTarget
+                        { targetProvider = env.toolsProvider
+                        , targetConnectionId = env.toolsConnection
+                        , targetModelId = model
+                        , targetWireModelId = env.toolsTransportModel
+                        , targetDialect = env.toolsDialect
+                        }
                     , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
                     }
             Just _ ->
                 resolveModelOptionDialect ModelOption
-                    { modelProvider = env.toolsProvider
-                    , modelId = model
-                    , modelTransportId = model
-                    , modelDialect =
-                        dialectIdForModel env.toolsProvider model
+                    { modelTarget = ModelTarget
+                        { targetProvider = env.toolsProvider
+                        , targetConnectionId = env.toolsConnection
+                        , targetModelId = model
+                        , targetWireModelId = model
+                        , targetDialect =
+                            dialectIdForModel env.toolsProvider model
+                        }
                     , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
                     }
         let title = case Text.strip <$> args.title of
                 Just value | not (Text.null value) -> value
                 _ -> sessionTitleFromPrompt args.message
             spec = SessionCreate
                 { createRoot = env.toolsRoot
-                , createProvider = env.toolsProvider
-                , createModel = model
-                , createTransportModel = target.modelTransportId
-                , createDialect = target.modelDialect
+                , createTarget = target.modelTarget
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
                 , createTitleHint = Just title
@@ -520,6 +527,7 @@ sessionJson meta status = object
     , "status" .= status
     , "title" .= meta.metaTitle
     , "provider" .= providerSlug meta.metaProvider
+    , "connection" .= meta.metaConnection
     , "model" .= meta.metaModel
     , "dialect" .= dialectSlug meta.metaDialect
     , "reasoning_effort" .= meta.metaEffort

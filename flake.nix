@@ -109,6 +109,8 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "config"
+                        "skills"
                         "src"
                         "test"
                         "agent-cli.cabal"

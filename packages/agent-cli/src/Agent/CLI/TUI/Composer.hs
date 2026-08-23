@@ -29,7 +29,7 @@ module Agent.CLI.TUI.Composer
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
-    , slashMenuForWithSkills
+    , slashMenuForWithSkillsAndModels
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -1090,8 +1090,9 @@ currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
     | state.appSlashDismissed = Nothing
     | otherwise =
-        slashMenuForWithSkills
+        slashMenuForWithSkillsAndModels
             state.appSkillCommands
+            state.appModelIds
             state.appUi.uiDraft
             state.appUi.uiCursor
 

@@ -1,6 +1,11 @@
 module Agent.CLI.ProviderFallbackSpec (spec) where
 
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , decodeModelConfig
+    , packagedModelCatalogPath
+    )
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
@@ -9,13 +14,15 @@ import Agent.CLI.ProviderFallback
     )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
-import Data.List (elemIndex)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    catalog <- runIO readPackagedCatalog
     describe "allowsAutomaticBillingFallback" do
         it "blocks subscription-to-API-credit fallback" do
             allowsAutomaticBillingFallback
@@ -33,14 +40,13 @@ spec = do
                 `shouldBe` True
 
     describe "rankedModels" do
-        it "prefers sol over luna" do
-            let ids = map (.modelId) rankedModels
-            elemIndex "gpt-5.6-sol" ids
-                `shouldSatisfy` (< elemIndex "gpt-5.6-luna" ids)
-
-        it "puts the strongest OpenAI model first" do
-            fmap (\model -> (model.modelProvider, model.modelId))
-                (safeHead rankedModels)
+        it "puts the frontier OpenAI model first" do
+            fmap
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
+                (safeHead (rankedModels catalog))
                 `shouldBe` Just (OpenAIProvider, "gpt-5.6-sol")
 
     describe "fallbackCandidates" do
@@ -49,34 +55,42 @@ spec = do
                     (UTCTime (fromGregorian 2026 8 20) 0)
 
         it "selects the best model for each other provider" do
-            map (\model -> (model.modelProvider, model.modelId))
-                (fallbackCandidates [] XAIProvider exhausted)
+            map
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
+                (fallbackCandidates catalog [] XAIProvider exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
-                    , (OpenRouterProvider, "openai/gpt-5.1")
+                    , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
         it "falls back from OpenAI to the best configured alternatives" do
-            map (\model -> (model.modelProvider, model.modelId))
-                (fallbackCandidates [] OpenAIProvider exhausted)
+            map
+                (\model ->
+                    ( model.modelTarget.targetProvider
+                    , model.modelTarget.targetModelId
+                    ))
+                (fallbackCandidates catalog [] OpenAIProvider exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
-                    , (OpenRouterProvider, "openai/gpt-5.1")
+                    , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
         it "skips providers already found unavailable" do
-            map (.modelProvider)
-                (fallbackCandidates [OpenAIProvider] XAIProvider exhausted)
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [OpenAIProvider] XAIProvider exhausted)
                 `shouldBe` [OpenRouterProvider]
 
         it "accepts direct usage-limit errors from every provider" do
-            fallbackCandidates [] OpenRouterProvider
+            fallbackCandidates catalog [] OpenRouterProvider
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
 
         it "accepts other definitive account and billing exhaustion errors" do
             map
-                (not . null . fallbackCandidates [] XAIProvider)
+                (not . null . fallbackCandidates catalog [] XAIProvider)
                 [ ProviderError UsageBalanceExhausted "balance exhausted" Nothing
                 , ProviderError QuotaExceeded "quota exhausted" Nothing
                 , ProviderError UsageNotIncluded "not included" Nothing
@@ -85,17 +99,17 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "does not switch for transient capacity failures" do
-            fallbackCandidates [] XAIProvider
+            fallbackCandidates catalog [] XAIProvider
                 (ProviderError OverloadedError "busy" (Just 30))
                 `shouldBe` []
 
         it "can continue past a replacement provider with rejected auth" do
-            map (.modelProvider)
-                (fallbackCandidates [XAIProvider] OpenAIProvider
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [XAIProvider] OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [OpenRouterProvider]
-            map (.modelProvider)
-                (fallbackCandidates [XAIProvider] OpenAIProvider
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [XAIProvider] OpenAIProvider
                     (CredentialError "credential file is invalid"))
                 `shouldBe` [OpenRouterProvider]
 
@@ -126,3 +140,11 @@ safeHead :: [a] -> Maybe a
 safeHead = \case
     [] -> Nothing
     value : _ -> Just value
+
+readPackagedCatalog :: IO ModelCatalog
+readPackagedCatalog = do
+    path <- packagedModelCatalogPath
+    bytes <- LBS.readFile path
+    case decodeModelConfig "models.default.json" bytes of
+        Left err -> fail (Text.unpack err)
+        Right catalog -> pure catalog
