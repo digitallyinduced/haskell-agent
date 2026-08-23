@@ -76,6 +76,16 @@ data ManagedSecret = ManagedSecret
     }
     deriving (Eq)
 
+data ManagedCredentialEntry = ManagedCredentialEntry
+    { entryManagedId :: !Text
+    , entryCredential :: !ManagedCredential
+    , entrySecret :: !ManagedSecret
+    }
+
+newtype ManagedCredentialStore = ManagedCredentialStore
+    { storeEntries :: [ManagedCredentialEntry]
+    }
+
 instance Show ManagedSecret where
     show secret =
         "ManagedSecret { secretManagedId = "
@@ -229,7 +239,14 @@ loadManagedCredentials = do
 loadManagedCredentialsUnlocked
     :: OsPath
     -> IO (Either Text [(ManagedCredential, ManagedSecret)])
-loadManagedCredentialsUnlocked home = do
+loadManagedCredentialsUnlocked home =
+    fmap (fmap managedCredentialPairs)
+        (loadManagedCredentialStoreUnlocked home)
+
+loadManagedCredentialStoreUnlocked
+    :: OsPath
+    -> IO (Either Text ManagedCredentialStore)
+loadManagedCredentialStoreUnlocked home = do
     metadataResult <- decodeFileOrEmpty
         (managedCredentialsPath home)
         (MetadataFile 1 [])
@@ -239,7 +256,10 @@ loadManagedCredentialsUnlocked home = do
     pure do
         metadata <- metadataResult
         secrets <- secretsResult
-        traverse (attachSecret secrets.storedSecrets) metadata.metadataAccounts
+        ManagedCredentialStore
+            <$> traverse
+                (attachSecret secrets.storedSecrets)
+                metadata.metadataAccounts
   where
     attachSecret secrets credential =
         case find
@@ -249,20 +269,16 @@ loadManagedCredentialsUnlocked home = do
                 Left
                     ("missing secret for managed credential "
                         <> credential.managedId)
-            Just secret -> Right (credential, secret)
+            Just secret -> managedCredentialEntry credential secret
 
 upsertManagedCredential
     :: ManagedCredential
     -> ManagedSecret
     -> IO (Either Text ())
-upsertManagedCredential credential secret
-    | credential.managedId /= secret.secretManagedId =
-        pure $ Left "managed credential metadata and secret ids do not match"
-    | otherwise =
-        mutateStore \accounts secrets ->
-            ( upsertBy (.managedId) credential accounts
-            , upsertBy (.secretManagedId) secret secrets
-            )
+upsertManagedCredential credential secret =
+    case managedCredentialEntry credential secret of
+        Left err -> pure (Left err)
+        Right entry -> mutateStore (upsertStoreEntry entry)
 
 -- | Persist a rotated OAuth secret before derived metadata. If the process
 -- exits between writes, the new one-time refresh token is already durable.
@@ -270,72 +286,64 @@ upsertManagedCredentialAfterRefresh
     :: ManagedCredential
     -> ManagedSecret
     -> IO (Either Text ())
-upsertManagedCredentialAfterRefresh credential secret
-    | credential.managedId /= secret.secretManagedId =
-        pure $ Left "managed credential metadata and secret ids do not match"
-    | otherwise = do
-        home <- getHomeDirectory
-        withCredentialStoreLock home do
-            loaded <- loadManagedCredentialsUnlocked home
-            case loaded of
-                Left err -> pure (Left err)
-                Right entries -> do
-                    let (accounts, secrets) = unzip entries
-                        accounts' =
-                            upsertBy (.managedId) credential accounts
-                        secrets' =
-                            upsertBy (.secretManagedId) secret secrets
-                    writePrivateJson
-                        (managedSecretsPath home)
-                        (SecretsFile 1 secrets')
-                        >>= \case
-                            Left err -> pure (Left err)
-                            Right () ->
-                                writePrivateJson
-                                    (managedCredentialsPath home)
-                                    (MetadataFile 1 accounts')
+upsertManagedCredentialAfterRefresh credential secret =
+    case managedCredentialEntry credential secret of
+        Left err -> pure (Left err)
+        Right entry -> do
+            home <- getHomeDirectory
+            withCredentialStoreLock home do
+                loaded <- loadManagedCredentialStoreUnlocked home
+                case loaded of
+                    Left err -> pure (Left err)
+                    Right store -> do
+                        let store' = upsertStoreEntry entry store
+                        writePrivateJson
+                            (managedSecretsPath home)
+                            (secretsFile store')
+                            >>= \case
+                                Left err -> pure (Left err)
+                                Right () ->
+                                    writePrivateJson
+                                        (managedCredentialsPath home)
+                                        (metadataFile store')
 
 setManagedCredentialEnabled :: Text -> Bool -> IO (Either Text ())
 setManagedCredentialEnabled credentialId enabled =
-    mutateStore \accounts secrets ->
-        ( map
-            (\account ->
-                if account.managedId == credentialId
-                    then account { managedEnabled = enabled }
-                    else account)
-            accounts
-        , secrets
-        )
+    mutateStore $
+        mapStoreEntries \entry ->
+            if entry.entryManagedId == credentialId
+                then entry
+                    { entryCredential =
+                        entry.entryCredential { managedEnabled = enabled }
+                    }
+                else entry
 
 updateManagedCredentialSecret :: Text -> Text -> IO (Either Text ())
 updateManagedCredentialSecret credentialId payload = do
     home <- getHomeDirectory
     withCredentialStoreLock home do
-        loaded <- loadManagedCredentialsUnlocked home
+        loaded <- loadManagedCredentialStoreUnlocked home
         case loaded of
             Left err -> pure (Left err)
-            Right entries -> do
-                let secrets = map snd entries
-                if any ((== credentialId) . (.secretManagedId)) secrets
-                    then
-                        writePrivateJson
-                            (managedSecretsPath home)
-                            (SecretsFile 1 (map updateSecret secrets))
-                    else pure $ Left
+            Right store ->
+                case updateStoreEntries credentialId updateSecret store of
+                    Nothing -> pure $ Left
                         ("managed credential secret " <> credentialId
                             <> " no longer exists")
+                    Just store' ->
+                        writePrivateJson
+                            (managedSecretsPath home)
+                            (secretsFile store')
   where
-    updateSecret secret
-        | secret.secretManagedId == credentialId =
-            secret { secretPayload = payload }
-        | otherwise = secret
+    updateSecret entry =
+        entry
+            { entrySecret =
+                entry.entrySecret { secretPayload = payload }
+            }
 
 deleteManagedCredential :: Text -> IO (Either Text ())
 deleteManagedCredential credentialId =
-    mutateStore \accounts secrets ->
-        ( filter ((/= credentialId) . (.managedId)) accounts
-        , filter ((/= credentialId) . (.secretManagedId)) secrets
-        )
+    mutateStore (deleteStoreEntries credentialId)
 
 newManagedCredentialId :: Provider -> Text -> IO Text
 newManagedCredentialId provider accountId = do
@@ -355,38 +363,25 @@ newManagedCredentialId provider accountId = do
             || (c >= '0' && c <= '9')
 
 mutateStore
-    :: ([ManagedCredential] -> [ManagedSecret] -> ([ManagedCredential], [ManagedSecret]))
+    :: (ManagedCredentialStore -> ManagedCredentialStore)
     -> IO (Either Text ())
-mutateStore update =
-    mutateStoreChecked \accounts secrets ->
-        Right (update accounts secrets)
-
-mutateStoreChecked
-    :: ( [ManagedCredential]
-        -> [ManagedSecret]
-        -> Either Text ([ManagedCredential], [ManagedSecret])
-       )
-    -> IO (Either Text ())
-mutateStoreChecked update = do
+mutateStore update = do
     home <- getHomeDirectory
     withCredentialStoreLock home do
-        loaded <- loadManagedCredentialsUnlocked home
+        loaded <- loadManagedCredentialStoreUnlocked home
         case loaded of
             Left err -> pure (Left err)
-            Right entries -> do
-                let (accounts, secrets) = unzip entries
-                case update accounts secrets of
+            Right store -> do
+                let store' = update store
+                writeResult <- writePrivateJson
+                    (managedCredentialsPath home)
+                    (metadataFile store')
+                case writeResult of
                     Left err -> pure (Left err)
-                    Right (accounts', secrets') -> do
-                        writeResult <- writePrivateJson
-                            (managedCredentialsPath home)
-                            (MetadataFile 1 accounts')
-                        case writeResult of
-                            Left err -> pure (Left err)
-                            Right () ->
-                                writePrivateJson
-                                    (managedSecretsPath home)
-                                    (SecretsFile 1 secrets')
+                    Right () ->
+                        writePrivateJson
+                            (managedSecretsPath home)
+                            (secretsFile store')
 
 withCredentialStoreLock :: OsPath -> IO a -> IO a
 withCredentialStoreLock home action =
@@ -449,6 +444,71 @@ writePrivateJson path value =
         setFileMode (unsafeToFilePath (takeDirectory path)) 0o700
         writeLazyFileAtomically path 0o600 (Aeson.encode value)
 
-upsertBy :: Eq key => (value -> key) -> value -> [value] -> [value]
-upsertBy keyOf value values =
-    value : filter ((/= keyOf value) . keyOf) values
+managedCredentialEntry
+    :: ManagedCredential
+    -> ManagedSecret
+    -> Either Text ManagedCredentialEntry
+managedCredentialEntry credential secret
+    | credential.managedId /= secret.secretManagedId =
+        Left "managed credential metadata and secret ids do not match"
+    | otherwise =
+        Right ManagedCredentialEntry
+            { entryManagedId = credential.managedId
+            , entryCredential = credential
+            , entrySecret = secret
+            }
+
+managedCredentialPairs
+    :: ManagedCredentialStore
+    -> [(ManagedCredential, ManagedSecret)]
+managedCredentialPairs store =
+    map
+        (\entry -> (entry.entryCredential, entry.entrySecret))
+        store.storeEntries
+
+metadataFile :: ManagedCredentialStore -> MetadataFile
+metadataFile store =
+    MetadataFile 1 (map (.entryCredential) store.storeEntries)
+
+secretsFile :: ManagedCredentialStore -> SecretsFile
+secretsFile store =
+    SecretsFile 1 (map (.entrySecret) store.storeEntries)
+
+upsertStoreEntry
+    :: ManagedCredentialEntry
+    -> ManagedCredentialStore
+    -> ManagedCredentialStore
+upsertStoreEntry entry store =
+    ManagedCredentialStore
+        (entry : filter
+            ((/= entry.entryManagedId) . (.entryManagedId))
+            store.storeEntries)
+
+mapStoreEntries
+    :: (ManagedCredentialEntry -> ManagedCredentialEntry)
+    -> ManagedCredentialStore
+    -> ManagedCredentialStore
+mapStoreEntries update store =
+    ManagedCredentialStore (map update store.storeEntries)
+
+updateStoreEntries
+    :: Text
+    -> (ManagedCredentialEntry -> ManagedCredentialEntry)
+    -> ManagedCredentialStore
+    -> Maybe ManagedCredentialStore
+updateStoreEntries credentialId update store
+    | any ((== credentialId) . (.entryManagedId)) store.storeEntries =
+        Just $ mapStoreEntries
+            (\entry ->
+                if entry.entryManagedId == credentialId
+                    then update entry
+                    else entry)
+            store
+    | otherwise = Nothing
+
+deleteStoreEntries :: Text -> ManagedCredentialStore -> ManagedCredentialStore
+deleteStoreEntries credentialId store =
+    ManagedCredentialStore
+        (filter
+            ((/= credentialId) . (.entryManagedId))
+            store.storeEntries)
