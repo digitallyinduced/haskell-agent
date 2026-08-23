@@ -140,6 +140,8 @@ data LoopEvent
     | ReasoningDelta Text
     -- | Ephemeral transport/tool activity for the live CLI status line.
     | ActivityUpdated Text
+    -- | A persistent user-visible warning that must not replace live activity.
+    | WarningRaised Text
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall

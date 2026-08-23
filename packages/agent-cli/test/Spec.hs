@@ -11,6 +11,7 @@ import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
@@ -21,6 +22,7 @@ import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
@@ -39,6 +41,7 @@ import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
+import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
@@ -69,6 +72,7 @@ main = hspec do
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    ConfigSpec.spec
     CompactionSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
@@ -79,6 +83,7 @@ main = hspec do
     InterruptSpec.spec
     LoginSpec.spec
     MarkdownSpec.spec
+    ModelConfigSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
     NotificationSpec.spec
@@ -97,6 +102,7 @@ main = hspec do
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
+    SecretSpec.spec
     StyleSpec.spec
     TimestampSpec.spec
     TurnSpec.spec

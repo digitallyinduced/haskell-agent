@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "connections": {
+    "openai": {
+      "api": "builtin",
+      "provider": "openai"
+    },
+    "xai": {
+      "api": "builtin",
+      "provider": "xai"
+    },
+    "openrouter": {
+      "api": "builtin",
+      "provider": "openrouter"
+    }
+  },
+  "models": [
+    {
+      "id": "gpt-5.6-sol",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "default · frontier",
+      "default": true,
+      "fallback_priority": 0
+    },
+    {
+      "id": "grok-4.6",
+      "connection": "xai",
+      "dialect": "grok-build",
+      "label": "default",
+      "default": true,
+      "fallback_priority": 10
+    },
+    {
+      "id": "stealth/ox-alpha",
+      "connection": "openrouter",
+      "dialect": "generic-responses",
+      "label": "default · frontier · free · coding · 1M context",
+      "default": true,
+      "fallback_priority": 20
+    }
+  ]
+}

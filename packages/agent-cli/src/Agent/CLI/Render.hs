@@ -56,6 +56,7 @@ import Agent.CLI.Style
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
+    , glyphWarn
     , paintBackgroundLines
     , osc8Link
     , roleError
@@ -68,6 +69,7 @@ import Agent.CLI.Style
     , roleToolName
     , roleToolOutput
     , roleToolPath
+    , roleWarn
     , solarizedGreen
     , solarizedRed
     , motionGlyphSet
@@ -485,6 +487,12 @@ renderEventUnlocked config = \case
             else if config.renderShowThinking
                 then startThinkingSpinnerUnlocked config
                 else putTextLn config.renderStderr (roleMuted config.renderColor activity)
+    WarningRaised warning -> do
+        visible <- readIORef config.renderThinkingVisible
+        when visible (stopThinkingSpinnerUnlocked config)
+        putTextLn config.renderStderr
+            (roleWarn config.renderColor (glyphWarn <> warning))
+        when visible (startThinkingSpinnerUnlocked config)
     TurnStarted -> do
         writeIORef config.renderMarkdownState emptyMarkdownStreamState
         writeIORef config.renderLiveActive False

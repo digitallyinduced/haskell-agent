@@ -11,7 +11,9 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
-data-files:         skills/telegram-agent/SKILL.md
+data-files:         config/models.default.json
+                  , skills/add-model/SKILL.md
+                  , skills/telegram-agent/SKILL.md
 
 common common-options
     default-language: GHC2021
@@ -52,6 +54,7 @@ library
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
+                    , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.Duration
                     , Agent.CLI.Dialects
@@ -62,6 +65,7 @@ library
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
@@ -83,6 +87,7 @@ library
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
@@ -186,6 +191,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
@@ -197,6 +203,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
+                    , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
@@ -214,6 +221,7 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec

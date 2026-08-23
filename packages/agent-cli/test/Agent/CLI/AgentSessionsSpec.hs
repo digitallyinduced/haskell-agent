@@ -1,6 +1,7 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
@@ -70,6 +71,7 @@ spec = describe "Agent.CLI.AgentSessions" do
         withTempEnv \env launched -> do
             let openRouterEnv = env
                     { toolsProvider = OpenRouterProvider
+                    , toolsConnection = "openrouter"
                     , toolsModel = "openai/gpt-5.1"
                     , toolsTransportModel = "openai/gpt-5.1"
                     , toolsDialect = GrokBuildDialect
@@ -278,6 +280,7 @@ withTempEnv action =
             env = AgentSessionToolsEnv
                 { toolsRoot = root
                 , toolsProvider = XAIProvider
+                , toolsConnection = "xai"
                 , toolsModel = "model-1"
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
@@ -292,10 +295,13 @@ withTempEnv action =
 testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
-    , createProvider = XAIProvider
-    , createModel = "model-1"
-    , createTransportModel = "model-1"
-    , createDialect = GrokBuildDialect
+    , createTarget = ModelTarget
+        { targetProvider = XAIProvider
+        , targetConnectionId = "xai"
+        , targetModelId = "model-1"
+        , targetWireModelId = "model-1"
+        , targetDialect = GrokBuildDialect
+        }
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"

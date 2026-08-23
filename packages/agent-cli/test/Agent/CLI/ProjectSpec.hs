@@ -1,12 +1,14 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as Text
 import qualified System.Directory as Directory
 import System.Directory.OsPath
     ( canonicalizePath
@@ -24,6 +26,21 @@ import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
 toFilePath path = either (error . show) id (decodeUtf path)
+
+target
+    :: Provider
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> DialectId
+    -> ModelTarget
+target provider connection model wireModel dialect = ModelTarget
+    { targetProvider = provider
+    , targetConnectionId = connection
+    , targetModelId = model
+    , targetWireModelId = wireModel
+    , targetDialect = dialect
+    }
 
 spec :: Spec
 spec = describe "Agent.CLI.Project" do
@@ -57,18 +74,18 @@ spec = describe "Agent.CLI.Project" do
         it "round-trips the last provider/model/dialect and preserves other settings" $
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
-                saveProjectModel
-                    root OpenAIProvider "gpt-project" "gpt-project" CodexDialect
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-project" "gpt-project" CodexDialect)
 
                 let path = projectSettingsPath root
                 modeOf path `shouldReturn` 0o600
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
                 settings.settingsLastModel `shouldBe` Just ProjectModel
-                    { projectModelProvider = OpenAIProvider
-                    , projectModelName = "gpt-project"
-                    , projectModelTransportName = Just "gpt-project"
-                    , projectModelDialect = CodexDialect
+                    { projectModelTarget =
+                        target OpenAIProvider "openai"
+                            "gpt-project" "gpt-project" CodexDialect
                     }
                 projectModelProvider settings `shouldBe` Just OpenAIProvider
                 projectModelFor OpenAIProvider settings
@@ -87,10 +104,12 @@ spec = describe "Agent.CLI.Project" do
         it "replaces the remembered provider/model without resetting approval" $
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
-                saveProjectModel
-                    root OpenAIProvider "gpt-old" "gpt-old" CodexDialect
-                saveProjectModel
-                    root XAIProvider "grok-new" "grok-new" GrokBuildDialect
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-old" "gpt-old" CodexDialect)
+                saveProjectModel root
+                    (target XAIProvider "xai"
+                        "grok-new" "grok-new" GrokBuildDialect)
 
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
@@ -115,8 +134,12 @@ spec = describe "Agent.CLI.Project" do
                     `shouldBe` Just "openai/gpt-5.1"
                 projectDialectFor OpenRouterProvider settings
                     `shouldBe` Just GrokBuildDialect
-                fmap (.projectModelTransportName) settings.settingsLastModel
-                    `shouldBe` Just Nothing
+                fmap (.projectModelTarget.targetWireModelId)
+                    settings.settingsLastModel
+                    `shouldBe` Just "openai/gpt-5.1"
+                fmap (.projectModelTarget.targetConnectionId)
+                    settings.settingsLastModel
+                    `shouldBe` Just "openrouter"
 
         it "loads legacy settings without a remembered model" $
             withTempDir "agent-project-" \root -> do

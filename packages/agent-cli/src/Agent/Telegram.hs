@@ -40,9 +40,13 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Models
     ( ModelOption(..)
+    , ModelTarget(..)
+    , defaultModelOptionFor
+    , rawModelOption
+    , resolveConfiguredModel
     , resolveModelOptionDialect
     )
-import Agent.CLI.Prompt (defaultModelFor)
+import Agent.CLI.ModelConfig (loadModelCatalog)
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionHandle(..)
@@ -54,7 +58,6 @@ import Agent.CLI.Session
     , sessionsRoot
     )
 import Agent.FileRetry (writeLazyFileAtomically)
-import Agent.Dialect (DialectId, dialectIdForModel)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Control.Applicative ((<|>))
@@ -680,8 +683,10 @@ runTelegram :: TelegramConfig -> Text -> IO ()
 runTelegram config token = do
     home <- getHomeDirectory
     cwd <- makeAbsolute (unsafeEncodeUtf config.telegramCwd)
+    catalog <- loadModelCatalog home >>= either
+        (die . Text.unpack)
+        pure
     let provider = config.telegramProvider
-        model = fromMaybe (defaultModelFor provider) config.telegramModel
         effort = fromMaybe (defaultEffortFor provider) config.telegramEffort
         root = sessionsRoot home
         gatewayDir = gatewayDirectory home
@@ -689,13 +694,20 @@ runTelegram config token = do
         policy
             | config.telegramYolo = ApproveAll
             | otherwise = DenyMutating
-    target <- resolveModelOptionDialect ModelOption
-        { modelProvider = provider
-        , modelId = model
-        , modelTransportId = model
-        , modelDialect = dialectIdForModel provider model
-        , modelLabel = Nothing
-        }
+        configuredOption = config.telegramModel >>= \model ->
+            case resolveConfiguredModel catalog model of
+                Just option
+                    | option.modelTarget.targetProvider == provider ->
+                        Just option
+                _ -> Just (rawModelOption provider model)
+    selectedOption <- case configuredOption of
+        Just option -> pure option
+        Nothing -> maybe
+            (die "configured provider has no default model")
+            pure
+            (defaultModelOptionFor catalog provider)
+    resolvedOption <- resolveModelOptionDialect selectedOption
+    let target = resolvedOption.modelTarget
     createDirectoryIfMissing True gatewayDir
     setFileMode (unsafeToFilePath gatewayDir) 0o700
     state <- loadTelegramState statePath
@@ -713,10 +725,7 @@ runTelegram config token = do
             , runtimeStateVar = stateVar
             , runtimeWorkers = workers
             , runtimeProcessManager = processManager
-            , runtimeProvider = provider
-            , runtimeModel = model
-            , runtimeTransportModel = target.modelTransportId
-            , runtimeDialect = target.modelDialect
+            , runtimeTarget = target
             , runtimeCwd = cwd
             , runtimeEffort = effort
             , runtimePolicy = policy
@@ -811,10 +820,7 @@ data TelegramRuntime = TelegramRuntime
     , runtimeStateVar :: !(MVar TelegramState)
     , runtimeWorkers :: !(MVar (Map TelegramChatKey (Async ())))
     , runtimeProcessManager :: !SessionProcessManager
-    , runtimeProvider :: !Provider
-    , runtimeModel :: !Text
-    , runtimeTransportModel :: !Text
-    , runtimeDialect :: !DialectId
+    , runtimeTarget :: !ModelTarget
     , runtimeCwd :: !OsPath
     , runtimeEffort :: !Text
     , runtimePolicy :: !ApprovalPolicy
@@ -1429,10 +1435,7 @@ sessionForPrompt runtime key prompt = do
         Nothing -> do
             handle <- createSession SessionCreate
                 { createRoot = runtime.runtimeSessionsRoot
-                , createProvider = runtime.runtimeProvider
-                , createModel = runtime.runtimeModel
-                , createTransportModel = runtime.runtimeTransportModel
-                , createDialect = runtime.runtimeDialect
+                , createTarget = runtime.runtimeTarget
                 , createCwd = runtime.runtimeCwd
                 , createEffort = runtime.runtimeEffort
                 , createTitleHint = Just (sessionTitleFromPrompt prompt)

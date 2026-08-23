@@ -115,6 +115,7 @@ data SkillDiscoverOptions = SkillDiscoverOptions
     , skillsProjectRoot :: !OsPath
     , skillsCwd :: !OsPath
     , skillsMaxDepth :: !Int
+    , skillsBuiltinRoots :: ![(SkillOrigin, OsPath)]
     } deriving (Eq, Show)
 
 data SkillInvocation = SkillInvocation
@@ -238,7 +239,11 @@ skillRoots options = do
             [ (UserSkill, origin, home </> userRoot origin)
             | origin <- origins
             ]
-    pure (projectRoots <> userRoots)
+        builtinRoots =
+            [ (BuiltinSkill, origin, unsafeToFilePath root)
+            | (origin, root) <- options.skillsBuiltinRoots
+            ]
+    pure (projectRoots <> userRoots <> builtinRoots)
   where
     origins = [AgentSkills, GrokSkills, CodexSkills]
     relativeRoot = \case

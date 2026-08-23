@@ -34,6 +34,20 @@ spec = describe "tool presentation" do
                 "wait_commands_or_subagents"
                 "{\"task_ids\":[\"t1\"]}")
             `shouldBe` "Waited"
+        summarizeToolCall
+            (functionToolCall
+                "secret"
+                "ask_secret"
+                "{\"prompt\":\"Enter token\",\"purpose\":\"Configure Telegram\"}")
+            `shouldBe` "Requested secret Configure Telegram"
+
+    it "falls back to the safe prompt text for ask_secret detail" do
+        toolDetail
+            (functionToolCall
+                "secret"
+                "ask_secret"
+                "{\"prompt\":\"Enter API token\"}")
+            `shouldBe` "Enter API token"
 
     it "parses and truncates search-replace diffs once for all renderers" do
         let oldText = Text.intercalate "\\n"

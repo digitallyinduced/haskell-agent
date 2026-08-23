@@ -1,6 +1,7 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( defaultModelFor
+    ( secretInputGuidance
+    , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
@@ -22,18 +23,29 @@ import Agent.GrokBuild.Dialect.Prompt
     , grokSystemPromptForTools
     )
 import Agent.OsPath (toText)
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.OsPath (OsPath)
 
-defaultModelFor :: Provider -> Text
-defaultModelFor = \case
-    XAIProvider -> "grok-4.6"
-    OpenAIProvider -> "gpt-5.6-luna"
-    OpenRouterProvider -> "openai/gpt-5.1"
+-- | Nudge subscription-backed OpenAI sessions toward the inexpensive model
+-- for bounded delegation without encouraging unnecessary or risky spawning.
+subscriptionSubagentModelGuidance :: Provider -> BillingMode -> Maybe Text
+subscriptionSubagentModelGuidance provider billing
+    | provider == OpenAIProvider
+    , billing == SubscriptionBilled =
+        Just $ Text.unwords
+            [ "When OpenAI subscription billing is active, prefer"
+            , "`gpt-5.6-luna` for small, bounded tasks such as codebase searches,"
+            , "locating definitions, straightforward reviews, test investigation,"
+            , "and concise summaries. Keep the parent model for complex debugging,"
+            , "architecture, security-sensitive analysis, or work requiring"
+            , "substantial judgment. Do not spawn a subagent when doing the work"
+            , "directly would be faster."
+            ]
+    | otherwise = Nothing
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
@@ -69,6 +81,7 @@ systemPromptForTools
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
+            , secretInputGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
@@ -102,6 +115,20 @@ sessionTempGuidance = \case
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
             , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands."
+            ]
+
+-- | Keep sensitive values outside model-visible text and tool arguments when
+-- the host exposes the dedicated secret-entry capability.
+secretInputGuidance :: [Text] -> Text
+secretInputGuidance available
+    | "ask_secret" `notElem` available = ""
+    | otherwise =
+        Text.unlines
+            [ "Secret handling:"
+            , "- Never ask the user to paste a token, API key, password, or other secret into chat or a normal tool argument."
+            , "- Use ask_secret to request sensitive values. It returns a private temporary file path, never the secret value."
+            , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
+            , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.

@@ -238,7 +238,7 @@ openAiResponseSenderWithConnectionRecovery
     -> IO (Either ApiError Response)
 openAiResponseSenderWithConnectionRecovery =
     openAiResponseSenderWithConnectionRecoveryUsing
-        (isJust . streamEventToLoopEvent)
+        streamOutputObserved
         markLoopReplayUnsafe
 
 openAiAuxiliaryResponseSenderWithConnectionRecovery

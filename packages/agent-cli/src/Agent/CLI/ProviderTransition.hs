@@ -9,7 +9,7 @@ module Agent.CLI.ProviderTransition
     , setPendingExitAfter
     ) where
 
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.Error (ApiError)
 import Agent.Loop (TurnInput)
@@ -31,7 +31,7 @@ data TransitionCause
     deriving (Eq, Show)
 
 data ProviderTransition = ProviderTransition
-    { transitionTarget :: !ModelOption
+    { transitionTarget :: !ModelTarget
     -- | Stable credential-source key to select after rebuilding the provider.
     , transitionAccountSelectionId :: !(Maybe Text)
     -- | Provider account id used by transports whose live pool selects by id.
@@ -60,8 +60,8 @@ data TurnResult
 applyProviderTransition :: CliOptions -> ProviderTransition -> CliOptions
 applyProviderTransition options transition =
     options
-        { optProvider = Just transition.transitionTarget.modelProvider
-        , optModel = Just transition.transitionTarget.modelId
+        { optProvider = Just transition.transitionTarget.targetProvider
+        , optModel = Just transition.transitionTarget.targetModelId
         , optCwd = Nothing
         , optWorktree = False
         , optEffort = Nothing
