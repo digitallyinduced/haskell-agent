@@ -71,6 +71,18 @@ spec = do
                     , optPrompt = Just "hi"
                     })
 
+        it "accepts claude-code and claude as provider names" do
+            parseArgs ["--provider", "claude-code", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optProvider = Just ClaudeCodeProvider
+                    , optPrompt = Just "hi"
+                    })
+            parseArgs ["--provider", "claude", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optProvider = Just ClaudeCodeProvider
+                    , optPrompt = Just "hi"
+                    })
+
         it "rejects the removed openai-base-url command" do
             parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
 
@@ -203,10 +215,11 @@ spec = do
             parseApprovalAnswer "maybe" `shouldBe` Deny
 
     describe "defaultEffortFor" do
-        it "defaults grok/xai to high and other providers to medium" do
+        it "uses provider-specific effort defaults" do
             defaultEffortFor XAIProvider `shouldBe` "high"
             defaultEffortFor OpenAIProvider `shouldBe` "medium"
             defaultEffortFor OpenRouterProvider `shouldBe` "medium"
+            defaultEffortFor ClaudeCodeProvider `shouldBe` "xhigh"
 
     describe "isOneShot" do
         it "is true for -p and --prompt-file" do

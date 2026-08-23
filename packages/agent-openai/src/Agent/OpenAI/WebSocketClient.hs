@@ -192,6 +192,10 @@ runConnectionAttemptWithPolicy _ credential _action
     | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
+runConnectionAttemptWithPolicy _ credential _action
+    | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
+        "Claude Code subscription sessions must use agent-claude"
+        Nothing
 runConnectionAttemptWithPolicy retryPolicy credential action = do
     let headers = buildCodexWsHeaders credential
     WebSocket.retryTransientWsConnectWithPolicy

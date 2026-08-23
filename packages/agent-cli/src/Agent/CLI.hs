@@ -192,8 +192,7 @@ import Agent.CLI.Project
     , saveProjectModel
     )
 import Agent.CLI.Prompt
-    ( secretInputGuidance
-    , subscriptionSubagentModelGuidance
+    ( subscriptionSubagentModelGuidance
     , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams)
@@ -345,6 +344,15 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Claude
+    ( ClaudeCodeAuth(..)
+    , ClaudeCodeOptions(..)
+    , ClaudeCodePermission(..)
+    , claudeCodeOneShotBackend
+    , defaultClaudeCodeOptions
+    , loadClaudeCodeAuth
+    , withClaudeCodeBackend
+    )
 import Agent.Loop
 import qualified Agent.MCP as MCP
 import Agent.Error (ApiError(..))
@@ -1436,6 +1444,7 @@ runAgentInitializedWithLock
                         let fallback = case loaded.loadedProvider of
                                 XAIProvider -> "Grok"
                                 OpenRouterProvider -> "OpenRouter"
+                                ClaudeCodeProvider -> "Claude Code"
                             selectionId = fromMaybe "" loaded.loadedSelectionId
                         writeIORef activeAccountRef fallback
                         writeIORef activeSelectionRef selectionId
@@ -1670,6 +1679,9 @@ runAgentInitializedWithLock
             options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
+        claudeBypassEnabled =
+            not options.optNoYolo
+                && (options.optYolo || projectSettings.settingsAutoApprove)
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
@@ -2303,6 +2315,67 @@ runAgentInitializedWithLock
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                    ClaudeCodeProvider -> do
+                        claudeAuth <-
+                            loadClaudeCodeAuth
+                                >>= either (startupDie startup . Text.unpack) pure
+                        let permission =
+                                if claudeBypassEnabled
+                                    then ClaudeCodeBypass
+                                    else ClaudeCodeDontAsk
+                            claudeOptions =
+                                (defaultClaudeCodeOptions
+                                    claudeAuth.executable
+                                    (unsafeToFilePath cwd))
+                                    { permission
+                                    , safeMode = True
+                                    }
+                            compactRunner _ =
+                                pure $ Left
+                                    "Claude Code manages its own context; /compact is unavailable."
+                            btwBackend privateParams =
+                                Backend \state previous inputs onEvent -> do
+                                    privateTranscript <- newIORef state
+                                    let privateBackend =
+                                            claudeCodeOneShotBackend
+                                                claudeOptions
+                                                    { permission =
+                                                        ClaudeCodeDontAsk
+                                                    }
+                                                (readIORef privateParams)
+                                                privateTranscript
+                                    privateBackend.submitTurn
+                                        state
+                                        previous
+                                        inputs
+                                        onEvent
+                        if claudeBypassEnabled
+                            then pure ()
+                            else
+                                case fullscreen of
+                                    Just runtime ->
+                                        emitUiEvent runtime
+                                            (UiSystemMessage
+                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
+                                    Nothing -> do
+                                        color <- resolveColor stderr
+                                        putTextLn stderr $
+                                            roleWarn color $
+                                                glyphWarn
+                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
+                        writeIORef activeAccountRef claudeAuth.accountLabel
+                        withClaudeCodeBackend
+                            claudeOptions
+                            initialPrevious
+                            (readIORef paramsRef)
+                            transcriptRef
+                            \backend -> do
+                                activeBackend <-
+                                    prepareTransitionBackend
+                                        projectRoot transition persist backend
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -3218,6 +3291,8 @@ loadSelectedAccountAuth provider selectionId accountId =
                                     loaded.loadedTokenProvider
                             , loadedSelectionId = Just accountId
                             }
+        ClaudeCodeProvider ->
+            loadAuth (Just ClaudeCodeProvider)
         _ -> loadAuthForAccount provider selectionId
 
 runCredentialOnboarding
@@ -3706,23 +3781,31 @@ replWithDraft env@SessionEnv
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
-        ReplCycleMode keptDraft -> do
-            let next = cycleReplInteraction planState policy
-            applyReplMode planMode policyRef projectRoot next
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime $
-                        UiSetNotice $
-                            Just $
-                                infoNotice
-                                    ("Switched to "
-                                        <> replModeLabel next
-                                        <> " mode.")
-                Nothing -> do
-                    -- Minimal editor advanced a line; replace its old chrome.
-                    putStr "\ESC[2A\r\ESC[J"
-                    hFlush stdout
-            continueWith keptDraft
+        ReplCycleMode keptDraft
+            | provider == ClaudeCodeProvider -> do
+                let message =
+                        "Claude Code permissions are fixed when the provider starts; restart with --yolo or --no-yolo to change them."
+                color <- resolveColor stderr
+                displayInfo message $
+                    putTextLn stderr (roleMuted color message)
+                continueWith keptDraft
+            | otherwise -> do
+                let next = cycleReplInteraction planState policy
+                applyReplMode planMode policyRef projectRoot next
+                case fullscreen of
+                    Just runtime ->
+                        emitUiEvent runtime $
+                            UiSetNotice $
+                                Just $
+                                    infoNotice
+                                        ("Switched to "
+                                            <> replModeLabel next
+                                            <> " mode.")
+                    Nothing -> do
+                        -- Minimal editor advanced a line; replace its old chrome.
+                        putStr "\ESC[2A\r\ESC[J"
+                        hFlush stdout
+                continueWith keptDraft
         ReplClipboardPaste keptDraft clipboardPasteImages -> do
             case clipboardPasteImages of
                 Just images@(_:_) -> do
@@ -4129,12 +4212,20 @@ replWithDraft env@SessionEnv
                                     Text.putStrLn
                                         (roleMuted color (glyphOk <> message))
                                 continue
-                    ReplToggleAlwaysApprove -> do
-                        message <- toggleAlwaysApprove policyRef projectRoot
-                        color <- resolveColor stderr
-                        displayInfo message $
-                            putTextLn stderr (roleMuted color message)
-                        continue
+                    ReplToggleAlwaysApprove
+                        | provider == ClaudeCodeProvider -> do
+                            let message =
+                                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
+                        | otherwise -> do
+                            message <- toggleAlwaysApprove policyRef projectRoot
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
                     ReplCompact focus -> do
                         color <- resolveColor stderr
                         result <-
@@ -4190,6 +4281,14 @@ replWithDraft env@SessionEnv
                                         writeIORef slotRef
                                             (PersistenceActive handle')
                                 continue
+                    ReplPlan _
+                        | provider == ClaudeCodeProvider -> do
+                            let message =
+                                    "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
                             Just providerSwitch ->
@@ -4685,7 +4784,13 @@ replWithDraft env@SessionEnv
                                         selectedAccountId
                                         selectedLabel
                                         _
+                                            -- Claude exposes display metadata,
+                                            -- not a stable account identity.
+                                            -- Revalidate and restart even when
+                                            -- the synthetic id still matches.
                                             | selectedProvider == provider
+                                            , selectedProvider
+                                                /= ClaudeCodeProvider
                                             , selectedAccountId
                                                 == currentAccountId ->
                                                 displayInfo
@@ -4898,28 +5003,57 @@ loadAllAccountPickerOptions :: Provider -> IO [AccountPickerOption]
 loadAllAccountPickerOptions currentProvider = do
     discovered <- discoverSelectableLoginAccounts
     refreshed <- mapConcurrently refreshLoginAccount discovered
+    claudeAuth <- loadClaudeCodeAuth
     now <- getCurrentTime
-    let ordered =
+    let providerAccounts =
+            [ AccountPickerAccount
+                account.loginProvider
+                (accountBillingMode account.loginProvider account.loginBilling)
+                (loginAccountSelectionId account)
+                account.loginAccountId
+                account.loginLabel
+                (formatLoginUsageSummary account.loginProvider now account)
+            | account <- deduplicateAccounts refreshed
+            , account.loginProvider /= ClaudeCodeProvider
+            ]
+        claudeAccounts = case claudeAuth of
+            Left _ -> []
+            Right auth ->
+                [ AccountPickerAccount
+                    ClaudeCodeProvider
+                    SubscriptionBilled
+                    "claude-code"
+                    "claude-code"
+                    auth.accountLabel
+                    (Text.intercalate " · " $
+                        ["subscription"]
+                            <> maybeToList auth.subscriptionType
+                            <> ["usage via `claude /status`"])
+                ]
+        ordered =
             sortOn
-                (\account ->
-                    ( account.loginProvider /= currentProvider
-                    , providerOrder account.loginProvider
-                    , Text.toLower account.loginLabel
-                    ))
-                (deduplicateAccounts refreshed)
+                (\case
+                    AccountPickerAccount optionProvider _ _ _ label _ ->
+                        ( optionProvider /= currentProvider
+                        , providerOrder optionProvider
+                        , Text.toLower label
+                        )
+                    AccountPickerConnect optionProvider ->
+                        ( True
+                        , providerOrder optionProvider
+                        , ""
+                        ))
+                (providerAccounts <> claudeAccounts)
     pure $
-        [ AccountPickerAccount
-            account.loginProvider
-            (accountBillingMode account.loginProvider account.loginBilling)
-            (loginAccountSelectionId account)
-            account.loginAccountId
-            account.loginLabel
-            (formatLoginUsageSummary account.loginProvider now account)
-        | account <- ordered
-        ]
+        ordered
             <> map AccountPickerConnect
-                [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                [ OpenAIProvider
+                , XAIProvider
+                , OpenRouterProvider
+                , ClaudeCodeProvider
+                ]
   where
+    maybeToList = maybe [] pure
     deduplicateAccounts = foldr addUnique []
     addUnique account accounts
         | any (samePickerAccount account) accounts = accounts
@@ -4934,10 +5068,12 @@ loadAllAccountPickerOptions currentProvider = do
         OpenAIProvider -> 0 :: Int
         XAIProvider -> 1
         OpenRouterProvider -> 2
+        ClaudeCodeProvider -> 3
 
 accountBillingMode :: Provider -> AccountBilling -> BillingMode
 accountBillingMode provider = case provider of
     OpenRouterProvider -> const ApiBilled
+    ClaudeCodeProvider -> const SubscriptionBilled
     _ -> \case
         SubscriptionBilling _ -> SubscriptionBilled
         ApiCreditsBilling -> ApiBilled
@@ -5184,6 +5320,18 @@ accountUsageText color provider tokenProvider openAiPool = do
                             pure $
                                 roleMuted color
                                     "usage: no OpenAI credentials loaded"
+        ClaudeCodeProvider ->
+            loadClaudeCodeAuth >>= \case
+                Left err ->
+                    pure (roleError color ("usage: " <> err))
+                Right auth ->
+                    pure $
+                        roleMuted color $
+                            "usage: Claude Code "
+                                <> fromMaybe "subscription" auth.subscriptionType
+                                <> " · "
+                                <> auth.accountLabel
+                                <> " (run `claude /status` for live limits)"
         _ ->
             pure $
                 roleMuted color
@@ -5805,38 +5953,47 @@ markUnavailable provider unavailable
     | otherwise = unavailable <> [provider]
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
-reloadAuth provider = \case
-    Nothing ->
-        pure $ Right $
-            "reload-auth: OpenAI WebSocket auth is fixed for this process; "
-                <> "restart after refreshing ~/.codex/auth.json "
-                <> "(OAuth pools already rotate on handshake failure)"
-    Just tokenProvider ->
-        -- Force a disk/env re-read by rejecting the credential that is
-        -- actually active. Switchable providers intentionally ignore failures
-        -- from older accounts, so a fabricated empty account id is insufficient.
-        getNextToken tokenProvider Nothing >>= \case
-            Left err -> do
-                now <- getCurrentTime
-                pure $ Left $
-                    "reload-auth failed: " <> formatApiErrorInlineAt now err
-            Right current ->
-                getNextToken tokenProvider (Just FailedCredential
-                    { credential = current
-                    , failure = AccountAuthenticationRejected
-                    }) >>= \case
-                    Left err -> do
-                        now <- getCurrentTime
-                        pure $ Left $
-                            "reload-auth failed: "
-                                <> formatApiErrorInlineAt now err
-                    Right credential ->
-                        pure $ Right $
-                            "auth reloaded ("
-                                <> providerSlug provider
-                                <> " account "
-                                <> credential.accountId
-                                <> ")"
+reloadAuth ClaudeCodeProvider _ =
+    loadClaudeCodeAuth >>= \case
+        Left err -> pure (Left ("reload-auth failed: " <> err))
+        Right auth ->
+            pure $ Right $
+                "auth status rechecked (claude-code account "
+                    <> auth.accountLabel
+                    <> ")"
+reloadAuth provider maybeTokenProvider =
+    case maybeTokenProvider of
+        Nothing ->
+            pure $ Right $
+                "reload-auth: OpenAI WebSocket auth is fixed for this process; "
+                    <> "restart after refreshing ~/.codex/auth.json "
+                    <> "(OAuth pools already rotate on handshake failure)"
+        Just tokenProvider ->
+            -- Force a disk/env re-read by rejecting the credential that is
+            -- actually active. Switchable providers intentionally ignore failures
+            -- from older accounts, so a fabricated empty account id is insufficient.
+            getNextToken tokenProvider Nothing >>= \case
+                Left err -> do
+                    now <- getCurrentTime
+                    pure $ Left $
+                        "reload-auth failed: " <> formatApiErrorInlineAt now err
+                Right current ->
+                    getNextToken tokenProvider (Just FailedCredential
+                        { credential = current
+                        , failure = AccountAuthenticationRejected
+                        }) >>= \case
+                        Left err -> do
+                            now <- getCurrentTime
+                            pure $ Left $
+                                "reload-auth failed: "
+                                    <> formatApiErrorInlineAt now err
+                        Right credential ->
+                            pure $ Right $
+                                "auth reloaded ("
+                                    <> providerSlug provider
+                                    <> " account "
+                                    <> credential.accountId
+                                    <> ")"
 
 
 requestReload

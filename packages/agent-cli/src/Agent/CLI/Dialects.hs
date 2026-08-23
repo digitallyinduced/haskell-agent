@@ -38,14 +38,18 @@ import Agent.GrokBuild.Dialect.Task
     )
 import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Tools.MultiAgents (MultiAgentContext)
-import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , PlanModeHooks
+    , newPlanModeEnv
+    )
 import Agent.Tools.Secret
     ( SecretPromptHooks
     , askSecretTool
     , closeSecretStore
     , newSecretStore
     )
-import Agent.Tools.Types (AppTool(..), ToolEnv)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -108,6 +112,14 @@ codingToolsForWithTypes
                     coding.grokPlanMode
                     coding.grokClose
                     coding.grokAgentTypes
+        ClaudeCodeToolSurface -> do
+            plan <- newPlanModeEnv env.toolCwd planHooks
+            pure $
+                finish
+                    []
+                    plan
+                    (pure ())
+                    typesRef
 
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
 filterChildGrokTools = filterGrokToolsForType
@@ -146,3 +158,4 @@ globalAgentsHomeDir dialect home =
         CodexInstructionHome -> unsafeEncodeUtf ".codex"
         GrokInstructionHome -> unsafeEncodeUtf ".grok"
         HarnessInstructionHome -> unsafeEncodeUtf ".haskell-agent"
+        ClaudeInstructionHome -> unsafeEncodeUtf ".claude"

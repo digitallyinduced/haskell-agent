@@ -9,7 +9,8 @@ import Agent.CLI.Dialects
     , globalAgentsHomeDir
     )
 import Agent.Dialect
-    ( codexDialect
+    ( claudeCodeDialect
+    , codexDialect
     , genericResponsesDialect
     , grokBuildDialect
     )
@@ -50,6 +51,9 @@ spec = describe "Agent.CLI.Dialects" do
         formatAgentsMdForDialect genericResponsesDialect cwd loaded
             `shouldSatisfy`
                 maybe False (Text.isInfixOf "<system-reminder>")
+        formatAgentsMdForDialect claudeCodeDialect cwd loaded
+            `shouldSatisfy`
+                maybe False (Text.isPrefixOf "# AGENTS.md instructions")
 
     it "uses each dialect's compatibility instruction home" do
         let home = unsafeEncodeUtf "/home/u"
@@ -59,6 +63,14 @@ spec = describe "Agent.CLI.Dialects" do
             `shouldBe` unsafeEncodeUtf "/home/u/.grok"
         globalAgentsHomeDir genericResponsesDialect home
             `shouldBe` unsafeEncodeUtf "/home/u/.haskell-agent"
+        globalAgentsHomeDir claudeCodeDialect home
+            `shouldBe` unsafeEncodeUtf "/home/u/.claude"
+
+    it "does not allocate host tools for Claude Code" do
+        env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+        coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing
+        length coding.codingAppTools `shouldBe` 0
+        coding.codingClose
 
     it "registers ask_secret only when root prompt hooks are supplied" do
         withTempToolEnv \env ->

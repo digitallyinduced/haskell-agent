@@ -12,6 +12,10 @@
     "openrouter": {
       "api": "builtin",
       "provider": "openrouter"
+    },
+    "claude-code": {
+      "api": "builtin",
+      "provider": "claude-code"
     }
   },
   "models": [
@@ -50,6 +54,25 @@
       "label": "default · frontier · free · coding · 1M context",
       "default": true,
       "fallback_priority": 20
+    },
+    {
+      "id": "sonnet",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "default · subscription",
+      "default": true
+    },
+    {
+      "id": "opus",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "frontier · subscription"
+    },
+    {
+      "id": "fable",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "fast · subscription"
     }
   ]
 }

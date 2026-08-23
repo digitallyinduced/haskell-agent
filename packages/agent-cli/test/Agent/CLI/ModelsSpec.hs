@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
@@ -36,7 +38,13 @@ spec = do
                 `shouldBe` defaultModelFor catalog OpenAIProvider
             firstId (modelsForProvider catalog OpenRouterProvider)
                 `shouldBe` defaultModelFor catalog OpenRouterProvider
+            firstId (modelsForProvider catalog ClaudeCodeProvider)
+                `shouldBe` defaultModelFor catalog ClaudeCodeProvider
 
+        it "ships the configured frontier models for each provider" do
+            modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
+            modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
+            modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
 
         it "ships the GPT-5.6 series and each other provider frontier model" do
             modelIdsFor OpenAIProvider
@@ -47,6 +55,8 @@ spec = do
                     ]
             modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
+            modelIdsFor ClaudeCodeProvider
+                `shouldBe` ["sonnet", "opus", "fable"]
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelTarget.targetProvider))
@@ -63,6 +73,11 @@ spec = do
             dialectFor "stealth/ox-alpha"
                 `shouldBe` Just GenericResponsesDialect
 
+        it "assigns the owned-tool dialect to every Claude Code model" do
+            map (.modelTarget.targetDialect)
+                (modelsForProvider catalog ClaudeCodeProvider)
+                `shouldSatisfy` all (== ClaudeCodeDialect)
+
         it "keeps every catalog dialect consistent with model inference" do
             all
                 (\option ->
@@ -77,7 +92,11 @@ spec = do
         it "includes every provider" do
             nub (map (.modelTarget.targetProvider) (modelCatalog catalog))
                 `shouldMatchList`
-                    [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                    [ OpenAIProvider
+                    , XAIProvider
+                    , OpenRouterProvider
+                    , ClaudeCodeProvider
+                    ]
 
     describe "modelTargetRequiresRebuild" do
         let sameDialect =
@@ -253,7 +272,11 @@ spec = do
         it "shows models from every provider" do
             nub (map (.modelTarget.targetProvider) (visibleOptions state0))
                 `shouldMatchList`
-                    [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                    [ OpenAIProvider
+                    , XAIProvider
+                    , OpenRouterProvider
+                    , ClaudeCodeProvider
+                    ]
 
         it "moves down and wraps" do
             let n = length (visibleOptions state0)

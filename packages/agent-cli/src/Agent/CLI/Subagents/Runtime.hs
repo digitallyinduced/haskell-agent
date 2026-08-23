@@ -26,6 +26,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( sessionTempGuidance
+    , systemPrompt
     , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams)
@@ -706,7 +707,10 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             GrokTaskProtocol ->
                                 filterChildGrokTools agentType coding.codingAppTools
                             GenericTaskProtocol ->
-                                filterChildGrokTools agentType coding.codingAppTools
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                            NoHostChildAgentProtocol ->
+                                []
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
                     let codingTools =
@@ -746,6 +750,13 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         sessionTmp
                                         today
                                         True
+                                NoHostChildAgentProtocol ->
+                                    systemPrompt
+                                        childDialect
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
                         instructions =
                             baseInstructions
                                 <> "\n\n"
@@ -757,6 +768,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         ""
                                     GenericTaskProtocol ->
                                         genericSubagentSuffix agentType env.subId
+                                    NoHostChildAgentProtocol ->
+                                        ""
                         childParams = requestParams model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -842,6 +855,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     CodexCollaborationProtocol -> sendToRoot
                     GrokTaskProtocol -> Nothing
                     GenericTaskProtocol -> Nothing
+                    NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             }
     pure PreparedChild

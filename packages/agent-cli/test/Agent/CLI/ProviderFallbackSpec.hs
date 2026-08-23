@@ -81,6 +81,13 @@ spec = do
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
+        it "never automatically enters or leaves the Claude Code provider" do
+            fallbackCandidates catalog [] ClaudeCodeProvider exhausted
+                `shouldBe` []
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [] OpenAIProvider exhausted)
+                `shouldSatisfy` (ClaudeCodeProvider `notElem`)
+
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog [OpenAIProvider] XAIProvider exhausted)
