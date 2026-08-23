@@ -46,12 +46,11 @@ import Agent.CLI.SessionTitle
     )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
-    , acquireSessionLock
     , agentSessionTools
     , closeSessionProcessManager
     , launchSessionTurn
     , newSessionProcessManager
-    , releaseSessionLock
+    , signalManagedSessionReady
     , sessionProcessStatus
     )
 import Agent.CLI.Approval
@@ -184,6 +183,13 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionLock
+    ( SessionLock
+    , acquireSessionLock
+    , releaseSessionLock
+    , sessionLockFilePath
+    , sessionLockPath
+    )
 import Agent.CLI.Skills
     ( formatSkillsListing
     , installSkillCatalog
@@ -403,6 +409,7 @@ import Control.Exception.Safe
     , catchAsync
     , finally
     , mask_
+    , onException
     , throwIO
     , try
     )
@@ -427,7 +434,8 @@ import Data.Time.Clock
     )
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
-    ( getCurrentDirectory
+    ( doesDirectoryExist
+    , getCurrentDirectory
     , getHomeDirectory
     , makeAbsolute
     , setCurrentDirectory
@@ -836,10 +844,12 @@ prepareAgentIteration
     -> IO PreparedAgent
 prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
+    resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
     let failPreparation message =
-            case activeFullscreen of
-                Nothing -> die message
-                Just _ -> throwIO (StartupFailure message)
+            readIORef resumeLockRef >>= mapM_ releaseSessionLock >>
+                case activeFullscreen of
+                    Nothing -> die message
+                    Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
@@ -847,10 +857,31 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     let root = sessionsRoot home
     resumed <- case options.optResume of
         Nothing -> pure Nothing
-        Just sessionId ->
-            loadSession root sessionId >>= \case
-                Left err -> failPreparation (Text.unpack err)
-                Right loaded -> pure (Just loaded)
+        Just sessionId -> do
+            dir <- either
+                (\err -> do
+                    signalManagedSessionReady (Left err)
+                    failPreparation (Text.unpack err))
+                pure
+                (sessionDirForId root sessionId)
+            exists <- doesDirectoryExist dir
+            when (not exists) do
+                let err = "session not found: " <> sessionId
+                signalManagedSessionReady (Left err)
+                failPreparation (Text.unpack err)
+            acquireSessionLock dir sessionId >>= \case
+                Left err -> do
+                    signalManagedSessionReady (Left err)
+                    failPreparation (Text.unpack err)
+                Right lock -> do
+                    writeIORef resumeLockRef (Just lock)
+                    loadSession root sessionId >>= \case
+                        Left err -> do
+                            signalManagedSessionReady (Left err)
+                            failPreparation (Text.unpack err)
+                        Right loaded -> do
+                            signalManagedSessionReady (Right ())
+                            pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
     cwd <- case resumed of
@@ -961,9 +992,10 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
             , startupTimings = startupTimingsRef
             , startupSyntaxLoadDuration = syntaxLoadDurationRef
             }
-        action =
+    resumeLock <- readIORef resumeLockRef
+    let action =
             runAgentInitialized
-                options transition home root resumed cwd startup
+                options transition home root resumed resumeLock cwd startup
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             forM_ fullscreen resetFullscreenSessionActions
@@ -1037,10 +1069,27 @@ runAgentInitialized
     -> OsPath
     -> OsPath
     -> Maybe (SessionMeta, [SessionTurn])
+    -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
     -> IO RunResult
-runAgentInitialized options transition home root resumed cwd startup = do
+runAgentInitialized options transition home root resumed resumeLock cwd startup =
+    runAgentInitializedWithLock
+        options transition home root resumed resumeLock cwd startup
+        `onException` mapM_ releaseSessionLock resumeLock
+
+runAgentInitializedWithLock
+    :: CliOptions
+    -> Maybe ProviderTransition
+    -> OsPath
+    -> OsPath
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> Maybe SessionLock
+    -> OsPath
+    -> StartupRuntime
+    -> IO RunResult
+runAgentInitializedWithLock
+        options transition home root resumed resumeLock cwd startup = do
     let toolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
         escPaused = startup.startupEscPaused
@@ -1274,8 +1323,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
     when (isNothing transition) $
         saveProjectModel projectRoot provider model
     sessionProcessManager <- newSessionProcessManager root
-    managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
-    activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
+    activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
@@ -1329,19 +1377,18 @@ runAgentInitialized options transition home root resumed cwd startup = do
                             agentId status session.subSessionTranscript
                     Nothing -> pure ()
         Nothing -> pure ()
-    let claimCurrentSession handle
-            | managedAgentSession = pure ()
-            | otherwise = do
-                let desired =
-                        unsafeToFilePath
-                            (handle.sessionDir </> unsafeEncodeUtf ".agent-running")
-                readIORef activeSessionLock >>= \case
-                    Just current | current == desired -> pure ()
-                    previous ->
-                        acquireSessionLock handle >>= \case
+    let claimCurrentSession handle = do
+            let desired = sessionLockPath handle.sessionDir
+            readIORef activeSessionLock >>= \case
+                Just current
+                    | sessionLockFilePath current == desired -> pure ()
+                previous ->
+                    acquireSessionLock
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
                             Left err -> throwIO (userError (Text.unpack err))
-                            Right lockPath -> do
-                                writeIORef activeSessionLock (Just lockPath)
+                            Right lock -> do
+                                writeIORef activeSessionLock (Just lock)
                                 mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root

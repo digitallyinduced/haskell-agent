@@ -5,11 +5,10 @@ module Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
     , SessionProcessManager
     , agentSessionTools
-    , acquireSessionLock
     , closeSessionProcessManager
     , launchSessionTurn
     , newSessionProcessManager
-    , releaseSessionLock
+    , signalManagedSessionReady
     , sessionProcessStatus
     ) where
 
@@ -24,6 +23,10 @@ import Agent.CLI.Session
     , loadSession
     , sessionTitleFromPrompt
     )
+import Agent.CLI.SessionLock
+    ( sessionLockIsActive
+    , sessionLockPath
+    )
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
@@ -34,6 +37,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -52,15 +56,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as TextIO
-import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import Text.Read (readMaybe)
 import System.Directory
-    ( createDirectory
-    , doesDirectoryExist
-    , doesFileExist
-    , findExecutable
-    , getModificationTime
-    , removeDirectory
+    ( findExecutable
     , removeFile
     )
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
@@ -70,7 +67,6 @@ import qualified System.FilePath as FilePath
 import System.IO (IOMode(AppendMode), hClose, openTempFile, withFile)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
-import System.Posix.Signals (nullSignal, signalProcess)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -93,10 +89,7 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     }
 
 data ManagedSessionProcess = ManagedSessionProcess
-    { managedHandle :: !ProcessHandle
-    , managedLockPath :: !FilePath
-    , managedPromptPath :: !FilePath
-    }
+    { managedHandle :: !ProcessHandle }
 
 data SessionProcessManager = SessionProcessManager
     { managedRoot :: !OsPath
@@ -132,93 +125,92 @@ launchSessionTurn manager background policy handle message =
                 ( processes
                 , Left ("session " <> sessionId <> " is already running")
                 )
-            else acquireSessionLock handle >>= \case
+            else resolveAgentExecutable >>= \case
                 Left err -> pure (processes, Left err)
-                Right lockPath -> resolveAgentExecutable >>= \case
-                    Left err -> do
-                        releaseSessionLock lockPath
-                        pure (processes, Left err)
-                    Right executable -> do
-                        parentEnv <- getEnvironment
-                        (promptPath, promptHandle) <- openTempFile
-                            (unsafeToFilePath handle.sessionDir) ".agent-prompt-"
-                        TextIO.hPutStr promptHandle message
-                        hClose promptHandle
-                        setFileMode promptPath 0o600
-                        let childEnv =
-                                ("HASKELL_AGENT_MANAGED_SESSION", "1")
-                                    : filter
-                                        ((/= "HASKELL_AGENT_MANAGED_SESSION") . fst)
-                                        parentEnv
-                            logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
-                            approvalArgs = case policy of
-                                ApproveAll -> ["--yolo"]
-                                DenyMutating -> ["--no-yolo"]
-                                PromptMutating -> ["--no-yolo"]
-                            agentArgs =
-                                [ "--resume", Text.unpack sessionId
-                                , "--prompt-file", promptPath
-                                , "--save-session"
-                                ]
-                                    <> approvalArgs
-                            cleanupScript =
-                                "lock=$1; prompt=$2; shift 2; owner=\"$lock/pid\"; "
-                                    <> "cleanup() { rm -f \"$prompt\" \"$owner\"; rmdir \"$lock\" >/dev/null 2>&1 || true; }; "
-                                    <> "trap cleanup EXIT; "
-                                    <> "\"$@\" & child=$!; "
-                                    <> "printf '%s\\n' \"$child\" > \"$owner\"; "
-                                    <> "trap 'kill \"$child\" >/dev/null 2>&1 || true' HUP INT TERM; "
-                                    <> "wait \"$child\""
-                            args =
-                                [ "-c", cleanupScript
-                                , "agent-session-runner"
-                                , lockPath
-                                , promptPath
-                                , executable
-                                ]
-                                    <> agentArgs
-                        started <- try @_ @SomeException do
-                            withFile logPath AppendMode \logHandle ->
-                                setFileMode logPath 0o600 >>
-                                createProcess (proc "/bin/sh" args)
-                                    { cwd = Just (unsafeToFilePath handle.sessionMeta.metaCwd)
-                                    , std_in = NoStream
-                                    , std_out = UseHandle logHandle
-                                    , std_err = UseHandle logHandle
-                                    , create_group = True
-                                    , env = Just childEnv
-                                    }
-                        case started of
-                            Left err -> do
-                                removePrivateFile promptPath
-                                releaseSessionLock lockPath
-                                pure
-                                    ( processes
-                                    , Left
-                                        ("failed to start agent session: "
-                                            <> formatException err)
-                                    )
-                            Right (_, _, _, process)
-                                | background ->
-                                    pure
-                                        ( Map.insert sessionId ManagedSessionProcess
-                                            { managedHandle = process
-                                            , managedLockPath = lockPath
-                                            , managedPromptPath = promptPath
-                                            }
-                                            processes
-                                        , Right ("started session " <> sessionId)
-                                        )
-                                | otherwise -> do
-                                    exitCode <- waitForProcess process
-                                    removePrivateFile promptPath
-                                    pure (processes, case exitCode of
-                                        ExitSuccess ->
-                                            Right ("completed session " <> sessionId)
-                                        ExitFailure code ->
-                                            Left
-                                                ("session failed with exit code "
-                                                    <> Text.pack (show code)))
+                Right executable -> do
+                    parentEnv <- getEnvironment
+                    (promptPath, promptHandle) <- openTempFile
+                        (unsafeToFilePath handle.sessionDir) ".agent-prompt-"
+                    TextIO.hPutStr promptHandle message
+                    hClose promptHandle
+                    setFileMode promptPath 0o600
+                    (readyPath, readyHandle) <- openTempFile
+                        (unsafeToFilePath handle.sessionDir) ".agent-ready-"
+                    hClose readyHandle
+                    setFileMode readyPath 0o600
+                    let childEnv =
+                            (managedSessionReadyEnv, readyPath)
+                                : filter
+                                    ((/= managedSessionReadyEnv) . fst)
+                                    parentEnv
+                        logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
+                        approvalArgs = case policy of
+                            ApproveAll -> ["--yolo"]
+                            DenyMutating -> ["--no-yolo"]
+                            PromptMutating -> ["--no-yolo"]
+                        agentArgs =
+                            [ "--resume", Text.unpack sessionId
+                            , "--prompt-file", promptPath
+                            , "--save-session"
+                            ]
+                                <> approvalArgs
+                        cleanupScript =
+                            "prompt=$1; shift; "
+                                <> "cleanup() { rm -f \"$prompt\"; }; "
+                                <> "trap cleanup EXIT HUP INT TERM; "
+                                <> "\"$@\""
+                        args =
+                            [ "-c", cleanupScript
+                            , "agent-session-runner"
+                            , promptPath
+                            , executable
+                            ]
+                                <> agentArgs
+                    started <- try @_ @SomeException do
+                        withFile logPath AppendMode \logHandle ->
+                            setFileMode logPath 0o600 >>
+                            createProcess (proc "/bin/sh" args)
+                                { cwd = Just (unsafeToFilePath handle.sessionMeta.metaCwd)
+                                , std_in = NoStream
+                                , std_out = UseHandle logHandle
+                                , std_err = UseHandle logHandle
+                                , create_group = True
+                                , env = Just childEnv
+                                }
+                    case started of
+                        Left err -> do
+                            removePrivateFile promptPath
+                            removePrivateFile readyPath
+                            pure
+                                ( processes
+                                , Left
+                                    ("failed to start agent session: "
+                                        <> formatException err)
+                                )
+                        Right (_, _, _, process) -> do
+                            ready <- waitForManagedSessionReady process readyPath
+                            removePrivateFile readyPath
+                            case ready of
+                                Left err -> do
+                                    _ <- waitForProcess process
+                                    pure (processes, Left err)
+                                Right ()
+                                    | background ->
+                                        pure
+                                            ( Map.insert sessionId ManagedSessionProcess
+                                                { managedHandle = process }
+                                                processes
+                                            , Right ("started session " <> sessionId)
+                                            )
+                                    | otherwise -> do
+                                        exitCode <- waitForProcess process
+                                        pure (processes, case exitCode of
+                                            ExitSuccess ->
+                                                Right ("completed session " <> sessionId)
+                                            ExitFailure code ->
+                                                Left
+                                                    ("session failed with exit code "
+                                                        <> Text.pack (show code)))
 
 sessionProcessStatus :: SessionProcessManager -> Text -> IO Text
 sessionProcessStatus manager sessionId =
@@ -226,7 +218,9 @@ sessionProcessStatus manager sessionId =
         case Map.lookup sessionId processes of
             Nothing -> do
                 locked <- sessionLockIsActive
-                    (sessionLockPath manager sessionId)
+                    (sessionLockPath
+                        (manager.managedRoot
+                            </> unsafeEncodeUtf (Text.unpack sessionId)))
                 pure (processes, if locked then "running" else "idle")
             Just process ->
                 getProcessExitCode process.managedHandle >>= \case
@@ -242,8 +236,8 @@ sessionProcessStatus manager sessionId =
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager =
     modifyMVar_ manager.managedProcesses \processes -> do
-        -- Running sessions intentionally outlive the caller. The child
-        -- wrapper owns prompt and lock cleanup.
+        -- Running sessions intentionally outlive the caller. The child owns
+        -- the advisory session lock; its wrapper owns prompt cleanup.
         forM_ (Map.elems processes) \process -> do
             getProcessExitCode process.managedHandle >>= \case
                 Just _ -> do
@@ -253,79 +247,41 @@ closeSessionProcessManager manager =
                 Nothing -> pure ()
         pure Map.empty
 
-acquireSessionLock :: SessionHandle -> IO (Either Text FilePath)
-acquireSessionLock handle = do
-    let lockPath = unsafeToFilePath handle.sessionDir FilePath.</> ".agent-running"
-    acquire lockPath >>= \case
-        True -> pure (Right lockPath)
-        False -> pure $ Left
-            ("session " <> handle.sessionMeta.metaId <> " is already running")
+signalManagedSessionReady :: Either Text () -> IO ()
+signalManagedSessionReady result =
+    lookupEnv managedSessionReadyEnv >>= \case
+        Nothing -> pure ()
+        Just path -> TextIO.writeFile path $ case result of
+            Right () -> "ready\n"
+            Left err -> "error\n" <> err
+
+waitForManagedSessionReady :: ProcessHandle -> FilePath -> IO (Either Text ())
+waitForManagedSessionReady process path = go
   where
-    acquire lockPath =
-        try @_ @SomeException (createDirectory lockPath) >>= \case
-            Right () -> pure True
-            Left _ ->
-                sessionLockIsActive lockPath >>= \case
-                    True -> pure False
-                    False ->
-                        try @_ @SomeException (createDirectory lockPath) >>= \case
-                            Right () -> pure True
-                            Left _ -> pure False
-
-releaseSessionLock :: FilePath -> IO ()
-releaseSessionLock lockPath = do
-    removePrivateFile (sessionLockOwnerPath lockPath)
-    _ <- try @_ @SomeException (removeDirectory lockPath)
-    pure ()
-
--- | Check whether a cross-process session lock still has a live owner.
--- New locks record the child agent PID. Empty legacy locks are kept briefly
--- to avoid racing a newly-created lock before its owner file is written, then
--- reclaimed so a hard-killed launcher cannot block a session forever.
-sessionLockIsActive :: FilePath -> IO Bool
-sessionLockIsActive lockPath =
-    doesDirectoryExist lockPath >>= \case
-        False -> pure False
-        True -> do
-            let ownerPath = sessionLockOwnerPath lockPath
-            doesFileExist ownerPath >>= \case
-                True ->
-                    try @_ @SomeException (readFile ownerPath) >>= \case
-                        Right contents
-                            | Just pid <- readMaybe contents ->
-                                processIsAlive pid >>= \case
-                                    True -> pure True
-                                    False ->
-                                        releaseSessionLock lockPath >> pure False
-                        _ -> legacyLockIsFresh lockPath
-                False -> legacyLockIsFresh lockPath
-  where
-    legacyLockIsFresh path = do
-        now <- getCurrentTime
-        modified <- getModificationTime path
-        if diffUTCTime now modified < 5
-            then pure True
-            else releaseSessionLock path >> pure False
-
-processIsAlive :: Int -> IO Bool
-processIsAlive pid =
-    try @_ @SomeException (signalProcess nullSignal (fromIntegral pid)) >>= \case
-        Right () -> pure True
-        Left _ -> pure False
-
-sessionLockOwnerPath :: FilePath -> FilePath
-sessionLockOwnerPath lockPath = lockPath FilePath.</> "pid"
+    go = do
+        contents <- try @_ @SomeException (TextIO.readFile path)
+        case contents of
+            Right "ready\n" -> pure (Right ())
+            Right text
+                | Just err <- Text.stripPrefix "error\n" text ->
+                    pure (Left err)
+            _ ->
+                getProcessExitCode process >>= \case
+                    Nothing -> threadDelay 10000 >> go
+                    Just ExitSuccess ->
+                        pure (Left "agent session exited before acquiring its lock")
+                    Just (ExitFailure code) ->
+                        pure $ Left
+                            ("agent session exited before acquiring its lock (exit code "
+                                <> Text.pack (show code) <> ")")
 
 removePrivateFile :: FilePath -> IO ()
 removePrivateFile path = do
     _ <- try @_ @SomeException (removeFile path)
     pure ()
 
-sessionLockPath :: SessionProcessManager -> Text -> FilePath
-sessionLockPath manager sessionId =
-    unsafeToFilePath manager.managedRoot
-        FilePath.</> Text.unpack sessionId
-        FilePath.</> ".agent-running"
+managedSessionReadyEnv :: String
+managedSessionReadyEnv = "HASKELL_AGENT_MANAGED_SESSION_READY"
 
 resolveAgentExecutable :: IO (Either Text FilePath)
 resolveAgentExecutable = do

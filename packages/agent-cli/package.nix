@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-core, agent-openai, agent-openrouter
 , agent-responses, agent-syntax, agent-tui, agent-xai
 , ansi-terminal, async, base, base64-bytestring, brick, bytestring
-, colour, containers, directory, filepath, haskeline, hspec
+, colour, containers, directory, filelock, filepath, haskeline, hspec
 , JuicyPixels, lib, mtl, process, safe-exceptions, stm, text, time
 , transformers, unix, vector, vty, vty-crossplatform
 }:
@@ -14,7 +14,7 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-core agent-openai agent-openrouter agent-responses
     agent-syntax agent-tui agent-xai ansi-terminal async base
-    base64-bytestring brick bytestring colour containers directory
+    base64-bytestring brick bytestring colour containers directory filelock
     filepath haskeline JuicyPixels mtl process safe-exceptions stm text
     time transformers unix vector vty vty-crossplatform
   ];
