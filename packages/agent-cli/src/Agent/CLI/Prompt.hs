@@ -1,7 +1,7 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( defaultModelFor
-    , secretInputGuidance
+    ( secretInputGuidance
+    , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
@@ -23,18 +23,29 @@ import Agent.GrokBuild.Dialect.Prompt
     , grokSystemPromptForTools
     )
 import Agent.OsPath (toText)
-import Agent.Provider (Provider(..))
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.OsPath (OsPath)
 
-defaultModelFor :: Provider -> Text
-defaultModelFor = \case
-    XAIProvider -> "grok-4.6"
-    OpenAIProvider -> "gpt-5.6-luna"
-    OpenRouterProvider -> "openai/gpt-5.1"
+-- | Nudge subscription-backed OpenAI sessions toward the inexpensive model
+-- for bounded delegation without encouraging unnecessary or risky spawning.
+subscriptionSubagentModelGuidance :: Provider -> BillingMode -> Maybe Text
+subscriptionSubagentModelGuidance provider billing
+    | provider == OpenAIProvider
+    , billing == SubscriptionBilled =
+        Just $ Text.unwords
+            [ "When OpenAI subscription billing is active, prefer"
+            , "`gpt-5.6-luna` for small, bounded tasks such as codebase searches,"
+            , "locating definitions, straightforward reviews, test investigation,"
+            , "and concise summaries. Keep the parent model for complex debugging,"
+            , "architecture, security-sensitive analysis, or work requiring"
+            , "substantial judgment. Do not spawn a subagent when doing the work"
+            , "directly would be faster."
+            ]
+    | otherwise = Nothing
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text

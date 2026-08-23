@@ -89,6 +89,66 @@ agent-cli --worktree
 Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
 override automatic provider detection.
 
+### Model catalog and local models
+
+The model picker is driven by a versioned catalog. The application ships its
+default OpenAI, xAI, and OpenRouter entries, then merges an optional user file:
+
+```text
+~/.haskell-agent/models.json
+```
+
+User entries with the same `id` replace shipped entries; new entries are
+appended. The `id` is the stable name accepted by `/model` and `--model`.
+Secrets are not stored in this file: custom connections name an environment
+variable containing their API key.
+
+For example, an unauthenticated local server exposing the streaming OpenAI
+Responses API at `POST /v1/responses` can be configured as:
+
+```json
+{
+  "version": 1,
+  "connections": {
+    "ollama": {
+      "api": "responses",
+      "base_url": "http://localhost:11434/v1",
+      "api_key_optional": true,
+      "request_timeout_seconds": 600
+    }
+  },
+  "models": [
+    {
+      "id": "qwen-local",
+      "connection": "ollama",
+      "model": "qwen2.5-coder:32b",
+      "dialect": "generic-responses",
+      "label": "local"
+    }
+  ]
+}
+```
+
+Select it with `agent-cli --model qwen-local` or from `/model`. For an
+authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
+that variable. Omit `"api_key_optional": true` when the key is required.
+
+Supported dialects are:
+
+- `codex` for Codex-style prompts and tools
+- `grok-build` for the Grok Build protocol
+- `generic-responses` for portable Responses-compatible models
+
+Custom connections are selected manually and are not considered for automatic
+billing fallback. Built-in connection names (`openai`, `xai`, and
+`openrouter`) are reserved. A malformed catalog is reported at startup with
+the file and invalid field instead of being silently ignored.
+
+The built-in `add-model` skill handles requests such as “use the model running
+at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
+Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
+naturally and let the agent activate it.
+
 ### Authentication
 
 Works with your Codex subscription, Grok subscription, and provider API keys.

@@ -46,6 +46,8 @@ library
     exposed-modules:  Agent.Responses.Types
                     , Agent.Responses.Codec
                     , Agent.Responses.Error
+                    , Agent.Responses.GenericBackend
+                    , Agent.Responses.GenericClient
                     , Agent.Responses.HttpSSE
                     , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
@@ -61,6 +63,7 @@ library
                     , http-client
                     , http-client-tls
                     , http-conduit
+                    , retry
                     , safe-exceptions
                     , scientific
                     , text
@@ -72,6 +75,7 @@ test-suite agent-responses-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Responses.LoopBackendSpec
+                    , Agent.Responses.GenericClientSpec
                     , Agent.Responses.ResponseMergeSpec
                     , Agent.Responses.SSESpec
                     , Agent.Responses.StreamAssemblySpec
@@ -81,4 +85,5 @@ test-suite agent-responses-test
                     , aeson >= 2.0
                     , bytestring
                     , hspec
+                    , retry
                     , text

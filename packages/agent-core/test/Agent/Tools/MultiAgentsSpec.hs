@@ -16,11 +16,13 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , dispatchToolCall
     )
+import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , appToolHandlers
+    , jsonToolParameters
     )
 import Control.Concurrent.STM
 import Control.Monad (unless)
@@ -89,6 +91,26 @@ spec = describe "Agent.Tools.MultiAgents" do
             (spawnCall "level5")
         rejected.output `shouldSatisfy`
             Text.isInfixOf "maximum depth 4"
+        closeSubagentRegistry registry
+
+    it "adds host-provided model guidance to spawn_agent" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiSpawnModelGuidance =
+                    Just "Prefer `gpt-5.6-luna` for small tasks."
+                }
+            descriptions =
+                [ description
+                | tool <- multiAgentTools context
+                , tool.appToolName == "spawn_agent"
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                , property.propertyName == "model"
+                , description <- maybe [] pure property.description
+                ]
+        descriptions `shouldSatisfy`
+            any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
     it "preserves encrypted spawn payloads" do
@@ -261,6 +283,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiCreateWorktree = Nothing
                 , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
+                , multiSpawnModelGuidance = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -292,6 +315,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
+    , multiSpawnModelGuidance = Nothing
     }
 
 childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext

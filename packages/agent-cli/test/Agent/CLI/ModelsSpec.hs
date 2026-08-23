@@ -1,97 +1,93 @@
 module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
-import Agent.CLI.Prompt (defaultModelFor)
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , decodeModelConfig
+    , packagedModelCatalogPath
+    )
 import Agent.Dialect
     ( DialectId(..)
     , dialectIdForModel
     )
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
+import qualified Data.ByteString.Lazy as LBS
 import Data.List (find, nub)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 firstId :: [ModelOption] -> Maybe Text.Text
-firstId = fmap (.modelId) . listToMaybe
+firstId = fmap (.modelTarget.targetModelId) . listToMaybe
 
 spec :: Spec
 spec = do
+    catalog <- runIO readPackagedCatalog
+    let modelIdsFor provider =
+            map (.modelTarget.targetModelId)
+                (modelsForProvider catalog provider)
     describe "modelsForProvider" do
         it "puts the provider default first" do
-            firstId (modelsForProvider XAIProvider)
-                `shouldBe` Just (defaultModelFor XAIProvider)
-            firstId (modelsForProvider OpenAIProvider)
-                `shouldBe` Just (defaultModelFor OpenAIProvider)
-            firstId (modelsForProvider OpenRouterProvider)
-                `shouldBe` Just (defaultModelFor OpenRouterProvider)
+            firstId (modelsForProvider catalog XAIProvider)
+                `shouldBe` defaultModelFor catalog XAIProvider
+            firstId (modelsForProvider catalog OpenAIProvider)
+                `shouldBe` defaultModelFor catalog OpenAIProvider
+            firstId (modelsForProvider catalog OpenRouterProvider)
+                `shouldBe` defaultModelFor catalog OpenRouterProvider
 
 
-        it "lists the gpt-5.6 series for OpenAI" do
-            let ids = map (.modelId) (modelsForProvider OpenAIProvider)
-            ids `shouldBe` ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
-
-        it "lists Ox Alpha instead of Thinking Machines models for OpenRouter" do
-            let ids = map (.modelId) (modelsForProvider OpenRouterProvider)
-            ids `shouldContain` ["stealth/ox-alpha"]
-            ids `shouldSatisfy`
-                all (not . Text.isPrefixOf "thinkingmachines/")
-
-        it "lists several options per provider" do
-            length (modelsForProvider XAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider OpenAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider OpenRouterProvider) `shouldSatisfy` (>= 2)
+        it "ships only the frontier model for each provider" do
+            modelIdsFor OpenAIProvider `shouldBe` ["gpt-5.6-sol"]
+            modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
+            modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
 
         it "tags every option with its provider" do
-            all ((== OpenAIProvider) . (.modelProvider))
-                (modelsForProvider OpenAIProvider)
+            all ((== OpenAIProvider) . (.modelTarget.targetProvider))
+                (modelsForProvider catalog OpenAIProvider)
                 `shouldBe` True
 
-        it "assigns OpenRouter dialects by model family" do
-            let options = modelsForProvider OpenRouterProvider
+        it "assigns the OpenRouter frontier model its portable dialect" do
+            let options = modelsForProvider catalog OpenRouterProvider
                 dialectFor model =
-                    (.modelDialect) <$> find ((== model) . (.modelId)) options
-            dialectFor "openai/gpt-5.1" `shouldBe` Just CodexDialect
-            dialectFor "x-ai/grok-4" `shouldBe` Just GrokBuildDialect
-            dialectFor "anthropic/claude-sonnet-4"
-                `shouldBe` Just GenericResponsesDialect
-            dialectFor "google/gemini-2.5-pro"
+                    (.modelTarget.targetDialect)
+                        <$> find
+                            ((== model) . (.modelTarget.targetModelId))
+                            options
+            dialectFor "stealth/ox-alpha"
                 `shouldBe` Just GenericResponsesDialect
 
         it "keeps every catalog dialect consistent with model inference" do
             all
                 (\option ->
-                    option.modelDialect
+                    option.modelTarget.targetDialect
                         == dialectIdForModel
-                            option.modelProvider
-                            option.modelId)
-                modelCatalog
+                            option.modelTarget.targetProvider
+                            option.modelTarget.targetModelId)
+                (modelCatalog catalog)
                 `shouldBe` True
 
     describe "modelCatalog" do
         it "includes every provider" do
-            nub (map (.modelProvider) modelCatalog)
+            nub (map (.modelTarget.targetProvider) (modelCatalog catalog))
                 `shouldMatchList`
                     [OpenAIProvider, XAIProvider, OpenRouterProvider]
 
     describe "modelTargetRequiresRebuild" do
-        let sameDialect = ModelOption
-                { modelProvider = OpenRouterProvider
-                , modelId = "openai/gpt-5.2"
-                , modelTransportId = "openai/gpt-5.2"
-                , modelDialect = CodexDialect
-                , modelLabel = Nothing
-                }
+        let sameDialect =
+                testOption OpenRouterProvider "openrouter"
+                    "openai/gpt-5.2" "openai/gpt-5.2" CodexDialect
+                    Nothing Nothing
 
         it "updates a model in place within the current provider and dialect" do
             modelTargetRequiresRebuild
-                OpenRouterProvider CodexDialect sameDialect
+                "openrouter" OpenRouterProvider CodexDialect sameDialect
                 `shouldBe` False
 
         it "rebuilds when only the dialect changes" do
             modelTargetRequiresRebuild
+                "openrouter"
                 OpenRouterProvider
                 GrokBuildDialect
                 sameDialect
@@ -99,6 +95,7 @@ spec = do
 
         it "rebuilds when the provider changes" do
             modelTargetRequiresRebuild
+                "xai"
                 XAIProvider
                 CodexDialect
                 sameDialect
@@ -110,37 +107,27 @@ spec = do
                 "OPENROUTER_MODEL_MAP"
                 (Just "friendly=anthropic/claude-sonnet-4") do
                     resolved <-
-                        resolveModelOptionDialect ModelOption
-                            { modelProvider = OpenRouterProvider
-                            , modelId = "friendly"
-                            , modelTransportId = "friendly"
-                            , modelDialect = CodexDialect
-                            , modelLabel = Nothing
-                            }
-                    resolved.modelDialect
+                        resolveModelOptionDialect $
+                            testOption OpenRouterProvider "openrouter"
+                                "friendly" "friendly" CodexDialect Nothing Nothing
+                    resolved.modelTarget.targetDialect
                         `shouldBe` GenericResponsesDialect
-                    resolved.modelTransportId
+                    resolved.modelTarget.targetWireModelId
                         `shouldBe` "anthropic/claude-sonnet-4"
 
-        it "keeps direct providers on their native dialect" do
+        it "keeps direct providers on their configured dialect" do
             resolved <-
-                resolveModelOptionDialect ModelOption
-                    { modelProvider = XAIProvider
-                    , modelId = "openai/gpt-5.1"
-                    , modelTransportId = "openai/gpt-5.1"
-                    , modelDialect = CodexDialect
-                    , modelLabel = Nothing
-                    }
-            resolved.modelDialect `shouldBe` GrokBuildDialect
+                resolveModelOptionDialect $
+                    testOption XAIProvider "xai"
+                        "openai/gpt-5.1" "openai/gpt-5.1"
+                        CodexDialect Nothing Nothing
+            resolved.modelTarget.targetDialect `shouldBe` CodexDialect
 
     describe "resolvePersistedDialect" do
-        let inferred = ModelOption
-                { modelProvider = OpenRouterProvider
-                , modelId = "friendly"
-                , modelTransportId = "x-ai/grok-4"
-                , modelDialect = GrokBuildDialect
-                , modelLabel = Nothing
-                }
+        let option =
+                testOption OpenRouterProvider "openrouter"
+                    "friendly" "x-ai/grok-4" GrokBuildDialect Nothing Nothing
+            inferred = option.modelTarget
 
         it "retargets when a recorded OpenRouter mapping changes" do
             resolvePersistedDialect
@@ -165,51 +152,58 @@ spec = do
 
     describe "ensureCurrentInList" do
         it "prepends an unknown current model" do
-            let base = modelsForProvider XAIProvider
+            let base = modelsForProvider catalog XAIProvider
                 opts =
                     ensureCurrentInList
+                        "xai"
                         XAIProvider
                         "custom-model"
                         GrokBuildDialect
                         base
             firstId opts `shouldBe` Just "custom-model"
             fmap (.modelLabel) (listToMaybe opts) `shouldBe` Just (Just "current")
-            fmap (.modelProvider) (listToMaybe opts) `shouldBe` Just XAIProvider
-            fmap (.modelDialect) (listToMaybe opts)
+            fmap (.modelTarget.targetProvider) (listToMaybe opts)
+                `shouldBe` Just XAIProvider
+            fmap (.modelTarget.targetDialect) (listToMaybe opts)
                 `shouldBe` Just GrokBuildDialect
 
         it "does not duplicate a known current model" do
-            let base = modelsForProvider XAIProvider
-                def = defaultModelFor XAIProvider
+            let base = modelsForProvider catalog XAIProvider
+                def = fromMaybe
+                    (error "shipped xAI default is missing")
+                    (defaultModelFor catalog XAIProvider)
                 opts =
                     ensureCurrentInList
+                        "xai"
                         XAIProvider
                         def
                         GrokBuildDialect
                         base
-            length (filter (\opt -> opt.modelId == def) opts) `shouldBe` 1
+            length
+                (filter (\opt -> opt.modelTarget.targetModelId == def) opts)
+                `shouldBe` 1
 
-        it "preserves a legacy OpenRouter dialect for a known model" do
+        it "preserves a legacy OpenRouter dialect for a removed model" do
             let model = "openai/gpt-5.1"
                 opts =
                     ensureCurrentInList
+                        "openrouter"
                         OpenRouterProvider
                         model
                         GrokBuildDialect
-                        (modelsForProvider OpenRouterProvider)
-            fmap (.modelDialect) (listToMaybe opts)
+                        (modelsForProvider catalog OpenRouterProvider)
+            fmap (.modelTarget.targetDialect) (listToMaybe opts)
                 `shouldBe` Just GrokBuildDialect
-            length (filter ((== model) . (.modelId)) opts) `shouldBe` 2
+            length
+                (filter ((== model) . (.modelTarget.targetModelId)) opts)
+                `shouldBe` 1
 
         it "ignores unset placeholders" do
             let option =
-                    ModelOption
-                        XAIProvider
-                        "a"
-                        "a"
-                        GrokBuildDialect
-                        Nothing
+                    testOption XAIProvider "xai" "a" "a"
+                        GrokBuildDialect Nothing Nothing
             ensureCurrentInList
+                "xai"
                 XAIProvider
                 "(unset)"
                 GrokBuildDialect
@@ -219,36 +213,40 @@ spec = do
     describe "picker navigation" do
         let state0 =
                 initialPickerState
+                    catalog
+                    "xai"
                     XAIProvider
-                    (defaultModelFor XAIProvider)
+                    "grok-4.6"
                     GrokBuildDialect
 
         it "starts on the current model" do
             fmap
                 (\option ->
-                    ( option.modelProvider
-                    , option.modelId
-                    , option.modelDialect
+                    ( option.modelTarget.targetProvider
+                    , option.modelTarget.targetModelId
+                    , option.modelTarget.targetDialect
                     ))
                 (selectedOption state0)
                 `shouldBe`
                     Just
                         ( XAIProvider
-                        , defaultModelFor XAIProvider
+                        , "grok-4.6"
                         , GrokBuildDialect
                         )
 
         it "starts on a legacy dialect rather than the catalog replacement" do
             let state =
                     initialPickerState
+                        catalog
+                        "openrouter"
                         OpenRouterProvider
                         "openai/gpt-5.1"
                         GrokBuildDialect
-            fmap (.modelDialect) (selectedOption state)
+            fmap (.modelTarget.targetDialect) (selectedOption state)
                 `shouldBe` Just GrokBuildDialect
 
         it "shows models from every provider" do
-            nub (map (.modelProvider) (visibleOptions state0))
+            nub (map (.modelTarget.targetProvider) (visibleOptions state0))
                 `shouldMatchList`
                     [OpenAIProvider, XAIProvider, OpenRouterProvider]
 
@@ -268,13 +266,10 @@ spec = do
 
         it "confirms the selected model id" do
             applyPickerEvent PickerConfirm state0
-                `shouldBe` Left (Just ModelOption
-                    { modelProvider = XAIProvider
-                    , modelId = defaultModelFor XAIProvider
-                    , modelTransportId = defaultModelFor XAIProvider
-                    , modelDialect = GrokBuildDialect
-                    , modelLabel = Just "default"
-                    })
+                `shouldBe` Left (Just
+                    (testOption XAIProvider "xai"
+                        "grok-4.6" "grok-4.6" GrokBuildDialect
+                        (Just "default") (Just 10)))
 
         it "cancels without a selection" do
             applyPickerEvent PickerCancel state0 `shouldBe` Left Nothing
@@ -286,13 +281,15 @@ spec = do
                             Right s' -> s'
                             Left _ -> s)
                         state0
-                        ("mini" :: String)
+                        ("frontier" :: String)
             not (null (visibleOptions typed)) `shouldBe` True
             all
-                (\opt -> "mini" `Text.isInfixOf` Text.toLower opt.modelId
+                (\opt ->
+                    "frontier" `Text.isInfixOf`
+                        Text.toLower opt.modelTarget.targetModelId
                     || maybe
                         False
-                        (("mini" `Text.isInfixOf`) . Text.toLower)
+                        (("frontier" `Text.isInfixOf`) . Text.toLower)
                         opt.modelLabel)
                 (visibleOptions typed)
                 `shouldBe` True
@@ -306,8 +303,32 @@ spec = do
                         state0
                         ("openrouter" :: String)
             visibleOptions typed `shouldSatisfy` (not . null)
-            all ((== OpenRouterProvider) . (.modelProvider)) (visibleOptions typed)
+            all
+                ((== OpenRouterProvider) . (.modelTarget.targetProvider))
+                (visibleOptions typed)
                 `shouldBe` True
+
+testOption
+    :: Provider
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> DialectId
+    -> Maybe Text.Text
+    -> Maybe Int
+    -> ModelOption
+testOption provider connection model wireModel dialect label priority =
+    ModelOption
+        { modelTarget = ModelTarget
+            { targetProvider = provider
+            , targetConnectionId = connection
+            , targetModelId = model
+            , targetWireModelId = wireModel
+            , targetDialect = dialect
+            }
+        , modelLabel = label
+        , modelFallbackPriority = priority
+        }
 
 withEnv :: String -> Maybe String -> IO a -> IO a
 withEnv name value action =
@@ -322,3 +343,11 @@ withEnv name value action =
     set = \case
         Just current -> setEnv name current
         Nothing -> unsetEnv name
+
+readPackagedCatalog :: IO ModelCatalog
+readPackagedCatalog = do
+    path <- packagedModelCatalogPath
+    bytes <- LBS.readFile path
+    case decodeModelConfig "models.default.json" bytes of
+        Left err -> fail (Text.unpack err)
+        Right catalog -> pure catalog
