@@ -27,6 +27,7 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
+    , mapConcurrently
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -82,6 +83,7 @@ import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Scientific (floatingOrInteger)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -205,14 +207,25 @@ emptyInputSchema = object
 startMcpFleet :: [McpServerConfig] -> IO McpFleet
 startMcpFleet = startMcpFleetWithProgress (const (pure ()))
 
--- | Start every server while reporting its configured name immediately before
--- launching it. The callback is intended for startup UI and deliberately
--- receives no command arguments or environment values.
-startMcpFleetWithProgress :: (Text -> IO ()) -> [McpServerConfig] -> IO McpFleet
-startMcpFleetWithProgress reportStarting configs = mask \restore -> do
+-- | Start every server concurrently while reporting the configured names that
+-- are still initializing. The callback is intended for startup UI and
+-- deliberately receives no command arguments or environment values.
+startMcpFleetWithProgress
+    :: ([Text] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleet
+startMcpFleetWithProgress reportActive configs = mask \restore -> do
     closed <- newMVar False
-    (clients, registrations, warnings) <-
-        startServers restore [] [] [] configs
+    ownedClients <- newIORef []
+    activeServers <- newMVar Set.empty
+    results <-
+        restore
+            (mapConcurrently
+                (startServerTracked ownedClients activeServers)
+                configs)
+            `onException` closeOwnedClients ownedClients
+    let (clients, registrations, warnings) =
+            foldr collectServerResult ([], [], []) results
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
@@ -224,31 +237,43 @@ startMcpFleetWithProgress reportStarting configs = mask \restore -> do
         Nothing -> pure fleet
         Just err -> closeMcpFleet fleet >> ioError (userError (Text.unpack err))
   where
-    startServers _ clients registrations warnings [] =
-        pure (reverse clients, registrations, warnings)
-    startServers restore clients registrations warnings (config : rest) = do
-        reportStarting config.mcpServerName
-            `onException` mapM_ closeMcpClient clients
-        attempt <- tryAny (restore (startServer config))
-            `onException` mapM_ closeMcpClient clients
-        case attempt of
-            Left exception ->
-                startServers restore clients registrations
-                    (warnings <> [startupWarning config exception])
-                    rest
+    startServerTracked ownedClients activeServers config = mask \restore -> do
+        updateActive activeServers (Set.insert config.mcpServerName)
+        (do
+            attempt <- tryAny (restore (startServer config))
+            case attempt of
+                Left exception ->
+                    pure (Left (startupWarning config exception))
+                Right result@(client, _, _) -> do
+                    atomicModifyIORef' ownedClients \clients ->
+                        (client : clients, ())
+                    pure (Right result))
+            `finally` updateActive activeServers (Set.delete config.mcpServerName)
+
+    updateActive activeServers update =
+        modifyMVar_ activeServers \current -> do
+            let active = update current
+            reportActive (Set.toAscList active)
+            pure active
+
+    closeOwnedClients ownedClients =
+        atomicModifyIORef' ownedClients (\clients -> ([], clients))
+            >>= mapM_ closeMcpClient
+
+    collectServerResult result (clients, registrations, warnings) =
+        case result of
+            Left warning -> (clients, registrations, warning : warnings)
             Right (client, tools, serverWarnings) ->
-                startServers restore
-                    (client : clients)
-                    (registrations <> map (registrationFor client) tools)
-                    (warnings <> serverWarnings)
-                    rest
-                    `onException` mapM_ closeMcpClient (client : clients)
+                ( client : clients
+                , map (registrationFor client) tools <> registrations
+                , serverWarnings <> warnings
+                )
 
     startServer config = do
         client <- startMcpClient config
-        (tools, warnings) <- discoverMcpTools client
-            `onException` closeMcpClient client
-        pure (client, tools, warnings)
+        flip onException (closeMcpClient client) do
+            (tools, warnings) <- discoverMcpTools client
+            pure (client, tools, warnings)
 
     registrationFor :: McpClient -> McpTool -> McpToolRegistration
     registrationFor client tool = McpToolRegistration

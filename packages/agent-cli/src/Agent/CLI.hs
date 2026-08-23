@@ -1773,9 +1773,14 @@ runAgentInitializedWithLock
     mcpFleet <-
         try @_ @SomeException
             (MCP.startMcpFleetWithProgress
-                (\name ->
+                (\names ->
                     setStartupNotice startup.startupFullscreen
-                        ("Loading tools: " <> name <> "…"))
+                        (if null names
+                            then "Loading built-in tools…"
+                            else
+                                "Loading tools: "
+                                    <> Text.intercalate ", " names
+                                    <> "…"))
                 mcpServerConfigs)
             >>= \case
             Left exception ->

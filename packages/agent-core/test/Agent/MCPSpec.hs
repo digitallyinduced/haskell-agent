@@ -20,7 +20,12 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    , removeFile
+    )
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import Test.Hspec
@@ -76,7 +81,7 @@ spec = describe "Agent.MCP" do
         withFakeServer \script -> do
             started <- newIORef []
             fleet <- startMcpFleetWithProgress
-                (\name -> modifyIORef' started (<> [name]))
+                (\names -> modifyIORef' started (<> [names]))
                 [ McpServerConfig
                     { mcpServerName = "fake"
                     , mcpServerCommand = script
@@ -88,7 +93,7 @@ spec = describe "Agent.MCP" do
                     }
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
-                readIORef started `shouldReturn` ["fake"]
+                readIORef started `shouldReturn` [["fake"], []]
                 let tools = mcpFleetTools fleet
                 map (.appToolName) tools `shouldBe` ["echo_read"]
                 fleet.mcpFleetWarnings `shouldBe`
@@ -108,6 +113,21 @@ spec = describe "Agent.MCP" do
                     firstResult.output `shouldBe` "first response"
                     second.output `shouldBe` "second response"
 
+    it "starts servers concurrently and preserves configured tool order" $
+        withConcurrentFakeServer \script barrier -> do
+            progress <- newIORef []
+            fleet <- startMcpFleetWithProgress
+                (\names -> modifyIORef' progress (<> [names]))
+                [ concurrentConfig script barrier "first"
+                , concurrentConfig script barrier "second"
+                ]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                map (.appToolName) (mcpFleetTools fleet)
+                    `shouldBe` ["first_read", "second_read"]
+                updates <- readIORef progress
+                updates `shouldContain` [["first", "second"]]
+                last updates `shouldBe` []
+
 withFakeServer :: (FilePath -> IO a) -> IO a
 withFakeServer action = do
     temporary <- getTemporaryDirectory
@@ -120,6 +140,38 @@ withFakeServer action = do
             pure path)
         removeFile
         action
+
+concurrentConfig :: FilePath -> FilePath -> Text.Text -> McpServerConfig
+concurrentConfig script barrier name = McpServerConfig
+    { mcpServerName = name
+    , mcpServerCommand = script
+    , mcpServerArgs = [barrier, Text.unpack name]
+    , mcpServerCwd = Nothing
+    , mcpServerEnv = []
+    , mcpServerStartupTimeoutSeconds = 2
+    , mcpServerRequestTimeoutSeconds = 2
+    }
+
+withConcurrentFakeServer :: (FilePath -> FilePath -> IO a) -> IO a
+withConcurrentFakeServer action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (barrier, barrierHandle) <-
+                openTempFile temporary "agent-mcp-barrier"
+            hClose barrierHandle
+            removeFile barrier
+            createDirectory barrier
+            (script, scriptHandle) <-
+                openTempFile temporary "agent-mcp-concurrent.sh"
+            LBS.hPutStr scriptHandle concurrentFakeServer
+            hClose scriptHandle
+            setFileMode script 0o700
+            pure (script, barrier))
+        (\(script, barrier) -> do
+            removeFile script
+            removeDirectoryRecursive barrier)
+        (uncurry action)
 
 fakeServer :: LBS.ByteString
 fakeServer =
@@ -140,6 +192,27 @@ fakeServer =
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second response\"}]}}'\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first response\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+concurrentFakeServer :: LBS.ByteString
+concurrentFakeServer =
+    "#!/bin/sh\n\
+    \barrier=\"$1\"\n\
+    \name=\"$2\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      : > \"$barrier/$name\"\n\
+    \      while [ \"$(find \"$barrier\" -type f | wc -l)\" -lt 2 ]; do\n\
+    \        sleep 0.01\n\
+    \      done\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"${name}_read\\\",\\\"description\\\":\\\"Read.\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\"},\\\"annotations\\\":{\\\"readOnlyHint\\\":true}}]}}\"\n\
     \      ;;\n\
     \  esac\n\
     \done\n"
