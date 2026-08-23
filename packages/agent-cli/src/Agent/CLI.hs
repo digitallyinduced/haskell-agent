@@ -186,6 +186,7 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Prompt
     ( secretInputGuidance
+    , subscriptionSubagentModelGuidance
     , systemPrompt
     )
 import Agent.CLI.Request (requestParams, setRequestInstructions)
@@ -1678,6 +1679,10 @@ runAgentInitializedWithLock
                     subagentSessions subagentStoreRoot agentTypesRef
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
+            , multiSpawnModelGuidance =
+                subscriptionSubagentModelGuidance
+                    provider
+                    (tokenProviderBillingMode tokenProvider)
             }
     prompt <- loadPrompt options
     persist <-
@@ -1805,6 +1810,10 @@ runAgentInitializedWithLock
                 , subagentConnection = inferredTarget.targetConnectionId
                 , subagentMapModel = transportModel
                 , subagentSessionTmp = toolEnv.toolSessionTmp
+                , subagentSpawnModelGuidance =
+                    subscriptionSubagentModelGuidance
+                        provider
+                        (tokenProviderBillingMode tokenProvider)
                 }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing

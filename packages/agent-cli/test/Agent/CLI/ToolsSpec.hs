@@ -185,6 +185,7 @@ spec = describe "schemasFromAppTools" do
                         , multiCreateWorktree = Nothing
                         , multiPrepareSpawn = Nothing
                         , multiSendToRoot = Nothing
+                        , multiSpawnModelGuidance = Nothing
                         }
                     namespaces =
                         [ tagged
