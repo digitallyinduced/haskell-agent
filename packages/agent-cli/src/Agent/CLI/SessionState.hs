@@ -1,11 +1,14 @@
--- | Coherent mutable state for the live CLI conversation.
+-- | Coherent mutable state for the live CLI session.
 --
 -- The CLI owns one mutable cell containing this record. Transitions stay pure
--- so turns, compaction, startup context, and UI readers cannot observe
--- partially committed conversation state.
+-- so turns, compaction, skills, auth, and UI readers cannot observe partially
+-- committed session state.
 module Agent.CLI.SessionState
     ( SessionState(..)
+    , SessionAccountState(..)
+    , SessionAccountPatch(..)
     , addSessionTokenUsage
+    , applySessionAccountPatch
     , applySessionConversationPatch
     , appendSessionStartupContext
     , beginSessionTurn
@@ -18,6 +21,7 @@ module Agent.CLI.SessionState
 import Agent.CLI.TurnState
     ( ConversationPatch
     , ConversationState(..)
+    , FieldUpdate(..)
     , applyConversationPatch
     )
 import Agent.Loop (TokenUsage, addTokenUsage, emptyTokenUsage)
@@ -30,7 +34,43 @@ data SessionState = SessionState
     { sessionConversation :: !ConversationState
     , sessionSkillCatalog :: !SkillCatalog
     , sessionSkillInvocations :: ![SkillInvocation]
+    , sessionAccount :: !SessionAccountState
     } deriving (Eq, Show)
+
+data SessionAccountState = SessionAccountState
+    { accountLabel :: !Text
+    , accountId :: !Text
+    , accountSelectionId :: !Text
+    } deriving (Eq, Show)
+
+data SessionAccountPatch = SessionAccountPatch
+    { patchAccountLabel :: !(FieldUpdate Text)
+    , patchAccountId :: !(FieldUpdate Text)
+    , patchAccountSelectionId :: !(FieldUpdate Text)
+    } deriving (Eq, Show)
+
+applySessionAccountPatch
+    :: SessionAccountPatch
+    -> SessionState
+    -> SessionState
+applySessionAccountPatch patch state =
+    state
+        { sessionAccount = account
+            { accountLabel =
+                applyField patch.patchAccountLabel account.accountLabel
+            , accountId =
+                applyField patch.patchAccountId account.accountId
+            , accountSelectionId =
+                applyField
+                    patch.patchAccountSelectionId
+                    account.accountSelectionId
+            }
+        }
+  where
+    account = state.sessionAccount
+    applyField update current = case update of
+        KeepField -> current
+        SetField value -> value
 
 -- | Snapshot a turn's starting conversation while consuming startup context.
 beginSessionTurn :: SessionState -> (SessionState, ConversationState)
