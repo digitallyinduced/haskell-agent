@@ -70,7 +70,7 @@ getTaskOutputDescription :: Text
 getTaskOutputDescription =
     "Get output and status from a background task or subagent.\n\n\
     \Usage notes:\n\
-    \- Pass task_ids with one or more ids from background=true commands or subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
+    \- Pass task_ids with one or more ids returned by a background command or subagent; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
     \- Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at 600000 (~10 min)\n\
     \- Returns current output and status."
 
@@ -297,7 +297,7 @@ instance FromJSON KillTaskArgs where
 killTaskTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
 killTaskTool session multi = jsonTool "kill_task" killTaskDescription
     [ PropertySchema "task_id" PropertyString True $ Just
-        "The task ID from a background `run_terminal_cmd` call or the subagent ID from `task`."
+        "The id returned by a background command or subagent."
     ]
     False
     TurnSequential

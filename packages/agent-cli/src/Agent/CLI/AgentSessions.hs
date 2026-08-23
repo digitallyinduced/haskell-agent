@@ -126,10 +126,12 @@ launchSessionTurn
     :: SessionProcessManager
     -> Bool
     -> ApprovalPolicy
+    -> Bool
+    -> Bool
     -> SessionHandle
     -> Text
     -> IO (Either Text Text)
-launchSessionTurn manager background policy handle message =
+launchSessionTurn manager background policy ghciEnabled bashEnabled handle message =
     resolveAgentExecutable >>= \case
         Left err -> pure (Left err)
         Right executable -> do
@@ -209,6 +211,8 @@ launchSessionTurn manager background policy handle message =
                 , "--save-session"
                 ]
                     <> approvalArgs
+                    <> ["--no-ghci" | not ghciEnabled]
+                    <> ["--bash" | bashEnabled]
             cleanupScript =
                 "prompt=$1; shift; "
                     <> "cleanup() { rm -f \"$prompt\"; }; "

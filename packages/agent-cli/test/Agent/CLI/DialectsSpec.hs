@@ -3,6 +3,8 @@ module Agent.CLI.DialectsSpec (spec) where
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
+    , filterBashTools
+    , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     )
@@ -12,8 +14,15 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
+import Agent.ToolDispatch (noArgsTool)
 import Agent.Tools.Secret (SecretPromptHooks(..))
-import Agent.Tools.Types (AppTool(..), ToolEnv, defaultToolEnv)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ApprovalRule(AlwaysReadOnly)
+    , ToolEnv
+    , defaultToolEnv
+    , jsonAppTool
+    )
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (forM_)
 import qualified Data.Text as Text
@@ -68,6 +77,25 @@ spec = describe "Agent.CLI.Dialects" do
                     `shouldContain` ["ask_secret"])
                     `finally` withSecret.codingClose
 
+    it "filters shell and ghci tools independently" do
+        let tools = map fakeTool
+                [ "run_ghci"
+                , "read_file"
+                , "shell_command"
+                , "write_stdin"
+                , "run_terminal_cmd"
+                ]
+            names = map (.appToolName)
+        names (filterBashTools False tools)
+            `shouldBe` ["run_ghci", "read_file"]
+        names (filterGhciTools False tools)
+            `shouldBe`
+                [ "read_file"
+                , "shell_command"
+                , "write_stdin"
+                , "run_terminal_cmd"
+                ]
+
 withTempToolEnv :: (ToolEnv -> IO a) -> IO a
 withTempToolEnv action = do
     root <- getTemporaryDirectory
@@ -76,3 +104,7 @@ withTempToolEnv action = do
         removeDirectoryRecursive
         (\directory ->
             defaultToolEnv (unsafeEncodeUtf directory) >>= action)
+
+fakeTool name =
+    jsonAppTool name "" [] AlwaysReadOnly
+        (noArgsTool name (pure (Right "")))
