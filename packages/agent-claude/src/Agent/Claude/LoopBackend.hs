@@ -21,6 +21,7 @@ import Agent.Error
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnInput(..)
@@ -119,11 +120,11 @@ claudeCodeOneShotBackend
     -> IORef [ResponseItem]
     -> Backend
 claudeCodeOneShotBackend options getParams transcript =
-    Backend \previous inputs onEvent -> do
+    Backend \_state previous inputs onEvent -> do
         checkpoint <- newIORef Nothing
         sdkOptions <-
             toClaudeAgentOptions ClaudeCodeNoTools options
-        withClaudeSDKClient sdkOptions \session ->
+        result <- withClaudeSDKClient sdkOptions \session ->
             submitClaudeCodeTurn
                 session
                 checkpoint
@@ -132,6 +133,7 @@ claudeCodeOneShotBackend options getParams transcript =
                 transcript
                 inputs
                 onEvent
+        attachBackendState transcript result
 
 backendForSession
     :: ClaudeSDKClient
@@ -140,8 +142,8 @@ backendForSession
     -> IORef [ResponseItem]
     -> Backend
 backendForSession session checkpoint getParams transcript =
-    Backend \previous inputs onEvent ->
-        submitClaudeCodeTurn
+    Backend \_state previous inputs onEvent -> do
+        result <- submitClaudeCodeTurn
             session
             checkpoint
             previous
@@ -149,6 +151,20 @@ backendForSession session checkpoint getParams transcript =
             transcript
             inputs
             onEvent
+        attachBackendState transcript result
+
+attachBackendState
+    :: IORef [ResponseItem]
+    -> Either ApiError TurnOutput
+    -> IO (Either ApiError BackendResult)
+attachBackendState _ (Left err) =
+    pure (Left err)
+attachBackendState transcript (Right output) = do
+    state <- readIORef transcript
+    pure $ Right BackendResult
+        { backendOutput = output
+        , backendState = state
+        }
 
 submitClaudeCodeTurn
     :: ClaudeSDKClient

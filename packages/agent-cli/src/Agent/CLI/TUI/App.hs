@@ -23,7 +23,9 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineWithModels
     , readFullscreenLineOr
+    , readFullscreenLineOrWithModels
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
@@ -32,6 +34,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenOnboarding
     , requestFullscreenResume
+    , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
@@ -39,12 +42,16 @@ module Agent.CLI.TUI.App
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
+    , maskedSecretText
+    , normalizeTextOverlayInsertion
+    , textOverlayDisplayText
     , withFullscreenSuspended
     ) where
 
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -156,6 +163,7 @@ import Control.Concurrent.STM
     , readTMVar
     , registerDelay
     , retry
+    , takeTMVar
     , writeTVar
     )
 import Control.Monad (unless, void, when)
@@ -398,7 +406,22 @@ readFullscreenLine
     -> Text
     -> IO ReplLine
 readFullscreenLine runtime skills prompt initial = do
-    result <- readFullscreenLineOr runtime skills prompt initial retry
+    result <- readFullscreenLineOrWithModels
+        runtime skills [] prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
+readFullscreenLineWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> IO ReplLine
+readFullscreenLineWithModels runtime skills modelIds prompt initial = do
+    result <- readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial retry
     case result of
         Left impossible -> pure impossible
         Right line -> pure line
@@ -415,7 +438,20 @@ readFullscreenLineOr
     -> STM wake
     -> IO (Either wake ReplLine)
 readFullscreenLineOr runtime skills prompt initial wake = do
+    readFullscreenLineOrWithModels runtime skills [] prompt initial wake
+
+readFullscreenLineOrWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial wake = do
     enqueueAppEvent runtime (AppSetSkillCommands skills)
+    enqueueAppEvent runtime (AppSetModelIds modelIds)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -516,8 +552,28 @@ requestFullscreenText
 requestFullscreenText runtime title body initial = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
-        (AppAskText title body initial reply)
+        (AppAskText TextInputPlain title body initial reply)
     atomically (readTMVar reply)
+
+-- | Request a secret through a masked fullscreen prompt.
+--
+-- The returned value exists only in transient overlay state and the reply
+-- 'TMVar'; it is never rendered or added to normal prompt history.
+requestFullscreenSecret
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> IO (Maybe Text)
+requestFullscreenSecret runtime title body = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskText
+            TextInputSecret
+            (sanitizeSecretPromptText title)
+            (sanitizeSecretPromptText body)
+            ""
+            reply)
+    atomically (takeTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
@@ -568,6 +624,7 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appModelIds = []
             , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
@@ -1063,81 +1120,73 @@ handleDeleteConfirmation state browser sessionId = \case
     _ -> pure ()
 
 handleResumeSearch :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeSearch browser = \case
-    V.EvKey V.KEsc [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KEnter [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KBS [] ->
-        setAndReveal $
-            insertResumeSearch ""
-                browser
-                    { resumeBrowserQuery =
-                        Text.dropEnd 1 browser.resumeBrowserQuery
-                    , resumeBrowserIndex = 0
-                    }
-    V.EvKey (V.KChar 'u') modifiers
-        | V.MCtrl `elem` modifiers ->
+handleResumeSearch browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEsc [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KEnter [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KBS [] ->
             setAndReveal $
                 insertResumeSearch ""
                     browser
-                        { resumeBrowserQuery = ""
+                        { resumeBrowserQuery =
+                            Text.dropEnd 1 browser.resumeBrowserQuery
                         , resumeBrowserIndex = 0
                         }
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal (insertResumeSearch (Text.singleton char) browser)
-    _ -> pure ()
+        V.EvKey (V.KChar 'u') modifiers
+            | V.MCtrl `elem` modifiers ->
+                setAndReveal $
+                    insertResumeSearch ""
+                        browser
+                            { resumeBrowserQuery = ""
+                            , resumeBrowserIndex = 0
+                            }
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal (insertResumeSearch (Text.singleton char) browser)
+        _ -> pure ()
 
 handleResumeNormal :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeNormal browser = \case
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KEnter [] ->
-        resolveResume True
-    V.EvKey V.KEsc [] ->
-        resolveResume False
-    V.EvKey (V.KChar 'e') [] ->
-        expandSelectedResume browser
-    V.EvKey (V.KChar 'f') [] -> do
-        setBrowser (cycleResumeSource browser)
-        revealSelectedResume
-    V.EvKey (V.KChar 'd') [] ->
-        case selectedResumeBrowser browser of
-            Nothing -> pure ()
-            Just entry ->
-                setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
-    V.EvKey (V.KChar '/') [] ->
-        setBrowser (beginResumeSearch browser)
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal
-                (insertResumeSearch
-                    (Text.singleton char)
-                    (beginResumeSearch browser))
-    _ -> pure ()
+handleResumeNormal browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEnter [] ->
+            resolveResume True
+        V.EvKey V.KEsc [] ->
+            resolveResume False
+        V.EvKey (V.KChar 'e') [] ->
+            expandSelectedResume browser
+        V.EvKey (V.KChar 'f') [] -> do
+            setBrowser (cycleResumeSource browser)
+            revealSelectedResume
+        V.EvKey (V.KChar 'd') [] ->
+            case selectedResumeBrowser browser of
+                Nothing -> pure ()
+                Just entry ->
+                    setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
+        V.EvKey (V.KChar '/') [] ->
+            setBrowser (beginResumeSearch browser)
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal
+                    (insertResumeSearch
+                        (Text.singleton char)
+                        (beginResumeSearch browser))
+        _ -> pure ()
+
+resumeNavigationDelta :: V.Event -> Maybe Int
+resumeNavigationDelta = \case
+    V.EvKey V.KUp [] -> Just (-1)
+    V.EvKey V.KDown [] -> Just 1
+    V.EvKey V.KPageUp [] -> Just (-10)
+    V.EvKey V.KPageDown [] -> Just 10
+    V.EvMouseDown _ _ V.BScrollUp _ -> Just (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ -> Just mouseScrollLines
+    _ -> Nothing
 
 expandSelectedResume :: ResumeBrowser -> EventM Name AppState ()
 expandSelectedResume browser =
@@ -1374,7 +1423,11 @@ handleTextPromptKey = \case
             _ <- handleCtrlC
             when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
-    V.EvKey V.KEnter [V.MShift] -> insert "\n"
+    V.EvKey V.KEnter [V.MShift] -> do
+        state <- get
+        case (.textInputMode) <$> state.appTextPrompt of
+            Just TextInputPlain -> insert "\n"
+            _ -> pure ()
     V.EvKey V.KPageUp [] ->
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
@@ -1413,11 +1466,16 @@ handleTextPromptKey = \case
         | V.MCtrl `elem` modifiers ->
             edit deleteToLineEnd
     V.EvKey (V.KChar character) [] ->
-        insert (Text.singleton character)
+        insertForMode (Text.singleton character)
     V.EvPaste bytes ->
-        insert (Composer.decodePaste bytes)
+        insertForMode (Composer.decodePaste bytes)
     _ -> pure ()
   where
+    insertForMode raw = do
+        state <- get
+        let mode =
+                maybe TextInputPlain (.textInputMode) state.appTextPrompt
+        insert (normalizeTextOverlayInsertion mode raw)
     edit change =
         modify' \state ->
             state
@@ -2999,13 +3057,33 @@ drawTextPrompt state prompt =
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =
-    let content =
-            if Text.null prompt.textDraft
+    let displayDraft = textOverlayDisplayText prompt
+        content =
+            if Text.null displayDraft
                 then withAttr Theme.mutedAttr (txt " ")
-                else txt prompt.textDraft
+                else txt displayDraft
         (row, column) =
-            Composer.draftCursorLocation prompt.textDraft prompt.textCursor
+            Composer.draftCursorLocation displayDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
+
+-- | Replace every code point with one fixed-width masking glyph.
+maskedSecretText :: Text -> Text
+maskedSecretText value =
+    Text.replicate (Text.length value) "•"
+
+-- | Text that may be painted for an overlay draft.
+textOverlayDisplayText :: TextOverlay -> Text
+textOverlayDisplayText prompt = case prompt.textInputMode of
+    TextInputPlain -> prompt.textDraft
+    TextInputSecret -> maskedSecretText prompt.textDraft
+
+-- | Secret prompts are deliberately single-line. Plain overlays preserve
+-- multiline input, while secret pastes stop before the first line ending.
+normalizeTextOverlayInsertion :: TextInputMode -> Text -> Text
+normalizeTextOverlayInsertion = \case
+    TextInputPlain -> id
+    TextInputSecret -> Text.takeWhile \character ->
+        character /= '\n' && character /= '\r'
 
 choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
 choiceRow appState selected index (label, detail) =
@@ -3366,6 +3444,15 @@ handleEventInner event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
+    AppEvent (AppSetModelIds modelIds) -> do
+        state <- get
+        if state.appModelIds == modelIds
+            then pure ()
+            else modify' \current -> current
+                { appModelIds = modelIds
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
     AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
@@ -3480,7 +3567,7 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)
-    AppEvent (AppAskText title body initial reply) -> do
+    AppEvent (AppAskText mode title body initial reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
@@ -3490,6 +3577,7 @@ handleEventInner event = case event of
                     , textBody = body
                     , textDraft = initial
                     , textCursor = Text.length initial
+                    , textInputMode = mode
                     }
                 , appTextReply = Just reply
                 , appAgentHover = Nothing

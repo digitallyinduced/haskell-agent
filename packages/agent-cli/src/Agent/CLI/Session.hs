@@ -19,6 +19,7 @@ module Agent.CLI.Session
     , addSessionUsage
     , deleteSession
     , loadSession
+    , loadSessionHandle
     , isValidSessionId
     , listSessions
     , sessionDirForId
@@ -50,6 +51,7 @@ import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
     )
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Dialect
     ( DialectId
@@ -63,7 +65,7 @@ import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, finally, onException, tryIO)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -119,6 +121,7 @@ data SessionMeta = SessionMeta
     , metaCreatedAt :: !UTCTime
     , metaUpdatedAt :: !UTCTime
     , metaProvider :: !Provider
+    , metaConnection :: !Text
     , metaModel :: !Text
     , metaTransportModel :: !(Maybe Text)
     , metaDialect :: !DialectId
@@ -141,6 +144,7 @@ data SessionMeta = SessionMeta
 -- compatible merely because the root metadata has already been retargeted.
 data LegacySubagentTarget = LegacySubagentTarget
     { legacyTargetProvider :: !Provider
+    , legacyTargetConnection :: !Text
     , legacyTargetEffectiveModel :: !Text
     , legacyTargetDialect :: !DialectId
     } deriving (Eq, Show)
@@ -148,6 +152,7 @@ data LegacySubagentTarget = LegacySubagentTarget
 instance ToJSON LegacySubagentTarget where
     toJSON target = object
         [ "provider" .= providerSlug target.legacyTargetProvider
+        , "connection" .= target.legacyTargetConnection
         , "effectiveModel" .= target.legacyTargetEffectiveModel
         , "dialect" .= dialectSlug target.legacyTargetDialect
         ]
@@ -175,7 +180,10 @@ instance FromJSON LegacySubagentTarget where
                     <> " is incompatible with provider "
                     <> Text.unpack (providerSlug provider)
                 )
-        LegacySubagentTarget provider
+        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        when (Text.null (Text.strip connection)) $
+            fail "legacy subagent connection must not be empty"
+        LegacySubagentTarget provider connection
             <$> o .: "effectiveModel"
             <*> pure dialect
 
@@ -186,6 +194,7 @@ instance ToJSON SessionMeta where
         , "createdAt" .= meta.metaCreatedAt
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
+        , "connection" .= meta.metaConnection
         , "model" .= meta.metaModel
         , "transportModel" .= meta.metaTransportModel
         , "dialect" .= dialectSlug meta.metaDialect
@@ -210,6 +219,9 @@ instance FromJSON SessionMeta where
             Just p -> pure p
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
         model <- o .: "model"
+        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        when (Text.null (Text.strip connection)) $
+            fail "session connection must not be empty"
         dialectText <- o .:? "dialect"
         dialect <- case dialectText of
             Nothing -> pure (legacyDialectIdForProvider provider)
@@ -228,6 +240,7 @@ instance FromJSON SessionMeta where
             <*> o .: "createdAt"
             <*> o .: "updatedAt"
             <*> pure provider
+            <*> pure connection
             <*> pure model
             <*> o .:? "transportModel"
             <*> pure dialect
@@ -286,10 +299,7 @@ data SessionHandle = SessionHandle
 -- | Parameters for creating a session on the first persisted turn.
 data SessionCreate = SessionCreate
     { createRoot :: !OsPath
-    , createProvider :: !Provider
-    , createModel :: !Text
-    , createTransportModel :: !Text
-    , createDialect :: !DialectId
+    , createTarget :: !ModelTarget
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
@@ -376,14 +386,17 @@ createReservedSession spec sessionId tempDir = do
             , metaId = sessionId
             , metaCreatedAt = now
             , metaUpdatedAt = now
-            , metaProvider = spec.createProvider
-            , metaModel = spec.createModel
-            , metaTransportModel = Just spec.createTransportModel
-            , metaDialect = spec.createDialect
+            , metaProvider = spec.createTarget.targetProvider
+            , metaConnection = spec.createTarget.targetConnectionId
+            , metaModel = spec.createTarget.targetModelId
+            , metaTransportModel = Just spec.createTarget.targetWireModelId
+            , metaDialect = spec.createTarget.targetDialect
             , metaLegacySubagentTarget = Just LegacySubagentTarget
-                { legacyTargetProvider = spec.createProvider
-                , legacyTargetEffectiveModel = spec.createTransportModel
-                , legacyTargetDialect = spec.createDialect
+                { legacyTargetProvider = spec.createTarget.targetProvider
+                , legacyTargetConnection = spec.createTarget.targetConnectionId
+                , legacyTargetEffectiveModel =
+                    spec.createTarget.targetWireModelId
+                , legacyTargetDialect = spec.createTarget.targetDialect
                 }
             , metaCwd = spec.createCwd
             , metaEffort = spec.createEffort
@@ -498,6 +511,7 @@ sessionLegacySubagentTarget meta =
     fromMaybe
         LegacySubagentTarget
             { legacyTargetProvider = meta.metaProvider
+            , legacyTargetConnection = meta.metaConnection
             , legacyTargetEffectiveModel =
                 fromMaybe meta.metaModel meta.metaTransportModel
             , legacyTargetDialect = meta.metaDialect
@@ -555,6 +569,29 @@ loadSession root sessionId = runExceptT do
                 <> ")"
     turns <- loadTranscript transcriptPath
     pure (meta, turns)
+
+loadSessionHandle
+    :: OsPath
+    -> Text
+    -> IO (Either Text (SessionHandle, [SessionTurn]))
+loadSessionHandle root sessionId =
+    loadSession root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right (meta, turns) ->
+            pure do
+                dir <- sessionDirForId root sessionId
+                tempDir <- sessionTempDirForId root sessionId
+                Right
+                    ( SessionHandle
+                        { sessionDir = dir
+                        , sessionTempDir = tempDir
+                        , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
+                        , sessionTranscriptPath =
+                            dir </> unsafeEncodeUtf "transcript.jsonl"
+                        , sessionMeta = meta
+                        }
+                    , turns
+                    )
 
 deleteSession :: OsPath -> Text -> IO (Either Text ())
 deleteSession root sessionId = runExceptT do

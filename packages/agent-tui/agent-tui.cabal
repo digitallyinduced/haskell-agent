@@ -37,6 +37,7 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.TUI.FencedCode
                     , Agent.TUI.Markdown
+                    , Agent.TUI.Markdown.Block
                     , Agent.TUI.Markdown.Inline
                     , Agent.TUI.Motion
                     , Agent.TUI.Model
@@ -58,6 +59,7 @@ test-suite agent-tui-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.TUI.FencedCodeSpec
+                    , Agent.TUI.Markdown.BlockSpec
                     , Agent.TUI.Markdown.InlineSpec
                     , Agent.TUI.MarkdownSpec
                     , Agent.TUI.MotionSpec

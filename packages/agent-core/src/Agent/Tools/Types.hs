@@ -10,6 +10,8 @@ module Agent.Tools.Types
     , jsonTool
     , jsonAppTool
     , jsonAppToolWithExecution
+    , rawJsonAppTool
+    , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , mkToolRegistry
@@ -34,6 +36,7 @@ import Agent.ToolDispatch
     , handlerName
     )
 import Control.Monad (foldM)
+import Data.Aeson (Value)
 import Data.IORef (IORef, newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -44,6 +47,7 @@ import System.OsPath (OsPath, dropTrailingPathSeparator)
 -- meaningless JSON parameters.
 data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
+    | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
     deriving (Eq, Show)
 
@@ -154,6 +158,37 @@ jsonAppToolWithExecution
     , appToolExecution = execution
     }
 
+-- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
+-- tool providers such as MCP use this path so their schemas remain lossless.
+rawJsonAppTool
+    :: Text
+    -> Text
+    -> Value
+    -> ApprovalRule
+    -> ToolHandler
+    -> AppTool
+rawJsonAppTool name description parameters approval =
+    rawJsonAppToolWithExecution
+        name description parameters approval TurnSequential
+
+rawJsonAppToolWithExecution
+    :: Text
+    -> Text
+    -> Value
+    -> ApprovalRule
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+rawJsonAppToolWithExecution
+        name description parameters approval execution handler = AppTool
+    { appToolName = name
+    , appToolDescription = description
+    , appToolSchema = RawJsonFunctionSchema parameters
+    , appToolHandler = handler
+    , appToolApproval = approval
+    , appToolExecution = execution
+    }
+
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
     :: Text
@@ -233,6 +268,7 @@ dispatchRegisteredToolCall config registry call =
 jsonToolParameters :: AppTool -> Maybe [PropertySchema]
 jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
+    RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths

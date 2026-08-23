@@ -1,6 +1,7 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
@@ -70,6 +71,7 @@ spec = describe "Agent.CLI.AgentSessions" do
         withTempEnv \env launched -> do
             let openRouterEnv = env
                     { toolsProvider = OpenRouterProvider
+                    , toolsConnection = "openrouter"
                     , toolsModel = "openai/gpt-5.1"
                     , toolsTransportModel = "openai/gpt-5.1"
                     , toolsDialect = GrokBuildDialect
@@ -134,9 +136,9 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                first <- launchSessionTurn manager True ApproveAll handle "one"
+                first <- launchSessionTurn manager True ApproveAll True False handle "one"
                 first `shouldSatisfy` either (const False) (const True)
-                second <- launchSessionTurn manager True ApproveAll handle "two"
+                second <- launchSessionTurn manager True ApproveAll True False handle "two"
                 second `shouldSatisfy` \case
                     Left err -> "already running" `Text.isInfixOf` err
                     Right _ -> False
@@ -144,6 +146,44 @@ spec = describe "Agent.CLI.AgentSessions" do
                     manager
                     handle.sessionMeta.metaId
                     "completed"
+                closeSessionProcessManager manager
+
+    it "forwards bash enablement to managed session turns" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let argsPath = toFilePath root FilePath.</> "agent-args"
+            script <- writeFakeAgentBody root
+                ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                launched <-
+                    launchSessionTurn manager True ApproveAll True True handle "one"
+                launched `shouldSatisfy` either (const False) (const True)
+                waitForSessionStatus
+                    manager
+                    handle.sessionMeta.metaId
+                    "completed"
+                args <- lines <$> readFile argsPath
+                args `shouldContain` ["--bash"]
+                closeSessionProcessManager manager
+
+    it "forwards ghci disablement to managed session turns" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let argsPath = toFilePath root FilePath.</> "agent-args"
+            script <- writeFakeAgentBody root
+                ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                launched <-
+                    launchSessionTurn manager True ApproveAll False True handle "one"
+                launched `shouldSatisfy` either (const False) (const True)
+                waitForSessionStatus
+                    manager
+                    handle.sessionMeta.metaId
+                    "completed"
+                args <- lines <$> readFile argsPath
+                args `shouldContain` ["--no-ghci", "--bash"]
                 closeSessionProcessManager manager
 
     it "keeps an advisory lock until its owner releases it" $
@@ -214,9 +254,39 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                launchSessionTurn manager True ApproveAll handle "one"
+                launchSessionTurn manager True ApproveAll True False handle "one"
                     `shouldReturn` Left "could not acquire lock"
                 closeSessionProcessManager manager
+
+    it "does not expose gateway credentials to managed agent children" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let marker = toFilePath root FilePath.</> "leaked"
+            script <- writeFakeAgentBody root
+                ("if [ -n \"$TELEGRAM_BOT_TOKEN\" ] \
+                \|| [ -n \"$TELEGRAM_ALLOWED_USERS\" ]; then \
+                \printf leaked > " <> shellQuote marker <> "; fi\n")
+            withExecutableOverride script $
+                bracket
+                    (do
+                        oldToken <- lookupEnv "TELEGRAM_BOT_TOKEN"
+                        oldUsers <- lookupEnv "TELEGRAM_ALLOWED_USERS"
+                        setEnv "TELEGRAM_BOT_TOKEN" "secret"
+                        setEnv "TELEGRAM_ALLOWED_USERS" "123"
+                        pure (oldToken, oldUsers))
+                    (\(oldToken, oldUsers) -> do
+                        restoreEnv "TELEGRAM_BOT_TOKEN" oldToken
+                        restoreEnv "TELEGRAM_ALLOWED_USERS" oldUsers)
+                    \_ -> do
+                        handle <- createSession (testCreateAt root root)
+                        manager <- newSessionProcessManager root
+                        launchSessionTurn
+                            manager False ApproveAll True False handle "one"
+                            `shouldReturn`
+                                Right
+                                    ("completed session "
+                                        <> handle.sessionMeta.metaId)
+                        Directory.doesFileExist marker `shouldReturn` False
+                        closeSessionProcessManager manager
 
     it "does not terminate background sessions when the manager closes" $
         withTempDir "agent-session-runtime-" \root -> do
@@ -226,7 +296,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                _ <- launchSessionTurn manager True ApproveAll handle "one"
+                _ <- launchSessionTurn manager True ApproveAll True False handle "one"
                 closeSessionProcessManager manager
                 waitForFile marker
 
@@ -249,6 +319,7 @@ withTempEnv action =
             env = AgentSessionToolsEnv
                 { toolsRoot = root
                 , toolsProvider = XAIProvider
+                , toolsConnection = "xai"
                 , toolsModel = "model-1"
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
@@ -263,10 +334,13 @@ withTempEnv action =
 testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
-    , createProvider = XAIProvider
-    , createModel = "model-1"
-    , createTransportModel = "model-1"
-    , createDialect = GrokBuildDialect
+    , createTarget = ModelTarget
+        { targetProvider = XAIProvider
+        , targetConnectionId = "xai"
+        , targetModelId = "model-1"
+        , targetWireModelId = "model-1"
+        , targetDialect = GrokBuildDialect
+        }
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"
@@ -345,6 +419,11 @@ withExecutableOverride executable action =
             Nothing -> unsetEnv "HASKELL_AGENT_EXECUTABLE"
             Just value -> setEnv "HASKELL_AGENT_EXECUTABLE" value)
         (const action)
+
+restoreEnv :: String -> Maybe String -> IO ()
+restoreEnv name = \case
+    Nothing -> unsetEnv name
+    Just value -> setEnv name value
 
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 21) (secondsToDiffTime 0)

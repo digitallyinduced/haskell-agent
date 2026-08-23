@@ -21,6 +21,7 @@ import Agent.InterAgentMessage
     )
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
@@ -46,7 +47,6 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
-import Data.IORef
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -59,12 +59,10 @@ statelessResponsesBackend
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
-statelessResponsesBackend send getParams transcript =
-    Backend \_previousResponseId inputs onEvent -> do
+statelessResponsesBackend send getParams =
+    Backend \history _previousResponseId inputs onEvent -> do
         baseParams <- getParams
-        history <- readIORef transcript
         let newItems = turnInputsToItems inputs
             requestItems = history <> newItems
             request = withRequestInput baseParams requestItems
@@ -72,9 +70,11 @@ statelessResponsesBackend send getParams transcript =
             mapM_ onEvent (streamEventToLoopEvent event)
         case result of
             Left err -> pure (Left err)
-            Right response -> do
-                writeIORef transcript (requestItems <> response.output)
-                pure (Right (responseToTurnOutput response))
+            Right response ->
+                pure $ Right BackendResult
+                    { backendOutput = responseToTurnOutput response
+                    , backendState = requestItems <> response.output
+                    }
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
@@ -87,7 +87,6 @@ tokenProviderStatelessResponsesBackend
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
 tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->

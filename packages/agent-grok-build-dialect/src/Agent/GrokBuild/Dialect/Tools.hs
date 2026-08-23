@@ -56,12 +56,12 @@ grokTools
 grokTools session ghci planMode multi typesRef =
     let env = session.grokEnv
         base =
-            [ readFileTool env
+            [ runGhciTool ghci
+            , readFileTool env
             , grepTool env
             , listDirTool env
             , searchReplaceTool env planMode
             , runTerminalCmdTool session
-            , runGhciTool ghci
             , todoWriteTool session
             , getTaskOutputTool session multi
             , waitTasksTool session multi

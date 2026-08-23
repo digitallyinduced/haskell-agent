@@ -130,6 +130,14 @@ spec = do
             out `shouldSatisfy`
                 Text.isInfixOf "https://example.com/a_(b)"
 
+        it "wraps bare URLs in OSC 8 hyperlinks" do
+            let url = "https://github.com/digitallyinduced/haskell-agent/pull/339"
+                out = renderMarkdown True ("PR: " <> url)
+            out `shouldSatisfy`
+                Text.isInfixOf ("\ESC]8;;" <> url <> "\ESC\\")
+            out `shouldSatisfy` Text.isInfixOf url
+            out `shouldSatisfy` Text.isInfixOf "\ESC]8;;\ESC\\"
+
         it "restores heading styling after nested code" do
             let out = renderMarkdown True "# before `code` after"
                 afterCode = snd (Text.breakOn "code" out)

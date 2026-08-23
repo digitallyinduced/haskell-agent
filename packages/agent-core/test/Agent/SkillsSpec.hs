@@ -164,6 +164,7 @@ options home repo cwd = SkillDiscoverOptions
     , skillsProjectRoot = fromFilePath repo
     , skillsCwd = fromFilePath cwd
     , skillsMaxDepth = 6
+    , skillsBuiltinRoots = []
     }
 
 writeSkill :: FilePath -> String -> String -> [String] -> IO ()

@@ -125,6 +125,7 @@ toolVerb name = case canonicalToolName name of
     "enter_plan_mode" -> "Entered"
     "exit_plan_mode" -> "Exited"
     "ask_user_question" -> "Asked"
+    "ask_secret" -> "Requested secret"
     other -> other
 
 toolDetail :: ToolCall -> Text
@@ -143,6 +144,12 @@ toolDetail call = case canonicalToolName call.name of
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
     "ask_user_question" -> askUserQuestionDetail call.arguments
+    "ask_secret" ->
+        firstLine $
+            let purpose = jsonTextFieldDefault "purpose" call.arguments
+            in if Text.null (Text.strip purpose)
+                then jsonTextFieldDefault "prompt" call.arguments
+                else purpose
     "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
     "send_message" -> jsonTextFieldDefault "target" call.arguments
     "followup_task" -> jsonTextFieldDefault "target" call.arguments

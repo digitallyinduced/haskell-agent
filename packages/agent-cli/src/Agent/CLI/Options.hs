@@ -81,6 +81,10 @@ data CliOptions = CliOptions
       -- ^ Discover and inject AGENTS.md at session start (default: True).
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
+    , optGhci :: !Bool
+      -- ^ Expose the persistent run_ghci tool (default: True).
+    , optBash :: !Bool
+      -- ^ Expose the provider's explicit shell execution tool (default: False).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -102,6 +106,8 @@ defaultCliOptions = CliOptions
     , optSaveSession = False
     , optAgentsMd = True
     , optSkills = True
+    , optGhci = True
+    , optBash = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -201,6 +207,14 @@ parseOptions options = \case
         parseOptions options { optSkills = True } rest
     "--no-skills" : rest ->
         parseOptions options { optSkills = False } rest
+    "--ghci" : rest ->
+        parseOptions options { optGhci = True } rest
+    "--no-ghci" : rest ->
+        parseOptions options { optGhci = False } rest
+    "--bash" : rest ->
+        parseOptions options { optBash = True } rest
+    "--no-bash" : rest ->
+        parseOptions options { optBash = False } rest
     "--fullscreen" : rest ->
         parseOptions options { optScreenMode = ScreenFullscreen } rest
     "--minimal" : rest ->
@@ -272,6 +286,10 @@ usage = unlines
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --skills            Discover Agent Skills (default)"
     , "      --no-skills         Disable skill discovery and invocation"
+    , "      --ghci              Enable the persistent GHCi tool (default)"
+    , "      --no-ghci           Disable the persistent GHCi tool"
+    , "      --bash              Enable explicit shell execution tools"
+    , "      --no-bash           Disable explicit shell execution tools (default)"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

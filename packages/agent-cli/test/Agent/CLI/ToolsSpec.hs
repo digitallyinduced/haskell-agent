@@ -23,6 +23,7 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
+    , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
@@ -124,6 +125,50 @@ spec = describe "schemasFromAppTools" do
                 offsetType tool `shouldBe` Just (Aeson.String "integer")
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "preserves a raw MCP schema and disables strict mode for OpenAI" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "siteUrl" Aeson..= Aeson.object
+                        [ "type" Aeson..= ("string" :: Text)
+                        ]
+                    ]
+                , "required" Aeson..= (["siteUrl"] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            tool = rawJsonAppTool
+                "gsc_site_get"
+                "Get a Search Console property."
+                parameters
+                AlwaysReadOnly
+                (noArgsTool "gsc_site_get" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [tool] of
+            [_, FunctionToolValue function] -> do
+                function.name `shouldBe` "gsc_site_get"
+                function.parameters `shouldBe` Just parameters
+                function.strict `shouldBe` Just False
+            other -> expectationFailure
+                ("expected raw OpenAI function tool, got " <> show other)
+
+    it "preserves raw MCP names and schemas for Grok without strict mode" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object []
+                ]
+            tool = rawJsonAppTool
+                "seo_auth_status"
+                "Show SEO authentication status."
+                parameters
+                AlwaysReadOnly
+                (noArgsTool "seo_auth_status" (pure (Right "ok")))
+        case schemasFromAppTools grokBuildDialect [tool] of
+            [_, FunctionToolValue function] -> do
+                function.name `shouldBe` "seo_auth_status"
+                function.parameters `shouldBe` Just parameters
+                function.strict `shouldBe` Nothing
+            other -> expectationFailure
+                ("expected raw Grok function tool, got " <> show other)
+
     it "registers apply_patch as a custom Lark tool" do
         case schemasFromAppTools codexDialect [patchTool] of
             [_, KnownResponseTool ToolCustom tagged] -> do
@@ -193,6 +238,7 @@ spec = describe "schemasFromAppTools" do
                         , multiCreateWorktree = Nothing
                         , multiPrepareSpawn = Nothing
                         , multiSendToRoot = Nothing
+                        , multiSpawnModelGuidance = Nothing
                         }
                     namespaces =
                         [ tagged

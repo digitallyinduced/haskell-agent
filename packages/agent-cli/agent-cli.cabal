@@ -11,6 +11,9 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+data-files:         config/models.default.json
+                  , skills/add-model/SKILL.md
+                  , skills/telegram-agent/SKILL.md
 
 common common-options
     default-language: GHC2021
@@ -37,6 +40,8 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
+    autogen-modules:  Paths_agent_cli
+    other-modules:    Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
@@ -49,6 +54,7 @@ library
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
+                    , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.Duration
                     , Agent.CLI.Dialects
@@ -59,6 +65,7 @@ library
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
@@ -80,12 +87,14 @@ library
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
+                    , Agent.Telegram
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -96,6 +105,7 @@ library
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
+                    , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
@@ -107,6 +117,7 @@ library
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
@@ -121,6 +132,8 @@ library
                     , filelock
                     , filepath
                     , haskeline >= 0.8 && < 0.9
+                    , http-client
+                    , http-client-tls
                     , JuicyPixels
                     , mtl
                     , process >= 1.6.26
@@ -144,6 +157,33 @@ executable agent-cli
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+
+executable agent-telegram
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Telegram.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+
+executable eval-ghci-vs-bash
+    import:           common-options
+    hs-source-dirs:   eval
+    main-is:          GhciVsBash.hs
+    ghc-options:      -threaded -rtsopts
+    build-depends:    agent-cli
+                    , agent-responses
+                    , aeson >= 2.0
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
 
 benchmark subagent-retention-bench
     import:           common-options
@@ -173,6 +213,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
@@ -184,6 +225,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
+                    , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
@@ -201,9 +243,11 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
+                    , Agent.TelegramSpec
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
@@ -227,6 +271,7 @@ test-suite agent-cli-test
                     , agent-openrouter
                     , agent-claude
                     , agent-responses
+                    , agent-responses-types
                     , agent-xai
                     , aeson
                     , ansi-terminal

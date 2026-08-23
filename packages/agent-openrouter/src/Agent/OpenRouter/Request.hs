@@ -5,20 +5,26 @@ module Agent.OpenRouter.Request
     , buildRequest
     ) where
 
+import Agent.Responses.Request
+    ( forceStatelessStreaming
+    , mapResponseTools
+    , selectConfiguredModel
+    , setResponseModel
+    )
 import Agent.Responses.Types
 import Agent.OpenRouter.Options (ClientOptions(..))
-import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Apply an exact model override, preserve an OpenRouter slug, or use the
 -- configured default.
 mapModel :: ClientOptions -> Text -> Text
-mapModel options model = case lookup model options.modelOverrides of
-    Just target -> target
-    Nothing
-        | "/" `Text.isInfixOf` model -> model
-        | otherwise -> options.defaultModel
+mapModel options model =
+    selectConfiguredModel
+        options.modelOverrides
+        (Text.isInfixOf "/")
+        options.defaultModel
+        (Just model)
 
 -- | Build the typed Responses request sent to OpenRouter.
 --
@@ -28,13 +34,15 @@ mapModel options model = case lookup model options.modelOverrides of
 -- through. Extra OpenRouter fields (provider routing, plugins) stay in
 -- 'extraFields'.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
-buildRequest options request = request
-    { model = Just (maybe options.defaultModel (mapModel options) request.model)
-    , tools = Maybe.mapMaybe openRouterTool <$> request.tools
-    , store = Just False
-    , stream = Just True
-    , previousResponseId = Nothing
-    }
+buildRequest options request =
+    mapResponseTools openRouterTool $
+        setResponseModel
+            (selectConfiguredModel
+                options.modelOverrides
+                (Text.isInfixOf "/")
+                options.defaultModel
+                request.model)
+            (forceStatelessStreaming request)
 
 openRouterTool :: ResponseTool -> Maybe ResponseTool
 openRouterTool tool = case tool of

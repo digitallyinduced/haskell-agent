@@ -80,17 +80,17 @@ codexTools
 codexTools env shellSession ghci planMode multi = do
     planRef <- newIORef []
     pure $
-        [ readFileTool env
+        [ runGhciTool ghci
+        , readFileTool env
         , grepTool env
         , listDirTool env
-        , shellCommandTool env shellSession
-        , writeStdinTool shellSession
         , applyPatchTool env
         , updatePlanTool planMode planRef
-        , runGhciTool ghci
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
+        , shellCommandTool env shellSession
+        , writeStdinTool shellSession
         ]
         ++ maybe [] multiAgentTools multi
 

@@ -55,6 +55,24 @@ spec = do
                 `shouldBe` False
             isPreviousResponseIdError (CredentialsExhausted epoch) `shouldBe` False
 
+    describe "isResponseChainCompatibilityError" do
+        it "detects unsupported inherited prompt cache retention" do
+            isResponseChainCompatibilityError
+                (ProviderError
+                    (UnknownErrorType "invalid_parameter")
+                    "prompt_cache_retention is not supported on this model \
+                    \(code: invalid_parameter)"
+                    Nothing)
+                `shouldBe` True
+
+        it "does not classify unrelated invalid parameters as chain errors" do
+            isResponseChainCompatibilityError
+                (ProviderError
+                    (UnknownErrorType "invalid_parameter")
+                    "temperature is not supported on this model"
+                    Nothing)
+                `shouldBe` False
+
     describe "classifyHttpFailure" do
         it "normalizes the real server_is_overloaded response code" do
             classifyHttpFailure 500 "{\"error\":{\"type\":\"server_error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded\"}}"

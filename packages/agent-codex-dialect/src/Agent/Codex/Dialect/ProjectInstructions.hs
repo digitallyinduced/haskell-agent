@@ -4,8 +4,8 @@ module Agent.Codex.Dialect.ProjectInstructions
 
 import Agent.OsPath (toText)
 import Agent.ProjectInstructions
-    ( InstructionFile(..)
-    , LoadedAgentsMd(..)
+    ( LoadedAgentsMd(..)
+    , nonEmptyInstructionContent
     )
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -35,8 +35,3 @@ formatCodexAgentsMd cwd loaded =
         (Just global, project) ->
             Just $ global <> "\n\n--- project-doc ---\n\n"
                 <> Text.intercalate "\n\n" project
-
-nonEmptyInstructionContent :: InstructionFile -> Maybe Text
-nonEmptyInstructionContent file =
-    let text = file.instructionContent
-    in if Text.null (Text.strip text) then Nothing else Just text

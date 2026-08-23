@@ -20,6 +20,7 @@ import Agent.OpenAI.Features
     , remoteCompactionV2Feature
     )
 import Agent.OpenAI.Http (decodeCodexHttpBody)
+import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.Provider
     ( Credential(..)
     , Provider(..)
@@ -186,7 +187,8 @@ makeCodexRequest options baseUrl accessToken accountId request = do
     -- The ChatGPT Codex HTTP endpoint only serves Responses requests as SSE
     -- and rejects an omitted/false stream flag. WebSocket callers do not need
     -- this field, so enforce it at the HTTP transport boundary.
-    let requestBody = Aeson.toJSON request { OpenAI.stream = Just True }
+    let requestBody = Aeson.toJSON
+            (sanitizeCodexRequest request) { OpenAI.stream = Just True }
         url = Text.dropWhileEnd (== '/') baseUrl <> "/responses"
 
     case URI.parseURI (Text.unpack url) of

@@ -39,7 +39,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
         let isolationTypes =
@@ -72,7 +72,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -90,7 +90,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (observeSpec typesRef observed)
             (\_ _ -> pure ())
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
@@ -120,7 +120,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         let restore _ =
                 pure (Left "persisted subagent dialect is incompatible")
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) (Just restore) Nothing Nothing Nothing
+                (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -155,7 +155,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let childId = SubagentId "agent-child"
             ctx = MultiAgentContext registry (Just childId) 1 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing
+                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
         closeSubagentRegistry registry
@@ -168,7 +168,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let createIsolated = cleanupLease cleaned
             ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
-                Nothing (Just createIsolated) Nothing Nothing
+                Nothing (Just createIsolated) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -189,7 +189,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
         let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
-                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing
+                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)

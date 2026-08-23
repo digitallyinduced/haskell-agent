@@ -5,6 +5,7 @@ module Agent.CLI.SessionEnv
 
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
+import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
@@ -33,6 +34,8 @@ data SessionEnv = SessionEnv
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
+    , sessionConnection :: !Text
+    , sessionModelCatalog :: !ModelCatalog
     , sessionDialect :: !Dialect
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))

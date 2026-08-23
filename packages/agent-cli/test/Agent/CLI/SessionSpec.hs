@@ -1,6 +1,7 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
@@ -111,11 +112,13 @@ spec = describe "Agent.CLI.Session" do
                     Right (meta, turns) -> do
                         meta.metaId `shouldBe` handle.sessionMeta.metaId
                         meta.metaProvider `shouldBe` XAIProvider
+                        meta.metaConnection `shouldBe` "xai"
                         meta.metaModel `shouldBe` "grok-4"
                         meta.metaDialect `shouldBe` GrokBuildDialect
                         meta.metaLegacySubagentTarget
                             `shouldBe` Just LegacySubagentTarget
                                 { legacyTargetProvider = XAIProvider
+                                , legacyTargetConnection = "xai"
                                 , legacyTargetEffectiveModel = "grok-4"
                                 , legacyTargetDialect = GrokBuildDialect
                                 }
@@ -140,6 +143,12 @@ spec = describe "Agent.CLI.Session" do
 
                 listed <- listSessions root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
+
+                loadSessionHandle root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (loadedHandle, _) ->
+                        loadedHandle.sessionTempDir
+                            `shouldBe` handle.sessionTempDir
 
         it "combines append metadata and a caller transition in one result" $
             withTempDir "agent-sessions-" \root -> do
@@ -314,10 +323,13 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 loadSession root handle.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
@@ -330,24 +342,30 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 rewriteMetaObject handle.sessionMetaPath $
                     KeyMap.delete "legacySubagentTarget"
+                        . KeyMap.delete "connection"
                         . KeyMap.delete "transportModel"
                         . KeyMap.delete "dialect"
                 loadSession root handle.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
                     Right (meta, _) -> do
                         meta.metaDialect `shouldBe` GrokBuildDialect
+                        meta.metaConnection `shouldBe` "openrouter"
                         meta.metaTransportModel `shouldBe` Nothing
                         meta.metaLegacySubagentTarget `shouldBe` Nothing
                         sessionLegacySubagentTarget meta
                             `shouldBe` LegacySubagentTarget
                                 { legacyTargetProvider = OpenRouterProvider
+                                , legacyTargetConnection = "openrouter"
                                 , legacyTargetEffectiveModel =
                                     "openai/gpt-5.1"
                                 , legacyTargetDialect = GrokBuildDialect
@@ -357,10 +375,13 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession $
                     (testCreate root)
-                        { createProvider = OpenRouterProvider
-                        , createModel = "openai/gpt-5.1"
-                        , createTransportModel = "openai/gpt-5.1"
-                        , createDialect = CodexDialect
+                        { createTarget = ModelTarget
+                            { targetProvider = OpenRouterProvider
+                            , targetConnectionId = "openrouter"
+                            , targetModelId = "openai/gpt-5.1"
+                            , targetWireModelId = "openai/gpt-5.1"
+                            , targetDialect = CodexDialect
+                            }
                         }
                 let legacyTarget =
                         sessionLegacySubagentTarget handle.sessionMeta
@@ -526,10 +547,13 @@ spec = describe "Agent.CLI.Session" do
 testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
-    , createProvider = XAIProvider
-    , createModel = "grok-4"
-    , createTransportModel = "grok-4"
-    , createDialect = GrokBuildDialect
+    , createTarget = ModelTarget
+        { targetProvider = XAIProvider
+        , targetConnectionId = "xai"
+        , targetModelId = "grok-4"
+        , targetWireModelId = "grok-4"
+        , targetDialect = GrokBuildDialect
+        }
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing

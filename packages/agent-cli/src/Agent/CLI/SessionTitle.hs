@@ -12,10 +12,14 @@ module Agent.CLI.SessionTitle
     ) where
 
 import Agent.CLI.Btw (BtwBackendFactory)
-import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , TurnInput(..)
+    , TurnOutput(..)
+    )
 import Agent.Responses.Types
     ( ResponseCreateParams(..)
-    , ResponseItem
     , ToolChoice(..)
     , ToolChoiceMode(..)
     )
@@ -170,19 +174,21 @@ generateTitle manager job = do
     baseParams <- readIORef manager.titleParams
     let params = titleRequestParams baseParams
     privateParams <- newIORef params
-    privateTranscript <- newIORef ([] :: [ResponseItem])
     let Backend submit =
-            manager.titleBackendFactory privateParams privateTranscript
+            manager.titleBackendFactory privateParams
     timeout 45000000
-        (submit Nothing [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
+        (submit [] Nothing
+            [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
         >>= \case
             Nothing -> pure Nothing
             Just response -> case response of
                 Left _ -> pure Nothing
-                Right turn
-                    | not (null turn.toolCalls) -> pure Nothing
-                    | otherwise ->
-                        pure (turn.assistantText >>= cleanGeneratedTitle)
+                Right result ->
+                    let turn = result.backendOutput
+                    in if not (null turn.toolCalls)
+                        then pure Nothing
+                        else pure
+                            (turn.assistantText >>= cleanGeneratedTitle)
 
 titleRequestParams :: ResponseCreateParams -> ResponseCreateParams
 titleRequestParams ResponseCreateParams{..} =

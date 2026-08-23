@@ -31,8 +31,9 @@ import Agent.Error
     , isInlineRetryableProviderError
     , isInlineRetryableProviderResponseError
     )
-import Agent.Loop (Backend(..), LoopEvent(..))
-import Agent.OpenAI.Error (isPreviousResponseIdError)
+import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
+import Agent.OpenAI.Error (isResponseChainCompatibilityError)
+import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
     , sendWsRequestWithEvents
@@ -78,12 +79,11 @@ import qualified Data.Text as Text
 -- re-run each turn so the REPL can change reasoning effort in place.
 --
 -- The wire protocol still sends only new items plus @previous_response_id@.
--- The shared 'IORef' mirrors the full transcript locally so sessions can be
--- persisted and resumed when the server-side chain is gone.
+-- The loop threads the full transcript so sessions can be persisted and
+-- resumed when the server-side chain is gone.
 openAiBackend
     :: CodexConn
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
@@ -96,7 +96,6 @@ openAiBackendReconnecting
     -> IORef Bool
     -> CodexConn
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
 openAiBackendReconnecting provider currentCredential connectionHealthy conn =
     openAiBackendWith
@@ -212,7 +211,6 @@ openAiBackendWithConnectionRecovery
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
 openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
     openAiBackendWith $
@@ -437,15 +435,15 @@ openAiBackendWithTransportFallback
     -> Backend
     -> Backend
 openAiBackendWithTransportFallback fallbackActive primary fallback =
-    Backend \previousResponseId inputs onEvent -> do
+    Backend \state previousResponseId inputs onEvent -> do
         active <- readIORef fallbackActive
         if active
-            then fallback.submitTurn previousResponseId inputs onEvent
-            else tryPrimary previousResponseId inputs onEvent
+            then fallback.submitTurn state previousResponseId inputs onEvent
+            else tryPrimary state previousResponseId inputs onEvent
   where
-    tryPrimary previousResponseId inputs onEvent = do
+    tryPrimary state previousResponseId inputs onEvent = do
         emittedModelOutput <- newIORef False
-        result <- primary.submitTurn previousResponseId inputs \event -> do
+        result <- primary.submitTurn state previousResponseId inputs \event -> do
             if isModelOutput event
                 then writeIORef emittedModelOutput True
                 else pure ()
@@ -457,7 +455,8 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
                     emitted <- readIORef emittedModelOutput
                     if emitted
                         then pure result
-                        else fallback.submitTurn previousResponseId inputs onEvent
+                        else fallback.submitTurn
+                            state previousResponseId inputs onEvent
             _ -> pure result
 
     isModelOutput = \case
@@ -477,7 +476,6 @@ openAiBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
 openAiBackendWith =
     openAiBackendWithRetryPolicy transientStreamingResultPolicy
@@ -492,12 +490,10 @@ openAiBackendWithRetryPolicy
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> Backend
-openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
-    Backend \previousResponseId inputs onLoopEvent -> do
-        baseParams <- getParams
-        history <- readIORef transcript
+openAiBackendWithRetryPolicy retryPolicy send getParams =
+    Backend \history previousResponseId inputs onLoopEvent -> do
+        baseParams <- sanitizeCodexRequest <$> getParams
         let newItems = turnInputsToItems inputs
             deltaRequest = withRequestInput baseParams newItems
             -- Live and resumed transcripts already apply compaction snapshots
@@ -513,15 +509,19 @@ openAiBackendWithRetryPolicy retryPolicy send getParams transcript =
         result <- sendRetrying onLoopEvent initialRequest initialPrevious emit
         recovered <- case result of
             Left err
-                | isPreviousResponseIdError err && not (null history) ->
+                | isJust initialPrevious
+                , isResponseChainCompatibilityError err
+                , not (null history) ->
                     sendRetrying onLoopEvent fullRequest Nothing emit
                 | otherwise -> pure (Left err)
             Right response -> pure (Right response)
         case recovered of
             Left err -> pure (Left err)
-            Right response -> do
-                writeIORef transcript (history <> newItems <> response.output)
-                pure (Right (responseToTurnOutput response))
+            Right response ->
+                pure $ Right BackendResult
+                    { backendOutput = responseToTurnOutput response
+                    , backendState = history <> newItems <> response.output
+                    }
   where
     sendRetrying onLoopEvent request previousResponseId onStreamEvent = do
         emittedLoopEvent <- newIORef False

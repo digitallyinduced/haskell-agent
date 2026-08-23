@@ -49,6 +49,11 @@ spec = describe "fullscreen Markdown rendering" do
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
 
+    it "renders bare URLs with native terminal hyperlink metadata" do
+        let url = "https://github.com/digitallyinduced/haskell-agent/pull/339"
+            spans = concat (renderSpanRows 100 ("PR: " <> url))
+        spans `shouldSatisfy` any (hasUrl url)
+
     it "parses links nested inside strong and emphasis spans" do
         parseInline
             "**[PR #316](https://example.com/316)** and *[docs](https://example.com)*"
