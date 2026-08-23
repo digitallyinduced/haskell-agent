@@ -2,9 +2,13 @@
 -- top-level @query()@ API.
 module Claude.Agent.SDK.Query
     ( query
+    , queryContent
     , queryClient
+    , queryClientContent
     , queryTurn
+    , queryTurnContent
     , queryTurnWithMessageValidator
+    , queryTurnContentWithMessageValidator
     , receiveResponse
     , receiveResponseWithMessageValidator
     ) where
@@ -14,7 +18,7 @@ import Claude.Agent.SDK.Client
     , ClaudeSDKTurn
     , acceptTurnSessionId
     , receiveMessage
-    , sendQuery
+    , sendQueryContent
     , turnDiagnostic
     , turnProcessExit
     , turnStreamInactivityTimeoutMicros
@@ -35,6 +39,7 @@ import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message
     , ResultMessage(..)
+    , UserContentBlock(..)
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -48,6 +53,15 @@ query
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 query options prompt onMessage =
+    queryContent options [UserTextBlock prompt] onMessage
+
+-- | Run a self-contained query with structured user content.
+queryContent
+    :: ClaudeAgentOptions
+    -> [UserContentBlock]
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryContent options content onMessage =
     withClaudeSDKClient options \client ->
         withClaudeSDKTurn
             client
@@ -56,7 +70,7 @@ query options prompt onMessage =
             options.model
             options.effort
             \turn -> do
-                result <- queryTurn turn prompt onMessage
+                result <- queryTurnContent turn content onMessage
                 pure ((, pure ()) <$> result)
 
 -- | Submit a prompt through a persistent client and continue its active
@@ -68,6 +82,15 @@ queryClient
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryClient client prompt onMessage =
+    queryClientContent client [UserTextBlock prompt] onMessage
+
+-- | Submit structured user content through a persistent client.
+queryClientContent
+    :: ClaudeSDKClient
+    -> [UserContentBlock]
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryClientContent client content onMessage =
     withClaudeSDKTurn
         client
         (pure True)
@@ -75,7 +98,7 @@ queryClient client prompt onMessage =
         Nothing
         Nothing
         \turn -> do
-            result <- queryTurn turn prompt onMessage
+            result <- queryTurnContent turn content onMessage
             pure ((, pure ()) <$> result)
 
 -- | Submit a prompt and receive one complete response. Visible records are
@@ -88,28 +111,45 @@ queryTurn
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurn turn prompt onMessage =
-    queryTurnWithMessageValidator
+    queryTurnContent turn [UserTextBlock prompt] onMessage
+
+-- | Submit structured user content and receive one complete response.
+queryTurnContent
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnContent turn content onMessage =
+    queryTurnContentWithMessageValidator
         turn
-        prompt
+        content
         (const (pure (Right ())))
         onMessage
 
 -- | Variant of 'queryTurn' that observes and may reject each parsed wire
--- message immediately, before transactional response buffering. Embedders can
--- use this for authentication or policy checks that must fail before a turn
--- reaches its terminal result.
+-- message immediately, before transactional response buffering.
 queryTurnWithMessageValidator
     :: ClaudeSDKTurn
     -> Text
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
-queryTurnWithMessageValidator turn prompt validateMessage onMessage = do
+queryTurnWithMessageValidator turn prompt =
+    queryTurnContentWithMessageValidator turn [UserTextBlock prompt]
+
+-- | Structured-content variant of 'queryTurnWithMessageValidator'.
+queryTurnContentWithMessageValidator
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
     completed <-
         timeout
             (max 1 (turnTimeoutMicros turn))
             do
-                sendQuery turn prompt >>= \case
+                sendQueryContent turn content >>= \case
                     Left err -> pure (Left err)
                     Right () ->
                         receiveResponseWithMessageValidator

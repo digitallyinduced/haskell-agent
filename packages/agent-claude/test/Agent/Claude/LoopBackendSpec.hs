@@ -35,7 +35,6 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     )
 import Control.Exception.Safe (bracket, finally)
-import qualified Data.ByteString as ByteString
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -170,6 +169,62 @@ spec = do
                     "<--setting-sources>\n<>"
                 arguments `shouldContain` "<--no-chrome>"
                 arguments `shouldNotContain` "<--ax-screen-reader>"
+
+        it "forwards pasted images as Claude image content blocks" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend ->
+                            submitBackend backend
+                                Nothing
+                                [ UserMultimodal
+                                    { userText = "describe this image"
+                                    , userImages =
+                                        [ ImageAttachment
+                                            { imageMime = "image/png"
+                                            , imageBytes = "png-bytes"
+                                            }
+                                        ]
+                                    }
+                                ]
+                                (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "\"type\":\"image\""
+                submitted `shouldContain` "\"type\":\"base64\""
+                submitted `shouldContain`
+                    "\"media_type\":\"image/png\""
+                submitted `shouldContain`
+                    "\"data\":\"cG5nLWJ5dGVz\""
+                submitted `shouldContain` "describe this image"
+
+                history <- readIORef transcript
+                case history of
+                    MessageItem ResponseMessage
+                        { content = MessageContentParts
+                            ( InputTextPart{text}
+                            : InputImagePart{imageUrl}
+                            : _
+                            )
+                        }
+                        : _ -> do
+                            text `shouldBe` "describe this image"
+                            imageUrl `shouldBe`
+                                Just
+                                    "data:image/png;base64,cG5nLWJ5dGVz"
+                    _ ->
+                        expectationFailure
+                            "multimodal user input was not persisted"
 
         it "converts cumulative modelUsage snapshots to per-turn deltas" $
             withFakeClaude \fake -> do
@@ -309,28 +364,6 @@ spec = do
                 arguments `shouldContain` "<--tools>\n<>"
                 arguments `shouldContain`
                     "<--disallowedTools>\n<AskUserQuestion>"
-
-        it "rejects image attachments before starting Claude Code" do
-            transcript <- newIORef []
-            let backend =
-                    claudeCodeOneShotBackend
-                        (defaultClaudeCodeOptions
-                            "/definitely/not/started"
-                            "/")
-                        (pure defaultResponseCreateParams)
-                        transcript
-                image = ImageAttachment
-                    { imageMime = "image/png"
-                    , imageBytes = ByteString.singleton 0
-                    }
-            result <-
-                submitBackend backend
-                    Nothing
-                    [UserMultimodal "look" [image]]
-                    (\_ -> pure ())
-            result `shouldSatisfy` \case
-                Left ProviderError{errorType = InvalidImageError} -> True
-                _ -> False
 
         it "maps none effort to Claude Code's default effort" $
             withFakeClaude \fake -> do

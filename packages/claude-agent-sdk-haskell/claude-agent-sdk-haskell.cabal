@@ -50,6 +50,7 @@ library
     build-depends:    base                  >= 4.17 && < 5
                     , aeson                 >= 2.0
                     , async
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory

@@ -7,6 +7,7 @@ module Claude.Agent.SDK.Client
     , withClaudeSDKClientWithoutTools
     , withClaudeSDKTurn
     , sendQuery
+    , sendQueryContent
     , receiveMessage
     , resolveTurnUsage
     , acceptTurnSessionId
@@ -39,6 +40,7 @@ import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message
     , ModelUsage(..)
+    , UserContentBlock(..)
     , Usage(..)
     , addUsage
     , emptyUsage
@@ -63,6 +65,7 @@ import Control.Exception.Safe
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Bits ((.&.), (.|.))
 import Data.IORef
@@ -76,6 +79,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.UUID.Types as UUID
 import System.Entropy (getEntropy)
 import System.Exit (ExitCode)
@@ -264,7 +268,15 @@ sendQuery
     :: ClaudeSDKTurn
     -> Text
     -> IO (Either ClaudeSDKError ())
-sendQuery turn prompt = do
+sendQuery turn prompt =
+    sendQueryContent turn [UserTextBlock prompt]
+
+-- | Send one SDK streaming-input user message with structured content.
+sendQueryContent
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> IO (Either ClaudeSDKError ())
+sendQueryContent turn content = do
     sessionId <- fromMaybe "" <$> turnSessionId turn
     turn.turnRunning.runningTransport.transportWrite
         ( LazyByteString.toStrict
@@ -273,12 +285,7 @@ sendQuery turn prompt = do
                     [ "type" Aeson..= ("user" :: Text)
                     , "message" Aeson..= Aeson.object
                         [ "role" Aeson..= ("user" :: Text)
-                        , "content" Aeson..=
-                            [ Aeson.object
-                                [ "type" Aeson..= ("text" :: Text)
-                                , "text" Aeson..= prompt
-                                ]
-                            ]
+                        , "content" Aeson..= map userContentValue content
                         ]
                     , "parent_tool_use_id" Aeson..= Aeson.Null
                     , "session_id" Aeson..= sessionId
@@ -290,6 +297,24 @@ sendQuery turn prompt = do
                 <> "\n"
             )
         )
+
+userContentValue :: UserContentBlock -> Aeson.Value
+userContentValue = \case
+    UserTextBlock{text} ->
+        Aeson.object
+            [ "type" Aeson..= ("text" :: Text)
+            , "text" Aeson..= text
+            ]
+    UserImageBlock{mediaType, imageBytes} ->
+        Aeson.object
+            [ "type" Aeson..= ("image" :: Text)
+            , "source" Aeson..= Aeson.object
+                [ "type" Aeson..= ("base64" :: Text)
+                , "media_type" Aeson..= mediaType
+                , "data" Aeson..=
+                    TextEncoding.decodeUtf8 (Base64.encode imageBytes)
+                ]
+            ]
 
 -- | Receive and parse one complete stream-json record. Blank lines are
 -- ignored; 'Nothing' denotes EOF.
