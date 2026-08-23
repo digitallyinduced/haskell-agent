@@ -22,11 +22,14 @@ import Agent.CLI.TurnState
     )
 import Agent.Loop (TokenUsage, addTokenUsage, emptyTokenUsage)
 import Agent.Responses.Types (ResponseItem)
+import Agent.Skills (SkillCatalog, SkillInvocation)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 
 data SessionState = SessionState
     { sessionConversation :: !ConversationState
+    , sessionSkillCatalog :: !SkillCatalog
+    , sessionSkillInvocations :: ![SkillInvocation]
     } deriving (Eq, Show)
 
 -- | Snapshot a turn's starting conversation while consuming startup context.

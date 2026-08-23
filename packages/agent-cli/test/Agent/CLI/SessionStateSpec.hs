@@ -4,6 +4,7 @@ import Agent.CLI.SessionState
 import Agent.CLI.TurnState
 import Agent.Loop (TokenUsage(..), TurnInput(..), emptyTokenUsage)
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Skills (SkillCatalog(..))
 import Test.Hspec
 
 spec :: Spec
@@ -72,7 +73,11 @@ spec = describe "Agent.CLI.SessionState" do
             }
 
 testState :: SessionState
-testState = SessionState initialConversation
+testState = SessionState
+    { sessionConversation = initialConversation
+    , sessionSkillCatalog = SkillCatalog [] []
+    , sessionSkillInvocations = []
+    }
 
 initialConversation :: ConversationState
 initialConversation = ConversationState

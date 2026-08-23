@@ -1932,13 +1932,6 @@ runAgentInitializedWithLock
                 cwd
                 (if refreshDialectContext then [] else initialItems)
                 (if refreshDialectContext then Nothing else initialPrevious)
-        -- Fullscreen sessions load skills after Brick has taken over the
-        -- terminal, so filesystem discovery cannot delay the first frame.
-        -- Minimal and one-shot sessions still initialize them synchronously
-        -- before their first prompt/turn below.
-        skillsRef <- newIORef (SkillCatalog [] [])
-        skillInvocationsRef <- newIORef []
-
         let initialUsage = case resumed of
                 Just (meta, turns) -> sessionUsageFromTurns meta turns
                 Nothing -> emptyTokenUsage
@@ -1950,6 +1943,8 @@ runAgentInitializedWithLock
                 , conversationUsage = initialUsage
                 , conversationLastAssistant = Nothing
                 }
+            , sessionSkillCatalog = SkillCatalog [] []
+            , sessionSkillInvocations = []
             }
         writeIORef subagentForkSource $
             Just
@@ -2252,7 +2247,7 @@ runAgentInitializedWithLock
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                                        persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                                        persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
@@ -2316,7 +2311,7 @@ runAgentInitializedWithLock
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         let makeBackend params =
@@ -2388,7 +2383,7 @@ runAgentInitializedWithLock
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
@@ -2593,8 +2588,6 @@ runSession
     -> OsPath
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
-    -> IORef SkillCatalog
-    -> IORef [SkillInvocation]
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
@@ -2614,7 +2607,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns persist projectRoot home cwd tokenProvider openAiPool skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns persist projectRoot home cwd tokenProvider openAiPool escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <-
       (.sessionConversation.conversationPreviousResponseId)
           <$> readIORef sessionStateRef
@@ -2857,15 +2850,13 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             deactivatePlanMode planMode
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames True sessionStateRef
-                skillsRef skillInvocationsRef freshSkills
+                reservedSlashNames True sessionStateRef freshSkills
             reportSkillCatalog True freshSkills omitted
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext sessionStateRef
-                skillsRef skillInvocationsRef refreshed
+                reservedSlashNames queueContext sessionStateRef refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
         formatSkillWarning warning =
@@ -3058,8 +3049,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionSkills = skillsRef
-            , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
@@ -3093,7 +3082,7 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames
                 (null initialTurns && not (isJust initialPrevious))
-                sessionStateRef skillsRef skillInvocationsRef skills
+                sessionStateRef skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
@@ -3518,8 +3507,6 @@ replWithDraft env@SessionEnv
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionOpenAiPool = openAiPool
-    , sessionSkills = skillsRef
-    , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
@@ -3537,8 +3524,9 @@ replWithDraft env@SessionEnv
     , sessionReset = sessionReset
     } draft = do
     refreshSkills False
-    skillInvocations <- readIORef skillInvocationsRef
-    conversation <- (.sessionConversation) <$> readIORef sessionStateRef
+    sessionState <- readIORef sessionStateRef
+    let skillInvocations = sessionState.sessionSkillInvocations
+        conversation = sessionState.sessionConversation
     let skillCommands =
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
@@ -3837,8 +3825,9 @@ replWithDraft env@SessionEnv
                                 finishTurn env False result
                     ReplSkills reloadFirst -> do
                         when reloadFirst (refreshSkills True)
-                        current <- readIORef skillsRef
-                        invocations <- readIORef skillInvocationsRef
+                        currentState <- readIORef sessionStateRef
+                        let current = currentState.sessionSkillCatalog
+                            invocations = currentState.sessionSkillInvocations
                         let listing =
                                 formatSkillsListing color current invocations
                         displayInfo (formatSkillsListing False current invocations) $
@@ -5910,7 +5899,8 @@ preparePromptSkillInputs
     -> [TurnInput]
     -> IO (Either Text [TurnInput])
 preparePromptSkillInputs env prompt inputs = do
-    invocations <- readIORef env.sessionSkillInvocations
+    invocations <-
+        (.sessionSkillInvocations) <$> readIORef env.sessionState
     pure do
         selected <- resolveSkillMentions invocations prompt
         let activations =
