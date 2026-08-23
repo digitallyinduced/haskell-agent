@@ -12,6 +12,7 @@ import Agent.Claude.Options
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
@@ -62,6 +63,15 @@ import System.Posix.Files
 import System.Timeout (timeout)
 import Test.Hspec
 
+submitBackend
+    :: Backend
+    -> Maybe Text
+    -> [TurnInput]
+    -> (LoopEvent -> IO ())
+    -> IO (Either ApiError TurnOutput)
+submitBackend backend previous inputs onEvent =
+    fmap backendOutput <$> backend.submitTurn [] previous inputs onEvent
+
 spec :: Spec
 spec = do
     describe "Claude Code loop backend" do
@@ -94,7 +104,7 @@ spec = do
                         (pure params)
                         transcript
                         \backend ->
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "hello"]
                                 (\event ->
@@ -174,12 +184,12 @@ spec = do
                         transcript
                         \backend -> do
                             first <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     Nothing
                                     [UserMessage "one"]
                                     (\_ -> pure ())
                             second <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     (Just first.responseId)
                                     [UserMessage "two"]
                                     (\_ -> pure ())
@@ -213,17 +223,17 @@ spec = do
                                 transcript
                                 \backend -> do
                                     first <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             Nothing
                                             [UserMessage "one"]
                                             (\_ -> pure ())
                                     second <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just first.responseId)
                                             [UserMessage "two"]
                                             (\_ -> pure ())
                                     third <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just second.responseId)
                                             [UserMessage "three"]
                                             (\_ -> pure ())
@@ -257,7 +267,7 @@ spec = do
                             (pure defaultResponseCreateParams)
                             transcript
                 result <- timeout 5_000_000 $
-                    backend.submitTurn
+                    submitBackend backend
                         Nothing
                         [UserMessage "bypass"]
                         (\_ -> pure ())
@@ -288,7 +298,7 @@ spec = do
                             (pure defaultResponseCreateParams)
                             transcript
                 result <- timeout 5_000_000 $
-                    backend.submitTurn
+                    submitBackend backend
                         Nothing
                         [UserMessage "title this"]
                         (\_ -> pure ())
@@ -314,7 +324,7 @@ spec = do
                     , imageBytes = ByteString.singleton 0
                     }
             result <-
-                backend.submitTurn
+                submitBackend backend
                     Nothing
                     [UserMultimodal "look" [image]]
                     (\_ -> pure ())
@@ -344,7 +354,7 @@ spec = do
                             (pure params)
                             transcript
                 result <- timeout 5_000_000 $
-                    backend.submitTurn
+                    submitBackend backend
                         Nothing
                         [UserMessage "hello"]
                         (\_ -> pure ())
@@ -368,7 +378,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "terminal error"]
                                 (\_ -> pure ())
@@ -399,7 +409,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "must not be API billed"]
                                 (\event ->
@@ -430,7 +440,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "nested auth metadata"]
                                 (\_ -> pure ())
@@ -457,7 +467,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "wrong session"]
                                 (\event ->
@@ -488,7 +498,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "malformed"]
                                 (\_ -> pure ())
@@ -510,7 +520,7 @@ spec = do
                                     (pure defaultResponseCreateParams)
                                     transcript
                         result <- timeout 5_000_000 $
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "exit early"]
                                 (\_ -> pure ())
@@ -533,7 +543,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "continued request"]
                                 (\_ -> pure ())
@@ -561,7 +571,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "resumed request"]
                                 (\_ -> pure ())
@@ -589,7 +599,7 @@ spec = do
                         (pure defaultResponseCreateParams)
                         transcript
                         \backend ->
-                            backend.submitTurn
+                            submitBackend backend
                                 Nothing
                                 [UserMessage "new Claude request"]
                                 (\_ -> pure ())
@@ -624,7 +634,7 @@ spec = do
                         -> Text
                         -> IO (Either ApiError TurnOutput)
                     submit backend previous prompt =
-                        backend.submitTurn
+                        submitBackend backend
                             previous
                             [UserMessage prompt]
                             (\_ -> pure ())
@@ -732,7 +742,7 @@ spec = do
                         transcript
                         \backend -> do
                             first <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     Nothing
                                     [UserMessage "rolled-back-prompt-marker"]
                                     (\_ -> pure ())
@@ -741,7 +751,7 @@ spec = do
                             -- backend has returned a successful turn.
                             writeIORef transcript initialHistory
                             second <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     (Just (Text.toUpper first.responseId))
                                     [UserMessage "replacement-prompt-marker"]
                                     (\_ -> pure ())
@@ -789,17 +799,17 @@ spec = do
                                 transcript
                                 \backend -> do
                                     first <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             Nothing
                                             [UserMessage "one"]
                                             (\_ -> pure ())
                                     failed <-
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just first.responseId)
                                             [UserMessage blockedPrompt]
                                             (\_ -> pure ())
                                     third <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just first.responseId)
                                             [UserMessage "three"]
                                             (\_ -> pure ())
@@ -847,17 +857,17 @@ spec = do
                                 transcript
                                 \backend -> do
                                     first <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             Nothing
                                             [UserMessage "one"]
                                             (\_ -> pure ())
                                     failed <-
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just first.responseId)
                                             [UserMessage "two"]
                                             (\_ -> pure ())
                                     resumed <- expectTurn =<<
-                                        backend.submitTurn
+                                        submitBackend backend
                                             (Just first.responseId)
                                             [UserMessage "three"]
                                             (\_ -> pure ())
@@ -899,17 +909,17 @@ spec = do
                         transcript
                         \backend -> do
                             first <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     Nothing
                                     [UserMessage "one"]
                                     (\_ -> pure ())
                             failed <-
-                                backend.submitTurn
+                                submitBackend backend
                                     (Just first.responseId)
                                     [UserMessage "two"]
                                     (\_ -> ioError (userError "renderer failed"))
                             resumed <- expectTurn =<<
-                                backend.submitTurn
+                                submitBackend backend
                                     (Just first.responseId)
                                     [UserMessage "three"]
                                     (\_ -> pure ())
