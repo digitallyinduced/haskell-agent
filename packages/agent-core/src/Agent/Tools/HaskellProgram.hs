@@ -105,10 +105,12 @@ haskellProgramDescription =
     \Use this to orchestrate multiple tool calls, filter large results, and return only a compact answer.\n\
     \Inside the program, call `callTool \"tool_name\" (object [\"key\" .= value]) :: IO Text`.\n\
     \Use `callLLM request :: IO Response` for an isolated raw Responses API call. `ResponseCreateParams`, `Response`, their related canonical types, and `defaultResponseCreateParams` are preimported from `Agent.Responses.Types`. Provider transports may enforce required wire settings; the OpenAI Codex transport sends streaming, non-stored responses.\n\
+    \When updating a raw request, give the binding an explicit signature to disambiguate canonical record fields. For OpenAI Codex, supply message items rather than bare text: `let request :: ResponseCreateParams; request = defaultResponseCreateParams { input = Just (ResponseInputItems [MessageItem ResponseMessage { messageId = Nothing, content = MessageContentParts [InputTextPart prompt Nothing mempty], role = RoleUser, status = Nothing, phase = Nothing, extraFields = mempty }]), model = Just \"model-name\" }`.\n\
     \callLLM returns the complete lossless response, including output items, usage, response ids, unknown fields, and raw tool calls; it does not run an automatic nested agent loop.\n\
     \For independent calls, `Concurrently(..)` and `runConcurrently` are preimported; combine `Concurrently (callTool ...)` or `Concurrently (callLLM ...)` actions applicatively to fan out.\n\
+    \For a dynamic list, use `runConcurrently (traverse (Concurrently . action) values)`; tuple field syntax such as `.1` is not valid Haskell.\n\
     \Only tools registered as parallel-safe overlap. Stateful tools remain serialized, and concurrently submitted stateful calls have no defined order.\n\
-    \`Text`, qualified `Text`, qualified `T`, `Value`, `object`, and `(.=)` are also imported.\n\
+    \`Text`, qualified `Text`, qualified `T`, `Value`, `object`, `(.=)`, `sort`, `sortOn`, `nub`, `group`, `mapMaybe`, `catMaybes`, and `fromMaybe` are also imported. Do not place `import` declarations inside the program expression.\n\
     \Use only tools and argument schemas advertised for the current provider. callTool returns the same formatted Text a direct tool call would return, including status metadata such as shell exit lines.\n\
     \Nested calls use the normal harness approvals and tool dispatch. Their results stay inside GHCi unless you pass selected text to `emitText`.\n\
     \Each outer invocation has isolated Haskell bindings and must be a complete program.\n\

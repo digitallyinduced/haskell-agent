@@ -22,13 +22,13 @@ spec = describe "Agent.CLI.Benchmark" do
         parseBenchmarkArgs defaults
             [ "--agent", "/tmp/agent-cli"
             , "--repetitions", "2"
-            , "--arms", "direct,forced-haskell"
+            , "--arms", "disabled-haskell,forced-haskell"
             , "--tasks", "privacy-canary,simple-control"
             ]
             `shouldBe` Right (defaults
                 { benchmarkAgent = "/tmp/agent-cli"
                 , benchmarkRepetitions = 2
-                , benchmarkArms = [DirectTools, ForcedHaskell]
+                , benchmarkArms = [DisabledHaskell, ForcedHaskell]
                 , benchmarkTaskNames =
                     ["privacy-canary", "simple-control"]
                 })

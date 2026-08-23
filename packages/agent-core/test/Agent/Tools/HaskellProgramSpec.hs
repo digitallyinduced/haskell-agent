@@ -149,6 +149,18 @@ spec = describe "Agent.Tools.HaskellProgram" do
             result.ghciOk `shouldBe` True
             result.ghciOutput `shouldSatisfy` Text.isInfixOf "OK"
 
+    it "preimports common list aggregation helpers" do
+        withTempProgramGhci \(ghci, _planMode) -> do
+            result <- evalGhciProgram ghci
+                ( "emitText (Text.pack (show \
+                  \(sort (mapMaybe (\\value -> if even value \
+                  \then Just value else Nothing) [3, 2, 4, 1]))))"
+                )
+                10000
+                unusedTool
+            result.ghciOk `shouldBe` True
+            result.ghciOutput `shouldSatisfy` Text.isInfixOf "[2,4]"
+
     it "round-trips raw callLLM requests and lossless responses" do
         withTempProgramGhci \(ghci, _planMode) -> do
             seen <- newIORef []

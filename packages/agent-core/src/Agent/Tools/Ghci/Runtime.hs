@@ -822,6 +822,8 @@ installRpcHelpers process rpcDir responsesTypesSource = do
         , "import Data.Aeson (Value, object, (.=))"
         , "import qualified Data.Aeson as AgentGhciAesonInternal"
         , "import qualified Data.ByteString.Lazy as AgentGhciLazyBytesInternal"
+        , "import Data.List (group, nub, sort, sortOn)"
+        , "import Data.Maybe (catMaybes, fromMaybe, mapMaybe)"
         , "import Data.Text (Text)"
         , "import qualified Data.Text as Text"
         , "import qualified Data.Text as T"

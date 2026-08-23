@@ -2057,6 +2057,21 @@ appendToolEvent (Just path) event = case event of
             )
     _ -> pure ()
 
+appendProgramResponseEvents :: Maybe FilePath -> Int -> IO ()
+appendProgramResponseEvents Nothing _ = pure ()
+appendProgramResponseEvents (Just path) count =
+    forM_ [1 .. count] \index ->
+        LBS.appendFile path
+            ( encode (object
+                [ "event" .= ("tool_started" :: Text)
+                , "callId" .=
+                    ("program/haskell/callLLM/" <> Text.pack (show index))
+                , "name" .= ("callLLM" :: Text)
+                , "arguments" .= ("{}" :: Text)
+                ])
+                <> "\n"
+            )
+
 type RawResponseCaller =
     ResponseCreateParams -> IO (Either ApiError Response)
 
@@ -2412,11 +2427,16 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                             writeIORef activityRef "Running tool…"
                         _ -> pure ()
                     emitUiEvent runtime (UiLoop event)
+        loggedProgramResponseCaller requests = do
+            appendProgramResponseEvents
+                options.optToolEventLog
+                (length requests)
+            programResponseCaller requests
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
-                { toolDispatchCallResponses = Just programResponseCaller }
+                { toolDispatchCallResponses = Just loggedProgramResponseCaller }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
