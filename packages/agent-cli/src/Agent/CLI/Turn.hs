@@ -1,6 +1,8 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( applyPendingSessionTitles
+    ( IncompleteTurnCheckpoint(..)
+    , applyPendingSessionTitles
+    , checkpointIncompleteTurn
     , runOneTurn
     ) where
 
@@ -39,7 +41,6 @@ import Agent.CLI.Session
     , SessionTurn(..)
     , Persistence(..)
     , PersistenceState(..)
-    , appendTurn
     , appendTurnWithMetaUpdate
     , ensureSession
     , loadSession
@@ -77,6 +78,8 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
+import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -215,7 +218,7 @@ runOneTurn env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete errorText = case persist of
+        persistIncomplete retainedItems errorText = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -228,10 +231,11 @@ runOneTurn env@SessionEnv
                         , turnAssistantText = Nothing
                         , turnError = Just errorText
                         , turnResponseId = Nothing
-                        , turnItems = []
+                        , turnItems = retainedItems
                         , turnUsage = Nothing
                         }
-                handle' <- appendTurn handle turn
+                handle' <- appendTurnWithMetaUpdate handle turn \meta ->
+                    meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
     case (restartEffort, result) of
         (Just level, _) -> do
@@ -250,11 +254,15 @@ runOneTurn env@SessionEnv
                 , pendingPlanState = planState
                 }
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
-            restoreStartupContext
             finishTerminal (isNothing fullscreen)
                 terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
-            writeIORef transcriptRef beforeItems
+            -- turnInputs already contains any startup context consumed above.
+            -- Checkpoint it instead of restoring it separately, which would
+            -- duplicate the instructions on the next full-history request.
+            let checkpoint = checkpointIncompleteTurn beforeItems turnInputs
+            writeIORef transcriptRef checkpoint.checkpointTranscript
+            writeIORef previous checkpoint.checkpointPreviousResponseId
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -268,16 +276,16 @@ runOneTurn env@SessionEnv
                     putTextLn stderr (formatLoopErrorColored color cancelled)
                     putTextLn stderr
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete "cancelled"
+            persistIncomplete checkpoint.checkpointTurnItems "cancelled"
             pure TurnSucceeded
         (Nothing, Left err) -> do
-            restoreStartupContext
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
                     | length afterItems == length beforeItems
                     , isProviderUnavailable apiError -> do
+                        restoreStartupContext
                         case fullscreen of
                             Nothing -> pure ()
                             Just runtime ->
@@ -296,7 +304,11 @@ runOneTurn env@SessionEnv
                 _ -> do
                     finishTerminal (isNothing fullscreen)
                         terminal wallStarted finishedAt 1 "Agent turn failed"
-                    writeIORef transcriptRef beforeItems
+                    let checkpoint =
+                            checkpointIncompleteTurn beforeItems turnInputs
+                    writeIORef transcriptRef checkpoint.checkpointTranscript
+                    writeIORef previous
+                        checkpoint.checkpointPreviousResponseId
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -314,7 +326,8 @@ runOneTurn env@SessionEnv
                                 (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderr
                                 (formatTurnStatus color "error" (elapsedDetail model))
-                    persistIncomplete (formatLoopErrorPersistedAt finishedAt err)
+                    persistIncomplete checkpoint.checkpointTurnItems
+                        (formatLoopErrorPersistedAt finishedAt err)
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
@@ -403,6 +416,28 @@ isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
     PersistencePending _ -> True
     PersistenceActive _ -> False
+
+-- | Pure state transition for a cancelled or failed logical turn. It preserves
+-- the exact model inputs while discarding partial assistant/tool state and
+-- invalidates the provider response chain so the next request replays the
+-- complete local transcript.
+data IncompleteTurnCheckpoint = IncompleteTurnCheckpoint
+    { checkpointTranscript :: ![ResponseItem]
+    , checkpointTurnItems :: ![ResponseItem]
+    , checkpointPreviousResponseId :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+checkpointIncompleteTurn
+    :: [ResponseItem]
+    -> [TurnInput]
+    -> IncompleteTurnCheckpoint
+checkpointIncompleteTurn beforeItems turnInputs =
+    let retainedItems = turnInputsToItems turnInputs
+    in IncompleteTurnCheckpoint
+        { checkpointTranscript = beforeItems <> retainedItems
+        , checkpointTurnItems = retainedItems
+        , checkpointPreviousResponseId = Nothing
+        }
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =

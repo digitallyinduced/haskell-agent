@@ -51,6 +51,14 @@ spec = do
             (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
         result `shouldBe` functionResult "call-1" "echo:hello"
 
+    it "passes the originating call to call-aware typed handlers" do
+        result <- dispatchToolCall testConfig
+            [ typedToolWithCall "echo" \call (EchoArgs message) ->
+                pure (Right (call.callId <> ":" <> message))
+            ]
+            (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
+        result `shouldBe` functionResult "call-1" "call-1:hello"
+
     it "turns typed decode failures into formatted tool output" do
         result <- dispatchToolCall testConfig
             [ typedTool "echo" \(EchoArgs message) ->

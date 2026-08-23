@@ -244,24 +244,22 @@ runHandler
     -> ToolHandler
     -> IO (Either Text Text)
 runHandler emitOutput runtime call value = \case
-    TypedTool _ run ->
-        case decodeToolArguments value of
-            Right args -> run args
-            Left err -> pure (Left err)
-    TypedToolWithCall _ run ->
-        case decodeToolArguments value of
-            Right args -> run call args
-            Left err -> pure (Left err)
+    TypedTool _ run -> decodeAndRun value run
+    TypedToolWithCall _ run -> decodeAndRun value (run call)
     TypedToolWithRuntimeAndCall _ run ->
-        case (runtime, decodeToolArguments value) of
-            (Nothing, _) ->
+        case runtime of
+            Nothing ->
                 pure (Left "This tool requires an active agent-loop runtime.")
-            (_, Left err) -> pure (Left err)
-            (Just activeRuntime, Right args) ->
-                run activeRuntime call args
-    TypedStreamingTool _ run ->
-        case decodeToolArguments value of
-            Right args -> run emitOutput args
-            Left err -> pure (Left err)
+            Just activeRuntime ->
+                decodeAndRun value (run activeRuntime call)
+    TypedStreamingTool _ run -> decodeAndRun value (run emitOutput)
     NoArgsTool _ run ->
         run
+
+decodeAndRun
+    :: FromJSON args
+    => Value
+    -> (args -> IO (Either Text Text))
+    -> IO (Either Text Text)
+decodeAndRun value run =
+    either (pure . Left) run (decodeToolArguments value)

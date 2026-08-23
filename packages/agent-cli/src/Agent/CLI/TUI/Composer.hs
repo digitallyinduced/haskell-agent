@@ -342,12 +342,6 @@ controlInteractionAttr state name
     | otherwise =
         Nothing
 
-modeAttr :: Text -> AttrName
-modeAttr mode = case Text.toLower mode of
-    "yolo" -> Theme.thinkingAttr
-    "plan" -> Theme.headingAttr
-    _ -> Theme.linkAttr
-
 renderDraft :: Bool -> Int -> UiState -> Widget Name
 renderDraft focused height state =
     Widget Greedy Fixed do
@@ -493,7 +487,7 @@ draftCursorLocation text cursor =
 drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
     hBox $
-        intersperse (txt " · ") $
+        intersperse (withAttr Theme.mutedAttr (txt " · ")) $
             modelAndEffort
                 <> [ modeControl
                    | not (Text.null mode)
@@ -515,7 +509,7 @@ drawComposerStatus state =
     effortControl =
         clickable ComposerEffort $
             forceAttr
-                (controlAttr state ComposerEffort Theme.assistantAttr)
+                (controlAttr state ComposerEffort Theme.controlLinkAttr)
                 (txt ("(" <> prompt.promptEffort <> ")"))
     modelAndEffort
         | Text.null prompt.promptModel = []
@@ -524,7 +518,7 @@ drawComposerStatus state =
     modeControl =
         clickable ComposerMode $
             forceAttr
-                (controlAttr state ComposerMode (modeAttr mode))
+                (controlAttr state ComposerMode Theme.controlLinkAttr)
                 (txt mode)
     accountControl =
         clickable ComposerAccount $
