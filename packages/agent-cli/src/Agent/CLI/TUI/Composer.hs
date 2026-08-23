@@ -1,8 +1,10 @@
 -- | Fullscreen prompt composer rendering, editing, and input buffering.
 module Agent.CLI.TUI.Composer
-    ( activateSlashAt
+    ( ComposerEscapeAction(..)
+    , activateSlashAt
     , appendFullscreenInput
     , applyComposerUiEvent
+    , composerEscapeAction
     , controlAttr
     , controlInteractionAttr
     , decodePaste
@@ -680,11 +682,16 @@ handleComposerKey
         V.EvKey (V.KChar 'c') [V.MCtrl] ->
             void handleCtrlC
         V.EvKey V.KEsc [] ->
-            case slashMenu of
-                Just _ ->
+            case composerEscapeAction
+                ui.uiAwaitingInput
+                (maybe False (const True) slashMenu) of
+                EscapeCancelTurn ->
+                    cancelOrClear
+                EscapeDismissSlashMenu ->
                     modify' \current ->
                         current { appSlashDismissed = True }
-                Nothing -> cancelOrClear
+                EscapeClearDraft ->
+                    cancelOrClear
         V.EvKey V.KBackTab []
             | ui.uiAwaitingInput ->
                 submitRaw (ReplCycleMode ui.uiDraft)
@@ -1090,6 +1097,20 @@ currentSlashMenu state
             state.appSkillCommands
             state.appUi.uiDraft
             state.appUi.uiCursor
+
+data ComposerEscapeAction
+    = EscapeCancelTurn
+    | EscapeDismissSlashMenu
+    | EscapeClearDraft
+    deriving (Eq, Show)
+
+-- | During a running turn Esc keeps its advertised cancellation meaning,
+-- even when the next-message draft happens to open the slash menu.
+composerEscapeAction :: Bool -> Bool -> ComposerEscapeAction
+composerEscapeAction awaitingInput hasSlashMenu
+    | not awaitingInput = EscapeCancelTurn
+    | hasSlashMenu = EscapeDismissSlashMenu
+    | otherwise = EscapeClearDraft
 
 selectedSlashSuggestion
     :: AppState

@@ -605,6 +605,14 @@ finalizeTurn terminalState state =
             if terminalState == BlockComplete
                 then completionStatusDurationMillis
                 else 0
+        , uiNotice = case state.uiNotice of
+            Just notice
+                | notice.noticeKind == NoticeProgress -> Nothing
+            other -> other
+        , uiNoticeElapsedMillis = case state.uiNotice of
+            Just notice
+                | notice.noticeKind == NoticeProgress -> 0
+            _ -> state.uiNoticeElapsedMillis
         }
 
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice
