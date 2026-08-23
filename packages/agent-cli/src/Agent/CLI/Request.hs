@@ -1,6 +1,7 @@
 -- | Construction of provider-neutral Responses requests.
 module Agent.CLI.Request
     ( requestParams
+    , setRequestInstructions
     ) where
 
 import Agent.Responses.Types
@@ -31,5 +32,14 @@ requestParams modelName instructionText toolSchemas effort =
                     , extraFields = KeyMap.empty
                     }
                 , store = Just False
+                , ..
+                }
+
+setRequestInstructions :: Text -> ResponseCreateParams -> ResponseCreateParams
+setRequestInstructions instructionText params =
+    case params of
+        ResponseCreateParams{..} ->
+            ResponseCreateParams
+                { instructions = Just instructionText
                 , ..
                 }

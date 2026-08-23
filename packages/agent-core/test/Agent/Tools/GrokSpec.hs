@@ -81,7 +81,7 @@ spec = describe "Agent.Tools.Grok" do
                 map (.appToolName) generic.codingAppTools `shouldBe` names)
                 `finally` (grok.codingClose >> generic.codingClose)
 
-    it "advertises only supported, workspace-confined file inputs" do
+    it "advertises only supported file inputs and allowed filesystem roots" do
         withTempSession \(session, ghci) -> do
             plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
             typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
@@ -103,10 +103,10 @@ spec = describe "Agent.Tools.Grok" do
                 `shouldNotContain` ["output_mode"]
             descriptions "read_file" `shouldSatisfy`
                 any (Text.isInfixOf
-                    "Absolute paths are accepted only when they resolve within the workspace")
+                    "workspace or session temp directory")
             descriptions "list_dir" `shouldSatisfy`
                 any (Text.isInfixOf
-                    "absolute path that resolves within the workspace")
+                    "workspace or session temp directory")
             descriptions "search_replace" `shouldSatisfy`
                 any (Text.isInfixOf
                     "Absolute paths are accepted only when they resolve within the workspace")
