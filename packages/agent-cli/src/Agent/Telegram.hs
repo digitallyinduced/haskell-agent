@@ -1395,6 +1395,8 @@ runAgentTurn runtime key prompt = do
         runtime.runtimeProcessManager
         False
         runtime.runtimePolicy
+        True
+        False
         handle
         agentPrompt >>= \case
             Left err -> fail (Text.unpack err)
