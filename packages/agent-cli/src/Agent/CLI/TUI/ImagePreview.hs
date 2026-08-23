@@ -7,6 +7,7 @@ module Agent.CLI.TUI.ImagePreview
     , nativePreviewPlacements
     , imageDimensions
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , previewImageAt
     , renderTuiImagePreview
@@ -257,7 +258,10 @@ nativePreviewPlacements
 nativePreviewPlacements imageIdBase terminalColumns terminalRows previews =
     zipWith place [imageIdBase ..] shownWithSizes
   where
-    shown = takeLast maxShownPreviews previews
+    shown =
+        takeLast
+            (previewCountForWidth maxWidth)
+            previews
     count = length shown
     maxWidth = viewportPreviewSize terminalColumns
     maxHeight = viewportPreviewSize terminalRows
@@ -542,6 +546,16 @@ maxBoxSamplesPerAxis = 3
 
 maxShownPreviews :: Int
 maxShownPreviews = 3
+
+-- | Number of previews that can fit with at least one column per image and
+-- the normal gap between them.
+previewCountForWidth :: Int -> Int
+previewCountForWidth availableWidth
+    | availableWidth <= 0 = 0
+    | otherwise =
+        min
+            maxShownPreviews
+            ((availableWidth + previewGap) `div` (1 + previewGap))
 
 previewGap :: Int
 previewGap = 2

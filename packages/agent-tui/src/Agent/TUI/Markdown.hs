@@ -15,12 +15,14 @@ import Agent.TUI.FencedCode
     , fenceChunks
     )
 import Agent.Syntax
-    ( HighlightedLine
-    , SyntaxHighlighter
+    ( SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
     )
-import Agent.TUI.TextWidth (displayCharCellWidth)
+import Agent.TUI.TextWidth
+    ( displayCharCellWidth
+    , displayTerminalText
+    )
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
@@ -170,21 +172,43 @@ renderCodeBody syntaxHighlighter language bodyLines =
     -- Keep tokenization inside the render action. Brick's 'cached' inspects a
     -- widget's size policy before consulting its cache; returning a concrete
     -- vBox here would therefore force tokenization on every streamed redraw.
-    B.Widget B.Fixed B.Fixed $
-        B.render (buildCodeBody syntaxHighlighter language bodyLines)
-
-buildCodeBody
-    :: Maybe SyntaxHighlighter
-    -> Text
-    -> [Text]
-    -> Widget n
-buildCodeBody syntaxHighlighter language bodyLines =
-    vBox $
-        case syntaxHighlighter >>= highlighted of
-            Just highlightedLines
-                | length highlightedLines == length bodyLines ->
-                    map renderHighlightedCodeLine highlightedLines
-            _ -> map renderFlatCodeLine bodyLines
+    --
+    -- Code must also be bounded here rather than relying on the surrounding
+    -- vertical viewport. An over-wide Vty image can reach the terminal as one
+    -- physical line, where terminal-side wrapping corrupts subsequent rows.
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        codeAttr <- B.lookupAttrName Theme.codeAttr
+        styledLines <-
+            case syntaxHighlighter >>= highlighted of
+                Just highlightedLines
+                    | length highlightedLines == length bodyLines ->
+                        traverse (traverse resolveSyntaxSpan) highlightedLines
+                _ ->
+                    pure
+                        [ [(codeAttr, displayTerminalText line)]
+                        | line <- bodyLines
+                        ]
+        let availableWidth = max 1 context.availWidth
+            horizontalPadding =
+                if availableWidth >= 3 then 1 else 0
+            contentWidth =
+                max 1 (availableWidth - 2 * horizontalPadding)
+            rows =
+                concatMap (wrapStyled contentWidth) styledLines
+            image =
+                V.vertCat
+                    [ renderCodeRow
+                        codeAttr
+                        horizontalPadding
+                        row
+                    | row <- rows
+                    ]
+            boundedImage
+                | V.imageWidth image > availableWidth =
+                    V.cropRight availableWidth image
+                | otherwise = image
+        pure B.emptyResult { B.image = boundedImage }
   where
     highlighted highlighter =
         either (const Nothing) Just $
@@ -192,24 +216,29 @@ buildCodeBody syntaxHighlighter language bodyLines =
                 highlighter
                 language
                 (Text.intercalate "\n" bodyLines)
+    resolveSyntaxSpan span_ = do
+        attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
+        pure (attr, displayTerminalText span_.syntaxText)
 
-renderFlatCodeLine :: Text -> Widget n
-renderFlatCodeLine =
-    withAttr Theme.codeAttr . padLeftRight 1 . txt
-
-renderHighlightedCodeLine :: HighlightedLine -> Widget n
-renderHighlightedCodeLine spans =
-    withAttr Theme.codeAttr $
-        padLeftRight 1 $
-            case spans of
-                [] -> txt ""
-                _ ->
-                    hBox
-                        [ withAttr
-                            (Theme.syntaxClassAttr span_.syntaxClass)
-                            (txt span_.syntaxText)
-                        | span_ <- spans
-                        ]
+renderCodeRow
+    :: V.Attr
+    -> Int
+    -> [(V.Attr, Text)]
+    -> V.Image
+renderCodeRow paddingAttr horizontalPadding fragments =
+    V.horizCat
+        [ blank
+        , V.horizCat
+            [ V.text attr (LazyText.fromStrict text)
+            | (attr, text) <- fragments
+            ]
+        , blank
+        ]
+  where
+    blank
+        | horizontalPadding <= 0 = V.emptyImage
+        | otherwise =
+            V.charFill paddingAttr ' ' horizontalPadding 1
 
 stripHeading :: Text -> Maybe Text
 stripHeading line =
@@ -766,14 +795,18 @@ resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
     pure
         ( case inlineStyle of
             InlineLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             InlineStrongLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             InlineEmphasisLink url
-                | not (Text.null url) -> attr `V.withURL` url
+                | safeUrl url -> attr `V.withURL` url
             _ -> attr
-        , inlineText
+        , displayTerminalText inlineText
         )
+  where
+    safeUrl url =
+        not (Text.null url)
+            && displayTerminalText url == url
 
 styleAttr :: InlineStyle -> AttrName
 styleAttr = \case

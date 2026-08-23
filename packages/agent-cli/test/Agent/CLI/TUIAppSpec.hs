@@ -12,10 +12,12 @@ import Agent.CLI.TUI.App
     , elapsedMillisSince
     , fullscreenVtyConfig
     , motionDemandFor
+    , lambdaArtWidget
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
     , repositoryHeaderText
+    , resumeSearchCursorColumn
     , selectedAgentConversation
     , uiEventRestartsMotionSchedule
     )
@@ -142,6 +144,21 @@ spec = do
         it "still renders a path when git state is unavailable" do
             repositoryHeaderText "" "~/scratch"
                 `shouldBe` "~/scratch"
+
+    describe "bounded custom rendering" do
+        it "crops the empty-conversation art to tiny render contexts" do
+            let image =
+                    V.picImage $
+                        renderWidget Nothing [lambdaArtWidget 0] (5, 3)
+            V.imageWidth image `shouldSatisfy` (<= 5)
+            V.imageHeight image `shouldSatisfy` (<= 3)
+
+    describe "resume search cursor" do
+        it "uses terminal cells for wide and combining characters" do
+            resumeSearchCursorColumn "search: " "漢"
+                `shouldBe` 10
+            resumeSearchCursorColumn "search: " "e\x0301"
+                `shouldBe` 9
 
     describe "onboarding layout" do
         it "uses the complete 18-row surface when it fits" do
