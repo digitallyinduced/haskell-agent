@@ -3,6 +3,8 @@ module Agent.Telegram
     ( telegramMain
     , parseAllowedUsers
     , splitTelegramText
+    , markdownToTelegramHtml
+    , withTelegramProgressUsing
     , TelegramConfig(..)
     , TelegramCommand(..)
     , TelegramSetupOptions(..)
@@ -12,11 +14,18 @@ module Agent.Telegram
     , TelegramState(..)
     , TelegramPendingTurn(..)
     , TelegramPendingReply(..)
+    , TelegramVoice(..)
+    , TelegramMessage(..)
+    , TelegramUpdate(..)
     , TelegramUpdateAction(..)
     , PendingChatAction(..)
     , emptyTelegramState
     , storeUpdateAction
     , nextPendingAction
+    , checkpointPendingVoiceTranscript
+    , reactionMessageText
+    , telegramReactionEmoji
+    , transcribeWithCodex
     ) where
 
 import Agent.CLI.AgentSessions
@@ -48,36 +57,45 @@ import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Dialect (DialectId, dialectIdForModel)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async, race_)
+import Control.Concurrent.Async
+    ( Async
+    , async
+    , cancel
+    , race_
+    , waitCatch
+    , withAsync
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
+    , modifyMVar_
+    , newEmptyMVar
     , newMVar
+    , putMVar
     , readMVar
-    )
-import Control.Concurrent.STM
-    ( TVar
-    , atomically
-    , modifyTVar'
-    , newTVarIO
-    , readTVar
+    , takeMVar
     )
 import Control.Exception.Safe
     ( SomeException
     , bracket
     , displayException
     , finally
+    , mask
     , try
     , tryAny
     )
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( FromJSON(..)
+    , Result(..)
     , ToJSON(..)
-    , Value
+    , Value(..)
     , eitherDecode
+    , eitherDecodeStrict'
     , encode
+    , fromJSON
     , object
     , withObject
     , (.:)
@@ -85,17 +103,25 @@ import Data.Aeson
     , (.!=)
     , (.=)
     )
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text.Encoding as TextEncoding
 import Data.List (find)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import qualified Data.Vector as Vector
 import qualified Network.HTTP.Client as Http
 import qualified Network.HTTP.Client.TLS as HttpTls
+import qualified System.Directory as Directory
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesFileExist
@@ -106,8 +132,11 @@ import System.Directory.OsPath
     )
 import System.Environment (getArgs, getExecutablePath, lookupEnv)
 import System.Exit (die)
+import System.FilePath (takeExtension)
 import System.IO
-    ( IOMode(AppendMode)
+    ( Handle
+    , IOMode(AppendMode)
+    , hClose
     , hFlush
     , hGetEcho
     , hIsTerminalDevice
@@ -128,8 +157,11 @@ import System.Process
     , createProcess
     , getProcessExitCode
     , proc
+    , terminateProcess
+    , waitForProcess
     )
 import qualified System.FileLock as FileLock
+import qualified System.Timeout as Timeout
 import Text.Read (readMaybe)
 
 data TelegramConfig = TelegramConfig
@@ -259,6 +291,7 @@ data TelegramPendingTurn = TelegramPendingTurn
     , pendingTurnMessageId :: !Integer
     , pendingTurnChat :: !TelegramChatKey
     , pendingTurnText :: !Text
+    , pendingTurnVoice :: !(Maybe TelegramVoice)
     } deriving (Eq, Show)
 
 instance ToJSON TelegramPendingTurn where
@@ -267,6 +300,7 @@ instance ToJSON TelegramPendingTurn where
         , "messageId" .= pending.pendingTurnMessageId
         , "chat" .= pending.pendingTurnChat
         , "text" .= pending.pendingTurnText
+        , "voice" .= pending.pendingTurnVoice
         ]
 
 instance FromJSON TelegramPendingTurn where
@@ -276,10 +310,12 @@ instance FromJSON TelegramPendingTurn where
             <*> o .:? "messageId" .!= 0
             <*> o .: "chat"
             <*> o .: "text"
+            <*> o .:? "voice"
 
 data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
     , pendingChat :: !TelegramChatKey
+    , pendingReplyToMessageId :: !(Maybe Integer)
     , pendingText :: !Text
     } deriving (Eq, Show)
 
@@ -287,6 +323,7 @@ instance ToJSON TelegramPendingReply where
     toJSON pending = object
         [ "updateId" .= pending.pendingUpdateId
         , "chat" .= pending.pendingChat
+        , "replyToMessageId" .= pending.pendingReplyToMessageId
         , "text" .= pending.pendingText
         ]
 
@@ -295,7 +332,23 @@ instance FromJSON TelegramPendingReply where
         TelegramPendingReply
             <$> o .: "updateId"
             <*> o .: "chat"
+            <*> o .:? "replyToMessageId"
             <*> o .: "text"
+
+data TelegramVoice = TelegramVoice
+    { voiceFileId :: !Text
+    , voiceDuration :: !Int
+    , voiceMimeType :: !(Maybe Text)
+    , voiceFileSize :: !(Maybe Integer)
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramVoice where
+    toJSON voice = object
+        [ "fileId" .= voice.voiceFileId
+        , "duration" .= voice.voiceDuration
+        , "mimeType" .= voice.voiceMimeType
+        , "fileSize" .= voice.voiceFileSize
+        ]
 
 data TelegramUser = TelegramUser
     { userId :: !Integer
@@ -322,6 +375,7 @@ data TelegramMessage = TelegramMessage
     , messageChat :: !TelegramChat
     , messageThread :: !(Maybe Integer)
     , messageText :: !(Maybe Text)
+    , messageVoice :: !(Maybe TelegramVoice)
     } deriving (Eq, Show)
 
 instance FromJSON TelegramMessage where
@@ -332,10 +386,50 @@ instance FromJSON TelegramMessage where
             <*> o .: "chat"
             <*> o .:? "message_thread_id"
             <*> o .:? "text"
+            <*> o .:? "voice"
+
+instance FromJSON TelegramVoice where
+    parseJSON = withObject "TelegramVoice" \o ->
+        TelegramVoice
+            <$> (o .:? "file_id" >>= maybe (o .: "fileId") pure)
+            <*> (o .:? "duration" .!= 0)
+            <*> (o .:? "mime_type" >>= maybe (o .:? "mimeType") (pure . Just))
+            <*> (o .:? "file_size" >>= maybe (o .:? "fileSize") (pure . Just))
+
+data TelegramReactionType = TelegramReactionType
+    { reactionType :: !Text
+    , reactionEmoji :: !(Maybe Text)
+    , reactionCustomEmojiId :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+instance FromJSON TelegramReactionType where
+    parseJSON = withObject "TelegramReactionType" \o ->
+        TelegramReactionType
+            <$> o .: "type"
+            <*> o .:? "emoji"
+            <*> o .:? "custom_emoji_id"
+
+data TelegramMessageReaction = TelegramMessageReaction
+    { messageReactionChat :: !TelegramChat
+    , messageReactionMessageId :: !Integer
+    , messageReactionUser :: !(Maybe TelegramUser)
+    , messageReactionOld :: ![TelegramReactionType]
+    , messageReactionNew :: ![TelegramReactionType]
+    } deriving (Eq, Show)
+
+instance FromJSON TelegramMessageReaction where
+    parseJSON = withObject "TelegramMessageReaction" \o ->
+        TelegramMessageReaction
+            <$> o .: "chat"
+            <*> o .: "message_id"
+            <*> o .:? "user"
+            <*> (o .:? "old_reaction" .!= [])
+            <*> (o .:? "new_reaction" .!= [])
 
 data TelegramUpdate = TelegramUpdate
     { updateId :: !Integer
     , updateMessage :: !(Maybe TelegramMessage)
+    , updateMessageReaction :: !(Maybe TelegramMessageReaction)
     } deriving (Eq, Show)
 
 instance FromJSON TelegramUpdate where
@@ -343,6 +437,7 @@ instance FromJSON TelegramUpdate where
         TelegramUpdate
             <$> o .: "update_id"
             <*> o .:? "message"
+            <*> o .:? "message_reaction"
 
 data TelegramResponse a = TelegramResponse
     { responseOk :: !Bool
@@ -605,17 +700,18 @@ runTelegram config token = do
     setFileMode (unsafeToFilePath gatewayDir) 0o700
     state <- loadTelegramState statePath
     stateVar <- newMVar state
-    activeChats <- newTVarIO Set.empty
+    workers <- newMVar Map.empty
     manager <- HttpTls.newTlsManager
     processManager <- newSessionProcessManager root
     let client = TelegramClient token manager
         runtime = TelegramRuntime
             { runtimeClient = client
             , runtimeAllowedUsers = config.telegramAllowedUsers
+            , runtimeGatewayDirectory = gatewayDir
             , runtimeSessionsRoot = root
             , runtimeStatePath = statePath
             , runtimeStateVar = stateVar
-            , runtimeActiveChats = activeChats
+            , runtimeWorkers = workers
             , runtimeProcessManager = processManager
             , runtimeProvider = provider
             , runtimeModel = model
@@ -627,7 +723,9 @@ runTelegram config token = do
             }
     Text.putStrLn "Telegram gateway started (private chats only)."
     race_ (pollForever runtime) (dispatchForever runtime)
-        `finally` closeSessionProcessManager processManager
+        `finally` do
+            closeTelegramWorkers runtime
+            closeSessionProcessManager processManager
 
 removePidFile :: OsPath -> ProcessID -> IO ()
 removePidFile home expected = do
@@ -707,10 +805,11 @@ processIsAlive pid =
 data TelegramRuntime = TelegramRuntime
     { runtimeClient :: !TelegramClient
     , runtimeAllowedUsers :: !(Set Integer)
+    , runtimeGatewayDirectory :: !OsPath
     , runtimeSessionsRoot :: !OsPath
     , runtimeStatePath :: !OsPath
     , runtimeStateVar :: !(MVar TelegramState)
-    , runtimeActiveChats :: !(TVar (Set TelegramChatKey))
+    , runtimeWorkers :: !(MVar (Map TelegramChatKey (Async ())))
     , runtimeProcessManager :: !SessionProcessManager
     , runtimeProvider :: !Provider
     , runtimeModel :: !Text
@@ -747,7 +846,7 @@ processUpdate runtime update = do
 
 data TelegramUpdateAction
     = IgnoreUpdate
-    | QueueTurn !Integer !TelegramChatKey !Text
+    | QueueTurn !Integer !TelegramChatKey !Text !(Maybe TelegramVoice)
     deriving (Eq, Show)
 
 storeUpdateAction
@@ -761,11 +860,12 @@ storeUpdateAction updateId action current
     | otherwise =
         advanceOffset case action of
             IgnoreUpdate -> current
-            QueueTurn messageId key text ->
+            QueueTurn messageId key text voice ->
                 current
                     { pendingTurns =
                         current.pendingTurns
-                            <> [TelegramPendingTurn updateId messageId key text]
+                            <> [TelegramPendingTurn
+                                    updateId messageId key text voice]
                     }
   where
     advanceOffset state =
@@ -780,23 +880,58 @@ classifyUpdate
     -> TelegramUpdate
     -> IO TelegramUpdateAction
 classifyUpdate runtime update =
-    case update.updateMessage of
+    pure case update.updateMessage of
         Just message
             | message.messageChat.telegramChatType == "private"
             , Just sender <- message.messageFrom
-            , sender.userId `Set.member` runtime.runtimeAllowedUsers
-            , Just rawText <- message.messageText
-            , not (Text.null (Text.strip rawText)) ->
-                pure (QueueTurn
-                    message.messageId
-                    key
-                    (Text.strip rawText))
-          where
-            key = TelegramChatKey
-                { chatId = message.messageChat.telegramChatId
-                , messageThreadId = message.messageThread
-                }
-        _ -> pure IgnoreUpdate
+            , sender.userId `Set.member` runtime.runtimeAllowedUsers ->
+                let key = TelegramChatKey
+                        { chatId = message.messageChat.telegramChatId
+                        , messageThreadId = message.messageThread
+                        }
+                in case message.messageVoice of
+                    Just voice ->
+                        QueueTurn message.messageId key "[Voice message]" (Just voice)
+                    Nothing
+                        | Just rawText <- message.messageText
+                        , not (Text.null (Text.strip rawText)) ->
+                            QueueTurn message.messageId key
+                                (Text.strip rawText) Nothing
+                    _ -> IgnoreUpdate
+        _ -> case update.updateMessageReaction of
+            Just reaction
+                | reaction.messageReactionChat.telegramChatType == "private"
+                , Just sender <- reaction.messageReactionUser
+                , sender.userId `Set.member` runtime.runtimeAllowedUsers ->
+                    QueueTurn
+                        reaction.messageReactionMessageId
+                        TelegramChatKey
+                            { chatId =
+                                reaction.messageReactionChat.telegramChatId
+                            , messageThreadId = Nothing
+                            }
+                        (reactionMessageText reaction)
+                        Nothing
+            _ -> IgnoreUpdate
+
+reactionMessageText :: TelegramMessageReaction -> Text
+reactionMessageText reaction
+    | null reaction.messageReactionNew =
+        "[Telegram reaction removed from message "
+            <> Text.pack (show reaction.messageReactionMessageId)
+            <> "]"
+    | otherwise =
+        "[Telegram reaction on message "
+            <> Text.pack (show reaction.messageReactionMessageId)
+            <> "]: "
+            <> Text.intercalate " "
+                (map renderReaction reaction.messageReactionNew)
+  where
+    renderReaction value = case
+        (value.reactionEmoji, value.reactionCustomEmojiId) of
+            (Just emoji, _) -> emoji
+            (_, Just customId) -> "custom-emoji:" <> customId
+            _ -> value.reactionType
 
 updateAlreadyStored :: Integer -> TelegramState -> Bool
 updateAlreadyStored updateId state =
@@ -812,26 +947,35 @@ data PendingChatAction
 dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime = do
     state <- readMVar runtime.runtimeStateVar
-    active <- atomically (readTVar runtime.runtimeActiveChats)
+    workers <- readMVar runtime.runtimeWorkers
     let pendingChats = Set.fromList
             (map (.pendingTurnChat) state.pendingTurns
                 <> map (.pendingChat) state.pendingReplies)
-    forM_ (Set.toList (pendingChats `Set.difference` active)) \key -> do
-        claimed <- atomically do
-            current <- readTVar runtime.runtimeActiveChats
-            if key `Set.member` current
-                then pure False
-                else do
-                    modifyTVar' runtime.runtimeActiveChats (Set.insert key)
-                    pure True
-        if claimed
-            then void $ async $
-                processChatQueue runtime key `finally`
-                    atomically
-                        (modifyTVar' runtime.runtimeActiveChats (Set.delete key))
-            else pure ()
+        inactive =
+            pendingChats `Set.difference` Map.keysSet workers
+    forM_ (Set.toList inactive) (startTelegramWorker runtime)
     threadDelay 250_000
     dispatchForever runtime
+
+startTelegramWorker :: TelegramRuntime -> TelegramChatKey -> IO ()
+startTelegramWorker runtime key =
+    mask \restore -> do
+        startGate <- newEmptyMVar
+        worker <- async do
+            takeMVar startGate
+            restore (processChatQueue runtime key) `finally`
+                modifyMVar_ runtime.runtimeWorkers
+                    (pure . Map.delete key)
+        modifyMVar_ runtime.runtimeWorkers \workers ->
+            pure (Map.insert key worker workers)
+        putMVar startGate ()
+
+closeTelegramWorkers :: TelegramRuntime -> IO ()
+closeTelegramWorkers runtime = do
+    workers <- modifyMVar runtime.runtimeWorkers \current ->
+        pure (Map.empty, Map.elems current)
+    forM_ workers cancel
+    forM_ workers (void . waitCatch)
 
 processChatQueue :: TelegramRuntime -> TelegramChatKey -> IO ()
 processChatQueue runtime key =
@@ -840,7 +984,7 @@ processChatQueue runtime key =
         Just action -> do
             result <- tryAny case action of
                 DeliverReply pending -> do
-                    reply runtime pending.pendingChat pending.pendingText
+                    reply runtime pending
                     modifyState runtime \state ->
                         state
                             { pendingReplies =
@@ -850,7 +994,13 @@ processChatQueue runtime key =
                                     state.pendingReplies
                             }
                 RunPendingTurn pending -> do
-                    response <- runQueuedTurn runtime pending
+                    response <- case telegramCommand pending.pendingTurnText of
+                        Nothing ->
+                            withTelegramProgress
+                                runtime.runtimeClient
+                                pending.pendingTurnChat
+                                (runQueuedTurn runtime pending)
+                        Just _ -> runQueuedTurn runtime pending
                     modifyState runtime \state ->
                         state
                             { pendingTurns =
@@ -863,6 +1013,7 @@ processChatQueue runtime key =
                                     <> [ TelegramPendingReply
                                             pending.pendingTurnUpdateId
                                             pending.pendingTurnChat
+                                            (Just pending.pendingTurnMessageId)
                                             response
                                        ]
                             }
@@ -896,10 +1047,285 @@ runQueuedTurn runtime pending =
                 Nothing -> "No session yet. Send a prompt to create one."
                 Just sessionId -> "Session: " <> sessionId
         Just command -> pure ("Unknown command: /" <> command)
-        Nothing -> runAgentTurn
-            runtime
-            pending.pendingTurnChat
-            pending.pendingTurnText
+        Nothing -> case pending.pendingTurnVoice of
+            Nothing ->
+                runAgentTurn
+                    runtime
+                    pending.pendingTurnChat
+                    pending.pendingTurnText
+            Just voice ->
+                tryAny (transcribeTelegramVoice runtime pending voice) >>= \case
+                    Left err -> do
+                        Text.hPutStrLn stderr $
+                            "Telegram voice transcription failed: "
+                                <> redactToken
+                                    runtime.runtimeClient.clientToken
+                                    (Text.pack (displayException err))
+                        pure
+                            "I could not transcribe that voice message. \
+                            \Check that Codex is installed and logged in, and \
+                            \that the subscription has usage available."
+                    Right prompt -> do
+                        checkpointVoiceTranscript runtime pending prompt
+                        runAgentTurn runtime pending.pendingTurnChat prompt
+
+checkpointVoiceTranscript
+    :: TelegramRuntime
+    -> TelegramPendingTurn
+    -> Text
+    -> IO ()
+checkpointVoiceTranscript runtime pending transcript =
+    modifyState runtime
+        (checkpointPendingVoiceTranscript
+            pending.pendingTurnUpdateId
+            transcript)
+
+checkpointPendingVoiceTranscript
+    :: Integer
+    -> Text
+    -> TelegramState
+    -> TelegramState
+checkpointPendingVoiceTranscript updateId transcript state =
+    state
+        { pendingTurns =
+            map checkpoint state.pendingTurns
+        }
+  where
+    checkpoint current
+        | current.pendingTurnUpdateId == updateId =
+            current
+                { pendingTurnText = transcript
+                , pendingTurnVoice = Nothing
+                }
+        | otherwise = current
+
+transcribeTelegramVoice
+    :: TelegramRuntime
+    -> TelegramPendingTurn
+    -> TelegramVoice
+    -> IO Text
+transcribeTelegramVoice runtime pending voice = do
+    when (voice.voiceDuration > 600) $
+        fail "Telegram voice message exceeds the 10-minute limit"
+    when (maybe False (> 20 * 1024 * 1024) voice.voiceFileSize) $
+        fail "Telegram voice message exceeds the 20 MB limit"
+    filePath <- getTelegramFilePath runtime.runtimeClient voice.voiceFileId
+    let extension = case Text.toLower (Text.pack (takeExtension filePath)) of
+            ".wav" -> ".wav"
+            ".mp3" -> ".mp3"
+            ".m4a" -> ".m4a"
+            ".webm" -> ".webm"
+            _ -> ".ogg"
+        localPath =
+            runtime.runtimeGatewayDirectory
+                </> unsafeEncodeUtf
+                    ("voice-"
+                        <> show pending.pendingTurnUpdateId
+                        <> Text.unpack extension)
+    bracket
+        (downloadTelegramFile runtime.runtimeClient filePath localPath)
+        (\path -> void (tryAny (removeFile path)))
+        \path -> do
+            transcriptionCwd <- Directory.getTemporaryDirectory
+            transcript <- transcribeWithCodex
+                transcriptionCwd
+                (unsafeToFilePath path)
+            let clean = Text.strip transcript
+            when (Text.null clean) $
+                fail "Codex returned an empty voice transcription"
+            pure ("[Voice message transcript]: " <> clean)
+
+data TelegramFile = TelegramFile
+    { telegramFilePath :: !(Maybe Text)
+    }
+
+instance FromJSON TelegramFile where
+    parseJSON = withObject "TelegramFile" \o ->
+        TelegramFile <$> o .:? "file_path"
+
+getTelegramFilePath :: TelegramClient -> Text -> IO FilePath
+getTelegramFilePath client fileId =
+    telegramRequest client "getFile" (object ["file_id" .= fileId]) 30 >>= \case
+        Left err -> fail (Text.unpack err)
+        Right response ->
+            case decodeTelegramResponse response :: Either Text TelegramFile of
+                Left err -> fail (Text.unpack err)
+                Right TelegramFile { telegramFilePath = Nothing } ->
+                    fail "Telegram getFile response did not contain file_path"
+                Right TelegramFile { telegramFilePath = Just path } ->
+                    pure (Text.unpack path)
+
+downloadTelegramFile
+    :: TelegramClient
+    -> FilePath
+    -> OsPath
+    -> IO OsPath
+downloadTelegramFile client remotePath destination = do
+    response <- tryAny do
+        request <- Http.parseRequest $
+            "https://api.telegram.org/file/bot"
+                <> Text.unpack client.clientToken
+                <> "/"
+                <> remotePath
+        Http.httpLbs
+            request
+                { Http.responseTimeout =
+                    Http.responseTimeoutMicro 60_000_000
+                }
+            client.clientManager
+    body <- case response of
+        Left err ->
+            fail . Text.unpack $
+                redactToken client.clientToken
+                    (Text.pack (displayException err))
+        Right value -> pure (Http.responseBody value)
+    when (LBS.length body > 20 * 1024 * 1024) $
+        fail "Telegram voice download exceeds the 20 MB limit"
+    LBS.writeFile (unsafeToFilePath destination) body
+    setFileMode (unsafeToFilePath destination) 0o600
+    pure destination
+
+transcribeWithCodex :: FilePath -> FilePath -> IO Text
+transcribeWithCodex cwd audioPath = do
+    result <- Timeout.timeout (5 * 60 * 1_000_000) $
+        bracket start stop \(input, output, _) -> do
+            send input $ object
+                [ "method" .= ("initialize" :: Text)
+                , "id" .= (1 :: Int)
+                , "params" .= object
+                    [ "clientInfo" .= object
+                        [ "name" .= ("haskell_agent_telegram" :: Text)
+                        , "title" .= ("Haskell Agent Telegram" :: Text)
+                        , "version" .= ("0.1.0" :: Text)
+                        ]
+                    ]
+                ]
+            _ <- awaitResult output 1
+            send input $ object
+                [ "method" .= ("initialized" :: Text)
+                , "params" .= object []
+                ]
+            send input $ object
+                [ "method" .= ("thread/start" :: Text)
+                , "id" .= (2 :: Int)
+                , "params" .= object
+                    [ "ephemeral" .= True
+                    , "cwd" .= cwd
+                    , "approvalPolicy" .= ("never" :: Text)
+                    , "sandbox" .= ("read-only" :: Text)
+                    ]
+                ]
+            threadResponse <- awaitResult output 2
+            threadId <- maybe
+                (fail "Codex thread/start response did not contain a thread ID")
+                pure
+                (lookupText ["result", "thread", "id"] threadResponse)
+            send input $ object
+                [ "method" .= ("turn/start" :: Text)
+                , "id" .= (3 :: Int)
+                , "params" .= object
+                    [ "threadId" .= threadId
+                    , "input" .=
+                        [ object
+                            [ "type" .= ("text" :: Text)
+                            , "text" .=
+                                ("Transcribe the attached voice message exactly. \
+                                \Return only the transcription, without commentary."
+                                    :: Text)
+                            ]
+                        , object
+                            [ "type" .= ("localAudio" :: Text)
+                            , "path" .= audioPath
+                            ]
+                        ]
+                    ]
+                ]
+            _ <- awaitResult output 3
+            awaitCodexTranscript output Nothing
+    maybe (fail "Codex voice transcription timed out") pure result
+  where
+    start = do
+        (Just input, Just output, _, process) <-
+            createProcess (proc "codex" ["app-server", "--stdio"])
+                { std_in = CreatePipe
+                , std_out = CreatePipe
+                , std_err = Inherit
+                }
+        pure (input, output, process)
+    stop (input, output, process) = do
+        void (tryAny (hClose input))
+        void (tryAny (hClose output))
+        void (tryAny (terminateProcess process))
+        void (tryAny (waitForProcess process))
+    send handle value = do
+        LBS8.hPutStrLn handle (encode value)
+        hFlush handle
+
+awaitResult :: Handle -> Int -> IO Value
+awaitResult output expectedId = do
+    value <- readCodexValue output
+    case lookupInteger ["id"] value of
+        Just actualId
+            | actualId == fromIntegral expectedId ->
+                case lookupText ["error", "message"] value of
+                    Just message -> fail (Text.unpack message)
+                    Nothing -> pure value
+        _ -> awaitResult output expectedId
+
+awaitCodexTranscript :: Handle -> Maybe Text -> IO Text
+awaitCodexTranscript output latest = do
+    value <- readCodexValue output
+    let latest' = case
+            ( lookupText ["method"] value
+            , lookupText ["params", "item", "type"] value
+            , lookupText ["params", "item", "text"] value
+            ) of
+                (Just "item/completed", Just "agentMessage", Just text) ->
+                    Just text
+                _ -> latest
+    case lookupText ["method"] value of
+        Just "turn/completed" -> case
+            lookupText ["params", "turn", "error", "message"] value of
+                Just message -> fail (Text.unpack message)
+                Nothing ->
+                    maybe
+                        (fail "Codex completed without a transcription")
+                        pure
+                        ( latest'
+                            <|> lookupText
+                                ["params", "turn", "items", "0", "text"]
+                                value
+                        )
+        _ -> awaitCodexTranscript output latest'
+
+readCodexValue :: Handle -> IO Value
+readCodexValue output = do
+    line <- BS8.hGetLine output
+    case eitherDecodeStrict' line of
+        Left _ -> readCodexValue output
+        Right value -> pure value
+
+lookupText :: [Text] -> Value -> Maybe Text
+lookupText path value = case lookupValue path value of
+    Just (String text) -> Just text
+    _ -> Nothing
+
+lookupInteger :: [Text] -> Value -> Maybe Integer
+lookupInteger path value = case lookupValue path value of
+    Just number -> case fromJSON number of
+        Success integer -> Just integer
+        Error _ -> Nothing
+    _ -> Nothing
+
+lookupValue :: [Text] -> Value -> Maybe Value
+lookupValue [] value = Just value
+lookupValue (field : fields) (Object values) =
+    KeyMap.lookup (Key.fromText field) values >>= lookupValue fields
+lookupValue (index : fields) (Array values) = do
+    position <- readMaybe (Text.unpack index)
+    value <- values Vector.!? position
+    lookupValue fields value
+lookupValue _ _ = Nothing
 
 nextChatAction
     :: TelegramRuntime
@@ -948,6 +1374,12 @@ telegramCommand text = do
 runAgentTurn :: TelegramRuntime -> TelegramChatKey -> Text -> IO Text
 runAgentTurn runtime key prompt = do
     handle <- sessionForPrompt runtime key prompt
+    let agentPrompt =
+            prompt
+                <> "\n\n[Telegram delivery context: If the best response is \
+                \only a lightweight acknowledgement, you may respond with \
+                \exactly one standard Telegram reaction emoji. Otherwise \
+                \respond normally. Do not mention this delivery context.]"
     priorTurnCount <- loadSessionHandle
         runtime.runtimeSessionsRoot
         handle.sessionMeta.metaId >>= \case
@@ -958,7 +1390,7 @@ runAgentTurn runtime key prompt = do
         False
         runtime.runtimePolicy
         handle
-        prompt >>= \case
+        agentPrompt >>= \case
             Left err -> fail (Text.unpack err)
             Right _ ->
                 loadSessionHandle
@@ -967,7 +1399,7 @@ runAgentTurn runtime key prompt = do
                         Left err -> fail (Text.unpack err)
                         Right (_, turns)
                             | length turns > priorTurnCount
-                            , latestTurnMatches prompt turns ->
+                            , latestTurnMatches agentPrompt turns ->
                                 pure (renderLatestTurn turns)
                             | otherwise ->
                                 fail
@@ -1033,17 +1465,206 @@ modifyState runtime update =
         saveTelegramState runtime.runtimeStatePath next
         pure (next, ())
 
-reply :: TelegramRuntime -> TelegramChatKey -> Text -> IO ()
-reply runtime key text = do
-    -- Telegram counts astral Unicode characters as two UTF-16 code units.
-    -- A 2000-code-point chunk therefore remains below sendMessage's limit.
-    let chunks = case splitTelegramText 2000 text of
-            [] -> ["(empty response)"]
-            values -> values
-    forM_ chunks \chunk ->
-        sendMessage runtime.runtimeClient key chunk >>= \case
-            Left err -> fail (Text.unpack err)
-            Right () -> pure ()
+reply :: TelegramRuntime -> TelegramPendingReply -> IO ()
+reply runtime pending
+    | Just emoji <- telegramReactionEmoji pending.pendingText
+    , Just messageId <- pending.pendingReplyToMessageId = do
+        setMessageReaction
+            runtime.runtimeClient
+            pending.pendingChat
+            messageId
+            emoji >>= \case
+                Right () -> pure ()
+                Left _ -> sendTextReply
+    | otherwise = do
+        sendTextReply
+  where
+    sendTextReply = do
+        -- Rich HTML entities can expand one source character to six bytes.
+        -- Keep source chunks conservative so the rendered message stays below
+        -- Telegram's 4096-character limit without splitting generated tags.
+        let chunks = case splitTelegramText 600 pending.pendingText of
+                [] -> ["(empty response)"]
+                values -> values
+        forM_ chunks \chunk ->
+            sendRichMessage
+                runtime.runtimeClient
+                pending.pendingChat
+                chunk >>= \case
+                    Left err -> fail (Text.unpack err)
+                    Right () -> pure ()
+
+telegramReactionEmoji :: Text -> Maybe Text
+telegramReactionEmoji text =
+    let candidate = Text.filter (/= '\xFE0F') (Text.strip text)
+        normalized = if candidate == "♥" then "❤" else candidate
+    in if normalized `Set.member` supportedTelegramReactions
+        then Just normalized
+        else Nothing
+
+supportedTelegramReactions :: Set Text
+supportedTelegramReactions = Set.fromList
+    [ "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱"
+    , "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡"
+    , "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡"
+    , "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈"
+    , "😴", "😭", "🤓", "👻", "👀", "🎃", "🙈", "😇", "😨"
+    , "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿"
+    , "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷"
+    , "😡"
+    ]
+
+withTelegramProgress
+    :: TelegramClient
+    -> TelegramChatKey
+    -> IO a
+    -> IO a
+withTelegramProgress client key action =
+    withTelegramProgressUsing
+        (sendTypingAction client key)
+        (sendThinkingDraft client key)
+        action
+
+withTelegramProgressUsing :: IO () -> IO () -> IO a -> IO a
+withTelegramProgressUsing sendTyping sendDraft action =
+    withAsync progressLoop (const action)
+  where
+    progressLoop = loop (0 :: Int)
+    loop tick = do
+        -- Chat actions expire after roughly five seconds. Rich drafts last
+        -- longer, so refresh typing every four seconds and the draft every
+        -- fifth tick. Both are best-effort: the final reply remains durable
+        -- even when a client or Bot API version does not support rich drafts.
+        void (tryAny sendTyping)
+        when (tick `mod` 5 == 0) $
+            void (tryAny sendDraft)
+        threadDelay 4_000_000
+        loop (tick + 1)
+
+sendTypingAction :: TelegramClient -> TelegramChatKey -> IO ()
+sendTypingAction client key =
+    telegramRequest client "sendChatAction" body 30 >>= \case
+        Left err -> fail (Text.unpack err)
+        Right response ->
+            case decodeTelegramResponse response :: Either Text Bool of
+                Left err -> fail (Text.unpack err)
+                Right _ -> pure ()
+  where
+    body = object $
+        [ "chat_id" .= key.chatId
+        , "action" .= ("typing" :: Text)
+        ]
+            <> maybe []
+                (\threadId -> ["message_thread_id" .= threadId])
+                key.messageThreadId
+
+-- | Convert the Markdown subset commonly emitted by agents to Telegram's
+-- supported HTML. Literal text and link attributes are always escaped.
+markdownToTelegramHtml :: Text -> Text
+markdownToTelegramHtml input =
+    Text.concat (zipWith renderSegment [0 :: Int ..] (Text.splitOn "```" input))
+  where
+    renderSegment index segment
+        | odd index =
+            "<pre>" <> escapeTelegramHtml (stripLanguage segment) <> "</pre>"
+        | otherwise =
+            Text.replace "\n" "<br>" (renderInline segment)
+
+    stripLanguage segment =
+        case Text.breakOn "\n" segment of
+            (language, rest)
+                | not (Text.null language)
+                , Text.all isLanguageCharacter language ->
+                    Text.drop 1 rest
+            _ -> segment
+
+    isLanguageCharacter char =
+        ('a' <= char && char <= 'z')
+            || ('A' <= char && char <= 'Z')
+            || ('0' <= char && char <= '9')
+            || char `elem` ("-+#_" :: String)
+
+renderInline :: Text -> Text
+renderInline text
+    | Text.null text = ""
+    | Just rest <- Text.stripPrefix "`" text =
+        renderDelimited "`" "<code>" "</code>" rest
+    | Just rest <- Text.stripPrefix "**" text =
+        renderDelimited "**" "<b>" "</b>" rest
+    | Just rest <- Text.stripPrefix "~~" text =
+        renderDelimited "~~" "<s>" "</s>" rest
+    | Just rest <- Text.stripPrefix "*" text =
+        renderDelimited "*" "<i>" "</i>" rest
+    | Just rest <- Text.stripPrefix "[" text =
+        case parseMarkdownLink rest of
+            Just (label, url, remaining) ->
+                "<a href=\"" <> escapeTelegramHtml url <> "\">"
+                    <> escapeTelegramHtml label
+                    <> "</a>"
+                    <> renderInline remaining
+            Nothing -> "&#91;" <> renderInline rest
+    | otherwise =
+        let (plain, rest) = Text.break isMarkdownStarter text
+        in if Text.null plain
+            then escapeTelegramHtml (Text.take 1 text)
+                <> renderInline (Text.drop 1 text)
+            else escapeTelegramHtml plain <> renderInline rest
+  where
+    renderDelimited delimiter opening closing rest =
+        case Text.breakOn delimiter rest of
+            (_, after) | Text.null after ->
+                escapeTelegramHtml delimiter <> renderInline rest
+            (inside, after) ->
+                opening
+                    <> escapeTelegramHtml inside
+                    <> closing
+                    <> renderInline (Text.drop (Text.length delimiter) after)
+
+    isMarkdownStarter char =
+        char == '`' || char == '*' || char == '~' || char == '['
+
+parseMarkdownLink :: Text -> Maybe (Text, Text, Text)
+parseMarkdownLink text = do
+    let (label, afterLabel) = Text.breakOn "](" text
+    unlessMaybe (not (Text.null afterLabel))
+    let afterOpen = Text.drop 2 afterLabel
+        (url, afterUrl) = Text.breakOn ")" afterOpen
+    unlessMaybe (not (Text.null afterUrl))
+    pure (label, url, Text.drop 1 afterUrl)
+
+unlessMaybe :: Bool -> Maybe ()
+unlessMaybe True = Just ()
+unlessMaybe False = Nothing
+
+escapeTelegramHtml :: Text -> Text
+escapeTelegramHtml = Text.concatMap \case
+    '<' -> "&lt;"
+    '>' -> "&gt;"
+    '&' -> "&amp;"
+    '"' -> "&quot;"
+    '\'' -> "&#39;"
+    char -> Text.singleton char
+
+sendThinkingDraft :: TelegramClient -> TelegramChatKey -> IO ()
+sendThinkingDraft client key =
+    telegramRequest client "sendRichMessageDraft" body 30 >>= \case
+        Left err -> fail (Text.unpack err)
+        Right response ->
+            case decodeTelegramResponse response :: Either Text Bool of
+                Left err -> fail (Text.unpack err)
+                Right _ -> pure ()
+  where
+    body = object $
+        [ "chat_id" .= key.chatId
+        , "draft_id" .= (1 :: Int)
+        , "rich_message" .= object
+            [ "html" .=
+                ("<tg-thinking>✨ Thinking…</tg-thinking>" :: Text)
+            ]
+        ]
+            <> maybe []
+                (\threadId -> ["message_thread_id" .= threadId])
+                key.messageThreadId
 
 getUpdates
     :: TelegramClient
@@ -1056,22 +1677,91 @@ getUpdates client offset =
   where
     body = object $
         [ "timeout" .= (30 :: Int)
-        , "allowed_updates" .= (["message"] :: [Text])
+        , "allowed_updates" .=
+            (["message", "message_reaction"] :: [Text])
         ]
             <> maybe [] (\value -> ["offset" .= value]) offset
 
-sendMessage
+setMessageReaction
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Integer
+    -> Text
+    -> IO (Either Text ())
+setMessageReaction client key messageId emoji =
+    telegramRequest client "setMessageReaction" body 30 >>= \case
+        Left err -> pure (Left err)
+        Right response ->
+            pure (() <$ (decodeTelegramResponse response :: Either Text Bool))
+  where
+    body = object
+        [ "chat_id" .= key.chatId
+        , "message_id" .= messageId
+        , "reaction" .=
+            [ object
+                [ "type" .= ("emoji" :: Text)
+                , "emoji" .= emoji
+                ]
+            ]
+        ]
+
+sendRichMessage
     :: TelegramClient
     -> TelegramChatKey
     -> Text
     -> IO (Either Text ())
-sendMessage client key text =
-    telegramRequest client "sendMessage" body 30 >>= \case
+sendRichMessage client key text =
+    telegramRequest client "sendRichMessage" richBody 30 >>= \case
+        Right response
+            | Right (_ :: Value) <- decodeTelegramResponse response ->
+                pure (Right ())
+        _ -> sendHtmlMessage client key text
+  where
+    richBody = object $
+        [ "chat_id" .= key.chatId
+        , "rich_message" .= object
+            [ "html" .= markdownToTelegramHtml text
+            ]
+        ]
+            <> maybe []
+                (\threadId -> ["message_thread_id" .= threadId])
+                key.messageThreadId
+
+sendHtmlMessage
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Text
+    -> IO (Either Text ())
+sendHtmlMessage client key text =
+    telegramRequest client "sendMessage" htmlBody 30 >>= \case
+        Right response
+            | Right (_ :: Value) <- decodeTelegramResponse response ->
+                pure (Right ())
+        _ -> sendPlainMessage client key text
+  where
+    htmlBody = object $
+        [ "chat_id" .= key.chatId
+        , "text" .= markdownToTelegramHtml text
+        , "parse_mode" .= ("HTML" :: Text)
+        ]
+            <> maybe []
+                (\threadId -> ["message_thread_id" .= threadId])
+                key.messageThreadId
+
+sendPlainMessage
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Text
+    -> IO (Either Text ())
+sendPlainMessage client key text =
+    telegramRequest client "sendMessage" (messageBody key text) 30 >>= \case
         Left err -> pure (Left err)
         Right response ->
             pure (() <$ (decodeTelegramResponse response :: Either Text Value))
-  where
-    body = object $
+
+messageBody :: TelegramChatKey -> Text -> Value
+messageBody key text =
+    object $
         [ "chat_id" .= key.chatId
         , "text" .= text
         ]

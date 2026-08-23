@@ -53,6 +53,22 @@ disables terminal echo and stores the token in a private gateway file.
 
 9. Tell the user to open their new bot and send `/start`. The bot supports
    `/new` for a fresh agent session and `/session` for the current session ID.
+   Text, voice messages, and message reactions are persisted before processing.
+   Voice transcription uses the user's existing Codex subscription, so Codex
+   must already be logged in on the machine running the gateway.
+
+## Telegram delivery behavior
+
+- The gateway shows typing and a native rich-message draft while an agent turn
+  is running.
+- Agent Markdown is converted to Telegram-safe HTML, with a plain-text fallback.
+- A reply containing exactly one supported Telegram reaction emoji is delivered
+  as a reaction to the triggering message instead of as a separate message.
+- Inbound reaction changes become ordinary durable agent turns, including
+  reaction removals.
+- Voice messages are limited to 10 minutes and 20 MB. They are downloaded to a
+  private temporary gateway file, transcribed through `codex app-server`, then
+  deleted before the transcript enters the normal durable agent-session path.
 
 ## Management
 
