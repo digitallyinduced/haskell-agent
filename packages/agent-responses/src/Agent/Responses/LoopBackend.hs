@@ -6,6 +6,7 @@ module Agent.Responses.LoopBackend
     , responseToTurnOutput
     , responseTokenUsage
     , streamEventToLoopEvent
+    , streamOutputObserved
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
@@ -32,6 +33,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
+import Agent.Responses.StreamAssembly (responseFragmentHasOutput)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -45,7 +47,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef
-import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -410,6 +412,26 @@ streamEventToLoopEvent = \case
                 _ -> Nothing
             Nothing -> Nothing
     _ -> Nothing
+
+-- | Whether a stream event proves the provider has begun producing response
+-- output. These events make replay unsafe even when they do not map to a
+-- visible loop delta.
+streamOutputObserved :: ResponseStreamEvent -> Bool
+streamOutputObserved event = case event of
+    ResponseCompletedEvent{} -> True
+    ResponseDoneEvent{} -> True
+    ResponseIncompleteEvent{} -> True
+    ResponseFailedEvent { responseValue } ->
+        responseFragmentHasOutput responseValue
+    ResponseOutputItemAddedEvent{} -> True
+    ResponseOutputItemDoneEvent{} -> True
+    ResponseCustomToolInputDeltaEvent{} -> True
+    ResponseCustomToolInputDoneEvent{} -> True
+    ResponseReasoningSummaryPartAddedEvent{} -> True
+    ResponseReasoningSummaryTextDoneEvent{} -> True
+    _ ->
+        responseStreamEventType event /= EventCodexRateLimits
+            && isJust (streamEventToLoopEvent event)
 
 extraDeltaText :: Aeson.Object -> Maybe Text
 extraDeltaText extras = nonEmptyText extras "delta" <|> nonEmptyText extras "text"

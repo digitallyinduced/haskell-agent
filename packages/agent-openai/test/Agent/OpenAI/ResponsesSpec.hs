@@ -111,24 +111,84 @@ spec = do
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
                 Aeson.Success Responses.ResponseOutputItemDoneEvent { item, outputIndex } -> do
-                    outputIndex `shouldBe` 0
+                    outputIndex `shouldBe` Just 0
                     item `shouldSatisfy` \case
                         Responses.MessageItem{} -> True
                         _ -> False
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
-        it "decodes response completion into a typed response" do
+        it "decodes indexless output-item completion losslessly" do
+            let original = Aeson.object
+                    [ "type" .= ("response.output_item.done" :: Text)
+                    , "sequence_number" .= Aeson.Null
+                    , "output_index" .= Aeson.Null
+                    , "item" .= Aeson.object
+                        [ "type" .= ("function_call" :: Text)
+                        , "call_id" .= ("call_1" :: Text)
+                        , "name" .= ("shell_command" :: Text)
+                        , "arguments" .= ("{}" :: Text)
+                        ]
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseOutputItemDoneEvent
+                        { outputIndex, sequenceNumber } -> do
+                    outputIndex `shouldBe` Nothing
+                    sequenceNumber `shouldBe` Nothing
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes response completion into a lossless response fragment" do
             let original = Aeson.object
                     [ "type" .= ("response.completed" :: Text)
                     , "sequence_number" .= (4 :: Int)
                     , "response" .= canonicalResponseJson "completed"
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
-                Aeson.Success Responses.ResponseCompletedEvent { response } ->
-                    response.responseId `shouldBe` "resp_1"
+                Aeson.Success event@Responses.ResponseCompletedEvent { responseValue } -> do
+                    responseValue `shouldBe` canonicalResponseJson "completed"
+                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
+
+        it "accepts minimal and partial lifecycle response fragments losslessly" do
+            mapM_ assertLifecycleFixture
+                [ ( "response.created"
+                  , Responses.EventResponseCreated
+                  , Aeson.object ["id" .= ("resp_created" :: Text)]
+                  )
+                , ( "response.in_progress"
+                  , Responses.EventResponseInProgress
+                  , Aeson.object ["id" .= ("resp_progress" :: Text)]
+                  )
+                , ( "response.queued"
+                  , Responses.EventResponseQueued
+                  , Aeson.object ["id" .= ("resp_queued" :: Text)]
+                  )
+                , ( "response.completed"
+                  , Responses.EventResponseCompleted
+                  , Aeson.object
+                        [ "id" .= ("resp_completed" :: Text)
+                        , "usage" .= Aeson.object ["input_tokens" .= (10 :: Int)]
+                        ]
+                  )
+                , ( "response.failed"
+                  , Responses.EventResponseFailed
+                  , Aeson.object
+                        [ "id" .= ("resp_failed" :: Text)
+                        , "error" .= Aeson.object ["message" .= ("failed" :: Text)]
+                        ]
+                  )
+                , ( "response.incomplete"
+                  , Responses.EventResponseIncomplete
+                  , Aeson.object
+                        [ "id" .= ("resp_incomplete" :: Text)
+                        , "incomplete_details" .=
+                            Aeson.object ["reason" .= ("max_output_tokens" :: Text)]
+                        ]
+                  )
+                ]
 
         it "decodes the Codex WebSocket response.done terminal event losslessly" do
             let original = Aeson.object
@@ -150,18 +210,132 @@ spec = do
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
-        it "decodes response incomplete into its typed terminal constructor" do
+        it "decodes response incomplete into its typed terminal constructor losslessly" do
             let original = Aeson.object
                     [ "type" .= ("response.incomplete" :: Text)
                     , "sequence_number" .= (5 :: Int)
                     , "response" .= canonicalResponseJson "incomplete"
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
-                Aeson.Success Responses.ResponseIncompleteEvent { response } -> do
-                    response.status `shouldBe` Responses.ResponseIncomplete
-                    response.responseId `shouldBe` "resp_1"
+                Aeson.Success event@Responses.ResponseIncompleteEvent { responseValue } -> do
+                    responseValue `shouldBe` canonicalResponseJson "incomplete"
+                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
+
+        it "decodes Codex custom-tool input deltas without an output index" do
+            let original = Aeson.object
+                    [ "type" .= ("response.custom_tool_call_input.delta" :: Text)
+                    , "item_id" .= ("ctc_1" :: Text)
+                    , "call_id" .= ("call_1" :: Text)
+                    , "delta" .= ("*** Begin" :: Text)
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseCustomToolInputDeltaEvent
+                        { delta, streamItemId, streamCallId, streamOutputIndex } -> do
+                    delta `shouldBe` Just "*** Begin"
+                    streamItemId `shouldBe` Just "ctc_1"
+                    streamCallId `shouldBe` Just "call_1"
+                    streamOutputIndex `shouldBe` Nothing
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes completed custom-tool input losslessly" do
+            let original = Aeson.object
+                    [ "type" .= ("response.custom_tool_call_input.done" :: Text)
+                    , "item_id" .= ("ctc_1" :: Text)
+                    , "output_index" .= (2 :: Int)
+                    , "input" .= ("*** End Patch" :: Text)
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseCustomToolInputDoneEvent
+                        { inputText, streamItemId, streamCallId, streamOutputIndex } -> do
+                    inputText `shouldBe` Just "*** End Patch"
+                    streamItemId `shouldBe` Just "ctc_1"
+                    streamCallId `shouldBe` Nothing
+                    streamOutputIndex `shouldBe` Just 2
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes reasoning summary parts without requiring an output index" do
+            let part = Aeson.object
+                    [ "type" .= ("summary_text" :: Text)
+                    , "text" .= ("partial summary" :: Text)
+                    ]
+                original = Aeson.object
+                    [ "type" .= ("response.reasoning_summary_part.added" :: Text)
+                    , "item_id" .= ("reasoning_1" :: Text)
+                    , "summary_index" .= (0 :: Int)
+                    , "part" .= part
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseReasoningSummaryPartAddedEvent
+                        { streamItemId, streamOutputIndex, summaryIndex, partValue } -> do
+                    streamItemId `shouldBe` Just "reasoning_1"
+                    streamOutputIndex `shouldBe` Nothing
+                    summaryIndex `shouldBe` Just 0
+                    partValue `shouldBe` Just part
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes completed reasoning summary text without an output index" do
+            let original = Aeson.object
+                    [ "type" .= ("response.reasoning_summary_text.done" :: Text)
+                    , "item_id" .= ("reasoning_1" :: Text)
+                    , "summary_index" .= (0 :: Int)
+                    , "text" .= ("final summary" :: Text)
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseReasoningSummaryTextDoneEvent
+                        { streamItemId, streamOutputIndex, summaryIndex, text } -> do
+                    streamItemId `shouldBe` Just "reasoning_1"
+                    streamOutputIndex `shouldBe` Nothing
+                    summaryIndex `shouldBe` Just 0
+                    text `shouldBe` Just "final summary"
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "accepts payload-light Codex incremental events losslessly" do
+            mapM_
+                (\eventName -> do
+                    let original = Aeson.object ["type" .= eventName]
+                    case Aeson.fromJSON original
+                            :: Aeson.Result Responses.ResponseStreamEvent of
+                        Aeson.Success event ->
+                            Aeson.toJSON event `shouldBe` original
+                        Aeson.Error err ->
+                            expectationFailure
+                                (show (eventName :: Text) <> ": " <> err))
+                [ "response.custom_tool_call_input.delta"
+                , "response.custom_tool_call_input.done"
+                , "response.reasoning_summary_part.added"
+                , "response.reasoning_summary_text.done"
+                ]
+
+        it "recognises Codex metadata and timing events without discarding fields" do
+            mapM_ assertKnownMetadataEvent
+                [ ( "codex.rate_limits"
+                  , Responses.EventCodexRateLimits
+                  , [ "rate_limits" .=
+                        Aeson.object ["primary" .= Aeson.object ["used_percent" .= (12 :: Int)]]
+                    ]
+                  )
+                , ( "response.metadata"
+                  , Responses.EventResponseMetadata
+                  , [ "headers" .=
+                        Aeson.object ["x-codex-turn-state" .= ("state_1" :: Text)]
+                    ]
+                  )
+                , ( "responsesapi.websocket_timing"
+                  , Responses.EventResponsesApiWebSocketTiming
+                  , ["elapsed_ms" .= (17 :: Int)]
+                  )
+                ]
 
         it "decodes the Codex nested error envelope into a typed error" do
             let original = Aeson.object
@@ -390,6 +564,48 @@ assertKnownEvent eventName = do
             Aeson.toJSON event `shouldBe` original
         Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
 
+assertLifecycleFixture
+    :: (Text, Responses.StreamEventType, Aeson.Value)
+    -> Expectation
+assertLifecycleFixture (eventName, expectedType, responseValue) = do
+    let original = Aeson.object
+            [ "type" .= eventName
+            , "response" .= responseValue
+            , "future_event_field" .= True
+            ]
+    case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+        Aeson.Success event -> do
+            Responses.responseStreamEventType event `shouldBe` expectedType
+            lifecycleResponseValue event `shouldBe` Just responseValue
+            Aeson.toJSON event `shouldBe` original
+        Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
+
+lifecycleResponseValue :: Responses.ResponseStreamEvent -> Maybe Aeson.Value
+lifecycleResponseValue = \case
+    Responses.ResponseCreatedEvent { responseValue } -> Just responseValue
+    Responses.ResponseInProgressEvent { responseValue } -> Just responseValue
+    Responses.ResponseCompletedEvent { responseValue } -> Just responseValue
+    Responses.ResponseDoneEvent { responseValue } -> Just responseValue
+    Responses.ResponseFailedEvent { responseValue } -> Just responseValue
+    Responses.ResponseIncompleteEvent { responseValue } -> Just responseValue
+    Responses.ResponseQueuedEvent { responseValue } -> Just responseValue
+    _ -> Nothing
+
+assertKnownMetadataEvent
+    :: (Text, Responses.StreamEventType, [(Key.Key, Aeson.Value)])
+    -> Expectation
+assertKnownMetadataEvent (eventName, expectedType, payload) = do
+    let original = Aeson.object
+            ([ "type" .= eventName
+             , "sequence_number" .= (8 :: Int)
+             , "future_event_field" .= True
+             ] <> payload)
+    case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+        Aeson.Success event -> do
+            Responses.responseStreamEventType event `shouldBe` expectedType
+            Aeson.toJSON event `shouldBe` original
+        Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
+
 requiredEventFields :: Text -> [(Key.Key, Aeson.Value)]
 requiredEventFields eventName
     | eventName == "response.done" =
@@ -405,7 +621,7 @@ requiredEventFields eventName
         , "response.failed"
         , "response.incomplete"
         , "response.queued"
-        ] = [("response", canonicalResponseJson "completed")]
+        ] = [("response", Aeson.object ["id" .= ("resp_partial" :: Text)])]
     | eventName `elem` ["response.output_item.added", "response.output_item.done"] =
         [ ("output_index", Aeson.Number 0)
         , ("item", Aeson.object
@@ -413,6 +629,16 @@ requiredEventFields eventName
             , "role" .= ("assistant" :: Text)
             , "content" .= ([] :: [Aeson.Value])
             ])
+        ]
+    | eventName == "response.custom_tool_call_input.delta" =
+        [("delta", Aeson.String "partial")]
+    | eventName == "response.custom_tool_call_input.done" =
+        [("input", Aeson.String "complete")]
+    | eventName == "response.reasoning_summary_part.added" =
+        [("summary_index", Aeson.Number 0)]
+    | eventName == "response.reasoning_summary_text.done" =
+        [ ("summary_index", Aeson.Number 0)
+        , ("text", Aeson.String "summary")
         ]
     | eventName == "error" =
         [ ("code", Aeson.String "stream_error")

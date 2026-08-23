@@ -41,6 +41,8 @@ nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
   agent-core:lib:agent-core \
+  agent-codex-dialect:lib:agent-codex-dialect \
+  agent-grok-build-dialect:lib:agent-grok-build-dialect \
   agent-tui:lib:agent-tui \
   agent-responses:lib:agent-responses \
   agent-openai:lib:agent-openai \

@@ -9,6 +9,7 @@ module Agent.Subagents.Types
     , RunSubagent
     , defaultSubagentConfig
     , defaultMaxConcurrent
+    , defaultMaxDepth
     , defaultWaitTimeoutMs
     , minWaitTimeoutMs
     , maxWaitTimeoutMs
@@ -61,10 +62,13 @@ data SubagentConfig = SubagentConfig
 defaultMaxConcurrent :: Int
 defaultMaxConcurrent = 6
 
+defaultMaxDepth :: Int
+defaultMaxDepth = 4
+
 defaultSubagentConfig :: SubagentConfig
 defaultSubagentConfig = SubagentConfig
     { maxConcurrent = defaultMaxConcurrent
-    , maxDepth = Nothing
+    , maxDepth = Just defaultMaxDepth
     }
 
 minWaitTimeoutMs :: Int

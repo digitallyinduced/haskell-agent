@@ -19,7 +19,7 @@ import Agent.Responses.SSE
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , buildStreamResponse
-    , failedResponseMessage
+    , failedStreamResponseMessage
     )
 import Agent.Responses.Types
 import Agent.OpenRouter.Error (classifyStreamError)
@@ -31,5 +31,5 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
         "No terminal response event found in OpenRouter SSE stream"
     , classifyStreamError
     , classifyFailedResponse =
-        ConnectionError . failedResponseMessage
+        ConnectionError . failedStreamResponseMessage
     }
