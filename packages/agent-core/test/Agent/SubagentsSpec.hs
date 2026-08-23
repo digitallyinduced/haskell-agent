@@ -508,11 +508,14 @@ spec = describe "Agent.Subagents" do
         childSpawned <- newEmptyTMVarIO
         noticeSeen <- newEmptyTMVarIO
         rootNotices <- newIORef ([] :: [SubagentId])
+        settled <- newIORef ([] :: [(SubagentId, SubagentStatus)])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (Left LoopNoResponseId))
             (\_ _ -> pure ())
         setSubagentOnComplete registry \agentId _ ->
             atomicModifyIORef' rootNotices \xs -> (xs <> [agentId], ())
+        setSubagentOnSettled registry \agentId status ->
+            atomicModifyIORef' settled \xs -> (xs <> [(agentId, status)], ())
         setSubagentRunner registry \env _ prompt _ ->
             runNestedRouting
                 registry parentRelease childRelease childSpawned noticeSeen
@@ -532,13 +535,20 @@ spec = describe "Agent.Subagents" do
         _ <- waitSubagents registry [parent] 15000
         notices <- readIORef rootNotices
         notices `shouldNotContain` [child]
+        readIORef settled `shouldReturn`
+            [ (child, Completed (Just "leaf-final"))
+            , (parent, Completed (Just "parent-final"))
+            ]
 
     it "allows completion callbacks to queue a follow-up without deadlocking" do
         prompts <- newIORef ([] :: [Text])
+        events <- newIORef ([] :: [Text])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> do
                 let payload = messagePayload prompt
                 atomicModifyIORef' prompts \seen -> (seen <> [payload], ())
+                atomicModifyIORef' events \seen ->
+                    (seen <> ["run:" <> payload], ())
                 pure $ Right LoopResult
                     { finalResponseId = "response-" <> payload
                     , finalText = Just payload
@@ -551,23 +561,54 @@ spec = describe "Agent.Subagents" do
                 _ <- sendInput registry agentId "second" False
                 pure ()
             _ -> pure ()
+        setSubagentOnSettled registry \_ -> \case
+            Completed (Just payload) ->
+                atomicModifyIORef' events \seen ->
+                    (seen <> ["settled:" <> payload], ())
+            _ -> pure ()
         Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
         (statuses, timedOut) <- waitSubagents registry [agentId] 15000
         timedOut `shouldBe` False
         Map.lookup agentId statuses
             `shouldBe` Just (Completed (Just "second"))
         readIORef prompts `shouldReturn` ["first", "second"]
+        readIORef events `shouldReturn`
+            [ "run:first"
+            , "settled:first"
+            , "run:second"
+            , "settled:second"
+            ]
+
+    it "isolates settled callback failures from the supervisor" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        setSubagentOnSettled registry \_ _ ->
+            fail "settled callback failed"
+        Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
+        (first, firstTimedOut) <- waitSubagents registry [agentId] 15000
+        firstTimedOut `shouldBe` False
+        Map.lookup agentId first `shouldBe` Just (Completed (Just "first"))
+        Right _ <- sendInput registry agentId "second" False
+        (second, secondTimedOut) <- waitSubagents registry [agentId] 15000
+        secondTimedOut `shouldBe` False
+        Map.lookup agentId second `shouldBe` Just (Completed (Just "second"))
 
     it "cancels and joins a running supervisor when the registry closes" do
         started <- newEmptyTMVarIO
         cleanedUp <- newEmptyTMVarIO
+        settled <- newIORef ([] :: [(SubagentId, SubagentStatus)])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (blockingRunner started cleanedUp)
             (\_ _ -> pure ())
-        Right _ <- spawnSubagent registry Nothing 0 "wait" Nothing
+        setSubagentOnSettled registry \agentId status -> do
+            atomically $ readTMVar cleanedUp
+            atomicModifyIORef' settled \xs -> (xs <> [(agentId, status)], ())
+        Right agentId <- spawnSubagent registry Nothing 0 "wait" Nothing
         atomically $ takeTMVar started
         closeSubagentRegistry registry
         atomically $ readTMVar cleanedUp
+        readIORef settled `shouldReturn` [(agentId, Closed)]
 
     it "restores a missing agent id into the registry" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -734,6 +775,7 @@ spec = describe "Agent.Subagents" do
         closeSubagentRegistry registry
 
     it "does not let sendInput resurrect a closed agent" do
+        settled <- newIORef ([] :: [SubagentStatus])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
                 { finalResponseId = "r"
@@ -742,9 +784,15 @@ spec = describe "Agent.Subagents" do
                 , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
+        setSubagentOnSettled registry \_ status ->
+            atomicModifyIORef' settled \statuses -> (statuses <> [status], ())
         Right agentId <- spawnSubagent registry Nothing 0 "first" Nothing
         _ <- waitSubagents registry [agentId] 15000
+        readIORef settled `shouldReturn` [Completed (Just "first")]
         _ <- closeSubagent registry agentId
+        readIORef settled `shouldReturn` [Completed (Just "first"), Closed]
+        _ <- closeSubagent registry agentId
+        readIORef settled `shouldReturn` [Completed (Just "first"), Closed]
         sendInput registry agentId "should-not-run" False
             `shouldReturn` Left "agent is closed"
         getStatus registry agentId `shouldReturn` Closed
@@ -868,6 +916,7 @@ spec = describe "Agent.Subagents" do
         started <- newEmptyTMVarIO
         blocker <- newEmptyTMVarIO
         notices <- newIORef ([] :: [(SubagentId, SubagentStatus)])
+        settled <- newIORef ([] :: [(SubagentId, SubagentStatus)])
         let config = defaultSubagentConfig { maxConcurrent = 1 }
         registry <- newSubagentRegistry config (fromFilePath "/tmp")
             (\_ _ _ _ -> do
@@ -882,6 +931,8 @@ spec = describe "Agent.Subagents" do
             (\_ _ -> pure ())
         setSubagentOnComplete registry \agentId status ->
             atomicModifyIORef' notices \xs -> (xs <> [(agentId, status)], ())
+        setSubagentOnSettled registry \agentId status ->
+            atomicModifyIORef' settled \xs -> (xs <> [(agentId, status)], ())
         Right active <- spawnSubagent registry Nothing 0 "active" Nothing
         atomically $ takeTMVar started
 
@@ -889,6 +940,7 @@ spec = describe "Agent.Subagents" do
 
         getStatus registry active `shouldReturn` Interrupted
         readIORef notices `shouldReturn` []
+        readIORef settled `shouldReturn` [(active, Interrupted)]
         replacement <- spawnSubagent registry Nothing 0 "replacement" Nothing
         replacement `shouldSatisfy` \case
             Right _ -> True
@@ -941,6 +993,7 @@ spec = describe "Agent.Subagents" do
 
     it "can restart an interrupted agent in a later root turn" do
         started <- newEmptyTMVarIO
+        settled <- newIORef ([] :: [SubagentStatus])
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ ->
                 if messagePayload prompt == "first"
@@ -952,6 +1005,8 @@ spec = describe "Agent.Subagents" do
                         , tokenUsage = emptyTokenUsage
                         })
             (\_ _ -> pure ())
+        setSubagentOnSettled registry \_ status ->
+            atomicModifyIORef' settled \statuses -> (statuses <> [status], ())
         firstTurn <- beginRootTurn registry
         secondTurn <- beginRootTurn registry
         Right agentId <- spawnSubagentWithCwdForTurn registry (Just firstTurn)
@@ -959,12 +1014,15 @@ spec = describe "Agent.Subagents" do
         atomically $ takeTMVar started
         abortRootTurn registry firstTurn
         getStatus registry agentId `shouldReturn` Interrupted
+        readIORef settled `shouldReturn` [Interrupted]
         Right _ <- sendInputMessageForTurn registry (Just secondTurn)
             taskPathRoot agentId (plainInterAgentContent "second") False
         (statuses, timedOut) <- waitSubagents registry [agentId] 15000
         timedOut `shouldBe` False
         Map.lookup agentId statuses
             `shouldBe` Just (Completed (Just "second"))
+        readIORef settled `shouldReturn`
+            [Interrupted, Completed (Just "second")]
         closeSubagentRegistry registry
 
     it "removes failed-turn follow-ups queued behind unrelated work" do
