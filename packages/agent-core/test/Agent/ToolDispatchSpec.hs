@@ -93,6 +93,16 @@ spec = describe "dispatchToolCall" do
         result `shouldBe` functionResult "call-1" "EX explode"
         readIORef seen `shouldReturn` ["explode"]
 
+    it "does not let a synchronous exception hook replace the tool failure" do
+        let config = testConfig
+                { toolDispatchOnException = \_ _ ->
+                    Exception.throwIO (userError "logging failed")
+                }
+        result <- dispatchToolCall config
+            [noArgsTool "explode" (Exception.throwIO (userError "boom"))]
+            (functionToolCall "call-1" "explode" "{}")
+        result `shouldBe` functionResult "call-1" "EX explode"
+
     it "does not turn asynchronous cancellation into tool output" do
         dispatchToolCall testConfig
             [noArgsTool "cancel" (Exception.throwIO Exception.ThreadKilled)]
