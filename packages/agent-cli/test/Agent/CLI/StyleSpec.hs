@@ -32,7 +32,11 @@ spec = do
             let out = paintBackgroundLines True agentBackground "a\nb\n"
             Text.count "\ESC[48;2;0;43;54m" out `shouldBe` 2
             out `shouldSatisfy` Text.isSuffixOf "\n"
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0K"
+            out `shouldSatisfy` (not . Text.isInfixOf "\ESC[0K")
+
+        it "does not erase with the terminal default background" do
+            paintBackgroundLines True agentBackground "text"
+                `shouldSatisfy` (not . Text.isInfixOf "\ESC[K")
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
