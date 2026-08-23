@@ -115,6 +115,7 @@ library
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-claude >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
@@ -172,6 +173,7 @@ executable eval-ghci-vs-bash
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
                     , agent-responses
+                    , agent-responses-types
                     , aeson >= 2.0
                     , base >= 4.17 && < 5
                     , bytestring
@@ -268,6 +270,7 @@ test-suite agent-cli-test
                     , agent-tui
                     , agent-openai
                     , agent-openrouter
+                    , agent-claude
                     , agent-responses
                     , agent-responses-types
                     , agent-xai

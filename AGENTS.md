@@ -47,7 +47,9 @@ cabal repl \
   agent-responses:lib:agent-responses \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
-  agent-openrouter:lib:agent-openrouter
+  agent-openrouter:lib:agent-openrouter \
+  claude-agent-sdk-haskell:lib:claude-agent-sdk-haskell \
+  agent-claude:lib:agent-claude
 ```
 
 In GHCi:
@@ -119,6 +121,17 @@ cabal run agent-cli -- +RTS -N8 -M16G -RTS
 
 Avoid large `-A` defaults: the allocation area is per capability, so
 `-N14 -A64m` consumes roughly 896 MiB before meaningful application data.
+
+## Nix package maintenance
+
+Each package has a checked-in `package.nix` generated with `cabal2nix`; the
+flake does not use import-from-derivation. After changing a package's Cabal
+file, regenerate its expression from the repository root, for example:
+
+```
+(cd packages/claude-agent-sdk-haskell && cabal2nix . > package.nix)
+(cd packages/agent-claude && cabal2nix . > package.nix)
+```
 
 # performance
 

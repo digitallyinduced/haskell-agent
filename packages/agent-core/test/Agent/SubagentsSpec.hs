@@ -662,6 +662,29 @@ spec = describe "Agent.Subagents" do
                 index `shouldSatisfy` (> (1000000 :: Int))
             Left err -> expectationFailure err
 
+    it "keeps generated id indexes local to each registry" do
+        let runner _ _ _ _ = pure $ Right LoopResult
+                { finalResponseId = "independent"
+                , finalText = Nothing
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+            newRegistry =
+                newSubagentRegistry defaultSubagentConfig
+                    (fromFilePath "/tmp")
+                    runner
+                    (\_ _ -> pure ())
+            numericSuffix :: SubagentId -> Either String (Int, Text)
+            numericSuffix agentId =
+                TextRead.decimal
+                    (snd (Text.breakOnEnd "-" agentId.unSubagentId))
+        first <- newRegistry
+        second <- newRegistry
+        Right firstId <- spawnSubagent first Nothing 0 "first" Nothing
+        Right secondId <- spawnSubagent second Nothing 0 "second" Nothing
+        numericSuffix firstId `shouldBe` Right (1 :: Int, "")
+        numericSuffix secondId `shouldBe` Right (1 :: Int, "")
+
     it "does not reopen an agent after the registry is closed" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult

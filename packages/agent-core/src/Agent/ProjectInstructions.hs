@@ -70,7 +70,8 @@ data DiscoverOptions = DiscoverOptions
       -- ^ Soft budget across all loaded files. Content past the budget is
       -- truncated. Use @0@ to disable discovery.
     , discoverGlobalDir :: !(Maybe OsPath)
-      -- ^ Optional home-scope directory (e.g. @~/.codex@ or @~/.grok@).
+      -- ^ Optional home-scope directory (e.g. @~/.codex@, @~/.grok@, or
+      -- @~/.claude@).
     , discoverRootMarkers :: ![OsPath]
       -- ^ Path segments that mark the project root. Default: @[".git"]@.
     } deriving (Eq, Show)
@@ -89,8 +90,8 @@ defaultDiscoverOptions = DiscoverOptions
 -- files are skipped. Project files are ordered root -> cwd.
 --
 -- A @.codex@ global directory selects Codex's narrow discovery contract.
--- Other homes (including @.grok@ and @.haskell-agent@), and calls without a
--- global directory, use Grok-compatible discovery.
+-- Other homes (including @.grok@, @.claude@, and @.haskell-agent@), and calls
+-- without a global directory, use Grok-compatible discovery.
 discoverProjectInstructions :: DiscoverOptions -> OsPath -> IO LoadedAgentsMd
 discoverProjectInstructions options cwd
     | options.discoverMaxBytes <= 0 =
@@ -125,14 +126,19 @@ discoverGrokInstructions
 discoverGrokInstructions options dirs = do
     home <- maybe (pure []) readGrokHomeInstructions options.discoverGlobalDir
     project <- concat <$> traverse readGrokDirectoryInstructions dirs
-    pure $ case home of
-        [] -> LoadedAgentsMd
+    combined <- dedupeInstructionFiles (home <> project)
+    pure $ case (home, combined) of
+        ([], _) -> LoadedAgentsMd
             { loadedGlobal = Nothing
-            , loadedProject = project
+            , loadedProject = combined
             }
-        first : rest -> LoadedAgentsMd
+        (_, first : rest) -> LoadedAgentsMd
             { loadedGlobal = Just first
-            , loadedProject = rest <> project
+            , loadedProject = rest
+            }
+        (_, []) -> LoadedAgentsMd
+            { loadedGlobal = Nothing
+            , loadedProject = []
             }
 
 -- | Grok Build reads its own home first, followed by compatible Claude and

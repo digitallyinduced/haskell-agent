@@ -7,6 +7,8 @@ module Agent.TUI.Presentation
     , formatToolOutput
     , parseSearchReplaceDiff
     , summarizeToolCall
+    , toolCallInput
+    , toolCallTitle
     , toolDetail
     ) where
 
@@ -29,6 +31,20 @@ summarizeToolCall call =
     let verb = toolVerb call.name
         detail = toolDetail call
     in if Text.null detail then verb else verb <> " " <> detail
+
+-- | Compact heading for a retained tool block. GHCi expressions are rendered
+-- separately as code, so keeping them out of the heading avoids an unbounded
+-- single terminal row and leaves a useful activity label.
+toolCallTitle :: ToolCall -> Text
+toolCallTitle call
+    | canonicalToolName call.name == "run_ghci" = "$ ghci"
+    | otherwise = summarizeToolCall call
+
+-- | Full invocation text that benefits from dedicated code rendering.
+toolCallInput :: ToolCall -> Text
+toolCallInput call = case canonicalToolName call.name of
+    "run_ghci" -> jsonTextFieldDefault "expression" call.arguments
+    _ -> ""
 
 data SearchReplaceAction
     = SearchReplaceCreate

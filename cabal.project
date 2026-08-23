@@ -10,6 +10,8 @@ packages:
     packages/agent-openai
     packages/agent-xai
     packages/agent-openrouter
+    packages/claude-agent-sdk-haskell
+    packages/agent-claude
 
 tests: True
 multi-repl: True

@@ -1,6 +1,7 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
     ( ReplAction(..)
+    , ShellMode(..)
     , SkillCommand(..)
     , SlashCommand(..)
     , SlashMenu(..)
@@ -67,6 +68,8 @@ data ReplAction
     | ReplShowTerminal
     | ReplAgents
     | ReplSkills !Bool
+    | ReplShowShell
+    | ReplSetShell !ShellMode
     | ReplInvokeSkill !Text !Text
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
@@ -80,6 +83,13 @@ data ReplAction
       -- ^ Start a fresh persisted session id with empty history.
     | ReplUsage
     | ReplCommandError Text
+    deriving (Eq, Show)
+
+data ShellMode
+    = ShellGhci
+    | ShellBash
+    | ShellBoth
+    | ShellNone
     deriving (Eq, Show)
 
 data SkillCommand = SkillCommand
@@ -117,7 +127,7 @@ slashCommands =
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
     , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
-    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials" False
+    , cmd "reload-auth" [] "/reload-auth" "Re-read provider credentials" False
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
     , cmd "attachments" [] "/attachments" "List queued clipboard images" False
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False
@@ -129,6 +139,7 @@ slashCommands =
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
+    , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     ]
   where
@@ -275,6 +286,7 @@ parseSlash skills line = case Text.words line of
                 [] -> ReplSkills False
                 ["reload"] -> ReplSkills True
                 _ -> ReplCommandError "usage: /skills [reload]"
+            "shell" -> parseShellCommand args
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -338,6 +350,17 @@ parseEffortCommand = \case
         Right effort -> ReplSetEffort effort
         Left err -> ReplCommandError (Text.pack err)
     _ -> ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
+
+parseShellCommand :: [Text] -> ReplAction
+parseShellCommand = \case
+    [] -> ReplShowShell
+    [raw] -> case Text.toLower raw of
+        "ghci" -> ReplSetShell ShellGhci
+        "bash" -> ReplSetShell ShellBash
+        "both" -> ReplSetShell ShellBoth
+        "none" -> ReplSetShell ShellNone
+        _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
+    _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
 
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
@@ -494,6 +517,7 @@ argCompletions :: [Text] -> SlashCommand -> [Text]
 argCompletions modelIds spec = case spec.slashName of
     "effort" -> reasoningEfforts
     "model" -> modelIds
+    "shell" -> ["ghci", "bash", "both", "none"]
     "help" -> map (.slashName) slashCommands
     "rename" -> ["--auto"]
     "paste" -> ["--send"]

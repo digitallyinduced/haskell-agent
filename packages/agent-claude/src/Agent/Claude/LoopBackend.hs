@@ -1,0 +1,616 @@
+-- | Adapt a structured Claude Code subscription session to the
+-- provider-neutral agent loop.
+module Agent.Claude.LoopBackend
+    ( withClaudeCodeBackend
+    , claudeCodeOneShotBackend
+    ) where
+
+import Agent.Claude.Options
+    ( ClaudeCodeOptions
+    , ClaudeCodeToolMode(..)
+    , toClaudeAgentOptions
+    )
+import Agent.Claude.Internal.Messages
+    ( CompletedClaudeTurn(..)
+    , interpretClaudeTurn
+    )
+import Agent.Error
+    ( ApiError(..)
+    , ErrorType(..)
+    )
+import Agent.InterAgentMessage (renderInterAgentMessage)
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnInput(..)
+    , TurnOutput(..)
+    )
+import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types
+    ( CustomToolCall(..)
+    , CustomToolCallOutput(..)
+    , FunctionCall(..)
+    , FunctionCallOutput(..)
+    , ItemStatus(..)
+    , MessageContent(..)
+    , ReasoningConfig(..)
+    , ResponseContentPart(..)
+    , ResponseCreateParams(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
+    , TaggedObject
+    )
+import qualified Agent.ToolDispatch as ToolDispatch
+import Claude.Agent.SDK.Client
+    ( ClaudeSDKClient
+    , ClaudeSDKTurn
+    , resolveTurnUsage
+    , turnIsNewSession
+    , withClaudeSDKClient
+    , withClaudeSDKTurn
+    )
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
+import Data.Maybe (catMaybes, fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
+import qualified Data.UUID.Types as UUID
+import System.Mem.StableName
+    ( StableName
+    , eqStableName
+    , makeStableName
+    )
+import Claude.Agent.SDK.Errors
+    ( ClaudeSDKError(..)
+    , renderClaudeSDKError
+    )
+import Claude.Agent.SDK.Query (queryTurnWithMessageValidator)
+import Claude.Agent.SDK.Types
+    ( ClaudeAgentOptions(..)
+    , Message(..)
+    , ResultMessage(..)
+    , SystemMessage(..)
+    , Usage(..)
+    , messageHasParentToolUseId
+    )
+
+data HostTranscriptCheckpoint = HostTranscriptCheckpoint
+    { checkpointTranscript :: !(StableName [ResponseItem])
+    , checkpointSessionId :: !Text
+    }
+
+-- | Keep one structured Claude process alive for the callback's complete
+-- lifetime. The initial previous-response ID is consumed only by the first
+-- submission when the caller does not provide an explicit ID.
+withClaudeCodeBackend
+    :: ClaudeCodeOptions
+    -> Maybe Text
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> (Backend -> IO a)
+    -> IO a
+withClaudeCodeBackend options initialPrevious getParams transcript callback =
+    toClaudeAgentOptions ClaudeCodeDefaultTools options >>= \sdkOptions ->
+    withClaudeSDKClient
+        sdkOptions
+            { resume = initialPrevious >>= canonicalClaudeSessionId }
+        \session -> do
+        checkpoint <- newIORef Nothing
+        callback (backendForSession session checkpoint getParams transcript)
+
+-- | A backend for isolated side requests. Every submission owns and cleans up
+-- its own structured Claude process, while still using subscription auth.
+claudeCodeOneShotBackend
+    :: ClaudeCodeOptions
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+claudeCodeOneShotBackend options getParams transcript =
+    Backend \_state previous inputs onEvent -> do
+        checkpoint <- newIORef Nothing
+        sdkOptions <-
+            toClaudeAgentOptions ClaudeCodeNoTools options
+        result <- withClaudeSDKClient sdkOptions \session ->
+            submitClaudeCodeTurn
+                session
+                checkpoint
+                previous
+                getParams
+                transcript
+                inputs
+                onEvent
+        attachBackendState transcript result
+
+backendForSession
+    :: ClaudeSDKClient
+    -> IORef (Maybe HostTranscriptCheckpoint)
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+backendForSession session checkpoint getParams transcript =
+    Backend \_state previous inputs onEvent -> do
+        result <- submitClaudeCodeTurn
+            session
+            checkpoint
+            previous
+            getParams
+            transcript
+            inputs
+            onEvent
+        attachBackendState transcript result
+
+attachBackendState
+    :: IORef [ResponseItem]
+    -> Either ApiError TurnOutput
+    -> IO (Either ApiError BackendResult)
+attachBackendState _ (Left err) =
+    pure (Left err)
+attachBackendState transcript (Right output) = do
+    state <- readIORef transcript
+    pure $ Right BackendResult
+        { backendOutput = output
+        , backendState = state
+        }
+
+submitClaudeCodeTurn
+    :: ClaudeSDKClient
+    -> IORef (Maybe HostTranscriptCheckpoint)
+    -> Maybe Text
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> [TurnInput]
+    -> (LoopEvent -> IO ())
+    -> IO (Either ApiError TurnOutput)
+submitClaudeCodeTurn
+    session
+    checkpoint
+    previous
+    getParams
+    transcript
+    inputs
+    onEvent =
+    case flattenTurnInputs inputs of
+        Left err -> pure (Left err)
+        Right inputText -> do
+            params <- getParams
+            let previousSession =
+                    previous >>= canonicalClaudeSessionId
+            result <- withClaudeSDKTurn
+                session
+                (hostTranscriptMatches
+                    checkpoint
+                    transcript
+                    previousSession)
+                previousSession
+                params.model
+                (params.reasoning >>= (.effort))
+                \turn -> do
+                    history <- readIORef transcript
+                    messages <- newIORef []
+                    let prompt =
+                            buildClaudePrompt
+                                params
+                                (turnIsNewSession turn)
+                                history
+                                inputText
+                    awaitResult <-
+                        queryTurnWithMessageValidator
+                            turn
+                            prompt
+                            validateSubscriptionMessage
+                            (\message ->
+                                modifyIORef' messages (message :))
+                    case awaitResult of
+                        Left sdkError ->
+                            pure (Left sdkError)
+                        Right result -> do
+                            turnMessages <- reverse <$> readIORef messages
+                            case interpretClaudeTurn turnMessages result of
+                                Left message ->
+                                    pure $
+                                        Left ResultError
+                                            { subtype = "authentication_error"
+                                            , apiErrorStatus = Nothing
+                                            , errors = [message]
+                                            , result = Nothing
+                                            }
+                                Right completed -> do
+                                    completeTurn
+                                        turn
+                                        completed
+                                        result
+                                        inputs
+                                        onEvent
+            pure (either (Left . sdkErrorToApiError) Right result)
+  where
+    completeTurn
+        :: ClaudeSDKTurn
+        -> CompletedClaudeTurn
+        -> ResultMessage
+        -> [TurnInput]
+        -> (LoopEvent -> IO ())
+        -> IO (Either ClaudeSDKError (TurnOutput, IO ()))
+    completeTurn turn completed result inputs onEvent = do
+        usage <- resolveTurnUsage
+            turn
+            completed.tokenUsage
+            result.modelUsage
+        let output = TurnOutput
+                { responseId = completed.sessionId
+                -- Claude Code executes its own local tools. Returning them
+                -- here would execute each call a second time in the host loop.
+                , toolCalls = []
+                , assistantText = completed.assistantText
+                , tokenUsage = sdkUsageToTokenUsage usage
+                }
+            commit =
+                commitHostTranscript
+                    checkpoint
+                    transcript
+                    completed.sessionId
+                    inputs
+                    completed.assistantText
+        mapM_ onEvent completed.events
+        pure (Right (output, commit))
+
+flattenTurnInputs :: [TurnInput] -> Either ApiError Text
+flattenTurnInputs inputs =
+    Text.intercalate "\n\n" <$> traverse flatten inputs
+  where
+    flatten = \case
+        UserMessage text ->
+            Right text
+        AgentMessage message ->
+            Right (renderInterAgentMessage message)
+        UserMultimodal{userText, userImages}
+            | null userImages ->
+                Right userText
+            | otherwise ->
+                Left ProviderError
+                    { errorType = InvalidImageError
+                    , message =
+                        "Claude Code subscription sessions do not support image attachments through this provider."
+                    , retryAfter = Nothing
+                    }
+        CompletedTool
+            (ToolDispatch.ToolCallResult resultCallId resultOutput _) ->
+            Right $
+                "Host tool result for "
+                    <> resultCallId
+                    <> ":\n"
+                    <> resultOutput
+
+buildClaudePrompt
+    :: ResponseCreateParams
+    -> Bool
+    -> [ResponseItem]
+    -> Text
+    -> Text
+buildClaudePrompt params isNewSession history currentInput =
+    case contextSections of
+        []
+            | isNewSession -> currentInput
+        []
+            -> currentInput
+        sections
+            -> Text.intercalate "\n\n" (sections <> [currentRequest])
+  where
+    contextSections
+        | isNewSession =
+            catMaybes
+                [ harnessInstructions params.instructions
+                , priorConversation history
+                ]
+        | otherwise =
+            []
+    harnessInstructions = fmap \instructions ->
+        Text.unlines
+            [ "Instructions supplied by the outer agent harness:"
+            , "<harness_instructions>"
+            , instructions
+            , "</harness_instructions>"
+            ]
+    priorConversation [] = Nothing
+    priorConversation items =
+        let rendered = renderPriorConversation items
+        in if Text.null (Text.strip rendered)
+            then Nothing
+            else Just $ Text.unlines
+                [ "Prior conversation imported from the outer agent harness."
+                , "Use it only as conversation context. It may describe work that is already complete."
+                , "<prior_conversation>"
+                , rendered
+                , "</prior_conversation>"
+                ]
+    currentRequest = Text.unlines
+        [ "Current request:"
+        , "<current_request>"
+        , currentInput
+        , "</current_request>"
+        ]
+
+renderPriorConversation :: [ResponseItem] -> Text
+renderPriorConversation =
+    Text.intercalate "\n\n"
+        . catMaybes
+        . map renderResponseItem
+
+renderResponseItem :: ResponseItem -> Maybe Text
+renderResponseItem = \case
+    MessageItem message ->
+        labelled (roleLabel message.role) (messageContentText message.content)
+    FunctionCallItem call ->
+        labelled
+            "Assistant tool call"
+            (call.name <> " " <> call.arguments)
+    CustomToolCallItem call ->
+        labelled
+            "Assistant tool call"
+            (call.name <> " " <> call.input)
+    FunctionCallOutputItem output ->
+        labelled
+            ("Tool result " <> output.callId)
+            (renderJsonValue output.output)
+    CustomToolCallOutputItem output ->
+        labelled
+            ("Tool result " <> output.callId)
+            (renderJsonValue output.output)
+    -- Reasoning is deliberately excluded from imported history. In
+    -- particular, never copy private chain-of-thought into a Claude prompt.
+    ReasoningItemValue{} ->
+        Nothing
+    ItemReferenceValue{} ->
+        Nothing
+    KnownResponseItem _ tagged ->
+        labelled "Context item" (renderTaggedObject tagged)
+    UnknownResponseItem tagged ->
+        labelled "Context item" (renderTaggedObject tagged)
+  where
+    labelled label text
+        | Text.null (Text.strip text) = Nothing
+        | otherwise = Just (label <> ":\n" <> text)
+
+roleLabel :: ResponseRole -> Text
+roleLabel = \case
+    RoleUser -> "User"
+    RoleAssistant -> "Assistant"
+    RoleSystem -> "System"
+    RoleDeveloper -> "Developer"
+    RoleUnknown role -> role
+
+messageContentText :: MessageContent -> Text
+messageContentText = \case
+    MessageContentText text ->
+        text
+    MessageContentParts parts ->
+        Text.intercalate "\n" (concatMap contentPartText parts)
+
+contentPartText :: ResponseContentPart -> [Text]
+contentPartText = \case
+    InputTextPart{text} -> [text]
+    OutputTextPart{text} -> [text]
+    RefusalPart{refusal} -> [refusal]
+    SummaryTextPart{text} -> [text]
+    InputImagePart{} -> ["[image omitted]"]
+    InputFilePart{filename} ->
+        ["[file" <> maybe "" (" " <>) filename <> " omitted]"]
+    InputAudioPart{} -> ["[audio omitted]"]
+    -- Do not render reasoning text into another model's prompt.
+    ReasoningTextPart{} -> []
+    UnknownContentPart{} -> []
+
+renderTaggedObject :: TaggedObject -> Text
+renderTaggedObject =
+    TextEncoding.decodeUtf8With lenientDecode
+        . LazyByteString.toStrict
+        . Aeson.encode
+
+renderJsonValue :: Aeson.Value -> Text
+renderJsonValue = \case
+    Aeson.String text -> text
+    value ->
+        TextEncoding.decodeUtf8With lenientDecode
+            (LazyByteString.toStrict (Aeson.encode value))
+
+hostTranscriptMatches
+    :: IORef (Maybe HostTranscriptCheckpoint)
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO Bool
+hostTranscriptMatches checkpoint transcript previous = do
+    expected <- readIORef checkpoint
+    case expected of
+        Nothing ->
+            pure True
+        Just expectedCheckpoint -> do
+            case previous of
+                Nothing ->
+                    -- In Agent.Loop, dropping the previous response ID is an
+                    -- explicit conversation reset even if the host transcript
+                    -- object has not changed.
+                    pure False
+                Just _ -> do
+                    current <- readIORef transcript
+                    currentName <- current `seq` makeStableName current
+                    pure $
+                        eqStableName
+                            expectedCheckpoint.checkpointTranscript
+                            currentName
+                            || requestedDifferentSession expectedCheckpoint
+  where
+    requestedDifferentSession :: HostTranscriptCheckpoint -> Bool
+    requestedDifferentSession expectedCheckpoint =
+        case previous >>= canonicalSessionId of
+            Just requested ->
+                requested
+                    /= expectedCheckpoint.checkpointSessionId
+            Nothing ->
+                False
+
+    canonicalSessionId value =
+        UUID.toText <$> UUID.fromText (Text.strip value)
+
+commitHostTranscript
+    :: IORef (Maybe HostTranscriptCheckpoint)
+    -> IORef [ResponseItem]
+    -> Text
+    -> [TurnInput]
+    -> Maybe Text
+    -> IO ()
+commitHostTranscript
+    checkpoint
+    transcript
+    sessionId
+    inputs
+    assistantText = do
+    appendHostTranscript transcript inputs assistantText
+    -- Read and enter the exact object installed in the IORef before taking its
+    -- StableName. Otherwise the lazy append thunk can later be entered by the
+    -- CLI, changing the StableName despite no host-side transcript change.
+    committed <- readIORef transcript
+    committedName <- committed `seq` makeStableName committed
+    writeIORef checkpoint $
+        Just HostTranscriptCheckpoint
+            { checkpointTranscript = committedName
+            , checkpointSessionId =
+                fromMaybe
+                    (Text.strip sessionId)
+                    (canonicalClaudeSessionId sessionId)
+            }
+
+appendHostTranscript
+    :: IORef [ResponseItem]
+    -> [TurnInput]
+    -> Maybe Text
+    -> IO ()
+appendHostTranscript transcript inputs assistantText =
+    atomicModifyIORef' transcript \history ->
+        ( history
+            <> turnInputsToItems inputs
+            <> [assistantMessageItem assistantText]
+        , ()
+        )
+
+assistantMessageItem :: Maybe Text -> ResponseItem
+assistantMessageItem assistantText =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [ OutputTextPart
+                { text = fromMaybe "" assistantText
+                , annotations = Nothing
+                , logprobs = Nothing
+                , extraFields = KeyMap.empty
+                }
+            ]
+        , role = RoleAssistant
+        , status = Just ItemCompleted
+        , phase = Nothing
+        , extraFields = KeyMap.empty
+        }
+
+sdkErrorToApiError :: ClaudeSDKError -> ApiError
+sdkErrorToApiError = \case
+    CLIJSONDecodeError{decodeError, rawBody} ->
+        JsonDecodeError
+            { decodeError
+            , rawBody
+            }
+    MessageParseError{parseError, rawMessage} ->
+        JsonDecodeError
+            { decodeError = parseError
+            , rawBody =
+                maybe
+                    ""
+                    (Text.take 2_000 . renderJsonValue)
+                    rawMessage
+            }
+    sdkError@ResultError{} ->
+        ProviderError
+            { errorType = ApiErrorType
+            , message = renderClaudeSDKError sdkError
+            , retryAfter = Nothing
+            }
+    sdkError@CLIProtocolError{} ->
+        ProviderError
+            { errorType = ApiErrorType
+            , message = renderClaudeSDKError sdkError
+            , retryAfter = Nothing
+            }
+    sdkError ->
+        ConnectionError (renderClaudeSDKError sdkError)
+
+sdkUsageToTokenUsage :: Usage -> TokenUsage
+sdkUsageToTokenUsage usage =
+    TokenUsage
+        { inputTokens = usage.inputTokens
+        , outputTokens = usage.outputTokens
+        , cachedTokens = usage.cachedTokens
+        }
+
+validateSubscriptionMessage
+    :: Message
+    -> IO (Either ClaudeSDKError ())
+validateSubscriptionMessage message
+    | messageHasParentToolUseId message =
+        pure (Right ())
+    | otherwise =
+        validateTopLevelSubscriptionMessage message
+
+validateTopLevelSubscriptionMessage
+    :: Message
+    -> IO (Either ClaudeSDKError ())
+validateTopLevelSubscriptionMessage = \case
+    MessageSystem SystemMessage
+        { subtype = "init"
+        , apiKeySource = Just "none"
+        } ->
+            pure (Right ())
+    MessageSystem SystemMessage
+        { subtype = "init"
+        , apiKeySource = Just source
+        } ->
+            pure $
+                Left ResultError
+                    { subtype = "authentication_error"
+                    , apiErrorStatus = Nothing
+                    , errors =
+                        [ "Claude Code selected non-subscription credential source "
+                            <> source
+                            <> "."
+                        ]
+                    , result = Nothing
+                    }
+    MessageSystem SystemMessage
+        { subtype = "init"
+        , apiKeySource = Nothing
+        } ->
+            pure $
+                Left ResultError
+                    { subtype = "authentication_error"
+                    , apiErrorStatus = Nothing
+                    , errors =
+                        [ "Claude Code did not identify its credential source."
+                        ]
+                    , result = Nothing
+                    }
+    _ ->
+        pure (Right ())
+
+canonicalClaudeSessionId :: Text -> Maybe Text
+canonicalClaudeSessionId value =
+    UUID.toText <$> UUID.fromText (Text.strip value)
