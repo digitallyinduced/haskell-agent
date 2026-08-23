@@ -494,6 +494,38 @@ spec = describe "fullscreen UI reducer" do
                     (warningNotice
                         "Cancelling the current turn; sending this prompt next…")
 
+    it "updates retry errors in place until the deadline reaches now" do
+        let started =
+                reduceUi
+                    (UiRetryCountdown
+                        "Provider unavailable.\n"
+                        61000
+                        ", or choose another provider.")
+                    initialUiState
+            afterSecond = advanceUiTime 1000 started
+            finished = advanceUiTime 60000 afterSecond
+            bodies =
+                map (.blockBody) . Foldable.toList . (.uiBlocks)
+        bodies started
+            `shouldBe`
+                [ "Provider unavailable.\n\
+                  \Try again in 1m01s, or choose another provider."
+                ]
+        bodies afterSecond
+            `shouldBe`
+                [ "Provider unavailable.\n\
+                  \Try again in 1m00s, or choose another provider."
+                ]
+        bodies finished
+            `shouldBe`
+                [ "Provider unavailable.\n\
+                  \Try again now, or choose another provider."
+                ]
+        uiNeedsTick started `shouldBe` True
+        uiNextDeadlineMillis started `shouldBe` Just 1000
+        finished.uiRetryCountdown `shouldBe` Nothing
+        uiNeedsTick finished `shouldBe` False
+
     it "shows a search-replace diff while the tool is running" do
         let call =
                 functionToolCall

@@ -290,6 +290,21 @@ spec = do
             motionDemandFor MotionOff False False False running
                 `shouldBe` MotionSlow
 
+        it "keeps semantic countdown updates active in every motion mode" do
+            let countdown =
+                    reduceUi
+                        (UiRetryCountdown
+                            "Provider unavailable.\n"
+                            60000
+                            ", or choose another provider.")
+                        initialUiState
+            motionDemandFor MotionFull False False False countdown
+                `shouldBe` MotionSlow
+            motionDemandFor MotionReduced False False False countdown
+                `shouldBe` MotionSlow
+            motionDemandFor MotionOff False False False countdown
+                `shouldBe` MotionSlow
+
         it "bumps the scheduler generation on demand or timer boundaries" do
             nextMotionSchedule
                 False
