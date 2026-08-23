@@ -94,6 +94,22 @@ spec = describe "fullscreen UI reducer" do
                     ]
         state.uiNotice `shouldBe` Just notice
 
+    it "shows provider warnings without replacing live activity" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ActivityUpdated "Writing…")
+                    , UiLoop
+                        (WarningRaised
+                            "Codex usage is low: primary 8% left.")
+                    ]
+        state.uiActivity `shouldBe` "Writing…"
+        state.uiNotice
+            `shouldBe`
+                Just
+                    (warningNotice
+                        "Codex usage is low: primary 8% left.")
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult

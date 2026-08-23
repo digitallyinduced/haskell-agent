@@ -317,6 +317,10 @@ spec = do
                         (UiSetNotice
                             (Just (successNotice "saved")))
                         idle
+                warning =
+                    reduceUi
+                        (UiLoop (WarningRaised "Codex usage is low"))
+                        turnStarted
                 promoted =
                     reduceUi (UiInputPromoted "urgent") turnStarted
             uiEventRestartsMotionSchedule
@@ -337,6 +341,12 @@ spec = do
                 (UiSetNotice (Just (successNotice "saved")))
                 idle
                 notice
+                Map.empty
+                `shouldBe` True
+            uiEventRestartsMotionSchedule
+                (UiLoop (WarningRaised "Codex usage is low"))
+                turnStarted
+                warning
                 Map.empty
                 `shouldBe` True
             uiEventRestartsMotionSchedule
