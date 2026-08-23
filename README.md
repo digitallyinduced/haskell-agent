@@ -228,3 +228,7 @@ same session without rebuilding the executable.
 
 See [`AGENTS.md`](AGENTS.md) for the complete development workflow, including
 multi-package GHCi sessions, Nix package maintenance, and CLI testing.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
