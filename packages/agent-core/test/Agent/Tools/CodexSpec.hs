@@ -22,7 +22,11 @@ import Agent.Tools.Codex.Shell
     , newCodexShellSession
     )
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
+import Agent.Tools.PlanMode
+    ( isPlanModeActive
+    , newPlanModeEnv
+    , readPlanMarkdown
+    )
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket, finally)
@@ -52,15 +56,18 @@ spec = describe "Agent.Tools.Codex" do
             coding <- codingToolsFor OpenAIProvider env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
             names `shouldBe`
-                [ "shell_command"
+                [ "read_file"
+                , "grep"
+                , "list_dir"
+                , "shell_command"
                 , "write_stdin"
                 , "apply_patch"
                 , "update_plan"
                 , "run_ghci"
                 , "enter_plan_mode"
+                , "write_plan"
                 , "ask_user_question"
                 ]
-            names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
             coding.codingClose
@@ -119,7 +126,31 @@ spec = describe "Agent.Tools.Codex" do
                     (functionToolCall "call-enter-plan" "enter_plan_mode"
                         "{\"explanation\":\"The user requested a design plan.\"}")
                 result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
+                result.output `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
+                result.output `shouldNotSatisfy` Text.isInfixOf "exit_plan_mode"
                 isPlanModeActive plan `shouldReturn` True)
+                `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
+
+    it "writes only the session plan through write_plan" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            shell <- newCodexShellSession env
+            plan <- newPlanModeEnv env.toolCwd Nothing
+            tools <- codexTools env shell ghci plan Nothing
+            (do
+                inactive <- dispatchToolCall defaultLoopDispatch
+                    (appToolHandlers tools)
+                    (functionToolCall "call-write-inactive" "write_plan"
+                        "{\"content\":\"# Not yet\"}")
+                inactive.output `shouldSatisfy` Text.isInfixOf "not active"
+                _ <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+                    (functionToolCall "call-enter" "enter_plan_mode" "{}")
+                written <- dispatchToolCall defaultLoopDispatch
+                    (appToolHandlers tools)
+                    (functionToolCall "call-write" "write_plan"
+                        "{\"content\":\"# Safe plan\\n\\n- inspect\\n\"}")
+                written.output `shouldSatisfy` Text.isInfixOf "Wrote the plan"
+                readPlanMarkdown plan `shouldReturn` "# Safe plan\n\n- inspect\n")
                 `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
 
     it "adds, updates, and deletes files via apply_patch" do
