@@ -174,11 +174,13 @@ solarizedDark =
         , (selectedAttr, V.defAttr
             `V.withForeColor` rgb 147 161 161
             `V.withBackColor` rgb 7 54 66)
+        -- Persistent UI chrome stays on Solarized's base ramp. Saturated
+        -- accents are reserved for semantic content and exceptional states.
         , (borderAttr, V.defAttr
             `V.withForeColor` rgb 88 110 117
             `V.withBackColor` rgb 0 43 54)
         , (borderActiveAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
+            `V.withForeColor` rgb 101 123 131
             `V.withBackColor` rgb 0 43 54)
         , (headingAttr, V.defAttr
             `V.withForeColor` rgb 211 54 130
@@ -201,14 +203,14 @@ solarizedDark =
             `V.withForeColor` rgb 69 94 100
             `V.withBackColor` rgb 0 43 54)
         , (lambdaTrailAttr, V.defAttr
-            `V.withForeColor` rgb 38 139 210
+            `V.withForeColor` rgb 88 110 117
             `V.withBackColor` rgb 0 43 54)
         , (lambdaGlowAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
+            `V.withForeColor` rgb 101 123 131
             `V.withBackColor` rgb 0 43 54
             `V.withStyle` V.bold)
         , (lambdaSparkAttr, V.defAttr
-            `V.withForeColor` rgb 211 54 130
+            `V.withForeColor` rgb 131 148 150
             `V.withBackColor` rgb 0 43 54
             `V.withStyle` V.bold)
         , (linkAttr, V.defAttr
@@ -220,15 +222,15 @@ solarizedDark =
             `V.withBackColor` rgb 0 43 54
             `V.withStyle` V.bold)
         , (controlLinkAttr, V.defAttr
-            `V.withForeColor` rgb 38 139 210
+            `V.withForeColor` rgb 101 123 131
             `V.withBackColor` rgb 0 43 54)
         , (controlLinkHoverAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
+            `V.withForeColor` rgb 131 148 150
             `V.withBackColor` rgb 0 43 54
             `V.withStyle` V.underline)
         , (controlLinkActiveAttr, V.defAttr
-            `V.withForeColor` rgb 0 43 54
-            `V.withBackColor` rgb 38 139 210
+            `V.withForeColor` rgb 147 161 161
+            `V.withBackColor` rgb 7 54 66
             `V.withStyle` V.bold)
         , (syntaxNormalAttr, codeColor 42 161 152)
         , (syntaxKeywordAttr, codeColor 211 54 130)
