@@ -16,7 +16,7 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
     ( AppTool

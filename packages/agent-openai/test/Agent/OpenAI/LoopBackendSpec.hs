@@ -8,6 +8,7 @@ import Agent.Error
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
+import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Control.Retry (constantDelay, limitRetries)
@@ -227,10 +228,33 @@ spec = do
                 `shouldBe` Nothing
             streamEventToLoopEvent (ResponseOutputItemDoneEvent
                 { item = assistantItem "x"
-                , outputIndex = 0
+                , outputIndex = Just 0
                 , sequenceNumber = Nothing
                 , eventExtraFields = KeyMap.empty
                 }) `shouldBe` Nothing
+
+    describe "streamOutputObserved" do
+        it "treats terminal lifecycle events as replay-unsafe" do
+            streamOutputObserved
+                (ResponseCompletedEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` True
+            streamOutputObserved
+                (ResponseDoneEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` True
+            streamOutputObserved
+                (ResponseIncompleteEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` True
+
+        it "treats failed lifecycle events as output only when output is present" do
+            streamOutputObserved
+                (ResponseFailedEvent
+                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
+                    Nothing
+                    KeyMap.empty)
+                `shouldBe` True
+            streamOutputObserved
+                (ResponseFailedEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` False
 
     describe "statelessResponsesBackend" do
         it "replays the local transcript on tool follow-ups" do
@@ -527,7 +551,7 @@ spec = do
             let connectionFailure = ConnectionError "socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
                     { item = assistantItem "partial"
-                    , outputIndex = 0
+                    , outputIndex = Just 0
                     , sequenceNumber = Nothing
                     , eventExtraFields = KeyMap.empty
                     }
@@ -553,8 +577,8 @@ spec = do
             healthy <- newIORef True
             let connectionFailure = ConnectionError "decode failed"
                 completedEvent = ResponseCompletedEvent
-                    { response =
-                        testResponse "resp-completed" [assistantItem "done"]
+                    { responseValue = Aeson.toJSON
+                        (testResponse "resp-completed" [assistantItem "done"])
                     , sequenceNumber = Nothing
                     , eventExtraFields = KeyMap.empty
                     }
@@ -580,8 +604,8 @@ spec = do
             healthy <- newIORef True
             let connectionFailure = ConnectionError "failed response"
                 failedEvent = ResponseFailedEvent
-                    { response =
-                        testResponse "resp-failed" [assistantItem "partial"]
+                    { responseValue = Aeson.toJSON
+                        (testResponse "resp-failed" [assistantItem "partial"])
                     , sequenceNumber = Nothing
                     , eventExtraFields = KeyMap.empty
                     }
@@ -609,7 +633,7 @@ spec = do
             let connectionFailure = ConnectionError "fresh socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
                     { item = assistantItem "partial"
-                    , outputIndex = 0
+                    , outputIndex = Just 0
                     , sequenceNumber = Nothing
                     , eventExtraFields = KeyMap.empty
                     }
@@ -638,7 +662,7 @@ spec = do
                 freshFailure = ConnectionError "fresh socket closed"
                 outputEvent = ResponseOutputItemDoneEvent
                     { item = assistantItem "partial"
-                    , outputIndex = 0
+                    , outputIndex = Just 0
                     , sequenceNumber = Nothing
                     , eventExtraFields = KeyMap.empty
                     }
@@ -1115,7 +1139,7 @@ shouldMarkPostOutputAuxiliaryFailure failure = do
     freshCalls <- newIORef (0 :: Int)
     let outputEvent = ResponseOutputItemDoneEvent
             { item = assistantItem "partial"
-            , outputIndex = 0
+            , outputIndex = Just 0
             , sequenceNumber = Nothing
             , eventExtraFields = KeyMap.empty
             }
@@ -1139,13 +1163,7 @@ shouldMarkPostOutputAuxiliaryFailure failure = do
     readIORef freshCalls `shouldReturn` 0
 
 isAuxiliaryOutputEvent :: ResponseStreamEvent -> Bool
-isAuxiliaryOutputEvent = \case
-    ResponseCompletedEvent{} -> True
-    ResponseFailedEvent{response} -> not (null response.output)
-    ResponseIncompleteEvent{} -> True
-    ResponseOutputItemAddedEvent{} -> True
-    ResponseOutputItemDoneEvent{} -> True
-    _ -> False
+isAuxiliaryOutputEvent = streamOutputObserved
 
 replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =

@@ -1,6 +1,7 @@
 module Agent.Responses.ResponseMerge
     ( mergeCompletedResponseOutput
     , mergeDoneResponse
+    , mergeResponseFragments
     ) where
 
 import qualified Data.Aeson as Aeson
@@ -39,14 +40,9 @@ mergeDoneResponse
 mergeDoneResponse baseResponse streamedItems doneResponse =
     mergeCompletedResponseOutput streamedItems withTerminalStatus
   where
-    mergedResponse = case (baseResponse, doneResponse) of
-        (Just (Aeson.Object baseObject), Aeson.Object doneObject) ->
-            Aeson.Object $
-                KeyMap.foldrWithKey
-                    KeyMap.insert
-                    baseObject
-                    doneObject
-        (_, value) -> value
+    mergedResponse =
+        mergeResponseFragments
+            (Maybe.maybeToList baseResponse <> [doneResponse])
 
     withTerminalStatus = case (doneResponse, mergedResponse) of
         (Aeson.Object doneObject, Aeson.Object mergedObject)
@@ -54,6 +50,21 @@ mergeDoneResponse baseResponse streamedItems doneResponse =
                 Aeson.Object
                     (KeyMap.insert "status" (Aeson.String "completed") mergedObject)
         _ -> mergedResponse
+
+-- | Overlay partial response objects in wire order. Later fragments win while
+-- fields absent from a terminal fragment remain available from earlier
+-- lifecycle events such as @response.created@.
+mergeResponseFragments :: [Aeson.Value] -> Aeson.Value
+mergeResponseFragments =
+    foldl merge (Aeson.Object KeyMap.empty)
+  where
+    merge (Aeson.Object accumulated) (Aeson.Object fragment) =
+        Aeson.Object $
+            KeyMap.foldrWithKey
+                KeyMap.insert
+                accumulated
+                fragment
+    merge _ fragment = fragment
 
 mergeOutputItems :: [Aeson.Value] -> [Aeson.Value] -> [Aeson.Value]
 mergeOutputItems finalItems streamedItems =
