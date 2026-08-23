@@ -1,6 +1,10 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.CLI.SubagentStore
+import Agent.CLI.Subagents.Runtime (validatePersistedSubagentTarget)
+import Agent.CLI.Session (LegacySubagentTarget(..))
+import Agent.Dialect (DialectId(..))
+import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
@@ -40,7 +44,8 @@ spec = describe "Agent.CLI.SubagentStore" do
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
             let identity = SubagentIdentity (Just parentId) 2 taskPath
             saveSubagentState dir agentId [item] (Just "resp-1")
-                (Completed (Just "done")) (Just "explore")
+                (Completed (Just "done")) XAIProvider "grok-4.5-mini"
+                GrokBuildDialect (Just "explore")
                 (Just "grok-4.5-mini") (Just "high")
                 (Just (fromFilePath "/tmp/work"))
                 (Just identity)
@@ -51,6 +56,9 @@ spec = describe "Agent.CLI.SubagentStore" do
                     length items `shouldBe` 1
                     meta.diskPreviousResponseId `shouldBe` Just "resp-1"
                     meta.diskStatus `shouldBe` Just (Completed (Just "done"))
+                    meta.diskProvider `shouldBe` Just XAIProvider
+                    meta.diskEffectiveModel `shouldBe` Just "grok-4.5-mini"
+                    meta.diskDialect `shouldBe` Just GrokBuildDialect
                     meta.diskAgentType `shouldBe` Just "explore"
                     meta.diskAgentModel `shouldBe` Just "grok-4.5-mini"
                     meta.diskReasoningEffort `shouldBe` Just "high"
@@ -76,6 +84,7 @@ spec = describe "Agent.CLI.SubagentStore" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-legacy-1"
             saveSubagentState dir agentId [] (Just "legacy") Interrupted
+                XAIProvider "grok-4.6" GrokBuildDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
@@ -89,12 +98,16 @@ spec = describe "Agent.CLI.SubagentStore" do
                     meta.diskParentId `shouldBe` Nothing
                     meta.diskDepth `shouldBe` Nothing
                     meta.diskStatus `shouldBe` Nothing
+                    meta.diskProvider `shouldBe` Nothing
+                    meta.diskEffectiveModel `shouldBe` Nothing
+                    meta.diskDialect `shouldBe` Nothing
                 other -> expectationFailure ("unexpected load: " <> show other)
 
     it "fails closed on corrupt transcript JSON" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-corrupt-1"
             saveSubagentState dir agentId [] (Just "r") Interrupted
+                OpenAIProvider "gpt-5.6-luna" CodexDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
@@ -118,6 +131,94 @@ spec = describe "Agent.CLI.SubagentStore" do
             `shouldBe` drop 2 items
         forkSubagentTranscript (Just "18446744073709551617") items
             `shouldBe` items
+
+    describe "validatePersistedSubagentTarget" do
+        it "accepts a matching provider, effective model, and dialect" do
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "openai/gpt-5.1"
+                CodexDialect
+                Nothing
+                persistedMeta
+                `shouldBe` Right ("openai/gpt-5.1", CodexDialect)
+
+        it "rejects an inherited child after the parent target changes" do
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "anthropic/claude-sonnet-4"
+                GenericResponsesDialect
+                Nothing
+                persistedMeta
+                `shouldSatisfy` isLeft
+
+        it "rejects transport-specific child models after a provider change" do
+            validatePersistedSubagentTarget
+                OpenAIProvider
+                "openai/gpt-5.1"
+                CodexDialect
+                Nothing
+                persistedMeta
+                `shouldSatisfy` isLeft
+
+        it "accepts missing target metadata only in legacy-compatible sessions" do
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "openai/gpt-5.1"
+                GrokBuildDialect
+                (Just legacyTarget)
+                legacyMeta
+                `shouldBe` Right ("openai/gpt-5.1", GrokBuildDialect)
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "openai/gpt-5.1"
+                GrokBuildDialect
+                Nothing
+                legacyMeta
+                `shouldSatisfy` isLeft
+
+        it "rejects legacy metadata after a durable root target change" do
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "anthropic/claude-sonnet-4"
+                GenericResponsesDialect
+                (Just legacyTarget)
+                legacyMeta
+                `shouldSatisfy` isLeft
+
+legacyTarget :: LegacySubagentTarget
+legacyTarget = LegacySubagentTarget
+    { legacyTargetProvider = OpenRouterProvider
+    , legacyTargetEffectiveModel = "openai/gpt-5.1"
+    , legacyTargetDialect = GrokBuildDialect
+    }
+
+persistedMeta :: SubagentDiskMeta
+persistedMeta = legacyMeta
+    { diskProvider = Just OpenRouterProvider
+    , diskEffectiveModel = Just "openai/gpt-5.1"
+    , diskDialect = Just CodexDialect
+    }
+
+legacyMeta :: SubagentDiskMeta
+legacyMeta = SubagentDiskMeta
+    { diskPreviousResponseId = Nothing
+    , diskStatus = Nothing
+    , diskProvider = Nothing
+    , diskEffectiveModel = Nothing
+    , diskDialect = Nothing
+    , diskAgentType = Nothing
+    , diskAgentModel = Nothing
+    , diskReasoningEffort = Nothing
+    , diskCwd = Nothing
+    , diskTaskPath = Nothing
+    , diskParentId = Nothing
+    , diskDepth = Nothing
+    }
+
+isLeft :: Either a b -> Bool
+isLeft = \case
+    Left _ -> True
+    Right _ -> False
 
 messageItem :: ResponseRole -> Text -> ResponseItem
 messageItem role text = MessageItem ResponseMessage

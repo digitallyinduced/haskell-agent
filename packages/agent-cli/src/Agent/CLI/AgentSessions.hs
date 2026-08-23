@@ -27,7 +27,16 @@ import Agent.CLI.SessionLock
     ( sessionLockIsActive
     , sessionLockPath
     )
+import Agent.CLI.Models
+    ( ModelOption(..)
+    , resolveModelOptionDialect
+    )
 import Agent.OsPath (fromText, unsafeToFilePath)
+import Agent.Dialect
+    ( DialectId
+    , dialectIdForModel
+    , dialectSlug
+    )
 import Agent.Provider (Provider, providerSlug)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -81,6 +90,8 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     { toolsRoot :: !OsPath
     , toolsProvider :: !Provider
     , toolsModel :: !Text
+    , toolsTransportModel :: !Text
+    , toolsDialect :: !DialectId
     , toolsCwd :: !OsPath
     , toolsEffort :: !Text
     , toolsCurrentSessionId :: !(IO (Maybe Text))
@@ -349,13 +360,34 @@ runCreateAgentSession env args
     | maybe False ((> 100) . Text.length . Text.strip) args.title =
         pure (Left "create_agent_session title must be at most 100 characters")
     | otherwise = do
+        let model = fromMaybe env.toolsModel args.model
+        target <- case args.model of
+            Nothing ->
+                pure ModelOption
+                    { modelProvider = env.toolsProvider
+                    , modelId = model
+                    , modelTransportId = env.toolsTransportModel
+                    , modelDialect = env.toolsDialect
+                    , modelLabel = Nothing
+                    }
+            Just _ ->
+                resolveModelOptionDialect ModelOption
+                    { modelProvider = env.toolsProvider
+                    , modelId = model
+                    , modelTransportId = model
+                    , modelDialect =
+                        dialectIdForModel env.toolsProvider model
+                    , modelLabel = Nothing
+                    }
         let title = case Text.strip <$> args.title of
                 Just value | not (Text.null value) -> value
                 _ -> sessionTitleFromPrompt args.message
             spec = SessionCreate
                 { createRoot = env.toolsRoot
                 , createProvider = env.toolsProvider
-                , createModel = fromMaybe env.toolsModel args.model
+                , createModel = model
+                , createTransportModel = target.modelTransportId
+                , createDialect = target.modelDialect
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
                 , createTitleHint = Just title
@@ -483,6 +515,7 @@ sessionJson meta status = object
     , "title" .= meta.metaTitle
     , "provider" .= providerSlug meta.metaProvider
     , "model" .= meta.metaModel
+    , "dialect" .= dialectSlug meta.metaDialect
     , "reasoning_effort" .= meta.metaEffort
     , "cwd" .= unsafeToFilePath meta.metaCwd
     , "created_at" .= meta.metaCreatedAt

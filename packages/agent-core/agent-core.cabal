@@ -39,6 +39,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
+                    , Agent.Dialect
                     , Agent.Error
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
@@ -131,6 +132,7 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.DialectSpec
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec

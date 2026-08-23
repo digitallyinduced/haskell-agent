@@ -62,6 +62,31 @@ spec = do
             Maybe.mapMaybe (KeyMap.lookup "external_web_access") toolObjects `shouldBe`
                 [Aeson.Bool True]
 
+        it "preserves Codex custom and namespace tools" do
+            let codexTools =
+                    [ KnownResponseTool ToolCustom TaggedObject
+                        { tag = "custom"
+                        , fields = KeyMap.singleton
+                            "name"
+                            (Aeson.String "apply_patch")
+                        }
+                    , KnownResponseTool ToolNamespace TaggedObject
+                        { tag = "namespace"
+                        , fields = KeyMap.singleton
+                            "name"
+                            (Aeson.String "collaboration")
+                        }
+                    ]
+                request = withTools (Just codexTools) sampleRequest
+            object <- expectObject
+                (requestValue defaultClientOptions request)
+            tools <- expectArray (KeyMap.lookup "tools" object)
+            toolObjects <- traverse expectObject tools
+            map (KeyMap.lookup "type") toolObjects `shouldBe`
+                [ Just (Aeson.String "custom")
+                , Just (Aeson.String "namespace")
+                ]
+
         it "uses the configured default when the request has no model" do
             let value = requestValue defaultClientOptions
                     (withModel Nothing sampleRequest)
@@ -179,6 +204,10 @@ sampleRequest = defaultResponseCreateParams
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =
     ResponseCreateParams { model = nextModel, .. }
+
+withTools :: Maybe [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
+withTools nextTools ResponseCreateParams { tools = _, .. } =
+    ResponseCreateParams { tools = nextTools, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

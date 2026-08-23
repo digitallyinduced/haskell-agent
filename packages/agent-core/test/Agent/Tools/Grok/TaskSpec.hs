@@ -81,6 +81,24 @@ spec = describe "Agent.Tools.Grok.Task" do
         lookupAgentReasoningEffort specsRef agentId
             `shouldReturn` Just "high"
 
+    it "propagates restore failures for resume_from" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        let restore _ =
+                pure (Left "persisted subagent dialect is incompatible")
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) (Just restore) Nothing Nothing Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+            (functionToolCall "c1" "task"
+                "{\"prompt\":\"continue\",\"description\":\"resume\",\
+                \\"resume_from\":\"agent-old\",\"subagent_type\":\"explore\"}")
+        result.output `shouldSatisfy`
+            Text.isInfixOf "persisted subagent dialect is incompatible"
+        closeSubagentRegistry registry
+
     it "filters explore tools to the Grok Build read-only set" do
         let tools =
                 [ fake "read_file"

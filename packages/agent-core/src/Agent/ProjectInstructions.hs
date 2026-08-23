@@ -14,12 +14,18 @@ module Agent.ProjectInstructions
     , loadedInstructionFiles
     , formatCodexAgentsMd
     , formatGrokAgentsMd
-    , formatAgentsMdForProvider
+    , formatAgentsMdForDialect
     , globalAgentsHomeDir
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.Provider (Provider(..))
+import Agent.Dialect
+    ( Dialect
+    , InstructionHomeStyle(..)
+    , ProjectInstructionStyle(..)
+    , dialectInstructionHomeStyle
+    , dialectProjectInstructionStyle
+    )
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as BS
@@ -68,12 +74,13 @@ defaultDiscoverOptions = DiscoverOptions
     , discoverRootMarkers = [unsafeEncodeUtf ".git"]
     }
 
--- | Provider-specific directory under the user home for global AGENTS.md.
-globalAgentsHomeDir :: Provider -> OsPath -> OsPath
-globalAgentsHomeDir provider home = case provider of
-    OpenAIProvider -> home </> unsafeEncodeUtf ".codex"
-    XAIProvider -> home </> unsafeEncodeUtf ".grok"
-    OpenRouterProvider -> home </> unsafeEncodeUtf ".grok"
+-- | Dialect compatibility directory under the user home for global AGENTS.md.
+globalAgentsHomeDir :: Dialect -> OsPath -> OsPath
+globalAgentsHomeDir dialect home =
+    home </> case dialectInstructionHomeStyle dialect of
+        CodexInstructionHome -> unsafeEncodeUtf ".codex"
+        GrokInstructionHome -> unsafeEncodeUtf ".grok"
+        HarnessInstructionHome -> unsafeEncodeUtf ".haskell-agent"
 
 -- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
 -- are skipped. Project files are ordered root -> cwd.
@@ -151,11 +158,11 @@ applyByteBudget maxBytes loaded =
                             (BS.take remaining encoded)
                     in [file { instructionContent = truncated }]
 
-formatAgentsMdForProvider :: Provider -> OsPath -> LoadedAgentsMd -> Maybe Text
-formatAgentsMdForProvider provider cwd loaded = case provider of
-    OpenAIProvider -> formatCodexAgentsMd cwd loaded
-    XAIProvider -> formatGrokAgentsMd loaded
-    OpenRouterProvider -> formatGrokAgentsMd loaded
+formatAgentsMdForDialect :: Dialect -> OsPath -> LoadedAgentsMd -> Maybe Text
+formatAgentsMdForDialect dialect cwd loaded =
+    case dialectProjectInstructionStyle dialect of
+        CodexProjectInstructions -> formatCodexAgentsMd cwd loaded
+        GrokProjectInstructions -> formatGrokAgentsMd loaded
 
 -- | Codex-style contextual user fragment.
 formatCodexAgentsMd :: OsPath -> LoadedAgentsMd -> Maybe Text

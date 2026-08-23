@@ -1,9 +1,9 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.Dialect (codexDialect, grokBuildDialect)
 import Agent.Loop (LoopError(..))
 import Agent.Responses.Types
-import Agent.Provider (Provider(..))
 import Agent.Subagents
     ( closeSubagentRegistry
     , defaultSubagentConfig
@@ -34,21 +34,21 @@ import Test.Hspec
 spec :: Spec
 spec = describe "schemasFromAppTools" do
     it "enables built-in web_search ahead of app tools" do
-        case schemasFromAppTools OpenAIProvider [jsonTool] of
+        case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do
                 tagged.tag `shouldBe` "web_search"
                 tagged.fields `shouldBe` KeyMap.empty
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
     it "builds a strict function tool for OpenAI JSON tools" do
-        case schemasFromAppTools OpenAIProvider [jsonTool] of
+        case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
     it "builds a loose grok-build function tool for xAI" do
-        case schemasFromAppTools XAIProvider [jsonTool] of
+        case schemasFromAppTools grokBuildDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Nothing
@@ -57,7 +57,7 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure ("expected function tool, got " <> show other)
 
     it "registers apply_patch as a custom Lark tool" do
-        case schemasFromAppTools OpenAIProvider [patchTool] of
+        case schemasFromAppTools codexDialect [patchTool] of
             [_, KnownResponseTool ToolCustom tagged] -> do
                 tagged.tag `shouldBe` "custom"
                 KeyMap.lookup "name" tagged.fields
@@ -79,7 +79,7 @@ spec = describe "schemasFromAppTools" do
                 [ PropertySchema "message" PropertyString False Nothing ]
                 AlwaysPrompt
                 (noArgsTool "spawn_agent" (pure (Right "ok")))
-        case schemasFromAppTools OpenAIProvider [jsonTool, spawn] of
+        case schemasFromAppTools codexDialect [jsonTool, spawn] of
             [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
                 tagged.tag `shouldBe` "namespace"
                 KeyMap.lookup "name" tagged.fields
@@ -91,7 +91,7 @@ spec = describe "schemasFromAppTools" do
                 [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
                 AlwaysReadOnly
                 (noArgsTool "wait_agent" (pure (Right "ok")))
-        case schemasFromAppTools OpenAIProvider [wait] of
+        case schemasFromAppTools codexDialect [wait] of
             [_, KnownResponseTool ToolNamespace tagged] ->
                 case KeyMap.lookup "tools" tagged.fields of
                     Just (Aeson.Array tools) -> case toList tools of
@@ -130,7 +130,7 @@ spec = describe "schemasFromAppTools" do
                         [ tagged
                         | KnownResponseTool ToolNamespace tagged <-
                             schemasFromAppTools
-                                OpenAIProvider
+                                codexDialect
                                 (multiAgentTools context)
                         ]
                 case namespaces of

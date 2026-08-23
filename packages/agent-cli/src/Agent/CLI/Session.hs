@@ -2,6 +2,7 @@
 module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , LegacySubagentTarget(..)
     , SessionTurn(..)
     , SessionCreate(..)
     , Persistence(..)
@@ -24,6 +25,7 @@ module Agent.CLI.Session
     , setManualSessionTitle
     , resetSessionTitleToAuto
     , sessionConversationText
+    , sessionLegacySubagentTarget
     , sessionTitleTurnCountFromSlot
     , writeSessionMeta
     , ensureSession
@@ -41,6 +43,13 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.Loop (TokenUsage(..))
+import Agent.Dialect
+    ( DialectId
+    , dialectSlug
+    , legacyDialectIdForProvider
+    , parseDialect
+    , providerSupportsDialect
+    )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
@@ -59,7 +68,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.List (sortOn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -95,6 +104,9 @@ data SessionMeta = SessionMeta
     , metaUpdatedAt :: !UTCTime
     , metaProvider :: !Provider
     , metaModel :: !Text
+    , metaTransportModel :: !(Maybe Text)
+    , metaDialect :: !DialectId
+    , metaLegacySubagentTarget :: !(Maybe LegacySubagentTarget)
     , metaCwd :: !OsPath
     , metaEffort :: !Text
     , metaTitle :: !Text
@@ -107,6 +119,50 @@ data SessionMeta = SessionMeta
     , metaCachedTokens :: !Int
     } deriving (Eq, Show)
 
+-- | Durable provenance for subagent transcripts written before child target
+-- metadata was persisted. Keeping this target separate from the mutable root
+-- target prevents a later reopen from treating stale legacy children as
+-- compatible merely because the root metadata has already been retargeted.
+data LegacySubagentTarget = LegacySubagentTarget
+    { legacyTargetProvider :: !Provider
+    , legacyTargetEffectiveModel :: !Text
+    , legacyTargetDialect :: !DialectId
+    } deriving (Eq, Show)
+
+instance ToJSON LegacySubagentTarget where
+    toJSON target = object
+        [ "provider" .= providerSlug target.legacyTargetProvider
+        , "effectiveModel" .= target.legacyTargetEffectiveModel
+        , "dialect" .= dialectSlug target.legacyTargetDialect
+        ]
+
+instance FromJSON LegacySubagentTarget where
+    parseJSON = withObject "LegacySubagentTarget" \o -> do
+        providerText <- o .: "provider"
+        provider <- case parseProvider providerText of
+            Just parsed -> pure parsed
+            Nothing ->
+                fail
+                    ("unknown legacy subagent provider: "
+                        <> Text.unpack providerText)
+        dialectText <- o .: "dialect"
+        dialect <- case parseDialect dialectText of
+            Just parsed -> pure parsed
+            Nothing ->
+                fail
+                    ("unknown legacy subagent dialect: "
+                        <> Text.unpack dialectText)
+        unless (providerSupportsDialect provider dialect) $
+            fail
+                ( "legacy subagent dialect "
+                    <> Text.unpack (dialectSlug dialect)
+                    <> " is incompatible with provider "
+                    <> Text.unpack (providerSlug provider)
+                )
+        LegacySubagentTarget provider
+            <$> o .: "effectiveModel"
+            <*> pure dialect
+
 instance ToJSON SessionMeta where
     toJSON meta = object
         [ "version" .= meta.metaVersion
@@ -115,6 +171,9 @@ instance ToJSON SessionMeta where
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
         , "model" .= meta.metaModel
+        , "transportModel" .= meta.metaTransportModel
+        , "dialect" .= dialectSlug meta.metaDialect
+        , "legacySubagentTarget" .= meta.metaLegacySubagentTarget
         , "cwd" .= unsafeToFilePath meta.metaCwd
         , "effort" .= meta.metaEffort
         , "title" .= meta.metaTitle
@@ -134,12 +193,29 @@ instance FromJSON SessionMeta where
         provider <- case parseProvider providerText of
             Just p -> pure p
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
+        model <- o .: "model"
+        dialectText <- o .:? "dialect"
+        dialect <- case dialectText of
+            Nothing -> pure (legacyDialectIdForProvider provider)
+            Just text -> case parseDialect text of
+                Just parsed -> pure parsed
+                Nothing -> fail ("unknown dialect: " <> Text.unpack text)
+        unless (providerSupportsDialect provider dialect) $
+            fail
+                ( "dialect "
+                    <> Text.unpack (dialectSlug dialect)
+                    <> " is incompatible with provider "
+                    <> Text.unpack (providerSlug provider)
+                )
         SessionMeta version
             <$> o .: "id"
             <*> o .: "createdAt"
             <*> o .: "updatedAt"
             <*> pure provider
-            <*> o .: "model"
+            <*> pure model
+            <*> o .:? "transportModel"
+            <*> pure dialect
+            <*> o .:? "legacySubagentTarget"
             <*> (unsafeEncodeUtf <$> o .: "cwd")
             <*> o .: "effort"
             <*> o .: "title"
@@ -195,6 +271,8 @@ data SessionCreate = SessionCreate
     { createRoot :: !OsPath
     , createProvider :: !Provider
     , createModel :: !Text
+    , createTransportModel :: !Text
+    , createDialect :: !DialectId
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
@@ -235,6 +313,13 @@ createSession spec = do
             , metaUpdatedAt = now
             , metaProvider = spec.createProvider
             , metaModel = spec.createModel
+            , metaTransportModel = Just spec.createTransportModel
+            , metaDialect = spec.createDialect
+            , metaLegacySubagentTarget = Just LegacySubagentTarget
+                { legacyTargetProvider = spec.createProvider
+                , legacyTargetEffectiveModel = spec.createTransportModel
+                , legacyTargetDialect = spec.createDialect
+                }
             , metaCwd = spec.createCwd
             , metaEffort = spec.createEffort
             , metaTitle = title
@@ -338,6 +423,20 @@ addSessionUsage usage handle = do
             }
     writeSessionMeta handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
+
+-- | The original root target under which metadata-less child transcripts may
+-- have been created. Old session files derive it from their persisted root
+-- target; once written, it remains stable across root model/provider changes.
+sessionLegacySubagentTarget :: SessionMeta -> LegacySubagentTarget
+sessionLegacySubagentTarget meta =
+    fromMaybe
+        LegacySubagentTarget
+            { legacyTargetProvider = meta.metaProvider
+            , legacyTargetEffectiveModel =
+                fromMaybe meta.metaModel meta.metaTransportModel
+            , legacyTargetDialect = meta.metaDialect
+            }
+        meta.metaLegacySubagentTarget
 
 sessionConversationText :: [SessionTurn] -> Text
 sessionConversationText =

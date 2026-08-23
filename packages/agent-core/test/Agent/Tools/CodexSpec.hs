@@ -1,11 +1,11 @@
 module Agent.Tools.CodexSpec (spec) where
 
+import Agent.Dialect (codexDialect)
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , customToolCall
@@ -53,7 +53,7 @@ spec = describe "Agent.Tools.Codex" do
     it "advertises Codex wire names and not Grok names" do
         withTempEnv \env -> do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
-            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            coding <- codingToolsFor codexDialect env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
             names `shouldBe`
                 [ "read_file"
@@ -88,7 +88,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiPrepareSpawn = Nothing
                     , multiSendToRoot = Nothing
                     }
-            coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
+            coding <- codingToolsFor codexDialect env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools
             names `shouldContain` ["spawn_agent", "wait_agent", "send_message", "followup_task", "list_agents", "interrupt_agent"]
             let parameters name =
@@ -429,7 +429,7 @@ spec = describe "Agent.Tools.Codex" do
     it "stops managed shell commands when coding tools close" do
         withTempEnv \env -> do
             let marker = toFilePath env.toolCwd </> "escaped"
-            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            coding <- codingToolsFor codexDialect env Nothing Nothing
             started <- runFnWith coding.codingAppTools "shell_command" $
                 "{\"command\":\"sleep 0.3; printf done > "
                     <> Text.pack marker

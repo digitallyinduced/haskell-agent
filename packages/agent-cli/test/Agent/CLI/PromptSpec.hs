@@ -1,6 +1,11 @@
 module Agent.CLI.PromptSpec (spec) where
 
 import Agent.CLI.Prompt
+import Agent.Dialect
+    ( codexDialect
+    , genericResponsesDialect
+    , grokBuildDialect
+    )
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Data.Time.Calendar (fromGregorian)
@@ -13,8 +18,18 @@ spec :: Spec
 spec = describe "systemPrompt" do
     it "names grok-build tools for xAI and Codex tools for OpenAI" do
         let day = fromGregorian 2026 8 19
-            grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") day False
-            openai = systemPrompt OpenAIProvider (fromFilePath "/tmp/repo") day False
+            grok =
+                systemPrompt
+                    grokBuildDialect
+                    (fromFilePath "/tmp/repo")
+                    day
+                    False
+            openai =
+                systemPrompt
+                    codexDialect
+                    (fromFilePath "/tmp/repo")
+                    day
+                    False
         grok `shouldSatisfy` Text.isInfixOf "read_file"
         grok `shouldSatisfy` Text.isInfixOf "search_replace"
         grok `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
@@ -42,17 +57,61 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
         grok `shouldSatisfy` Text.isInfixOf "2026-08-19"
         grok `shouldSatisfy` Text.isInfixOf "/tmp/repo"
-        let openrouter = systemPrompt OpenRouterProvider (fromFilePath "/tmp/repo") day False
-        openrouter `shouldSatisfy` Text.isInfixOf "read_file"
-        openrouter `shouldNotSatisfy` Text.isInfixOf "apply_patch"
+
+    it "uses a neutral identity for generic Responses models" do
+        let generic =
+                systemPrompt
+                    genericResponsesDialect
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    False
+        generic `shouldSatisfy` Text.isInfixOf "interactive coding agent"
+        generic `shouldSatisfy` Text.isInfixOf "read_file"
+        generic `shouldNotSatisfy` Text.isInfixOf "Grok released by xAI"
 
     it "uses the autonomous identity for one-shot Grok sessions" do
-        let grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") (fromGregorian 2026 8 19) True
+        let grok =
+                systemPrompt
+                    grokBuildDialect
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    True
         grok `shouldSatisfy` Text.isInfixOf "no human operator"
+
+    it "renders restricted Grok child prompts from the registered tools" do
+        let prompt =
+                systemPromptForTools
+                    grokBuildDialect
+                    ["read_file", "list_dir", "grep"]
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    True
+        prompt `shouldSatisfy` Text.isInfixOf "read_file"
+        prompt `shouldSatisfy` Text.isInfixOf "web_search"
+        prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"
+        prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
+        prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
+
+    it "renders restricted generic child prompts without unavailable tools" do
+        let prompt =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "list_dir", "grep"]
+                    (fromFilePath "/tmp/repo")
+                    (fromGregorian 2026 8 19)
+                    True
+        prompt `shouldSatisfy` Text.isInfixOf "read_file"
+        prompt `shouldSatisfy` Text.isInfixOf "web_search"
+        prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
+        prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"
+        prompt `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
 
     it "keeps OpenAI web-search references internal" do
         let openai =
-                systemPrompt OpenAIProvider
+                systemPrompt codexDialect
                     (fromFilePath "/tmp/repo")
                     (fromGregorian 2026 8 19)
                     False
@@ -62,8 +121,18 @@ spec = describe "systemPrompt" do
 
     it "tells grok and openai to prefer ghci for general-purpose scripting" do
         let day = fromGregorian 2026 8 19
-            grok = systemPrompt XAIProvider (fromFilePath "/tmp/repo") day False
-            openai = systemPrompt OpenAIProvider (fromFilePath "/tmp/repo") day False
+            grok =
+                systemPrompt
+                    grokBuildDialect
+                    (fromFilePath "/tmp/repo")
+                    day
+                    False
+            openai =
+                systemPrompt
+                    codexDialect
+                    (fromFilePath "/tmp/repo")
+                    day
+                    False
         grok `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
         grok `shouldSatisfy` Text.isInfixOf "Time context:"
         openai `shouldSatisfy` Text.isInfixOf "Time context:"
