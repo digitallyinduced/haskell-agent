@@ -48,6 +48,12 @@ persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
 web search, and interactive terminal interfaces. Those are important product
 features, but not the core differentiation.
 
+## Try it out
+
+```console
+nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+```
+
 ## Install
 
 Install [Nix](https://nixos.org/download/) with flakes enabled, make sure your
