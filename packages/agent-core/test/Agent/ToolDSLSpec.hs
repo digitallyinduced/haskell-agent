@@ -1,17 +1,11 @@
 module Agent.ToolDSLSpec (spec) where
 
-import System.OsPath (unsafeEncodeUtf)
 import Agent.ToolDSL
-import Agent.Tools.Grok.Prompt
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Time.Calendar (fromGregorian)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Test.Hspec
-
-fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
@@ -35,46 +29,6 @@ spec = do
                 `shouldBe` Just (Aeson.toJSON (["integer", "null"] :: [Text]))
             propertyTypeOf loose "offset"
                 `shouldBe` Just (Aeson.String "integer")
-
-    describe "grokSystemPrompt" do
-        it "names grok-build tools including background task helpers" do
-            let prompt = grokSystemPrompt codingGrokPromptTools (fromFilePath "/tmp/repo")
-                    (fromGregorian 2026 8 20) False
-            prompt `shouldSatisfy` Text.isInfixOf "read_file"
-            prompt `shouldSatisfy` Text.isInfixOf "search_replace"
-            prompt `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
-            prompt `shouldSatisfy` Text.isInfixOf "get_task_output"
-            prompt `shouldSatisfy` Text.isInfixOf "kill_task"
-            prompt `shouldSatisfy` Text.isInfixOf "web_search"
-            prompt `shouldSatisfy` Text.isInfixOf "<tool_calling>"
-            prompt `shouldSatisfy` Text.isInfixOf "<work_policy>"
-            prompt `shouldSatisfy` Text.isInfixOf "<background_tasks>"
-            prompt `shouldNotSatisfy` Text.isInfixOf "shell_command"
-            prompt `shouldNotSatisfy` Text.isInfixOf "apply_patch"
-            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_command"
-            prompt `shouldSatisfy` Text.isInfixOf "/tmp/repo"
-            prompt `shouldSatisfy` Text.isInfixOf "2026-08-20"
-
-        it "uses the autonomous identity for one-shot sessions" do
-            let prompt = grokSystemPrompt codingGrokPromptTools (fromFilePath "/tmp/repo")
-                    (fromGregorian 2026 8 20) True
-            prompt `shouldSatisfy` Text.isInfixOf "no human operator"
-
-        it "omits sections and names for tools unavailable to a child" do
-            let prompt =
-                    grokSystemPromptForTools
-                        codingGrokPromptTools
-                        ["read_file", "list_dir", "grep", "web_search"]
-                        (fromFilePath "/tmp/repo")
-                        (fromGregorian 2026 8 20)
-                        True
-            prompt `shouldSatisfy` Text.isInfixOf "read_file"
-            prompt `shouldSatisfy` Text.isInfixOf "web_search"
-            prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
-            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
-            prompt `shouldNotSatisfy` Text.isInfixOf "get_task_output"
-            prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
-            prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
 
 propertyType :: Text -> Aeson.Object -> Maybe Aeson.Value
 propertyType name object = do

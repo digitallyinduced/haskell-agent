@@ -1,9 +1,8 @@
--- | Discover and format AGENTS.md project instructions.
+-- | Discover AGENTS.md project instructions.
 --
 -- Discovery follows Codex's narrow rules (one file per directory from the
--- project root down to cwd, with an optional global home file). Formatting is
--- provider-specific so OpenAI gets the Codex user-fragment shape and
--- xAI/OpenRouter get the Grok system-reminder shape.
+-- project root down to cwd, with an optional global home file). Dialect
+-- packages own the model-facing formatting of the discovered documents.
 module Agent.ProjectInstructions
     ( InstructionFile(..)
     , LoadedAgentsMd(..)
@@ -12,21 +11,10 @@ module Agent.ProjectInstructions
     , defaultProjectDocMaxBytes
     , discoverProjectInstructions
     , loadedInstructionFiles
-    , formatCodexAgentsMd
-    , formatGrokAgentsMd
-    , formatAgentsMdForDialect
-    , globalAgentsHomeDir
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.Dialect
-    ( Dialect
-    , InstructionHomeStyle(..)
-    , ProjectInstructionStyle(..)
-    , dialectInstructionHomeStyle
-    , dialectProjectInstructionStyle
-    )
-import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
+import Agent.OsPath (directoryChain, unsafeToFilePath)
 import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as BS
 import Data.Maybe (mapMaybe)
@@ -73,14 +61,6 @@ defaultDiscoverOptions = DiscoverOptions
     , discoverGlobalDir = Nothing
     , discoverRootMarkers = [unsafeEncodeUtf ".git"]
     }
-
--- | Dialect compatibility directory under the user home for global AGENTS.md.
-globalAgentsHomeDir :: Dialect -> OsPath -> OsPath
-globalAgentsHomeDir dialect home =
-    home </> case dialectInstructionHomeStyle dialect of
-        CodexInstructionHome -> unsafeEncodeUtf ".codex"
-        GrokInstructionHome -> unsafeEncodeUtf ".grok"
-        HarnessInstructionHome -> unsafeEncodeUtf ".haskell-agent"
 
 -- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
 -- are skipped. Project files are ordered root -> cwd.
@@ -157,74 +137,3 @@ applyByteBudget maxBytes loaded =
                     let truncated = TextEncoding.decodeUtf8With TextEncodingError.ignore
                             (BS.take remaining encoded)
                     in [file { instructionContent = truncated }]
-
-formatAgentsMdForDialect :: Dialect -> OsPath -> LoadedAgentsMd -> Maybe Text
-formatAgentsMdForDialect dialect cwd loaded =
-    case dialectProjectInstructionStyle dialect of
-        CodexProjectInstructions -> formatCodexAgentsMd cwd loaded
-        GrokProjectInstructions -> formatGrokAgentsMd loaded
-
--- | Codex-style contextual user fragment.
-formatCodexAgentsMd :: OsPath -> LoadedAgentsMd -> Maybe Text
-formatCodexAgentsMd cwd loaded =
-    case bodies of
-        Nothing -> Nothing
-        Just body ->
-            Just $ Text.concat
-                [ "# AGENTS.md instructions for "
-                , toText cwd
-                , "\n\n<INSTRUCTIONS>\n"
-                , body
-                , "\n</INSTRUCTIONS>"
-                ]
-  where
-    bodies = case
-        ( loaded.loadedGlobal >>= nonEmptyInstructionContent
-        , mapMaybe nonEmptyInstructionContent loaded.loadedProject
-        ) of
-        (Nothing, []) -> Nothing
-        (Nothing, project) -> Just (Text.intercalate "\n\n" project)
-        (Just global, []) -> Just global
-        (Just global, project) ->
-            Just $ global <> "\n\n--- project-doc ---\n\n" <> Text.intercalate "\n\n" project
-
-nonEmptyInstructionContent :: InstructionFile -> Maybe Text
-nonEmptyInstructionContent file =
-    let text = file.instructionContent
-    in if Text.null (Text.strip text) then Nothing else Just text
-
--- | Grok-style system-reminder block with per-file provenance.
-formatGrokAgentsMd :: LoadedAgentsMd -> Maybe Text
-formatGrokAgentsMd loaded =
-    case mapMaybe withContent (loadedInstructionFiles loaded) of
-        [] -> Nothing
-        kept ->
-            Just $ Text.concat $
-                [ "\n\n<system-reminder>\n"
-                , "As you answer the user's questions, you can use the following context"
-                , " (ordered from repo root to current directory - deeper files take precedence on conflicts):\n"
-                ]
-                <> concatMap renderFile kept
-                <>
-                [ "\nFollow these instructions exactly. When working in subdirectories not listed above, "
-                , "check for additional project instruction files (AGENTS.md, Claude.md, etc.)."
-                , "\n</system-reminder>"
-                ]
-  where
-    withContent file =
-        (\content -> (file, content)) <$> nonEmptyInstructionContent file
-    renderFile :: (InstructionFile, Text) -> [Text]
-    renderFile (file, content) =
-        [ "\n## From: "
-        , neutralizeReminderTags (toText file.instructionPath)
-        , "\n"
-        , neutralizeReminderTags content
-        , "\n"
-        ]
-
-neutralizeReminderTags :: Text -> Text
-neutralizeReminderTags =
-    Text.replace "<system-reminder" "&lt;system-reminder"
-        . Text.replace "</system-reminder" "&lt;/system-reminder"
-        . Text.replace "<system_reminder" "&lt;system_reminder"
-        . Text.replace "</system_reminder" "&lt;/system_reminder"

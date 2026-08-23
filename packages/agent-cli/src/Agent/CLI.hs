@@ -253,6 +253,12 @@ import Agent.CLI.Terminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Dialects
+    ( CodingTools(..)
+    , codingToolsForWithTypes
+    , formatAgentsMdForDialect
+    , globalAgentsHomeDir
+    )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
@@ -316,8 +322,6 @@ import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
     , discoverProjectInstructions
-    , formatAgentsMdForDialect
-    , globalAgentsHomeDir
     , loadedInstructionFiles
     )
 import Agent.Skills
@@ -382,8 +386,7 @@ import Agent.Subagents
     , setSubagentOnSettled
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
-import Agent.Tools.Grok.Task (GrokSubagentSpecs)
+import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
