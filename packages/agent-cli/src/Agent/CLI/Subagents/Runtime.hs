@@ -178,6 +178,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
     , subagentConnection :: !Text
     , subagentMapModel :: !(Text -> Text)
+    , subagentSpawnModelGuidance :: !(Maybe Text)
     }
 
 data PreparedChild = PreparedChild
@@ -810,6 +811,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     CodexCollaborationProtocol -> sendToRoot
                     GrokTaskProtocol -> Nothing
                     GenericTaskProtocol -> Nothing
+            , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             }
     pure PreparedChild
         { preparedParentParams = parentParams

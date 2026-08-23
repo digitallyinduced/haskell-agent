@@ -7,6 +7,7 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import System.OsPath (unsafeEncodeUtf)
+import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -213,3 +214,16 @@ spec = describe "systemPrompt" do
             "relative paths still resolve against the workspace"
         rootPrompt `shouldSatisfy` Text.isInfixOf "HASKELL_AGENT_TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf "TMPDIR"
+    it "recommends Luna only for subscription-backed OpenAI subagents" do
+        let subscriptionGuidance =
+                subscriptionSubagentModelGuidance
+                    OpenAIProvider
+                    SubscriptionBilled
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "`gpt-5.6-luna`")
+        subscriptionGuidance `shouldSatisfy`
+            maybe False (Text.isInfixOf "small, bounded tasks")
+        subscriptionSubagentModelGuidance OpenAIProvider ApiBilled
+            `shouldBe` Nothing
+        subscriptionSubagentModelGuidance XAIProvider SubscriptionBilled
+            `shouldBe` Nothing
