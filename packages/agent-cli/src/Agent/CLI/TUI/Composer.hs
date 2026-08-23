@@ -590,6 +590,7 @@ handleEffortControlClick applyUiEvent = do
                                 "Changing effort will restart the current turn."
                             , choiceIndex = initial
                             , choiceRows = [(effort, "") | effort <- efforts]
+                            , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose
                         }

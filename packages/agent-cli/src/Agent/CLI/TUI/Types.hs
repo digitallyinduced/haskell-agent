@@ -219,6 +219,7 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceBody :: !Text
     , choiceIndex :: !Int
     , choiceRows :: ![(Text, Text)]
+    , choiceCloseOnTurnEnd :: !Bool
     }
 
 data ResumeOverlay = ResumeOverlay

@@ -8,6 +8,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
     , hasQueuedFullscreenInput
@@ -1222,6 +1223,11 @@ handleChoiceKey = \case
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveChoice False)
     _ -> pure ()
   where
     moveChoice delta =
@@ -1334,6 +1340,11 @@ resolveChoice confirmed = do
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
     V.EvKey V.KEsc [] -> resolveTextPrompt False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
     V.EvKey V.KEnter [V.MShift] -> insert "\n"
     V.EvKey V.KPageUp [] ->
@@ -2549,9 +2560,13 @@ drawFooter state =
   where
     footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
         (Just _, _, _) ->
-            "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
+                else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
         (Nothing, Just _, _) ->
-            "↑↓ select  │  Enter choose  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
+                else "↑↓ select  │  Enter choose  │  Esc cancel"
         (Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
@@ -3074,7 +3089,7 @@ applyUiEvent uiEvent state =
                 previousUi
                 nextUi
                 newFlashes
-        nextState =
+        nextState0 =
             state
                 { appUi = nextUi
                 , appCompletionFlashes =
@@ -3086,7 +3101,32 @@ applyUiEvent uiEvent state =
                         then 0
                         else state.appNativeProgressKeepaliveBucket
                 }
+        nextState =
+            case state.appChoice of
+                Just choice
+                    | choiceClosesOnUiTransition
+                        previousUi
+                        nextUi
+                        choice ->
+                        nextState0
+                            { appChoice = Nothing
+                            , appChoiceReply = Nothing
+                            }
+                _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
+
+-- | Turn-scoped choices, such as the live effort selector, become invalid
+-- when their turn stops running. Ordinary idle dialogs remain open, and a
+-- model round that continues into tools keeps the selector visible.
+choiceClosesOnUiTransition
+    :: UiState
+    -> UiState
+    -> ChoiceOverlay
+    -> Bool
+choiceClosesOnUiTransition previous next choice =
+    choice.choiceCloseOnTurnEnd
+        && previous.uiRunning
+        && not next.uiRunning
 
 retainExistingFlashes
     :: UiState
@@ -3383,6 +3423,7 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
                 , appAgentHover = Nothing
