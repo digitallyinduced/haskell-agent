@@ -109,11 +109,11 @@ renderLines lines_
     | Just (rows, rest) <- Block.takeTableRows lines_ =
         tableWidget rows : renderLines rest
 renderLines (line : rest)
-    | Just (_, heading) <- Block.headingParts line =
+    | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
         padTop (Pad 1)
             (inlineWidgetWithAttr Theme.headingAttr (parseInline heading))
             : renderLines rest
-    | Just (indent, item) <- Block.bulletParts line =
+    | Just (indent, item) <- Block.bulletPartsWith (== ' ') line =
         hBox
             [ txt indent
             , withAttr Theme.headingAttr (txt "• ")

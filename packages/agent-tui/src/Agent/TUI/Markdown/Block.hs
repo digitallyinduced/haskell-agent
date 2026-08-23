@@ -2,7 +2,9 @@
 -- both terminal renderers.
 module Agent.TUI.Markdown.Block
     ( headingParts
+    , headingPartsWith
     , bulletParts
+    , bulletPartsWith
     , orderedParts
     , blockQuoteRemainder
     , isThematicBreak
@@ -16,24 +18,30 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 headingParts :: Text -> Maybe (Int, Text)
-headingParts line =
+headingParts = headingPartsWith isSpace
+
+headingPartsWith :: (Char -> Bool) -> Text -> Maybe (Int, Text)
+headingPartsWith isSeparator line =
     let stripped = Text.stripStart line
         (marks, after) = Text.span (== '#') stripped
         level = Text.length marks
     in if level >= 1
         && level <= 6
-        && startsWithSpace after
+        && startsWith isSeparator after
         then Just (level, Text.strip after)
         else Nothing
 
 bulletParts :: Text -> Maybe (Text, Text)
-bulletParts line =
+bulletParts = bulletPartsWith isSpace
+
+bulletPartsWith :: (Char -> Bool) -> Text -> Maybe (Text, Text)
+bulletPartsWith isSeparator line =
     let (indent, stripped) = Text.span isSpace line
     in case Text.uncons stripped of
         Just (marker, rest)
             | marker `elem` ['-', '*', '+']
             , Just (separator, after) <- Text.uncons rest
-            , isSpace separator ->
+            , isSeparator separator ->
                 Just (indent, Text.strip after)
         _ -> Nothing
 
@@ -159,7 +167,7 @@ splitTableRow raw =
         _ : rest -> reverse rest
         [] -> []
 
-startsWithSpace :: Text -> Bool
-startsWithSpace text = case Text.uncons text of
-    Just (character, _) -> isSpace character
+startsWith :: (Char -> Bool) -> Text -> Bool
+startsWith predicate text = case Text.uncons text of
+    Just (character, _) -> predicate character
     Nothing -> False

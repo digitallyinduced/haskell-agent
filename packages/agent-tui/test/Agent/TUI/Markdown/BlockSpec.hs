@@ -9,10 +9,12 @@ spec = describe "Markdown block parsing" do
         headingParts "  ### Title  " `shouldBe` Just (3, "Title")
         headingParts "###Title" `shouldBe` Nothing
         headingParts "####### Title" `shouldBe` Nothing
+        headingPartsWith (== ' ') "#\tTitle" `shouldBe` Nothing
 
     it "parses indented unordered and ordered list items" do
         bulletParts "  * item" `shouldBe` Just ("  ", "item")
         bulletParts "\t-\titem" `shouldBe` Just ("\t", "item")
+        bulletPartsWith (== ' ') "\t-\titem" `shouldBe` Nothing
         orderedParts "    12. item" `shouldBe`
             Just ("    ", "12", "item")
 
