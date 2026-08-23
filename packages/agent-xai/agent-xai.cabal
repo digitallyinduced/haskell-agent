@@ -50,6 +50,7 @@ library
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , text
                     , bytestring
                     , aeson                 >= 2.0
@@ -75,6 +76,7 @@ test-suite agent-xai-test
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-responses
+                    , agent-responses-types
                     , agent-xai
                     , async
                     , hspec

@@ -11,7 +11,12 @@ module Agent.CLI.Btw
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
 import Agent.CLI.Error (formatApiErrorInline)
 import Agent.Error (ApiError)
-import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , TurnInput(..)
+    , TurnOutput(..)
+    )
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
@@ -32,7 +37,7 @@ import qualified Data.Text as Text
 
 -- | Construct a provider backend over private request parameters and transcript.
 type BtwBackendFactory =
-    IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend
+    IORef ResponseCreateParams -> Backend
 
 data BtwError
     = BtwTransport !ApiError
@@ -120,16 +125,17 @@ runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = 
     params <- clearTurnSpecificParams <$> readIORef paramsRef
     transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
     privateParams <- newIORef params
-    privateTranscript <- newIORef transcript
     cancel <- newCancelFlag
-    let Backend submit = makeBackend privateParams privateTranscript
-        request = submit Nothing [UserMessage (sideQuestionPrompt question)] (\_ -> pure ())
+    let Backend submit = makeBackend privateParams
+        request =
+            submit transcript Nothing
+                [UserMessage (sideQuestionPrompt question)] (\_ -> pure ())
         action = do
             result <- race (waitCancel cancel) request
             pure $ case result of
                 Left () -> Left BtwCancelled
                 Right (Left err) -> Left (BtwTransport err)
-                Right (Right turn) -> classifyTurn turn
+                Right (Right result) -> classifyTurn result.backendOutput
     withCancelScope cancel action
 
 clearTurnSpecificParams :: ResponseCreateParams -> ResponseCreateParams

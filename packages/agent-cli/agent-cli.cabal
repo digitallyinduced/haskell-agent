@@ -104,6 +104,7 @@ library
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
@@ -206,6 +207,7 @@ test-suite agent-cli-test
                     , agent-openai
                     , agent-openrouter
                     , agent-responses
+                    , agent-responses-types
                     , agent-xai
                     , aeson
                     , ansi-terminal

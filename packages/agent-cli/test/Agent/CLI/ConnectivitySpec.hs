@@ -8,6 +8,7 @@ import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , LoopEvent(..)
     , TurnInput(..)
     , emptyTurnOutput
@@ -24,19 +25,28 @@ spec = describe "withConnectionRecovery" do
         events <- newIORef []
         let backend = withConnectionRecoveryUsing
                 (\attempt -> modifyIORef' waits (<> [attempt]))
-                (Backend \previous inputs _ -> do
+                (Backend \state previous inputs _ -> do
                     modifyIORef' seen (<> [(previous, inputs)])
                     attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
                     pure $
                         if attempt < 3
                             then Left (ConnectionError "offline")
-                            else Right (emptyTurnOutput "response" [] (Just "done")))
+                            else Right BackendResult
+                                { backendOutput =
+                                    emptyTurnOutput
+                                        "response" [] (Just "done")
+                                , backendState = state
+                                })
             inputs = [UserMessage "continue"]
-        result <- backend.submitTurn (Just "previous") inputs
+        result <- backend.submitTurn [] (Just "previous") inputs
             (\event -> modifyIORef' events (<> [event]))
 
         result `shouldBe`
-            Right (emptyTurnOutput "response" [] (Just "done"))
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = []
+                }
         readIORef waits `shouldReturn` [1, 2]
         readIORef seen `shouldReturn`
             [ (Just "previous", inputs)
@@ -57,8 +67,8 @@ spec = describe "withConnectionRecovery" do
         let expected = HttpError 503 "unavailable"
             backend = withConnectionRecoveryUsing
                 (\attempt -> modifyIORef' waits (<> [attempt]))
-                (Backend \_ _ _ -> pure (Left expected))
-        result <- backend.submitTurn Nothing [] (const (pure ()))
+                (Backend \_ _ _ _ -> pure (Left expected))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe` Left expected
         readIORef waits `shouldReturn` []
 
@@ -66,17 +76,25 @@ spec = describe "withConnectionRecovery" do
         attempts <- newIORef (0 :: Int)
         let backend = withConnectionRecoveryUsing
                 (const (pure ()))
-                (Backend \_ _ _ -> do
+                (Backend \state _ _ _ -> do
                     attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
                     pure $
                         if attempt == 1
                             then Left $ ConnectionError
                                 "WebSocket receive error: ParseException \"not enough bytes\""
-                            else Right
-                                (emptyTurnOutput "response" [] (Just "done")))
-        result <- backend.submitTurn Nothing [] (const (pure ()))
+                            else Right BackendResult
+                                { backendOutput =
+                                    emptyTurnOutput
+                                        "response" [] (Just "done")
+                                , backendState = state
+                                })
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe`
-            Right (emptyTurnOutput "response" [] (Just "done"))
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = []
+                }
         readIORef attempts `shouldReturn` 2
 
     it "does not replay a submission after visible output streamed" do
@@ -84,11 +102,11 @@ spec = describe "withConnectionRecovery" do
         waits <- newIORef []
         let backend = withConnectionRecoveryUsing
                 (\attempt -> modifyIORef' waits (<> [attempt]))
-                (Backend \_ _ onEvent -> do
+                (Backend \_ _ _ onEvent -> do
                     modifyIORef' attempts (+ 1)
                     onEvent (TextDelta "partial")
                     pure (Left (ConnectionError "dropped")))
-        result <- backend.submitTurn Nothing [] (const (pure ()))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe` Left (ConnectionError "dropped")
         readIORef attempts `shouldReturn` 1
         readIORef waits `shouldReturn` []
@@ -101,21 +119,28 @@ spec = describe "withConnectionRecovery" do
                 withPendingInputs pending $
                     withConnectionRecoveryUsing
                         (const (pure ()))
-                        (Backend \_ inputs _ -> do
+                        (Backend \state _ inputs _ -> do
                             modifyIORef' seen (<> [inputs])
                             attempt <- atomicModifyIORef' attempts
                                 \n -> (n + 1, n + 1)
                             pure $
                                 if attempt == 1
                                     then Left (ConnectionError "offline")
-                                    else Right
-                                        (emptyTurnOutput
-                                            "response" [] (Just "done")))
+                                    else Right BackendResult
+                                        { backendOutput =
+                                            emptyTurnOutput
+                                                "response" [] (Just "done")
+                                        , backendState = state
+                                        })
             expected = [UserMessage "queued", UserMessage "current"]
-        result <- backend.submitTurn Nothing [UserMessage "current"]
+        result <- backend.submitTurn [] Nothing [UserMessage "current"]
             (const (pure ()))
         result `shouldBe`
-            Right (emptyTurnOutput "response" [] (Just "done"))
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = []
+                }
         readIORef seen `shouldReturn` [expected, expected]
         readIORef pending `shouldReturn` []
 

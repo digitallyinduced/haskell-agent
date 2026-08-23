@@ -1,9 +1,9 @@
 cabal-version:      2.2
 name:               agent-responses
 version:            0.1.0.0
-synopsis:           Provider-neutral OpenAI Responses protocol types and adapters
-description:        Canonical Responses API types, codecs, stream merging, and
-                    loop adapters shared by provider transports.
+synopsis:           Provider-neutral Responses codecs and adapters
+description:        Responses API codecs, stream merging, and loop adapters
+                    built on the canonical agent-responses-types data model.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -43,8 +43,7 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.Responses.Types
-                    , Agent.Responses.Codec
+    exposed-modules:  Agent.Responses.Codec
                     , Agent.Responses.Error
                     , Agent.Responses.HttpSSE
                     , Agent.Responses.SSE
@@ -54,6 +53,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , aeson                 >= 2.0
                     , base64-bytestring
                     , bytestring
@@ -78,6 +78,7 @@ test-suite agent-responses-test
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-responses
+                    , agent-responses-types
                     , aeson >= 2.0
                     , bytestring
                     , hspec

@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, async, base, bytestring, containers
+{ mkDerivation, aeson, agent-responses-types, async, base, bytestring, containers
 , crypton-connection, directory, filepath, hspec, lib, process
 , resourcet, retry, safe-exceptions, scientific, stm, text, time
 , text-builder, tls, transformers, unix, vector, websockets, yaml
@@ -8,13 +8,13 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson async base bytestring containers crypton-connection directory
+    aeson agent-responses-types async base bytestring containers crypton-connection directory
     filepath process resourcet retry safe-exceptions scientific stm
     text time tls transformers unix vector websockets yaml
   ];
   benchmarkHaskellDepends = [ base text text-builder ];
   testHaskellDepends = [
-    aeson async base bytestring containers crypton-connection directory
+    aeson agent-responses-types async base bytestring containers crypton-connection directory
     filepath hspec retry safe-exceptions stm text time tls unix
     websockets yaml
   ];
