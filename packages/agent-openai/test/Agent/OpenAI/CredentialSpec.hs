@@ -10,6 +10,12 @@ import Data.Aeson ((.=))
 import qualified "base64-bytestring" Data.ByteString.Base64 as B64
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    )
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -179,6 +185,43 @@ spec = do
                 (failed initial AccountAuthenticationRejected)
 
             rotated.accessToken `shouldNotBe` initial.accessToken
+            readIORef refreshCalls `shouldReturn` 1
+
+        it "shares auth recovery across token providers for one pool" do
+            refreshCalls <- newIORef (0 :: Int)
+            refreshStarted <- newEmptyMVar
+            releaseRefresh <- newEmptyMVar
+            state <- freshAuth "acc-a"
+            let rotatedToken = freshToken "rotated"
+                refresh current = do
+                    modifyIORef' refreshCalls (+ 1)
+                    putMVar refreshStarted ()
+                    takeMVar releaseRefresh
+                    pure $ Right current
+                        { Auth.accessToken = rotatedToken }
+            pool <- newPool [state] refresh
+            firstProvider <- poolTokenProvider pool
+            secondProvider <- poolTokenProvider pool
+            initial <- expectCredential
+                =<< getNextToken firstProvider Nothing
+            let rejection =
+                    failed initial AccountAuthenticationRejected
+
+            withAsync
+                (getNextToken firstProvider rejection)
+                \firstRecovery -> do
+                    takeMVar refreshStarted
+                    withAsync
+                        (getNextToken secondProvider rejection)
+                        \secondRecovery -> do
+                            putMVar releaseRefresh ()
+                            first <- expectCredential
+                                =<< wait firstRecovery
+                            second <- expectCredential
+                                =<< wait secondRecovery
+                            first.accessToken `shouldBe` rotatedToken
+                            second.accessToken `shouldBe` rotatedToken
+
             readIORef refreshCalls `shouldReturn` 1
 
         it "does not repeatedly refresh a persistently rejected account" do

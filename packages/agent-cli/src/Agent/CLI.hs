@@ -195,13 +195,14 @@ import Agent.CLI.Prompt
     ( subscriptionSubagentModelGuidance
     , systemPromptForTools
     )
-import Agent.CLI.Request (requestParams, setRequestInstructions)
+import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , automaticCooldownRetryDelay
     , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
+    , ProviderRecoveryPreference(..)
+    , providerRecoveryPreference
     )
 import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.ProviderTransition
@@ -291,6 +292,8 @@ import Agent.CLI.Dialects
     , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
+    , isBashToolName
+    , isGhciToolName
     )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
@@ -435,7 +438,7 @@ import Agent.Subagents
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
-import Agent.ToolDispatch (canonicalToolName)
+import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -1816,6 +1819,8 @@ runAgentInitializedWithLock
                         pure ()
                     Nothing -> pure ()
         Nothing -> pure ()
+    ghciEnabledRef <- newIORef options.optGhci
+    bashEnabledRef <- newIORef options.optBash
     let claimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -1840,19 +1845,23 @@ runAgentInitializedWithLock
             , toolsEffort = effort
             , toolsCurrentSessionId =
                 readIORef persistSlotRef >>= currentSessionId
-            , toolsLaunchTurn =
+            , toolsLaunchTurn = \handle message -> do
+                ghciEnabled <- readIORef ghciEnabledRef
+                bashEnabled <- readIORef bashEnabledRef
                 launchSessionTurn sessionProcessManager
                     (not (isOneShot options)) policy
-                    options.optGhci options.optBash
+                    ghciEnabled bashEnabled handle message
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
+        sessionTools = agentSessionTools sessionToolsEnv
+        allTools = coding.codingAppTools ++ mcpTools ++ sessionTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
-                ++ agentSessionTools sessionToolsEnv
+                ++ sessionTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1903,6 +1912,8 @@ runAgentInitializedWithLock
         paramsRef <- newIORef params
         let subagentRuntime = SubagentRuntime
                 { subagentOptions = options
+                , subagentGhciEnabled = ghciEnabledRef
+                , subagentBashEnabled = bashEnabledRef
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentParams = paramsRef
@@ -2237,7 +2248,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2301,7 +2312,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2362,7 +2373,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2434,7 +2445,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2623,6 +2634,8 @@ runSession
     -> Dialect
     -> ApprovalPolicy
     -> [AppTool]
+    -> IORef Bool
+    -> IORef Bool
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
@@ -2664,7 +2677,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2713,7 +2726,7 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                                                   (glyphWarn <> message))
                       _ -> pure ()
   withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
-    toolRegistry <- requireToolRegistry tools
+    toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -3014,6 +3027,35 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                         writeIORef activityRef "Running tool…"
                     _ -> pure ()
                 emitUiEvent runtime (UiLoop event)
+        shellToolAllowed call = do
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            let toolName = canonicalToolName call.name
+            pure $
+                (not (isGhciToolName toolName) || ghciEnabled)
+                    && (not (isBashToolName toolName) || bashEnabled)
+        approveRegisteredTool call =
+            withMVar ioLock \_ ->
+                case fullscreen of
+                    Nothing ->
+                        withStdinPaused escPaused $
+                            approveToolDecision
+                                policyRef allowedToolsRef toolRegistry planMode call
+                    Just runtime ->
+                        approveToolDecisionWithReporter
+                            (requestFullscreenPermission runtime)
+                            (\case
+                                ApprovalWarning _ -> pure ()
+                                ApprovalSuccess message ->
+                                    emitUiEvent runtime
+                                        (UiSetNotice
+                                            (Just
+                                                (successNotice message))))
+                            policyRef
+                            allowedToolsRef
+                            toolRegistry
+                            planMode
+                            call
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
@@ -3025,27 +3067,12 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
-                withMVar ioLock \_ ->
-                    case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode call
-                        Just runtime ->
-                            approveToolDecisionWithReporter
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+                shellToolAllowed call >>= \case
+                    False ->
+                        pure (Left
+                            ("Tool " <> call.name
+                                <> " is disabled by the current /shell setting."))
+                    True -> approveRegisteredTool call
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -3065,18 +3092,57 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                     Nothing -> pure ()
                 Nothing -> pure ()
             finishSubagentTurn rootTurnId
+        activeShellTools ghciEnabled bashEnabled =
+            filterGhciTools ghciEnabled
+                (filterBashTools bashEnabled allTools)
+        currentShellMode = do
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            pure $ case (ghciEnabled, bashEnabled) of
+                (True, False) -> ShellGhci
+                (False, True) -> ShellBash
+                (True, True) -> ShellBoth
+                (False, False) -> ShellNone
+        shellModeFlags = \case
+            ShellGhci -> (True, False)
+            ShellBash -> (False, True)
+            ShellBoth -> (True, True)
+            ShellNone -> (False, False)
+        shellModeLabel = \case
+            ShellGhci -> "ghci"
+            ShellBash -> "bash"
+            ShellBoth -> "ghci + bash"
+            ShellNone -> "none"
+        refreshShellParams ghciEnabled bashEnabled = do
+            sessionTmp <- readIORef toolEnv.toolSessionTmp
+            today <- utctDay <$> getCurrentTime
+            let enabledTools = activeShellTools ghciEnabled bashEnabled
+                instructionText =
+                    systemPromptForTools
+                        dialect
+                        (map (.appToolName) enabledTools)
+                        cwd
+                        sessionTmp
+                        today
+                        (isOneShot options)
+                toolSchemas = schemasFromAppTools dialect enabledTools
+            modifyIORef' paramsRef \ResponseCreateParams{..} ->
+                ResponseCreateParams
+                    { instructions = Just instructionText
+                    , tools = Just toolSchemas
+                    , ..
+                    }
+        setShellMode mode = do
+            let (ghciEnabled, bashEnabled) = shellModeFlags mode
+            writeIORef ghciEnabledRef ghciEnabled
+            writeIORef bashEnabledRef bashEnabled
+            refreshShellParams ghciEnabled bashEnabled
+            pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
             setToolSessionTmp toolEnv (Just tempDir)
-            today <- utctDay <$> getCurrentTime
-            modifyIORef' paramsRef $
-                setRequestInstructions
-                    (systemPromptForTools
-                        dialect
-                        (map (.appToolName) tools)
-                        cwd
-                        (Just tempDir)
-                        today
-                        (isOneShot options))
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            refreshShellParams ghciEnabled bashEnabled
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -3107,6 +3173,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
+            , sessionShellMode = currentShellMode
+            , sessionSetShellMode = setShellMode
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
@@ -3391,22 +3459,25 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         finishTurnWithCooldownRetry allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
-        in requestAutomaticProviderFallback env apiError pending' >>= \case
-            Just providerTransition ->
-                pure (RunSwitchProvider providerTransition)
-            Nothing -> do
-                now <- getCurrentTime
-                case automaticCooldownRetryDelay now apiError of
-                    Just delay | allowCooldownRetry ->
-                        waitAndRetryPendingTurn env delay pending'
-                    _ -> do
-                        reportProviderUnavailable
-                            env.sessionFullscreen apiError
-                        if exitAfter
-                            then exitFailure
-                            else do
-                                notifyAttention stderr InputRequested
-                                replWithDraft env pending.pendingPromptText
+        in do
+            now <- getCurrentTime
+            case providerRecoveryPreference
+                    allowCooldownRetry now apiError of
+                RetryCurrentProviderAfter delay ->
+                    waitAndRetryPendingTurn env delay pending'
+                TryProviderFallback ->
+                    requestAutomaticProviderFallback env apiError pending'
+                        >>= \case
+                        Just providerTransition ->
+                            pure (RunSwitchProvider providerTransition)
+                        Nothing -> do
+                            reportProviderUnavailable
+                                env.sessionFullscreen apiError
+                            if exitAfter
+                                then exitFailure
+                                else do
+                                    notifyAttention stderr InputRequested
+                                    replWithDraft env pending.pendingPromptText
 
 continueAfterTurn :: SessionEnv -> IO RunResult
 continueAfterTurn env = do
@@ -3901,6 +3972,23 @@ replWithDraft env@SessionEnv
                                 formatSkillsListing color current invocations
                         displayInfo (formatSkillsListing False current invocations) $
                             Text.putStrLn listing
+                        continue
+                    ReplShowShell -> do
+                        mode <- env.sessionShellMode
+                        let message = "shell tools: " <> case mode of
+                                ShellGhci -> "ghci"
+                                ShellBash -> "bash"
+                                ShellBoth -> "ghci + bash"
+                                ShellNone -> "none"
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
+                        continue
+                    ReplSetShell mode -> do
+                        message <- env.sessionSetShellMode mode
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplPaste pasteImmediate pasteCaption -> do
                         color <- resolveColor stdout

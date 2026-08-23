@@ -9,19 +9,16 @@ module Agent.OpenAI.Credential
 import qualified Agent.OpenAI.Auth as Auth
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider
-import Data.IORef
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 
 poolTokenProvider :: Auth.Pool -> IO TokenProvider
 poolTokenProvider = poolTokenProviderWithBilling SubscriptionBilled
 
 poolTokenProviderWithBilling :: BillingMode -> Auth.Pool -> IO TokenProvider
-poolTokenProviderWithBilling billing pool = do
-    authRecoveryAttempts <- newIORef Map.empty
+poolTokenProviderWithBilling billing pool =
     pure $ tokenProvider billing \failed -> case failed of
             Nothing -> acquireFromPool pool
             Just FailedCredential { credential, failure } ->
@@ -35,18 +32,14 @@ poolTokenProviderWithBilling billing pool = do
                         if maybe False (Text.null . (.refreshToken)) state
                             then rejectStaticCredential pool credential.accountId
                             else do
-                                shouldRefresh <- takeAuthRecoverySlot
-                                    authRecoveryAttempts
+                                Auth.recoverAfterAuthFailure
+                                    pool
                                     credential.accountId
-                                if shouldRefresh
-                                    then Auth.refreshAfterAuthFailure pool credential.accountId >>= \case
+                                    credential.accessToken >>= \case
                                         Right refreshed ->
                                             pure $ Right $
                                                 credentialFromAuthState refreshed
                                         Left _ -> acquireFromPool pool
-                                    else do
-                                        Auth.reportAuthBroken pool credential.accountId
-                                        acquireFromPool pool
 
 rejectStaticCredential :: Auth.Pool -> Text -> IO (Either ApiError Credential)
 rejectStaticCredential pool accountId = do
@@ -59,25 +52,6 @@ rejectStaticCredential pool accountId = do
                     "static bearer token was rejected"
                     Nothing
         result -> pure result
-
-takeAuthRecoverySlot
-    :: IORef (Map.Map Text UTCTime)
-    -> Text
-    -> IO Bool
-takeAuthRecoverySlot attempts accountId = do
-    now <- getCurrentTime
-    atomicModifyIORef' attempts \current ->
-        let recent = case Map.lookup accountId current of
-                Just attemptedAt -> diffUTCTime now attemptedAt
-                    < fromIntegral Auth.authFailureRetrySeconds
-                Nothing -> False
-            pruned = Map.filter
-                (\attemptedAt -> diffUTCTime now attemptedAt
-                    < fromIntegral Auth.authFailureRetrySeconds)
-                current
-        in if recent
-            then (pruned, False)
-            else (Map.insert accountId now pruned, True)
 
 -- | A single OpenAI-compatible API bearer token with no OAuth refresh or
 -- account failover.

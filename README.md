@@ -89,6 +89,17 @@ For bash-only operation, disable GHCi explicitly:
 agent-cli --no-ghci --bash
 ```
 
+During an interactive session, switch the available shell tools without
+restarting:
+
+```console
+/shell ghci
+/shell bash
+```
+
+Use `/shell` to show the current selection. `/shell both` and `/shell none`
+are also supported.
+
 Run a one-shot task:
 
 ```console

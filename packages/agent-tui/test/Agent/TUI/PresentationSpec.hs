@@ -41,6 +41,18 @@ spec = describe "tool presentation" do
                 "{\"prompt\":\"Enter token\",\"purpose\":\"Configure Telegram\"}")
             `shouldBe` "Requested secret Configure Telegram"
 
+    it "separates GHCi expressions from their compact retained heading" do
+        let call =
+                functionToolCall
+                    "ghci"
+                    "run_ghci"
+                    "{\"expression\":\"do { putStrLn \\\"one\\\"; putStrLn \\\"two\\\" }\"}"
+        toolCallTitle call `shouldBe` "$ ghci"
+        toolCallInput call
+            `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
+        summarizeToolCall call
+            `shouldBe` "$ do { putStrLn \"one\"; putStrLn \"two\" }"
+
     it "falls back to the safe prompt text for ask_secret detail" do
         toolDetail
             (functionToolCall

@@ -175,6 +175,8 @@ type SubagentStoreRoot = IORef (Maybe OsPath)
 -- | Provider-neutral dependencies shared by all child-agent backends.
 data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
+    , subagentGhciEnabled :: !(IORef Bool)
+    , subagentBashEnabled :: !(IORef Bool)
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
@@ -588,11 +590,11 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     coding.codingPlanMode
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+                    bashEnabled <- readIORef runtime.subagentBashEnabled
                     let codingTools =
-                            filterGhciTools runtime.subagentOptions.optGhci $
-                                filterBashTools
-                                    runtime.subagentOptions.optBash
-                                    coding.codingAppTools
+                            filterGhciTools ghciEnabled $
+                                filterBashTools bashEnabled coding.codingAppTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
                         baseInstructions =
@@ -709,11 +711,11 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                     agentType coding.codingAppTools
                             NoHostChildAgentProtocol ->
                                 []
-                        codingTools =
-                            filterGhciTools runtime.subagentOptions.optGhci $
-                                filterBashTools
-                                    runtime.subagentOptions.optBash
-                                    childTools
+                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+                    bashEnabled <- readIORef runtime.subagentBashEnabled
+                    let codingTools =
+                            filterGhciTools ghciEnabled $
+                                filterBashTools bashEnabled childTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
                         baseInstructions =

@@ -70,7 +70,7 @@ submitBackend
     -> (LoopEvent -> IO ())
     -> IO (Either ApiError TurnOutput)
 submitBackend backend previous inputs onEvent =
-    fmap backendOutput <$> backend.submitTurn [] previous inputs onEvent
+    fmap (.backendOutput) <$> backend.submitTurn [] previous inputs onEvent
 
 spec :: Spec
 spec = do

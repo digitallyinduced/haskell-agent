@@ -323,6 +323,8 @@ usage = unlines
     , "persisting the main conversation."
     , "/skills lists discovered SKILL.md workflows; /skills reload rescans."
     , "Invoke one with /NAME [ARGS] or mention it as $NAME in a prompt."
+    , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
+    , "the current session. /shell both and /shell none are also available."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."
