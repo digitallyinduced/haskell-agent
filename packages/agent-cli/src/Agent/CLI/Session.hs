@@ -42,11 +42,7 @@ module Agent.CLI.Session
     , sessionUsageFromTurns
     ) where
 
-import Agent.FileRetry
-    ( appendLazyFileRetryingOpen
-    , retryOnFileBusy
-    , writeLazyFileAtomically
-    )
+import Agent.FileRetry (retryOnFileBusy)
 import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
@@ -63,6 +59,9 @@ import Agent.Dialect
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
+import Agent.Store.Postgres.Connection (StorePool)
+import qualified Agent.Store.Postgres.Session as Store
+import Agent.Store.Types (renderStoreError)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, finally, onException, tryIO)
 import Control.Monad (unless, when)
@@ -76,11 +75,10 @@ import Control.Monad.Trans.Except
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import Data.Bits (xor)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.List (sortOn)
 import Data.Maybe (catMaybes, fromMaybe)
-import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -88,13 +86,13 @@ import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory.OsPath
     ( createDirectory
     , createDirectoryIfMissing
     , doesDirectoryExist
     , doesFileExist
-    , listDirectory
     , removePathForcibly
     )
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
@@ -289,24 +287,26 @@ instance FromJSON SessionTurn where
             <*> o .:? "usage"
 
 data SessionHandle = SessionHandle
-    { sessionDir :: !OsPath
+    { sessionPool :: !StorePool
+    , sessionDir :: !OsPath
     , sessionTempDir :: !OsPath
     , sessionMetaPath :: !OsPath
     , sessionTranscriptPath :: !OsPath
     , sessionMeta :: !SessionMeta
-    } deriving (Eq, Show)
+    }
 
 -- | Parameters for creating a session on the first persisted turn.
 data SessionCreate = SessionCreate
-    { createRoot :: !OsPath
+    { createPool :: !StorePool
+    , createRoot :: !OsPath
     , createTarget :: !ModelTarget
     , createCwd :: !OsPath
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
     , createTitleIsManual :: !Bool
-    } deriving (Eq, Show)
+    }
 
--- | Whether conversation state is stored on disk.
+-- | Whether conversation state is persisted.
 data Persistence
     = PersistenceDisabled
     | PersistenceEnabled (IORef PersistenceState)
@@ -315,7 +315,6 @@ data Persistence
 data PersistenceState
     = PersistencePending SessionCreate Text OsPath
     | PersistenceActive SessionHandle
-    deriving (Eq, Show)
 
 newPendingPersistence :: SessionCreate -> IO Persistence
 newPendingPersistence spec = do
@@ -360,6 +359,11 @@ cleanupPendingPersistence = \case
                 pure ()
             PersistenceActive _ -> pure ()
 
+-- | Create durable session state using a store-owned pool.
+--
+-- This function does not acquire or own a database pool. Each database
+-- operation uses the pool's bracketed 'Pool.use' path, while the enclosing
+-- 'Store' owns and releases the pool.
 createSession :: SessionCreate -> IO SessionHandle
 createSession spec = do
     (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
@@ -372,6 +376,7 @@ createReservedSession
     -> OsPath
     -> IO SessionHandle
 createReservedSession spec sessionId tempDir = do
+    let pool = spec.createPool
     ensurePrivateDir spec.createRoot
     dir <- either (fail . Text.unpack) pure
         (sessionDirForId spec.createRoot sessionId)
@@ -410,14 +415,23 @@ createReservedSession spec sessionId tempDir = do
             , metaCachedTokens = 0
             }
         handle = SessionHandle
-            { sessionDir = dir
+            { sessionPool = pool
+            , sessionDir = dir
             , sessionTempDir = tempDir
             , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
             , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
             , sessionMeta = meta
             }
-    writeSessionMeta handle.sessionMetaPath meta
-    pure handle
+    Store.createSession pool sessionId now (Aeson.toJSON meta) >>= \case
+        Left err -> do
+            _ <- tryIO (removePathForcibly dir)
+            fail
+                ("could not create PostgreSQL session: "
+                    <> Text.unpack (renderStoreError err))
+        Right False -> do
+            _ <- tryIO (removePathForcibly dir)
+            fail "could not allocate a unique PostgreSQL session id"
+        Right True -> pure handle
 
 -- | Create the session directory on first use when persistence is still pending.
 ensureSession :: IORef PersistenceState -> IO SessionHandle
@@ -455,10 +469,7 @@ appendTurnWithMetaTransition
     -> (SessionMeta -> SessionMeta)
     -> IO SessionHandle
 appendTurnWithMetaTransition handle turn transition = do
-    let path = handle.sessionTranscriptPath
-    existed <- doesFileExist path
-    appendLazyFileRetryingOpen path (Aeson.encode turn <> "\n")
-    if existed then pure () else setFileMode (unsafeToFilePath path) 0o600
+    let pool = handle.sessionPool
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -466,8 +477,20 @@ appendTurnWithMetaTransition handle turn transition = do
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
             }
         finalMeta = transition meta
-    writeSessionMeta handle.sessionMetaPath finalMeta
-    pure handle { sessionMeta = finalMeta }
+    Store.appendSessionTurn
+        pool
+        finalMeta.metaId
+        turn.turnAt
+        (Aeson.toJSON turn)
+        (Aeson.toJSON finalMeta) >>= \case
+            Left err ->
+                fail
+                    ("could not append PostgreSQL session turn: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack finalMeta.metaId)
+            Right True ->
+                pure handle { sessionMeta = finalMeta }
 
 applyTurnMetadata :: SessionTurn -> SessionMeta -> SessionMeta
 applyTurnMetadata turn meta =
@@ -489,6 +512,7 @@ applyTurnMetadata turn meta =
 -- authoritative aggregate used when resuming.
 addSessionUsage :: TokenUsage -> SessionHandle -> IO SessionHandle
 addSessionUsage usage handle = do
+    let pool = handle.sessionPool
     now <- getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
@@ -500,8 +524,20 @@ addSessionUsage usage handle = do
             , metaCachedTokens =
                 meta0.metaCachedTokens + usage.cachedTokens
             }
-    writeSessionMeta handle.sessionMetaPath meta
-    pure handle { sessionMeta = meta }
+    Store.replaceSessionMetadata
+        pool
+        meta.metaId
+        now
+        "session.usage_added"
+        (Aeson.toJSON meta) >>= \case
+            Left err ->
+                fail
+                    ("could not update PostgreSQL session usage: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack meta.metaId)
+            Right True ->
+                pure handle { sessionMeta = meta }
 
 -- | The original root target under which metadata-less child transcripts may
 -- have been created. Old session files derive it from their persisted root
@@ -546,36 +582,34 @@ appendTurnKeepTitle handle turn =
     appendTurnWithMetaTransition handle turn id
 
 
-loadSession :: OsPath -> Text -> IO (Either Text (SessionMeta, [SessionTurn]))
-loadSession root sessionId = runExceptT do
-    dir <- except (sessionDirForId root sessionId)
-    let
-        metaPath = dir </> unsafeEncodeUtf "meta.json"
-        transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
-    exists <- lift (doesDirectoryExist dir)
-    unless exists $
-        throwE ("session not found: " <> sessionId)
-    meta <- decodeFileEither metaPath
-    unless (isValidSessionId meta.metaId) $
-        throwE "invalid session id in metadata"
-    unless (meta.metaId == sessionId) $
-        throwE "session id does not match directory"
-    unless (meta.metaVersion == sessionSchemaVersion) $
-        throwE $
-            "unsupported session schema version "
-                <> Text.pack (show meta.metaVersion)
-                <> " (expected "
-                <> Text.pack (show sessionSchemaVersion)
-                <> ")"
-    turns <- loadTranscript transcriptPath
-    pure (meta, turns)
+loadSession
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text (SessionMeta, [SessionTurn]))
+loadSession pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- lift (Store.loadSession pool sessionId)
+        >>= either (throwE . renderStoreError) pure
+    stored' <- case stored of
+        Just value -> pure (Just value)
+        Nothing -> do
+            imported <- importLegacySession root pool sessionId
+            if imported
+                then lift (Store.loadSession pool sessionId)
+                    >>= either (throwE . renderStoreError) pure
+                else pure Nothing
+    case stored' of
+        Nothing -> throwE ("session not found: " <> sessionId)
+        Just value -> decodeStoredSession sessionId value
 
 loadSessionHandle
-    :: OsPath
+    :: StorePool
+    -> OsPath
     -> Text
     -> IO (Either Text (SessionHandle, [SessionTurn]))
-loadSessionHandle root sessionId =
-    loadSession root sessionId >>= \case
+loadSessionHandle pool root sessionId =
+    loadSession pool root sessionId >>= \case
         Left err -> pure (Left err)
         Right (meta, turns) ->
             pure do
@@ -583,7 +617,8 @@ loadSessionHandle root sessionId =
                 tempDir <- sessionTempDirForId root sessionId
                 Right
                     ( SessionHandle
-                        { sessionDir = dir
+                        { sessionPool = pool
+                        , sessionDir = dir
                         , sessionTempDir = tempDir
                         , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
                         , sessionTranscriptPath =
@@ -593,23 +628,33 @@ loadSessionHandle root sessionId =
                     , turns
                     )
 
-deleteSession :: OsPath -> Text -> IO (Either Text ())
-deleteSession root sessionId = runExceptT do
+deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
+deleteSession pool root sessionId = runExceptT do
     dir <- except (sessionDirForId root sessionId)
     exists <- lift (doesDirectoryExist dir)
-    unless exists $
-        throwE ("session not found: " <> sessionId)
-    lock <- lift (acquireSessionLock dir sessionId) >>= \case
-        Left _ -> throwE "cannot delete a running session"
-        Right lock -> pure lock
-    removed <- lift $
-        tryIO (removePathForcibly dir) `finally` releaseSessionLock lock
-    case removed of
-        Left err ->
-            throwE ("could not delete session: " <> Text.pack (displayException err))
-        Right () -> do
-            tempRemoved <- lift (removeSessionTemp root sessionId)
-            except tempRemoved
+    lock <- if exists
+        then lift (acquireSessionLock dir sessionId) >>= \case
+            Left _ -> throwE "cannot delete a running session"
+            Right lock -> pure (Just lock)
+        else pure Nothing
+    now <- lift getCurrentTime
+    deleted <- lift $
+        Store.deleteSession pool sessionId now
+            `finally` maybe (pure ()) releaseSessionLock lock
+    case deleted of
+        Left err -> throwE (renderStoreError err)
+        Right False -> throwE ("session not found: " <> sessionId)
+        Right True
+            | not exists -> pure ()
+            | otherwise ->
+                lift (tryIO (removePathForcibly dir)) >>= \case
+                    Left err ->
+                        throwE
+                            ("session deleted but artifacts could not be removed: "
+                                <> Text.pack (displayException err))
+                    Right () -> pure ()
+    tempRemoved <- lift (removeSessionTemp root sessionId)
+    except tempRemoved
 
 -- | Session ids are single path components. Keep this deliberately broader
 -- than the current date-plus-hex allocator so older ids remain resumable.
@@ -634,19 +679,30 @@ sessionTempDirForId root sessionId
                 </> unsafeEncodeUtf (Text.unpack sessionId))
     | otherwise = Left "invalid session id"
 
-listSessions :: OsPath -> IO [SessionMeta]
-listSessions root = do
-    exists <- doesDirectoryExist root
-    if not exists
-        then pure []
-        else do
-            names <- listDirectory root
-            metas <- mapM (readMetaQuiet root) names
-            pure (sortOn (Down . (.metaUpdatedAt)) (catMaybes metas))
+listSessions :: StorePool -> OsPath -> IO [SessionMeta]
+listSessions pool _root = do
+    Store.listSessionMetadata pool >>= \case
+        Left err ->
+            fail
+                ("could not list PostgreSQL sessions: "
+                    <> Text.unpack (renderStoreError err))
+        Right values -> pure (catMaybes (map decodeMetaQuiet values))
 
-writeSessionMeta :: OsPath -> SessionMeta -> IO ()
-writeSessionMeta path meta =
-    writeLazyFileAtomically path 0o600 (Aeson.encode meta)
+writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
+writeSessionMeta pool _path meta = do
+    Store.replaceSessionMetadata
+        pool
+        meta.metaId
+        meta.metaUpdatedAt
+        "session.metadata_replaced"
+        (Aeson.toJSON meta) >>= \case
+            Left err ->
+                fail
+                    ("could not update PostgreSQL session metadata: "
+                        <> Text.unpack (renderStoreError err))
+            Right False ->
+                fail ("session not found: " <> Text.unpack meta.metaId)
+            Right True -> pure ()
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
@@ -673,7 +729,7 @@ writeTitle manual refreshIndex rawTitle handle = do
             , metaTitleIsManual = manual
             , metaTitleRefreshIndex = refreshIndex
             }
-    writeSessionMeta handle.sessionMetaPath meta
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
 
 resetSessionTitleToAuto :: SessionHandle -> IO SessionHandle
@@ -682,7 +738,7 @@ resetSessionTitleToAuto handle = do
             { metaTitleIsManual = False
             , metaTitleRefreshIndex = 0
             }
-    writeSessionMeta handle.sessionMetaPath meta
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
 
 sessionUsageFromMeta :: SessionMeta -> TokenUsage
@@ -817,13 +873,91 @@ decodeFileEither path = do
         Left err -> throwE (toText path <> ": " <> Text.pack err)
         Right value -> pure value
 
-readMetaQuiet :: OsPath -> OsPath -> IO (Maybe SessionMeta)
-readMetaQuiet root name = do
-    let path = root </> name </> unsafeEncodeUtf "meta.json"
-    result <- tryIO (runExceptT (decodeFileEither path))
-    pure $ case result of
-        Left _ -> Nothing
-        Right (Left _) -> Nothing
-        Right (Right meta)
-            | meta.metaVersion == sessionSchemaVersion -> Just meta
-            | otherwise -> Nothing
+decodeStoredSession
+    :: Text
+    -> Store.StoredSession
+    -> ExceptT Text IO (SessionMeta, [SessionTurn])
+decodeStoredSession sessionId stored = do
+    meta <- except (decodeJsonValue "session metadata" stored.storedMetadata)
+    validateSessionMeta sessionId meta
+    turns <- except $
+        mapM
+            (decodeJsonValue "session turn" . (.storedTurnPayload))
+            stored.storedTurns
+    pure (meta, turns)
+
+decodeJsonValue :: FromJSON a => Text -> Aeson.Value -> Either Text a
+decodeJsonValue label value =
+    case Aeson.fromJSON value of
+        Aeson.Error err -> Left (label <> ": " <> Text.pack err)
+        Aeson.Success decoded -> Right decoded
+
+decodeMetaQuiet :: Aeson.Value -> Maybe SessionMeta
+decodeMetaQuiet value =
+    case decodeJsonValue "session metadata" value of
+        Right meta | meta.metaVersion == sessionSchemaVersion -> Just meta
+        _ -> Nothing
+
+validateSessionMeta :: Text -> SessionMeta -> ExceptT Text IO ()
+validateSessionMeta sessionId meta = do
+    unless (isValidSessionId meta.metaId) $
+        throwE "invalid session id in metadata"
+    unless (meta.metaId == sessionId) $
+        throwE "session id does not match requested session"
+    unless (meta.metaVersion == sessionSchemaVersion) $
+        throwE $
+            "unsupported session schema version "
+                <> Text.pack (show meta.metaVersion)
+                <> " (expected "
+                <> Text.pack (show sessionSchemaVersion)
+                <> ")"
+
+-- | Import the old @meta.json@ + @transcript.jsonl@ representation on first
+-- access.  PostgreSQL remains canonical after a successful import; the files
+-- are retained as rollback/export artifacts and are never dual-written.
+importLegacySession :: OsPath -> StorePool -> Text -> ExceptT Text IO Bool
+importLegacySession root pool sessionId = do
+    dir <- except (sessionDirForId root sessionId)
+    let
+        metaPath = dir </> unsafeEncodeUtf "meta.json"
+        transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
+    exists <- lift (doesDirectoryExist dir)
+    if not exists
+        then pure False
+        else do
+            meta <- decodeFileEither metaPath
+            validateSessionMeta sessionId meta
+            turns <- loadTranscript transcriptPath
+            metaBytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath metaPath)))
+            transcriptExists <- lift (doesFileExist transcriptPath)
+            transcriptBytes <- if transcriptExists
+                then lift (retryOnFileBusy
+                    (LBS.readFile (unsafeToFilePath transcriptPath)))
+                else pure mempty
+            let legacy = Store.LegacySession
+                    { legacySourcePath = toText dir
+                    , legacyContentHash =
+                        contentFingerprint (metaBytes <> transcriptBytes)
+                    , legacySessionId = sessionId
+                    , legacyCreatedAt = meta.metaCreatedAt
+                    , legacyUpdatedAt = meta.metaUpdatedAt
+                    , legacyMetadata = Aeson.toJSON meta
+                    , legacyTurns =
+                        map (\turn -> (turn.turnAt, Aeson.toJSON turn)) turns
+                    }
+            lift (Store.importLegacySession pool legacy) >>= \case
+                Left err -> throwE (renderStoreError err)
+                Right imported -> pure imported
+
+-- A deterministic import key without another crypto dependency.  It is used
+-- only for idempotency, not authentication or corruption detection.
+contentFingerprint :: LBS.ByteString -> Text
+contentFingerprint =
+    Text.pack . pad16 . (`showHex` "") . LBS.foldl' step fnvOffset
+  where
+    fnvOffset :: Word64
+    fnvOffset = 14695981039346656037
+    fnvPrime :: Word64
+    fnvPrime = 1099511628211
+    step hash byte = (hash `xor` fromIntegral byte) * fnvPrime
+    pad16 text = replicate (16 - length text) '0' <> text

@@ -96,6 +96,15 @@ import Agent.CLI.Compaction
     , runResponsesCompactWith
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.CLI.Database (databaseTools)
+import Agent.CLI.Database.Store
+    ( databaseToolsEnvForStore
+    , deriveDatabaseScopes
+    )
+import Agent.CLI.Database.Storage
+    ( postgresStorageCommandEnv
+    , runStorageCommand
+    )
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
@@ -167,6 +176,17 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Options
+import Agent.Store.Postgres
+    ( ManagedPostgresConfig
+    , Store
+    , closeStore
+    , managedPostgresConfigFromEnv
+    , openStore
+    , trustedPool
+    , withStore
+    )
+import Agent.Store.Types (renderStoreError)
+import Agent.Store.Postgres.Connection (StorePool)
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume
     ( ResumeEntry(..)
@@ -578,6 +598,7 @@ data AgentStepCache = AgentStepCache
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
+    , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
     , startupEscPaused :: !(IORef Bool)
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
@@ -664,6 +685,8 @@ devMainResume resumeId = do
             pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (Storage command) ->
+            runStorageAdmin command >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -682,12 +705,27 @@ run = do
             runLoginManager color
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (Storage command) -> runStorageAdmin command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
                 DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
+
+runStorageAdmin :: StorageCommand -> IO ()
+runStorageAdmin command = do
+    home <- getHomeDirectory
+    config <- managedPostgresConfigForHome home
+    runStorageCommand (postgresStorageCommandEnv config) command >>= \case
+        Left err -> die (Text.unpack err)
+        Right message -> Text.putStrLn message
+
+managedPostgresConfigForHome :: OsPath -> IO ManagedPostgresConfig
+managedPostgresConfigForHome home = do
+    stateDirectory <-
+        decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
+    managedPostgresConfigFromEnv stateDirectory
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
@@ -757,22 +795,31 @@ withRestoredCurrentDirectory action = do
 runListSessions :: IO ()
 runListSessions = do
     home <- getHomeDirectory
-    sessions <- listSessions (sessionsRoot home)
-    if null sessions
-        then putStrLn "No sessions in ~/.haskell-agent/sessions"
-        else mapM_ printSessionSummary sessions
+    withStoreForHome home \store -> do
+        sessions <- listSessions (trustedPool store) (sessionsRoot home)
+        if null sessions
+            then putStrLn "No sessions in ~/.haskell-agent/sessions"
+            else mapM_ printSessionSummary sessions
 
 runShowSession :: Text -> IO ()
 runShowSession sessionId = do
     home <- getHomeDirectory
-    loadSession (sessionsRoot home) sessionId >>= \case
-        Left err -> die (Text.unpack err)
-        Right (meta, turns) -> do
-            printSessionSummary meta
-            putStrLn ""
-            if null turns
-                then putStrLn "(empty transcript)"
-                else mapM_ printTurn turns
+    withStoreForHome home \store ->
+        loadSession (trustedPool store) (sessionsRoot home) sessionId >>= \case
+            Left err -> die (Text.unpack err)
+            Right (meta, turns) -> do
+                printSessionSummary meta
+                putStrLn ""
+                if null turns
+                    then putStrLn "(empty transcript)"
+                    else mapM_ printTurn turns
+
+withStoreForHome :: OsPath -> (Store -> IO a) -> IO a
+withStoreForHome home action = do
+    config <- managedPostgresConfigForHome home
+    withStore config action >>= \case
+        Left err -> die (Text.unpack (renderStoreError err))
+        Right value -> pure value
 
 printSessionSummary :: SessionMeta -> IO ()
 printSessionSummary meta =
@@ -968,8 +1015,10 @@ prepareAgentIteration
 prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
+    databaseStoreRef <- newIORef (Nothing :: Maybe Store)
     let failPreparation message =
             readIORef resumeLockRef >>= mapM_ releaseSessionLock >>
+            readIORef databaseStoreRef >>= mapM_ closeStore >>
                 case activeFullscreen of
                     Nothing -> die message
                     Just _ -> throwIO (StartupFailure message)
@@ -978,6 +1027,11 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     syntaxLoadDurationRef <- newIORef Nothing
     home <- getHomeDirectory
     let root = sessionsRoot home
+    databaseConfig <- managedPostgresConfigForHome home
+    databaseStore <- openStore databaseConfig >>= \case
+        Left err -> failPreparation (Text.unpack (renderStoreError err))
+        Right store -> writeIORef databaseStoreRef (Just store) >> pure store
+    let sessionPool = trustedPool databaseStore
     resumed <- case options.optResume of
         Nothing -> pure Nothing
         Just sessionId -> do
@@ -998,7 +1052,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadSession root sessionId >>= \case
+                    loadSession sessionPool root sessionId >>= \case
                         Left err -> do
                             signalManagedSessionReady (Left err)
                             failPreparation (Text.unpack err)
@@ -1103,6 +1157,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     writeIORef uiRuntimeRef fullscreen
     let startup = StartupRuntime
             { startupToolEnv = toolEnv
+            , startupDatabaseStore = databaseStore
             , startupInterrupt = interrupt
             , startupEscPaused = escPaused
             , startupUiRuntimeRef = uiRuntimeRef
@@ -1127,6 +1182,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             forM_ fullscreen resetFullscreenSessionActions
+            closeStore databaseStore
     pure PreparedAgent
         { preparedFullscreen = fullscreen
         , preparedRun = action `finally` cleanup
@@ -1230,6 +1286,12 @@ runAgentInitializedWithLock
                 Just runtime -> setFullscreenWindowTitle runtime title
                 Nothing -> setCliWindowTitle stdoutTty stdout title
     projectRoot <- resolveProjectRoot cwd
+    stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
+    projectRootPath <- decodeFS projectRoot
+    databaseScopes <-
+        deriveDatabaseScopes stateDirectory projectRootPath >>= \case
+            Left err -> startupDie startup (Text.unpack err)
+            Right scopes -> pure scopes
     projectSettings <- loadProjectSettings projectRoot
     catalog <-
         loadModelCatalog home >>= either
@@ -1734,6 +1796,7 @@ runAgentInitializedWithLock
     prompt <- loadPrompt options
     persist <-
         preparePersistence
+            (trustedPool startup.startupDatabaseStore)
             fullscreen options root
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort prompt resumed
@@ -1816,7 +1879,8 @@ runAgentInitializedWithLock
                                 writeIORef activeSessionLock (Just lock)
                                 mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
-            { toolsRoot = root
+            { toolsPool = trustedPool startup.startupDatabaseStore
+            , toolsRoot = root
             , toolsProvider = provider
             , toolsConnection = inferredTarget.targetConnectionId
             , toolsModel = model
@@ -1834,11 +1898,17 @@ runAgentInitializedWithLock
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
+        databaseToolsEnv =
+            databaseToolsEnvForStore
+                startup.startupDatabaseStore
+                databaseScopes
+                (readIORef persistSlotRef >>= currentSessionId)
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
                 ++ agentSessionTools sessionToolsEnv
+                ++ databaseTools databaseToolsEnv
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -2386,7 +2456,8 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                 pure (Right credential)
 
 preparePersistence
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> CliOptions
     -> OsPath
     -> ModelTarget
@@ -2397,7 +2468,7 @@ preparePersistence
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
 preparePersistence
-        fullscreen options root target
+        sessionPool fullscreen options root target
         retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -2439,7 +2510,8 @@ preparePersistence
                             }
                     | otherwise = meta
             let handle = SessionHandle
-                    { sessionDir = root </> fromText activeMeta.metaId
+                    { sessionPool = sessionPool
+                    , sessionDir = root </> fromText activeMeta.metaId
                     , sessionTempDir =
                         either
                             (error . Text.unpack)
@@ -2456,7 +2528,10 @@ preparePersistence
                     , sessionMeta = activeMeta
                     }
             when metadataChanged $
-                writeSessionMeta handle.sessionMetaPath activeMeta
+                writeSessionMeta
+                    handle.sessionPool
+                    handle.sessionMetaPath
+                    activeMeta
             let message = "session: " <> activeMeta.metaId <> " (resumed)"
             case fullscreen of
                 Nothing -> do
@@ -2471,7 +2546,8 @@ preparePersistence
                 -- Defer directory creation until the first successful turn so
                 -- an abandoned REPL does not leave empty session folders.
                 newPendingPersistence SessionCreate
-                    { createRoot = root
+                    { createPool = sessionPool
+                    , createRoot = root
                     , createTarget = target
                     , createCwd = cwd
                     , createEffort = effort
@@ -2996,6 +3072,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
             , sessionPersist = persist
+            , sessionDatabasePool =
+                trustedPool startup.startupDatabaseStore
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
@@ -3439,7 +3517,10 @@ setSessionEffort env level = do
                             tempDir)
                 PersistenceActive handle -> do
                     let meta = handle.sessionMeta { metaEffort = level }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
 
@@ -3462,6 +3543,7 @@ replWithDraft env@SessionEnv
     , sessionPolicy = policyRef
     , sessionTranscript = transcriptRef
     , sessionPersist = persist
+    , sessionDatabasePool = databasePool
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
     , sessionCwd = cwd
@@ -4119,7 +4201,7 @@ replWithDraft env@SessionEnv
                                             (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
-                        handleResume fullscreen maybeId persist >>= \case
+                        handleResume databasePool fullscreen maybeId persist >>= \case
                             Nothing -> continue
                             Just result -> pure result
                     ReplClear -> do
@@ -4154,7 +4236,10 @@ replWithDraft env@SessionEnv
                                                 , metaOutputTokens = 0
                                                 , metaCachedTokens = 0
                                                 }
-                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        writeSessionMeta
+                                            handle'.sessionPool
+                                            handle'.sessionMetaPath
+                                            meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
                                         pure
@@ -4195,7 +4280,8 @@ replWithDraft env@SessionEnv
                                                 }
                                         PersistenceActive handle ->
                                             SessionCreate
-                                                { createRoot =
+                                                { createPool = handle.sessionPool
+                                                , createRoot =
                                                     takeDirectory handle.sessionDir
                                                 , createTarget = ModelTarget
                                                     { targetProvider = provider
@@ -4238,7 +4324,10 @@ replWithDraft env@SessionEnv
                                         { metaLastResponseId = Nothing
                                         , metaUpdatedAt = now
                                         }
-                                writeSessionMeta handle'.sessionMetaPath meta
+                                writeSessionMeta
+                                    handle'.sessionPool
+                                    handle'.sessionMetaPath
+                                    meta
                                 env.sessionOnPersisted handle'
                                 env.sessionSetTempDir handle'.sessionTempDir
                                 writeIORef slotRef
@@ -4385,6 +4474,7 @@ replWithDraft env@SessionEnv
                                         updated <- resetSessionTitleToAuto handle
                                         writeIORef slotRef (PersistenceActive updated)
                                         loadSession
+                                            updated.sessionPool
                                             (takeDirectory updated.sessionDir)
                                             updated.sessionMeta.metaId
                                             >>= \case
@@ -5141,7 +5231,10 @@ applyModelChange
                             , metaTransportModel = Just transportModel
                             , metaDialect = dialectId
                             }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
     pure $
@@ -5645,7 +5738,10 @@ commitProviderTransition projectRoot (Just transition) persist = do
                             , metaLastResponseId = Nothing
                             , metaUpdatedAt = now
                             }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
 
@@ -5969,11 +6065,12 @@ loadPrompt options = case (options.optPrompt, options.optPromptFile) of
     _ -> pure Nothing
 
 handleResume
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> Maybe Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleResume fullscreen maybeId persist = do
+handleResume databasePool fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let reportInfo message =
@@ -5997,7 +6094,7 @@ handleResume fullscreen maybeId persist = do
                     reportInfo ("already on session " <> sessionId)
                     pure Nothing
                 else
-                    loadSession root sessionId >>= \case
+                    loadSession databasePool root sessionId >>= \case
                         Left err -> do
                             reportError err
                             pure Nothing
@@ -6005,21 +6102,24 @@ handleResume fullscreen maybeId persist = do
     case maybeId of
         Just sessionId -> resume sessionId
         Nothing -> do
-            sessions <- listSessions root
+            sessions <- listSessions databasePool root
             currentId <- currentSessionId persist
-            pickResumeChoice fullscreen color root currentId sessions >>= \case
+            pickResumeChoice
+                databasePool fullscreen color root currentId sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
 pickResumeChoice
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> Bool
     -> OsPath
     -> Maybe Text
     -> [SessionMeta]
     -> IO (Maybe Text)
-pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
-    Nothing -> pickResumeSession color root sessions
+pickResumeChoice databasePool fullscreen color root currentId sessions =
+  case fullscreen of
+    Nothing -> pickResumeSession databasePool color root sessions
     Just runtime -> do
         now <- getCurrentTime
         let browser =
@@ -6028,12 +6128,12 @@ pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
                 | currentId == Just sessionId =
                     pure (Left "cannot delete the current session")
                 | otherwise =
-                    deleteSession root sessionId
+                    deleteSession databasePool root sessionId
         fmap (.resumeId)
             <$> requestFullscreenResume
                 runtime
                 browser
-                (loadResumeEntry root)
+                (loadResumeEntry databasePool root)
                 deleteEntry
 
 pickAgentChoice

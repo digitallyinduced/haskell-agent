@@ -24,6 +24,7 @@ import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
+import Agent.Store.Postgres.Connection (StorePool)
 import Data.IORef (IORef)
 import Data.Text (Text)
 import Control.Concurrent.STM (STM)
@@ -45,6 +46,7 @@ data SessionEnv = SessionEnv
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !Persistence
+    , sessionDatabasePool :: !StorePool
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv

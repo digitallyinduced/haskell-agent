@@ -16,6 +16,7 @@ import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
+import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -77,6 +78,7 @@ main = hspec do
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
     DialectsSpec.spec
+    DatabaseSpec.spec
     ErrorSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec

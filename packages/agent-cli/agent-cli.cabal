@@ -56,6 +56,9 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
+                    , Agent.CLI.Database
+                    , Agent.CLI.Database.Store
+                    , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
                     , Agent.CLI.Dialects
                     , Agent.CLI.Error
@@ -111,6 +114,7 @@ library
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
                     , agent-syntax >= 0.1 && < 0.2
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
@@ -133,6 +137,7 @@ library
                     , haskeline >= 0.8 && < 0.9
                     , http-client
                     , http-client-tls
+                    , hasql-pool >= 1.3 && < 2
                     , JuicyPixels
                     , mtl
                     , process >= 1.6.26
@@ -172,6 +177,7 @@ executable eval-ghci-vs-bash
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
                     , agent-responses
+                    , agent-store
                     , aeson >= 2.0
                     , base >= 4.17 && < 5
                     , bytestring
@@ -192,6 +198,7 @@ benchmark subagent-retention-bench
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-core
+                    , agent-store
                     , agent-responses
                     , aeson
                     , base >= 4.17 && < 5
@@ -201,6 +208,7 @@ benchmark subagent-retention-bench
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ApprovalSpec
@@ -217,6 +225,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
+                    , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -265,6 +274,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-codex-dialect
                     , agent-grok-build-dialect
+                    , agent-store
                     , agent-tui
                     , agent-openai
                     , agent-openrouter

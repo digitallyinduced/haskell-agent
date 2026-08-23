@@ -70,6 +70,16 @@
                     ];
                 };
 
+                agentStoreSource = nix-filter.lib {
+                    root = ./packages/agent-store;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-store.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentSyntaxSource = nix-filter.lib {
                     root = ./packages/agent-syntax;
                     include = [
@@ -170,6 +180,55 @@
 
                 haskellPackages = pkgs.haskellPackages.extend (
                     final: previous: {
+                        pqi = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "pqi";
+                                ver = "1.1.0.1";
+                                sha256 = "sha256-y92T7Cry8sGOt/iCHwC4mC2DGCHVQDf+PuHEu4LxA+g=";
+                            } { });
+                        pqi-ffi = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "pqi-ffi";
+                                ver = "1.0.1.0";
+                                sha256 = "sha256-wZfnWVJwMNG40YS6MAarGIDZ9Nudqup+jncERD1fhmU=";
+                            } { });
+                        pqi-native = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "pqi-native";
+                                ver = "1.0.1.11";
+                                sha256 = "sha256-9lvHBXlIzADmgxHDyNsU7l+oKNzUlmQgAHjZTh27LLo=";
+                            } { });
+                        pqi-conformance = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "pqi-conformance";
+                                ver = "1.0.11.0";
+                                sha256 = "sha256-C14NRT6arn6U4T7KzS/vkjkzeA21gABfZo3MrN35Y5g=";
+                            } { });
+                        postgresql-binary = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "postgresql-binary";
+                                ver = "0.15.0.1";
+                                sha256 = "sha256-q5t2OgiDxyt8WU+zHVxpyVhFF9PtDu2BlQRfuPpBkgk=";
+                            } { });
+                        hasql = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "hasql";
+                                ver = "2.0.1.0";
+                                sha256 = "sha256-iA9yNnh+lfRjs4oWrnf1YN7oOrMwj+iANHALxBMq55U=";
+                            } { });
+                        hasql-pool = pkgs.haskell.lib.dontCheck
+                            (final.callHackageDirect {
+                                pkg = "hasql-pool";
+                                ver = "1.5.0.1";
+                                sha256 = "sha256-79Jj0htGBHdPXufyhuOKsL2H0qq2QwpC4fcVfvVLHCQ=";
+                            } { });
+                        hasql-transaction =
+                            pkgs.haskell.lib.dontCheck
+                                (final.callHackageDirect {
+                                    pkg = "hasql-transaction";
+                                    ver = "1.2.3.1";
+                                    sha256 = "sha256-EteEnSgJB4MXixv/58D2Qo70L/AfZxNGin/pYiIjVhY=";
+                                } { });
                         vty-unix = pkgs.haskell.lib.appendPatch
                             previous.vty-unix
                             ./patches/vty-unix-all-motion.patch;
@@ -238,11 +297,21 @@
                                             export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                                         '';
                                 });
+                        agent-store = pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-store/package.nix { })
+                                {
+                                    src = agentStoreSource;
+                                })
+                            [ pkgs.postgresql_18 ];
                         agent-cli = pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
                             })
-                            [ pkgs.git ];
+                            [
+                                pkgs.git
+                                pkgs.postgresql_18
+                            ];
                     }
                 );
 
@@ -256,6 +325,7 @@
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
                 agentTuiPackage = haskellPackages.agent-tui;
+                agentStorePackage = haskellPackages.agent-store;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
@@ -268,7 +338,8 @@
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
-                                            "${skylightingSyntaxDirectory}"
+                                            "${skylightingSyntaxDirectory}" \
+                                        --prefix PATH : "${pkgs.postgresql_18}/bin"
                                 '';
                         });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
@@ -352,6 +423,7 @@
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
                 packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
+                packages.agent-store = agentStorePackage;
                 packages.skylighting-syntaxes = skylightingSyntaxes;
                 packages.agent-responses-types = agentResponsesTypesPackage;
                 packages.agent-responses = agentResponsesPackage;
@@ -382,6 +454,7 @@
                         packages.agent-syntax
                         packages.agent-tui
                         packages.agent-responses-types
+                        packages.agent-store
                         packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
@@ -394,6 +467,7 @@
                     };
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                        export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
                     '';
                     nativeBuildInputs =
                         (with haskellPackages; [
@@ -402,6 +476,7 @@
                         ])
                         ++ (with pkgs; [
                             cabal2nix
+                            postgresql_18
                             ripgrep
                         ])
                         ++ [ agentRepl ];
@@ -415,6 +490,7 @@
                     agent-syntax = agentSyntaxPackage;
                     agent-tui = agentTuiPackage;
                     agent-responses-types = agentResponsesTypesPackage;
+                    agent-store = agentStorePackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
