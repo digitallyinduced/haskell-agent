@@ -3,7 +3,14 @@
 -- Provider-neutral conversion and stateless transport helpers live in
 -- "Agent.Responses.LoopBackend" and are re-exported here for compatibility.
 module Agent.OpenAI.LoopBackend
-    ( openAiBackend
+    ( ConnectionHealth
+    , newConnectionHealth
+    , readConnectionHealth
+    , markConnectionUnhealthy
+    , TransportFallbackState
+    , newTransportFallbackState
+    , readTransportFallbackState
+    , openAiBackend
     , openAiBackendReconnecting
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiAuxiliaryResponseSenderWithConnectionRecovery
@@ -59,7 +66,8 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (onException)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
+import qualified Control.Exception.Safe as Safe
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -73,6 +81,38 @@ import Data.IORef
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+-- | Exclusive ownership of a reusable connection and its health transition.
+--
+-- The state remains locked for the request because a Codex WebSocket is not
+-- multiplexed: a second caller must not observe it as healthy while the first
+-- caller is still deciding whether it survived the request.
+newtype ConnectionHealth = ConnectionHealth (MVar Bool)
+
+newConnectionHealth :: Bool -> IO ConnectionHealth
+newConnectionHealth = fmap ConnectionHealth . newMVar
+
+readConnectionHealth :: ConnectionHealth -> IO Bool
+readConnectionHealth (ConnectionHealth state) = readMVar state
+
+markConnectionUnhealthy :: ConnectionHealth -> IO ()
+markConnectionUnhealthy (ConnectionHealth state) =
+    modifyMVar state \_ -> pure (False, ())
+
+-- | Exclusive ownership of the primary-to-fallback transport transition.
+--
+-- Keeping the turn under this lock prevents concurrent callers from both
+-- replaying on the primary after the first transport failure. Once fallback is
+-- active, turns remain serialized through the same backend ownership boundary.
+newtype TransportFallbackState = TransportFallbackState (MVar Bool)
+
+newTransportFallbackState :: Bool -> IO TransportFallbackState
+newTransportFallbackState =
+    fmap TransportFallbackState . newMVar
+
+readTransportFallbackState :: TransportFallbackState -> IO Bool
+readTransportFallbackState (TransportFallbackState state) =
+    readMVar state
 
 -- | Close over a live Codex WebSocket and the request fields the loop does
 -- not own (model, instructions, tools, reasoning). The params action is
@@ -93,7 +133,7 @@ openAiBackend conn =
 openAiBackendReconnecting
     :: TokenProvider
     -> Credential
-    -> IORef Bool
+    -> ConnectionHealth
     -> CodexConn
     -> IO ResponseCreateParams
     -> Backend
@@ -112,7 +152,7 @@ openAiBackendReconnecting provider currentCredential connectionHealthy conn =
 openAiResponseSenderReconnecting
     :: TokenProvider
     -> Credential
-    -> IORef Bool
+    -> ConnectionHealth
     -> CodexConn
     -> ResponseCreateParams
     -> Maybe Text
@@ -130,7 +170,7 @@ openAiResponseSenderReconnecting =
 openAiAuxiliaryResponseSenderReconnecting
     :: TokenProvider
     -> Credential
-    -> IORef Bool
+    -> ConnectionHealth
     -> CodexConn
     -> ResponseCreateParams
     -> Maybe Text
@@ -154,7 +194,7 @@ openAiResponseSenderReconnectingWhen
     -> (ApiError -> ApiError)
     -> TokenProvider
     -> Credential
-    -> IORef Bool
+    -> ConnectionHealth
     -> CodexConn
     -> ResponseCreateParams
     -> Maybe Text
@@ -200,7 +240,7 @@ openAiResponseSenderReconnectingWhen observed markObservedFailure provider
 
 -- | Injectable connection recovery used by the reconnecting backend.
 openAiBackendWithConnectionRecovery
-    :: IORef Bool
+    :: ConnectionHealth
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
@@ -220,7 +260,7 @@ openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
             sendFresh
 
 openAiResponseSenderWithConnectionRecovery
-    :: IORef Bool
+    :: ConnectionHealth
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
@@ -240,7 +280,7 @@ openAiResponseSenderWithConnectionRecovery =
         markLoopReplayUnsafe
 
 openAiAuxiliaryResponseSenderWithConnectionRecovery
-    :: IORef Bool
+    :: ConnectionHealth
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
@@ -263,7 +303,7 @@ openAiAuxiliaryResponseSenderWithConnectionRecovery =
 -- produced enough output that replaying it is no longer safe.
 openAiResponseSenderWithConnectionRecoveryWhen
     :: (ResponseStreamEvent -> Bool)
-    -> IORef Bool
+    -> ConnectionHealth
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
@@ -285,7 +325,7 @@ openAiResponseSenderWithConnectionRecoveryWhen observed =
 openAiResponseSenderWithConnectionRecoveryUsing
     :: (ResponseStreamEvent -> Bool)
     -> (ApiError -> ApiError)
-    -> IORef Bool
+    -> ConnectionHealth
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
@@ -300,38 +340,49 @@ openAiResponseSenderWithConnectionRecoveryUsing
     -> (ResponseStreamEvent -> IO ())
     -> IO (Either ApiError Response)
 openAiResponseSenderWithConnectionRecoveryUsing observed markObservedFailure
-        connectionHealthy sendCurrent sendFresh =
+        (ConnectionHealth connectionHealth) sendCurrent sendFresh =
     sendWithRecovery
   where
     sendWithRecovery request previousResponseId onEvent = do
-        healthy <- readIORef connectionHealthy
-        if healthy
-            then tryCurrent request previousResponseId onEvent
-            else sendFreshTracked Nothing request previousResponseId onEvent
+        outcome <- modifyMVar connectionHealth \healthy -> do
+            attempted <- Safe.tryAny $
+                if healthy
+                    then tryCurrent request previousResponseId onEvent
+                    else
+                        (False,) <$>
+                            sendFreshTracked
+                                Nothing request previousResponseId onEvent
+            case attempted of
+                Left exception ->
+                    pure (False, Left exception)
+                Right (nextHealth, result) ->
+                    pure (nextHealth, Right result)
+        either Safe.throwIO pure outcome
 
     tryCurrent request previousResponseId onEvent = do
         emittedLoopEvent <- newIORef False
         result <- sendCurrent request previousResponseId
             (trackOutput emittedLoopEvent onEvent)
-            `onException` writeIORef connectionHealthy False
         case result of
             Left err -> do
                 let deadConnectionOrAccount =
                         isDeadConnectionOrAccount err
-                if deadConnectionOrAccount
-                    then writeIORef connectionHealthy False
-                    else pure ()
                 emitted <- readIORef emittedLoopEvent
                 if emitted
-                    then pure (Left (markObservedFailure err))
+                    then pure
+                        ( not deadConnectionOrAccount
+                        , Left (markObservedFailure err)
+                        )
                     else if deadConnectionOrAccount
-                        then sendFreshTracked
-                            (Just err)
-                            request
-                            previousResponseId
-                            onEvent
-                        else pure result
-            _ -> pure result
+                        then
+                            (False,) <$>
+                                sendFreshTracked
+                                    (Just err)
+                                    request
+                                    previousResponseId
+                                    onEvent
+                        else pure (True, result)
+            _ -> pure (True, result)
 
     sendFreshTracked previousFailure request previousResponseId onEvent = do
         emittedOutput <- newIORef False
@@ -430,16 +481,25 @@ isReplayUnsafeError = \case
 -- first response frame. Replaying the same logical turn over the stateless HTTP
 -- backend is safe while no text or reasoning delta has reached the caller.
 openAiBackendWithTransportFallback
-    :: IORef Bool
+    :: TransportFallbackState
     -> Backend
     -> Backend
     -> Backend
-openAiBackendWithTransportFallback fallbackActive primary fallback =
+openAiBackendWithTransportFallback
+        (TransportFallbackState fallbackState) primary fallback =
     Backend \state previousResponseId inputs onEvent -> do
-        active <- readIORef fallbackActive
-        if active
-            then fallback.submitTurn state previousResponseId inputs onEvent
-            else tryPrimary state previousResponseId inputs onEvent
+        outcome <- modifyMVar fallbackState \active ->
+            if active
+                then do
+                    attempted <- Safe.tryAny $
+                        fallback.submitTurn
+                            state previousResponseId inputs onEvent
+                    pure (True, attempted)
+                else do
+                    (nextActive, attempted) <-
+                        tryPrimary state previousResponseId inputs onEvent
+                    pure (nextActive, attempted)
+        either Safe.throwIO pure outcome
   where
     tryPrimary state previousResponseId inputs onEvent = do
         emittedModelOutput <- newIORef False
@@ -451,13 +511,15 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
         case result of
             Left err
                 | isWebSocketTransportFailure err -> do
-                    writeIORef fallbackActive True
                     emitted <- readIORef emittedModelOutput
                     if emitted
-                        then pure result
-                        else fallback.submitTurn
-                            state previousResponseId inputs onEvent
-            _ -> pure result
+                        then pure (True, Right result)
+                        else do
+                            attempted <- Safe.tryAny $
+                                fallback.submitTurn
+                                    state previousResponseId inputs onEvent
+                            pure (True, attempted)
+            _ -> pure (False, Right result)
 
     isModelOutput = \case
         TextDelta {} -> True

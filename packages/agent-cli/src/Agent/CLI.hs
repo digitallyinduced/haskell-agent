@@ -380,7 +380,10 @@ import Agent.OpenAI.Compaction
     )
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend
-    ( openAiAuxiliaryResponseSenderReconnecting
+    ( ConnectionHealth
+    , markConnectionUnhealthy
+    , newConnectionHealth
+    , openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWith
     , openAiResponseSenderReconnecting
     )
@@ -570,7 +573,10 @@ data ActiveHttpAuth = ActiveHttpAuth
     }
 
 data OpenAiPersistentConnection
-    = OpenAiPersistentConnection !Credential !(IORef Bool) !CodexConn
+    = OpenAiPersistentConnection
+        !Credential
+        !ConnectionHealth
+        !CodexConn
 
 data AccountSwitchRequest
     = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
@@ -2001,7 +2007,7 @@ runAgentInitializedWithLock
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProvider tokenProvider \conn credential -> do
                                 wsLock <- newMVar ()
-                                initialWsHealthy <- newIORef True
+                                initialWsHealthy <- newConnectionHealth True
                                 activeConnectionRef <- newIORef $
                                     OpenAiPersistentConnection
                                         credential
@@ -2071,7 +2077,8 @@ runAgentInitializedWithLock
                                                         newCredential
                                                         newConn = do
                                                             newHealthy <-
-                                                                newIORef True
+                                                                newConnectionHealth
+                                                                    True
                                                             label <-
                                                                 resolveActiveAccountLabel
                                                                     newCredential
@@ -2094,9 +2101,8 @@ runAgentInitializedWithLock
                                                     awaitNext newHealthy =
                                                         readChan switchRequests
                                                             `finally`
-                                                                writeIORef
+                                                                markConnectionUnhealthy
                                                                     newHealthy
-                                                                    False
                                                 oldConnection <-
                                                     readIORef activeConnectionRef
                                                 previousAccountId <-
@@ -2106,7 +2112,8 @@ runAgentInitializedWithLock
                                                         oldHealthy
                                                         oldConn =
                                                             oldConnection
-                                                writeIORef oldHealthy False
+                                                markConnectionUnhealthy
+                                                    oldHealthy
                                                 closeCodexConn oldConn
                                                 writeIORef
                                                     preferredOpenAiAccountRef
