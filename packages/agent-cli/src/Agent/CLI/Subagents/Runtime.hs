@@ -169,6 +169,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
+    , subagentMcpTools :: ![AppTool]
     , subagentParams :: !(IORef ResponseCreateParams)
     , subagentRegistry :: !SubagentRegistry
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
@@ -567,7 +568,9 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
-                        tools = coding.codingAppTools
+                        tools =
+                            coding.codingAppTools
+                                <> runtime.subagentMcpTools
                         childParams = requestParams model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -657,7 +660,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                     today <- utctDay <$> getCurrentTime
                     shellPath <-
                         Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
-                    let tools = case
+                    let codingTools = case
                                 dialectChildAgentProtocol childDialect of
                             CodexCollaborationProtocol ->
                                 coding.codingAppTools
@@ -667,6 +670,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             GenericTaskProtocol ->
                                 filterChildGrokTools
                                     agentType coding.codingAppTools
+                        tools = codingTools <> runtime.subagentMcpTools
                         baseInstructions =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->

@@ -46,6 +46,7 @@ library
                     , Agent.Provider
                     , Agent.Provider.Options
                     , Agent.Loop
+                    , Agent.MCP
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -138,6 +139,7 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
+                    , Agent.MCPSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec

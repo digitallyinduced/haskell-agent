@@ -49,6 +49,7 @@ library
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
+                    , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.Duration
                     , Agent.CLI.Error
@@ -169,6 +170,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.CommandSpec
+                    , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec

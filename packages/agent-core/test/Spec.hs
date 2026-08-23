@@ -7,6 +7,7 @@ import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
+import qualified Agent.MCPSpec as MCPSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
@@ -39,6 +40,7 @@ main = hspec do
     HttpHeaderSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec
+    MCPSpec.spec
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec

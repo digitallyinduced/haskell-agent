@@ -77,6 +77,11 @@ import Agent.CLI.Clipboard
     , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
+import Agent.CLI.Config
+    ( HarnessConfig(..)
+    , McpServerConfig(..)
+    , loadHarnessConfig
+    )
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , OpenAiCompactionSender
@@ -302,6 +307,7 @@ import Agent.CLI.Worktree
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
 import Agent.Loop
+import qualified Agent.MCP as MCP
 import Agent.Error (ApiError(..))
 import Agent.Dialect
     ( Dialect
@@ -386,6 +392,7 @@ import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
 import Agent.Tools.Grok.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -400,7 +407,7 @@ import Agent.Tools.PlanMode
     , planFilePath
     )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ToolEnv(..)
     , defaultToolEnv
     , setToolSessionTmp
@@ -804,6 +811,38 @@ startupDie startup message =
     case startup.startupFullscreen of
         Nothing -> die message
         Just _ -> throwIO (StartupFailure message)
+
+reportStartupWarning :: StartupRuntime -> Text -> IO ()
+reportStartupWarning startup message =
+    case startup.startupFullscreen of
+        Nothing -> putTextLn stderr ("warning: " <> message)
+        Just runtime ->
+            emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
+
+mcpToolCollision :: [AppTool] -> [MCP.McpToolRegistration] -> Maybe Text
+mcpToolCollision existingTools = go
+  where
+    existing =
+        Map.fromList $
+            ("web_search", "built-in web search")
+                : [ (canonicalToolName tool.appToolName, "built-in tool")
+                  | tool <- existingTools
+                  ]
+
+    go [] = Nothing
+    go (registration : rest) =
+        let tool = registration.mcpRegistrationTool
+            name = canonicalToolName tool.appToolName
+        in case Map.lookup name existing of
+            Nothing -> go rest
+            Just source ->
+                Just $
+                    "MCP tool "
+                        <> tool.appToolName
+                        <> " from server "
+                        <> registration.mcpRegistrationServer
+                        <> " conflicts with "
+                        <> source
 
 formatStartupTimings :: [(Text, NominalDiffTime)] -> Text
 formatStartupTimings timings =
@@ -1349,6 +1388,10 @@ runAgentInitializedWithLock
 
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
+    harnessConfig <-
+        loadHarnessConfig home >>= \case
+            Left err -> startupDie startup (Text.unpack err)
+            Right config -> pure config
     let basePlanHooks =
             cliPlanHooks interrupt escPaused (resolveColor stderr)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
@@ -1511,10 +1554,36 @@ runAgentInitializedWithLock
                 _ <- removeSessionTemp root sessionId
                 pure ()
         toolEnv = baseToolEnv
+        mcpServerConfigs =
+            [ MCP.McpServerConfig
+                { MCP.mcpServerName = label
+                , MCP.mcpServerCommand = Text.unpack config.mcpCommand
+                , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
+                , MCP.mcpServerCwd = Text.unpack <$> config.mcpCwd
+                , MCP.mcpServerEnv =
+                    [ (Text.unpack name, Text.unpack value)
+                    | (name, value) <- Map.toAscList config.mcpEnv
+                    ]
+                , MCP.mcpServerStartupTimeoutSeconds =
+                    config.mcpStartupTimeoutSeconds
+                , MCP.mcpServerRequestTimeoutSeconds =
+                    config.mcpRequestTimeoutSeconds
+                }
+            | (label, config) <-
+                Map.toAscList harnessConfig.configMcpServers
+            , config.mcpEnabled
+            ]
+    mcpFleet <-
+        try @_ @SomeException (MCP.startMcpFleet mcpServerConfigs) >>= \case
+            Left exception ->
+                startupDie startup
+                    ("Failed to initialize MCP tools: " <> show exception)
+            Right fleet -> pure fleet
+    mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     coding <-
         codingToolsForWithTypes
             dialect toolEnv (Just planHooks) multiCtx agentTypesRef
-            `onException` cleanupScratch
+            `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1560,7 +1629,11 @@ runAgentInitializedWithLock
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
-        tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
+        mcpTools = MCP.mcpFleetTools mcpFleet
+        tools =
+            coding.codingAppTools
+                ++ mcpTools
+                ++ agentSessionTools sessionToolsEnv
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1576,9 +1649,19 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
+            MCP.closeMcpFleet mcpFleet
             coding.codingClose
             cleanupScratch
     flip finally closeAll do
+        case
+                mcpToolCollision
+                    (coding.codingAppTools ++ agentSessionTools sessionToolsEnv)
+                    mcpFleet.mcpFleetRegistrations
+            of
+                Just err ->
+                    startupDie startup
+                        ("Failed to initialize MCP tools: " <> Text.unpack err)
+                Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
         let instructions =
                 systemPrompt dialect cwd (Just sessionTmp) today
@@ -1599,6 +1682,7 @@ runAgentInitializedWithLock
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentParams = paramsRef
+                , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
                 , subagentSessions = subagentSessions
                 , subagentStoreRoot = subagentStoreRoot

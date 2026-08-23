@@ -75,6 +75,16 @@ schemaFromAppTool dialect tool = case tool.appToolSchema of
             (name, description, projectedParameters) =
                 projectFunctionTool dialect tool parameters
         in build name description projectedParameters
+    RawJsonFunctionSchema parameters ->
+        FunctionToolValue FunctionTool
+            { name = tool.appToolName
+            , description = Just tool.appToolDescription
+            , parameters = Just parameters
+            , strict = case dialectFunctionSchemaStyle dialect of
+                StrictFunctionSchemas -> Just False
+                LooseFunctionSchemas -> Nothing
+            , extraFields = KeyMap.empty
+            }
     FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
 
@@ -146,6 +156,7 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
 appToolJsonParameters :: AppTool -> [PropertySchema]
 appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
+    RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.

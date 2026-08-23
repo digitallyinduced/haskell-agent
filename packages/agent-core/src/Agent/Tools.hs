@@ -16,6 +16,8 @@ module Agent.Tools
     , jsonTool
     , jsonAppTool
     , jsonAppToolWithExecution
+    , rawJsonAppTool
+    , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , mkToolRegistry
