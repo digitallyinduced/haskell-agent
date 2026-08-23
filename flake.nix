@@ -39,12 +39,23 @@
                     ];
                 };
 
-                agentClaudeCodeSource = nix-filter.lib {
-                    root = ./packages/agent-claude-code;
+                claudeAgentSdkHaskellSource = nix-filter.lib {
+                    root = ./packages/claude-agent-sdk-haskell;
                     include = [
                         "src"
                         "test"
-                        "agent-claude-code.cabal"
+                        "claude-agent-sdk-haskell.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
+                agentClaudeSource = nix-filter.lib {
+                    root = ./packages/agent-claude;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-claude.cabal"
                         "LICENSE"
                         "README.md"
                     ];
@@ -187,8 +198,11 @@
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
                         };
-                        agent-claude-code = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude-code/package.nix { }) {
-                            src = agentClaudeCodeSource;
+                        claude-agent-sdk-haskell = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
+                            src = claudeAgentSdkHaskellSource;
+                        };
+                        agent-claude = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
+                            src = agentClaudeSource;
                         };
                         agent-tui =
                             (pkgs.haskell.lib.overrideSrc
@@ -217,7 +231,8 @@
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
-                agentClaudeCodePackage = haskellPackages.agent-claude-code;
+                claudeAgentSdkHaskellPackage = haskellPackages.claude-agent-sdk-haskell;
+                agentClaudePackage = haskellPackages.agent-claude;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable =
@@ -317,7 +332,8 @@
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
-                packages.agent-claude-code = agentClaudeCodePackage;
+                packages.claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
+                packages.agent-claude = agentClaudePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
 
                 apps.default = flake-utils.lib.mkApp {
@@ -339,7 +355,8 @@
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
-                        packages.agent-claude-code
+                        packages.claude-agent-sdk-haskell
+                        packages.agent-claude
                     ];
                     withHoogle = false;
                     doBenchmark = true;
@@ -370,7 +387,8 @@
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
                     agent-openrouter = agentOpenrouterPackage;
-                    agent-claude-code = agentClaudeCodePackage;
+                    claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
+                    agent-claude = agentClaudePackage;
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

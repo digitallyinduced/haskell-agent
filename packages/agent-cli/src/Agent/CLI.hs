@@ -288,7 +288,7 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
-import Agent.ClaudeCode
+import Agent.Claude
     ( ClaudeCodeAuth(..)
     , ClaudeCodeOptions(..)
     , ClaudeCodePermission(..)

@@ -35,7 +35,7 @@ import Agent.CLI.CredentialStore
     )
 import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
-import qualified Agent.ClaudeCode.Auth as ClaudeCode
+import qualified Agent.Claude.Auth as ClaudeCode
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Agent.OpenAI.Credential as OpenAICredential
 import qualified Agent.OpenAI.Login as OpenAILogin

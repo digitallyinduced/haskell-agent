@@ -144,7 +144,7 @@ createCodexMessageWithProviderAtWithOptions options baseUrl provider request =
                 "OpenRouter credentials must be used through agent-openrouter"
                 Nothing
             ClaudeCodeProvider -> pure $ Left $ ProviderError ApiErrorType
-                "Claude Code subscription sessions must use agent-claude-code"
+                "Claude Code subscription sessions must use agent-claude"
                 Nothing
             OpenAIProvider ->
                 retryTransientCodexResultWithPolicy transientResultPolicy $

@@ -97,10 +97,14 @@ claude auth login
 agent-cli --provider claude-code --model sonnet
 ```
 
-The provider keeps one `claude -p` process alive and exchanges structured
-messages through Claude Code's bidirectional `stream-json` protocol. Claude
-Code owns tool execution and context compaction; the harness renders its
-assistant and tool events and persists its session UUID.
+The reusable
+[`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md)
+package keeps one `claude -p` process alive and exchanges structured messages
+through Claude Code's bidirectional `stream-json` protocol. The thin
+`agent-claude` adapter enforces subscription authentication and translates SDK
+messages into provider-neutral harness events. Claude Code owns tool execution
+and context compaction; the harness renders its assistant and tool events and
+persists its session UUID.
 
 The default permission mode is Claude Code's non-blocking `dontAsk` mode. Pass
 `--yolo` to bypass Claude Code's permission checks. Permission mode is fixed
@@ -115,9 +119,13 @@ subscription sessions.
 Anthropic's [June 15, 2026 subscription-policy
 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
 says that Claude Agent SDK, `claude -p`, and third-party app usage currently
-draw from Claude subscription usage limits. That policy may change; consult
-the linked notice for current terms. See
-[`packages/agent-claude-code/README.md`](packages/agent-claude-code/README.md)
+draw from Claude subscription usage limits. Anthropic's current
+[Agent SDK documentation](https://platform.claude.com/docs/en/agent-sdk/overview)
+also says third-party developers need prior approval to offer Claude.ai login
+or subscription rate limits in their products. Technical availability does
+not replace that approval requirement; consult the linked documents for
+current terms. See
+[`packages/agent-claude/README.md`](packages/agent-claude/README.md)
 for implementation and embedding details.
 
 ## Vision
@@ -232,7 +240,7 @@ execute only after the runtime has established the required guarantees.
                                |
        +---------------+---------------+---------------+
        |               |               |               |
- agent-openai      agent-xai    agent-openrouter  agent-claude-code
+ agent-openai      agent-xai    agent-openrouter  agent-claude
        |               |               |               |
 OpenAI / ChatGPT       xAI          OpenRouter      Claude Code
 ```
@@ -241,6 +249,12 @@ The provider-neutral loop sees typed turns, tool calls, tool results, usage,
 and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
+
+`agent-claude` delegates its generic process transport, protocol decoding, and
+session client to
+[`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md),
+leaving subscription policy and `Agent.Loop` translation in the provider
+adapter.
 
 ## Development
 

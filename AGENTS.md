@@ -46,7 +46,8 @@ cabal repl \
   agent-openai:lib:agent-openai \
   agent-xai:lib:agent-xai \
   agent-openrouter:lib:agent-openrouter \
-  agent-claude-code:lib:agent-claude-code
+  claude-agent-sdk-haskell:lib:claude-agent-sdk-haskell \
+  agent-claude:lib:agent-claude
 ```
 
 In GHCi:
@@ -126,7 +127,8 @@ flake does not use import-from-derivation. After changing a package's Cabal
 file, regenerate its expression from the repository root, for example:
 
 ```
-(cd packages/agent-claude-code && cabal2nix . > package.nix)
+(cd packages/claude-agent-sdk-haskell && cabal2nix . > package.nix)
+(cd packages/agent-claude && cabal2nix . > package.nix)
 ```
 
 # performance

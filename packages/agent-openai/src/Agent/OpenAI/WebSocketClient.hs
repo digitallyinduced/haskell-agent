@@ -184,7 +184,7 @@ runConnectionAttemptWithPolicy _ credential _action
         Nothing
 runConnectionAttemptWithPolicy _ credential _action
     | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
-        "Claude Code subscription sessions must use agent-claude-code"
+        "Claude Code subscription sessions must use agent-claude"
         Nothing
 runConnectionAttemptWithPolicy retryPolicy credential action = do
     let headers = buildCodexWsHeaders credential
