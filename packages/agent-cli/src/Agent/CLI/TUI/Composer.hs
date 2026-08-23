@@ -67,7 +67,6 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
-import Data.Foldable (toList)
 import Data.List (elemIndex, intersperse)
 import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..))
@@ -205,9 +204,9 @@ drawSlashRow selected index suggestion =
 
 drawQueuedInputs :: UiState -> Widget Name
 drawQueuedInputs state =
-    case toList state.uiQueuedInputs of
-        [] -> emptyWidget
-        next : _ ->
+    case Seq.viewl state.uiQueuedInputs of
+        EmptyL -> emptyWidget
+        next :< _ ->
             padLeftRight 2 $
                 vLimit 1 $
                     hBox
@@ -711,7 +710,7 @@ handleComposerKey
             case slashMenu of
                 Just menu -> acceptSlash menu
                 Nothing ->
-                    when (not (null (toList ui.uiBlocks))) $
+                    when (not (Seq.null ui.uiBlocks)) $
                         modifyUi (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter [V.MShift] ->
             insertText "\n"

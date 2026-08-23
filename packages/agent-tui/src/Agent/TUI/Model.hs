@@ -48,7 +48,6 @@ import Agent.Loop
     , emptyTokenUsage
     )
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
-import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -221,7 +220,7 @@ initialUiState = UiState
 -- conversation is still empty from the user's perspective.
 conversationIsEmpty :: UiState -> Bool
 conversationIsEmpty state =
-    all isStartupStatus (toList state.uiBlocks)
+    all isStartupStatus state.uiBlocks
   where
     isStartupStatus block =
         block.blockKind == BlockSystem
@@ -652,21 +651,22 @@ hasAssistantTextSince start =
         (\block ->
             block.blockKind == BlockAssistant
                 && not (Text.null (Text.strip block.blockBody)))
-        . toList
         . Seq.drop start
         . (.uiBlocks)
 
 moveSelection :: Int -> UiState -> UiState
 moveSelection delta state =
-    case toList state.uiBlocks of
-        [] -> state { uiSelectedBlock = Nothing }
-        blocks ->
-            let current = selectedBlockIndex state
-                next = max 0 (min (length blocks - 1) (current + delta))
-            in state
-                { uiSelectedBlock = Just (blocks !! next).blockId
-                , uiFollow = next == length blocks - 1
+    case Seq.lookup next blocks of
+        Nothing -> state { uiSelectedBlock = Nothing }
+        Just block ->
+            state
+                { uiSelectedBlock = Just block.blockId
+                , uiFollow = next == lastIndex
                 }
+  where
+    blocks = state.uiBlocks
+    lastIndex = Seq.length blocks - 1
+    next = max 0 (min lastIndex (selectedBlockIndex state + delta))
 
 selectBlock :: BlockId -> UiState -> UiState
 selectBlock ident state =
