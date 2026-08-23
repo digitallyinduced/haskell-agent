@@ -13,6 +13,11 @@ import Agent.Error
     , ErrorType(..)
     , isInlineRetryableProviderError
     )
+import Agent.Responses.Client
+    ( ResponsesClientConfig(..)
+    , performResponsesRequest
+    , retryStreamingResultWithPolicy
+    )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
@@ -24,10 +29,7 @@ import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
     , limitRetries
-    , retrying
     )
-import qualified Data.Aeson as Aeson
-import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -80,15 +82,15 @@ createResponseWithEventsPolicy policy options credential request onEvent
         retryTransientOpenRouterResultWithPolicy policy performOnce onEvent
   where
     performOnce =
-        HttpSSE.performResponsesHttpSse
-            HttpSSE.HttpSseConfig
-                { exceptionPrefix = "OpenRouter request failed"
-                , classifyFailure
-                , buildResponse
+        performResponsesRequest
+            ResponsesClientConfig
+                { clientExceptionPrefix = "OpenRouter request failed"
+                , clientBaseUrl = options.baseUrl
+                , clientTimeoutSeconds = options.requestTimeoutSeconds
+                , clientClassifyFailure = classifyFailure
+                , clientBuildResponse = buildResponse
                 }
-            options.baseUrl
-            options.requestTimeoutSeconds
-            (Aeson.encode (buildRequest options request))
+            (buildRequest options request)
             configureRequest
 
     configureRequest =
@@ -106,21 +108,11 @@ retryTransientOpenRouterResultWithPolicy
     -> (event -> IO ())
     -> IO (Either ApiError value)
 retryTransientOpenRouterResultWithPolicy policy request onEvent =
-    snd <$> retrying policy shouldRetry runAttempt
-  where
-    runAttempt _status = do
-        emitted <- newIORef False
-        result <- request \event -> do
-            writeIORef emitted True
-            onEvent event
-        didEmit <- readIORef emitted
-        pure (didEmit, result)
-
-    shouldRetry _status (emitted, result) = pure $
-        not emitted
-            && case result of
-                Left apiError -> isInlineRetryableProviderError apiError
-                Right _ -> False
+    retryStreamingResultWithPolicy
+        policy
+        isInlineRetryableProviderError
+        request
+        (Just onEvent)
 
 transientResultPolicy :: RetryPolicyM IO
 transientResultPolicy = exponentialBackoff 1_000_000 <> limitRetries 3

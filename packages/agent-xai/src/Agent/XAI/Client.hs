@@ -13,6 +13,11 @@ import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
     )
+import Agent.Responses.Client
+    ( ResponsesClientConfig(..)
+    , performResponsesRequest
+    , retryStreamingResultWithPolicy
+    )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
 import Agent.Provider (Credential(..), Provider(..))
@@ -30,8 +35,6 @@ import Control.Retry
     , limitRetries
     , retrying
     )
-import qualified Data.Aeson as Aeson
-import Data.IORef
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
 
@@ -111,18 +114,22 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
         "agent-xai requires an xAI credential"
         Nothing
     | otherwise =
-        retryTransientXaiStreamWithPolicy policy performOnce onEvent
+        retryStreamingResultWithPolicy
+            policy
+            isCapacityRetryable
+            performOnce
+            onEvent
   where
     performOnce =
-        HttpSSE.performResponsesHttpSse
-            HttpSSE.HttpSseConfig
-                { exceptionPrefix = "xAI request failed"
-                , classifyFailure
-                , buildResponse
+        performResponsesRequest
+            ResponsesClientConfig
+                { clientExceptionPrefix = "xAI request failed"
+                , clientBaseUrl = options.baseUrl
+                , clientTimeoutSeconds = options.requestTimeoutSeconds
+                , clientClassifyFailure = classifyFailure
+                , clientBuildResponse = buildResponse
                 }
-            options.baseUrl
-            options.requestTimeoutSeconds
-            (Aeson.encode (buildRequest options request))
+            (buildRequest options request)
             configureRequest
 
     configureRequest =
@@ -134,32 +141,6 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
             . setRequestHeader "x-grok-client-identifier" ["grok-shell"]
             . setRequestHeader "x-grok-client-mode" ["interactive"]
             . setRequestHeader "User-Agent" ["codex-hs"]
-
--- | Retry transient failures while replay is safe. The callback marker is
--- written before user code runs, so callback exceptions are never retried.
-retryTransientXaiStreamWithPolicy
-    :: RetryPolicyM IO
-    -> ((event -> IO ()) -> IO (Either ApiError value))
-    -> Maybe (event -> IO ())
-    -> IO (Either ApiError value)
-retryTransientXaiStreamWithPolicy policy request onEvent =
-    snd <$> retrying policy shouldRetry runAttempt
-  where
-    runAttempt _status = do
-        emitted <- newIORef False
-        result <- request \event -> case onEvent of
-            Nothing -> pure ()
-            Just callback -> do
-                writeIORef emitted True
-                callback event
-        didEmit <- readIORef emitted
-        pure (didEmit, result)
-
-    shouldRetry _status (emitted, result) = pure $
-        not emitted
-            && case result of
-                Left apiError -> isCapacityRetryable apiError
-                Right _ -> False
 
 defaultTransientPolicy :: RetryPolicyM IO
 defaultTransientPolicy =

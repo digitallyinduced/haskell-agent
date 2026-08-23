@@ -37,7 +37,8 @@ openRouterBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
 
--- | Same mapping as 'openRouterBackend', with an injectable transport for tests.
+-- | Same mapping as 'openRouterBackend', with an injectable transport for tests
+-- and downstream integrations.
 openRouterBackendWith
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
