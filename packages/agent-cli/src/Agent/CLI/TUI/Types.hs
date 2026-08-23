@@ -94,7 +94,7 @@ data AppEvent
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSkillCommands ![SkillCommand]
-    | AppSetImagePreviews ![ImageAttachment]
+    | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
