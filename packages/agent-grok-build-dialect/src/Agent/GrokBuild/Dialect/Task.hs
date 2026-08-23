@@ -421,12 +421,13 @@ recordAgentSpec specsRef agentId spec =
     update specs = (Map.insert agentId spec specs, ())
 
 recordAgentType :: GrokSubagentSpecs -> SubagentId -> Text -> IO ()
-recordAgentType specsRef agentId agentType = do
-    specs <- readIORef specsRef
-    let existing = Map.lookup agentId specs
-        model = existing >>= \spec -> spec.modelOverride
-        effort = existing >>= \spec -> spec.reasoningEffortOverride
-    recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model effort)
+recordAgentType specsRef agentId agentType =
+    atomicModifyIORef' specsRef \specs ->
+        let existing = Map.lookup agentId specs
+            model = existing >>= \spec -> spec.modelOverride
+            effort = existing >>= \spec -> spec.reasoningEffortOverride
+            updated = GrokSubagentSpec agentType model effort
+        in (Map.insert agentId updated specs, ())
 
 lookupAgentType :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
 lookupAgentType specsRef agentId =

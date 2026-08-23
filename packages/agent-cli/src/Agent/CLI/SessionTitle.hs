@@ -1,6 +1,8 @@
 -- | Asynchronous, provider-neutral session title generation.
 module Agent.CLI.SessionTitle
     ( SessionTitleManager
+    , SessionTitleEvent(..)
+    , SessionTitleFailure(..)
     , SessionTitleResult(..)
     , cleanGeneratedTitle
     , invalidateSessionTitles
@@ -12,16 +14,21 @@ module Agent.CLI.SessionTitle
     ) where
 
 import Agent.CLI.Btw (BtwBackendFactory)
-import Agent.Loop (Backend(..), TurnInput(..), TurnOutput(..))
+import Agent.CLI.Error (formatApiErrorInline)
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , TurnInput(..)
+    , TurnOutput(..)
+    )
 import Agent.Responses.Types
     ( ResponseCreateParams(..)
-    , ResponseItem
     , ToolChoice(..)
     , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (forever, void)
 import Data.IORef (IORef, newIORef, readIORef)
 import Data.Map.Strict (Map)
@@ -46,6 +53,18 @@ data SessionTitleResult = SessionTitleResult
     , resultGeneration :: !Int
     } deriving (Eq, Show)
 
+data SessionTitleFailure = SessionTitleFailure
+    { failureSessionId :: !Text
+    , failureMilestone :: !Int
+    , failureMessage :: !Text
+    , failureGeneration :: !Int
+    } deriving (Eq, Show)
+
+data SessionTitleEvent
+    = SessionTitleGenerated !SessionTitleResult
+    | SessionTitleFailed !SessionTitleFailure
+    deriving (Eq, Show)
+
 data SessionTitleManager = SessionTitleManager
     { titleJobs :: !(TQueue SessionTitleJob)
     , titleResults :: !(TQueue SessionTitleResult)
@@ -58,10 +77,10 @@ data SessionTitleManager = SessionTitleManager
 withSessionTitleManager
     :: BtwBackendFactory
     -> IORef ResponseCreateParams
-    -> (SessionTitleResult -> IO ())
+    -> (SessionTitleEvent -> IO ())
     -> (SessionTitleManager -> IO a)
     -> IO a
-withSessionTitleManager backendFactory paramsRef onGenerated action = do
+withSessionTitleManager backendFactory paramsRef onEvent action = do
     jobs <- newTQueueIO
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
@@ -74,7 +93,7 @@ withSessionTitleManager backendFactory paramsRef onGenerated action = do
             , titleBackendFactory = backendFactory
             , titleParams = paramsRef
             }
-    withAsync (titleWorker onGenerated manager) \_ -> action manager
+    withAsync (titleWorker onEvent manager) \_ -> action manager
 
 requestSessionTitle
     :: SessionTitleManager
@@ -140,8 +159,8 @@ titleRefreshIndex milestone
     | milestone >= 3 = 1
     | otherwise = 0
 
-titleWorker :: (SessionTitleResult -> IO ()) -> SessionTitleManager -> IO ()
-titleWorker onGenerated manager = forever do
+titleWorker :: (SessionTitleEvent -> IO ()) -> SessionTitleManager -> IO ()
+titleWorker onEvent manager = forever do
     job <- atomically (readTQueue manager.titleJobs)
     generated <- tryAny (generateTitle manager job)
     accepted <- atomically do
@@ -151,9 +170,10 @@ titleWorker onGenerated manager = forever do
         generations <- readTVar manager.titleGenerations
         let current =
                 Map.findWithDefault 0 job.jobSessionId generations
-        case generated of
-            Right (Just title)
-                | current == job.jobGeneration -> do
+        if current /= job.jobGeneration
+            then pure Nothing
+            else case generated of
+                Right (Right title) -> do
                     let result = SessionTitleResult
                             { resultSessionId = job.jobSessionId
                             , resultMilestone = job.jobMilestone
@@ -161,28 +181,47 @@ titleWorker onGenerated manager = forever do
                             , resultGeneration = job.jobGeneration
                             }
                     writeTQueue manager.titleResults result
-                    pure (Just result)
-            _ -> pure Nothing
-    mapM_ (void . tryAny . onGenerated) accepted
+                    pure (Just (SessionTitleGenerated result))
+                Right (Left message) ->
+                    pure (Just (SessionTitleFailed SessionTitleFailure
+                        { failureSessionId = job.jobSessionId
+                        , failureMilestone = job.jobMilestone
+                        , failureMessage = message
+                        , failureGeneration = job.jobGeneration
+                        }))
+                Left err ->
+                    pure (Just (SessionTitleFailed SessionTitleFailure
+                        { failureSessionId = job.jobSessionId
+                        , failureMilestone = job.jobMilestone
+                        , failureMessage =
+                            "unexpected error: "
+                                <> Text.pack (displayException err)
+                        , failureGeneration = job.jobGeneration
+                        }))
+    mapM_ (void . tryAny . onEvent) accepted
 
-generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Maybe Text)
+generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
     baseParams <- readIORef manager.titleParams
     let params = titleRequestParams baseParams
     privateParams <- newIORef params
-    privateTranscript <- newIORef ([] :: [ResponseItem])
     let Backend submit =
-            manager.titleBackendFactory privateParams privateTranscript
+            manager.titleBackendFactory privateParams
     timeout 45000000
-        (submit Nothing [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
+        (submit [] Nothing
+            [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
         >>= \case
-            Nothing -> pure Nothing
+            Nothing -> pure (Left "timed out after 45 seconds")
             Just response -> case response of
-                Left _ -> pure Nothing
-                Right turn
-                    | not (null turn.toolCalls) -> pure Nothing
-                    | otherwise ->
-                        pure (turn.assistantText >>= cleanGeneratedTitle)
+                Left err -> pure (Left (formatApiErrorInline err))
+                Right result ->
+                    let turn = result.backendOutput
+                    in if not (null turn.toolCalls)
+                        then pure (Left "model attempted a tool call")
+                        else pure $ case
+                                turn.assistantText >>= cleanGeneratedTitle of
+                            Nothing -> Left "provider returned no title text"
+                            Just title -> Right title
 
 titleRequestParams :: ResponseCreateParams -> ResponseCreateParams
 titleRequestParams ResponseCreateParams{..} =
@@ -194,8 +233,8 @@ titleRequestParams ResponseCreateParams{..} =
         , tools = Just []
         , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
         , parallelToolCalls = Just False
-        , maxOutputTokens = Just 100
-        , reasoning = Nothing
+        -- Preserve the provider's output-token behavior. In particular, the
+        -- Codex WebSocket transport rejects an explicit max_output_tokens.
         , ..
         }
 

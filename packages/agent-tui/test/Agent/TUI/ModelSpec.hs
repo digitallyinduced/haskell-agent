@@ -73,6 +73,48 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` Just
                 (progressNotice "Restarting current turn…")
 
+    it "keeps block positions and selection stable across restart, append, and clear" do
+        let restarted =
+                apply
+                    [ UiUserSubmitted "try this"
+                    , UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "partial thought")
+                    , UiLoop (TextDelta "partial answer")
+                    , UiTurnRestarted
+                    ]
+            appended =
+                reduceUi
+                    (UiSystemMessage "retrying")
+                    restarted
+            toggled = reduceUi UiToggleSelected appended
+            cleared = reduceUi UiConversationCleared toggled
+            repopulated =
+                reduceUi
+                    (UiUserSubmitted "fresh start")
+                    cleared
+        map (.blockId) (Foldable.toList restarted.uiBlocks)
+            `shouldBe` [BlockId 1]
+        restarted.uiSelectedBlock `shouldBe` Just (BlockId 1)
+        restarted.uiSelectedBlockIndex `shouldBe` Just 0
+        selectedBlockIndex restarted `shouldBe` 0
+        restarted.uiNextBlockId `shouldBe` 4
+        map (.blockId) (Foldable.toList appended.uiBlocks)
+            `shouldBe` [BlockId 1, BlockId 4]
+        appended.uiSelectedBlock `shouldBe` Just (BlockId 4)
+        appended.uiSelectedBlockIndex `shouldBe` Just 1
+        selectedBlockIndex appended `shouldBe` 1
+        map (.blockExpanded) (Foldable.toList toggled.uiBlocks)
+            `shouldBe` [True, False]
+        cleared.uiBlocks `shouldBe` mempty
+        cleared.uiSelectedBlock `shouldBe` Nothing
+        cleared.uiSelectedBlockIndex `shouldBe` Nothing
+        cleared.uiBlockIndices `shouldBe` mempty
+        cleared.uiNextBlockId `shouldBe` 1
+        map (.blockId) (Foldable.toList repopulated.uiBlocks)
+            `shouldBe` [BlockId 1]
+        repopulated.uiSelectedBlock `shouldBe` Just (BlockId 1)
+        repopulated.uiSelectedBlockIndex `shouldBe` Just 0
+
     it "clears a cancellation progress notice when the turn ends" do
         let state =
                 apply
@@ -182,6 +224,131 @@ spec = describe "fullscreen UI reducer" do
             blocks = Foldable.toList state.uiBlocks
         map (.blockBody) blocks `shouldBe` ["first output", ""]
         map (.blockState) blocks `shouldBe` [BlockRunning, BlockRunning]
+
+    it "tracks active tool calls by their exact block positions" do
+        let first =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"first\"}"
+            second =
+                functionToolCall
+                    "c2"
+                    "run_terminal_cmd"
+                    "{\"command\":\"second\"}"
+            running =
+                apply
+                    [ UiUserSubmitted "run both"
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted first)
+                    , UiSystemMessage "between tools"
+                    , UiLoop (ToolStarted second)
+                    ]
+            firstUpdated =
+                reduceUi
+                    (UiLoop (ToolOutputUpdated "c1" "first output"))
+                    running
+            secondFinished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c2"
+                                , output = "exit: 0\nsecond output"
+                                , callKind = FunctionCallKind
+                                }))
+                    firstUpdated
+            blocks = Foldable.toList secondFinished.uiBlocks
+        Foldable.toList running.uiToolCalls
+            `shouldBe` [(1, first), (3, second)]
+        map (.blockBody) blocks
+            `shouldBe`
+                [ "run both"
+                , "first output"
+                , "between tools"
+                , "exit: 0\nsecond output"
+                ]
+        map (.blockState) blocks
+            `shouldBe`
+                [ BlockComplete
+                , BlockRunning
+                , BlockComplete
+                , BlockComplete
+                ]
+        Foldable.toList secondFinished.uiToolCalls
+            `shouldBe` [(1, first)]
+
+    it "drops tool block positions when the conversation is cleared" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nlate final output"
+                , callKind = FunctionCallKind
+                }
+            started =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            cleared = reduceUi UiConversationCleared started
+            reused =
+                reduceUi
+                    (UiUserSubmitted "replacement block")
+                    cleared
+            afterLateEvents =
+                applyFrom
+                    reused
+                    [ UiLoop (ToolOutputUpdated "c1" "late live output")
+                    , UiLoop (ToolFinished result)
+                    ]
+        cleared.uiToolCalls `shouldBe` mempty
+        case Foldable.toList afterLateEvents.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockUser
+                block.blockBody `shouldBe` "replacement block"
+                block.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected one replacement block"
+
+    it "drops tool block positions when the current turn is restarted" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nlate final output"
+                , callKind = FunctionCallKind
+                }
+            started =
+                apply
+                    [ UiUserSubmitted "run work"
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            restarted = reduceUi UiTurnRestarted started
+            reused =
+                reduceUi
+                    (UiSystemMessage "replacement block")
+                    restarted
+            afterLateEvents =
+                applyFrom
+                    reused
+                    [ UiLoop (ToolOutputUpdated "c1" "late live output")
+                    , UiLoop (ToolFinished result)
+                    ]
+        restarted.uiToolCalls `shouldBe` mempty
+        case Foldable.toList afterLateEvents.uiBlocks of
+            [userBlock, replacementBlock] -> do
+                userBlock.blockBody `shouldBe` "run work"
+                replacementBlock.blockKind `shouldBe` BlockSystem
+                replacementBlock.blockBody `shouldBe` "replacement block"
+                replacementBlock.blockState `shouldBe` BlockComplete
+            _ -> expectationFailure "expected retained and replacement blocks"
 
     it "replaces a live snapshot with the final tool result" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
@@ -528,6 +695,9 @@ spec = describe "fullscreen UI reducer" do
 
 apply :: [UiEvent] -> UiState
 apply events = foldl (flip reduceUi) initialUiState events
+
+applyFrom :: UiState -> [UiEvent] -> UiState
+applyFrom = foldl (flip reduceUi)
 
 toolStateFor :: Text -> BlockState
 toolStateFor output =

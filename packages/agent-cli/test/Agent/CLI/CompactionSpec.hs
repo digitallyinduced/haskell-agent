@@ -318,9 +318,8 @@ spec = do
                     withModel
                         (Just "gpt-5.6-luna")
                         defaultResponseCreateParams
-                base = Backend \_ _ _ ->
+                base = Backend \_ _ _ _ ->
                     error "configured compaction threshold should run first"
-            transcript <- newIORef history
             contextState <- newIORef
                 (Just (threshold, length history))
             let backend =
@@ -328,10 +327,10 @@ spec = do
                         (Just threshold)
                         tokens
                         (pure params)
-                        transcript
                         contextState
                         base
-            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+            backend.submitTurn history Nothing
+                [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ConnectionError
                         "automatic compaction failed: configured threshold fired")
@@ -339,7 +338,6 @@ spec = do
         it "compacts before the next request at the Codex token limit" do
             let oldHistory = [userTextItem "old"]
                 compactedHistory = [userTextItem "compacted"]
-            transcript <- newIORef oldHistory
             contextState <- newIORef
                 (Just (codexAutoCompactTokenLimit, length oldHistory))
             compactCalls <- newIORef (0 :: Int)
@@ -353,24 +351,25 @@ spec = do
                         , compactHistory = compactedHistory
                         , compactSummary = "checkpoint"
                         }
-                base = Backend \previous _ _ -> do
+                base = Backend \state previous _ _ -> do
                     modifyIORef' seenPrevious (<> [previous])
-                    pure $ Right TurnOutput
+                    pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
                         }
-                backend = autoCompactOpenAiBackendWith compactAction
-                    transcript contextState base
-            result <- backend.submitTurn (Just "resp-old") [UserMessage "new"]
+                backend =
+                    autoCompactOpenAiBackendWith
+                        compactAction contextState base
+            result <- backend.submitTurn oldHistory (Just "resp-old")
+                [UserMessage "new"]
                 (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
+            fmap (.backendState) result `shouldBe` Right compactedHistory
             readIORef compactCalls `shouldReturn` 1
             readIORef seenPrevious `shouldReturn` [Nothing]
-            readIORef transcript `shouldReturn` compactedHistory
-            readIORef contextState `shouldReturn`
-                Just (25, length compactedHistory)
+            readIORef contextState `shouldReturn` Nothing
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
 
@@ -378,14 +377,13 @@ spec = do
             let history = [userTextItem "old"]
                 threshold = 20
                 oldContextState = Just (threshold - 2, length history)
-            transcript <- newIORef history
             contextState <- newIORef oldContextState
             requests <- newIORef []
             recordedUsage <- newIORef []
             let sender request = do
                     modifyIORef' requests (<> [request])
                     pure (Right remoteCompactionResponse)
-                base = Backend \_ _ _ ->
+                base = Backend \_ _ _ _ ->
                     pure (Left (ConnectionError "continuation failed"))
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -393,27 +391,25 @@ spec = do
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
-                        transcript
                         contextState
                         base
-            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+            backend.submitTurn history Nothing
+                [UserMessage "new"] (const (pure ()))
                 `shouldReturn` Left (ConnectionError "continuation failed")
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
-            readIORef transcript `shouldReturn` history
             readIORef contextState `shouldReturn` oldContextState
 
         it "rolls back compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
                 oldContextState = Just (threshold, length history)
-            transcript <- newIORef history
             contextState <- newIORef oldContextState
             continuationMasking <- newIORef MaskedUninterruptible
             let sender _request =
                     pure (Right remoteCompactionResponse)
-                base = Backend \_ _ _ -> do
+                base = Backend \_ _ _ _ -> do
                     getMaskingState >>= writeIORef continuationMasking
                     throwIO UserInterrupt
                 backend =
@@ -422,24 +418,23 @@ spec = do
                         sender
                         (const (pure ()))
                         (pure defaultResponseCreateParams)
-                        transcript
                         contextState
                         base
                 submit =
-                    backend.submitTurn Nothing
+                    backend.submitTurn history Nothing
                         [UserMessage "new"]
                         (const (pure ()))
             result <- try submit
-                :: IO (Either AsyncException (Either ApiError TurnOutput))
+                :: IO
+                    (Either AsyncException
+                        (Either ApiError BackendResult))
             result `shouldBe` Left UserInterrupt
             readIORef continuationMasking `shouldReturn` Unmasked
-            readIORef transcript `shouldReturn` history
             readIORef contextState `shouldReturn` oldContextState
 
         it "does not rerun compaction while its continuation reconnects" do
             let history = [userTextItem "old"]
                 threshold = 20
-            transcript <- newIORef history
             contextState <- newIORef
                 (Just (threshold, length history))
             compactCalls <- newIORef (0 :: Int)
@@ -450,19 +445,20 @@ spec = do
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     pure (Right remoteCompactionResponse)
-                continuation = Backend \previous _inputs _onEvent -> do
-                    modifyIORef' seenPrevious (<> [previous])
-                    attempt <- atomicModifyIORef' continuationCalls
-                        \n -> (n + 1, n + 1)
-                    pure $
-                        if attempt == 1
-                            then Left (ConnectionError "offline")
-                            else Right TurnOutput
-                                { responseId = "resp-new"
-                                , toolCalls = []
-                                , assistantText = Just "ok"
-                                , tokenUsage = TokenUsage 20 5 0
-                                }
+                continuation =
+                    Backend \state previous _inputs _onEvent -> do
+                        modifyIORef' seenPrevious (<> [previous])
+                        attempt <- atomicModifyIORef' continuationCalls
+                            \n -> (n + 1, n + 1)
+                        pure $
+                            if attempt == 1
+                                then Left (ConnectionError "offline")
+                                else successful state TurnOutput
+                                    { responseId = "resp-new"
+                                    , toolCalls = []
+                                    , assistantText = Just "ok"
+                                    , tokenUsage = TokenUsage 20 5 0
+                                    }
                 reconnectingContinuation =
                     withConnectionRecoveryUsing
                         (\attempt -> modifyIORef' waits (<> [attempt]))
@@ -473,10 +469,9 @@ spec = do
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
-                        transcript
                         contextState
                         reconnectingContinuation
-            result <- backend.submitTurn (Just "resp-old")
+            result <- backend.submitTurn history (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -501,7 +496,6 @@ spec = do
                     , output = toolOutputText
                     , callKind = FunctionCallKind
                     }
-            transcript <- newIORef oldHistory
             contextState <- newIORef
                 (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
             compactCalls <- newIORef (0 :: Int)
@@ -509,14 +503,15 @@ spec = do
             historyAtCompact <- newIORef []
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
-            let sender _request = do
+            let sender request = do
                     modifyIORef' compactCalls (+ 1)
-                    readIORef transcript >>= writeIORef historyAtCompact
+                    writeIORef historyAtCompact
+                        (init (requestItems request))
                     pure (Right remoteCompactionResponse)
-                base = Backend \previous inputs _ -> do
+                base = Backend \state previous inputs _ -> do
                     modifyIORef' seenPrevious (<> [previous])
                     modifyIORef' seenInputs (<> [inputs])
-                    pure $ Right TurnOutput
+                    pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
@@ -528,11 +523,10 @@ spec = do
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
-                        transcript
                         contextState
                         base
                 inputs = [CompletedTool toolResult]
-            result <- backend.submitTurn (Just "resp-tool") inputs
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
@@ -545,26 +539,26 @@ spec = do
                     _ -> False
             readIORef seenPrevious `shouldReturn` [Nothing]
             readIORef seenInputs `shouldReturn` [[]]
-            compacted <- readIORef transcript
+            let compacted = either (const []) (.backendState) result
             compacted `shouldSatisfy` hasCompactionCheckpoint
-            readIORef contextState `shouldReturn`
-                Just (25, length compacted)
+            readIORef contextState `shouldReturn` Nothing
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
                 compactError =
                     ProviderError UsageLimitReached "quota exhausted" (Just 120)
-            transcript <- newIORef history
             contextState <- newIORef
                 (Just (codexAutoCompactTokenLimit, length history))
             let compactAction =
                     pure (Left compactError)
-                base = Backend \_ _ _ ->
+                base = Backend \_ _ _ _ ->
                     error "failed compaction should not submit a model request"
-                backend = autoCompactOpenAiBackendWithApi compactAction
-                    transcript contextState base
-            backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+                backend =
+                    autoCompactOpenAiBackendWithApi
+                        compactAction contextState base
+            backend.submitTurn history Nothing
+                [UserMessage "new"] (const (pure ()))
                 `shouldReturn`
                     Left (ProviderError UsageLimitReached
                         "automatic compaction failed: quota exhausted"
@@ -577,7 +571,6 @@ spec = do
                             (codexAutoCompactTokenLimit * 4)
                             "x")
                     ]
-            transcript <- newIORef history
             contextState <- newIORef Nothing
             compactCalls <- newIORef (0 :: Int)
             let compactAction = do
@@ -588,19 +581,30 @@ spec = do
                         , compactHistory = [userTextItem "compacted"]
                         , compactSummary = "checkpoint"
                         }
-                base = Backend \_ _ _ ->
-                    pure $ Right TurnOutput
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
                         }
-                backend = autoCompactOpenAiBackendWith compactAction
-                    transcript contextState base
-            result <- backend.submitTurn Nothing [UserMessage "new"]
+                backend =
+                    autoCompactOpenAiBackendWith
+                        compactAction contextState base
+            result <- backend.submitTurn history Nothing [UserMessage "new"]
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
+
+successful
+    :: [ResponseItem]
+    -> TurnOutput
+    -> Either ApiError BackendResult
+successful state output =
+    Right BackendResult
+        { backendOutput = output
+        , backendState = state
+        }
 
 requestItems :: ResponseCreateParams -> [ResponseItem]
 requestItems request = case request.input of

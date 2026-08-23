@@ -63,30 +63,42 @@ spec = describe "Agent.CLI.SubagentStore" do
                     }
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
             let identity = SubagentIdentity (Just parentId) 2 taskPath
-            saveSubagentState dir agentId [item] (Just "resp-1")
-                (Completed (Just "done")) XAIProvider "xai" "grok-4.5-mini"
-                GrokBuildDialect (Just "explore")
-                (Just "grok-4.5-mini") (Just "high")
-                (Just (fromFilePath "/tmp/work"))
-                (Just identity)
+                snapshot =
+                    (testSnapshot
+                        [item]
+                        (Completed (Just "done"))
+                        XAIProvider
+                        "xai"
+                        "grok-4.5-mini"
+                        GrokBuildDialect)
+                        { snapshotPreviousResponseId = Just "resp-1"
+                        , snapshotAgentType = Just "explore"
+                        , snapshotAgentModel = Just "grok-4.5-mini"
+                        , snapshotReasoningEffort = Just "high"
+                        , snapshotCwd = Just (fromFilePath "/tmp/work")
+                        , snapshotIdentity = Just identity
+                        }
+            saveSubagentState dir agentId snapshot
                 `shouldReturn` Right ()
             loaded <- loadSubagentState dir agentId
             case loaded of
-                Right (Just (items, meta)) -> do
+                Right (Just (items, CurrentSubagentDiskMeta fields target)) -> do
                     length items `shouldBe` 1
-                    meta.diskPreviousResponseId `shouldBe` Just "resp-1"
-                    meta.diskStatus `shouldBe` Just (Completed (Just "done"))
-                    meta.diskProvider `shouldBe` Just XAIProvider
-                    meta.diskConnection `shouldBe` Just "xai"
-                    meta.diskEffectiveModel `shouldBe` Just "grok-4.5-mini"
-                    meta.diskDialect `shouldBe` Just GrokBuildDialect
-                    meta.diskAgentType `shouldBe` Just "explore"
-                    meta.diskAgentModel `shouldBe` Just "grok-4.5-mini"
-                    meta.diskReasoningEffort `shouldBe` Just "high"
-                    meta.diskCwd `shouldBe` Just (fromFilePath "/tmp/work")
-                    meta.diskTaskPath `shouldBe` Just "/root/research/worker"
-                    meta.diskParentId `shouldBe` Just parentId
-                    meta.diskDepth `shouldBe` Just 2
+                    fields.diskPreviousResponseId `shouldBe` Just "resp-1"
+                    fields.diskStatus `shouldBe`
+                        Just (Completed (Just "done"))
+                    target.targetProvider `shouldBe` XAIProvider
+                    target.targetConnection `shouldBe` "xai"
+                    target.targetEffectiveModel `shouldBe` "grok-4.5-mini"
+                    target.targetDialect `shouldBe` GrokBuildDialect
+                    fields.diskAgentType `shouldBe` Just "explore"
+                    fields.diskAgentModel `shouldBe` Just "grok-4.5-mini"
+                    fields.diskReasoningEffort `shouldBe` Just "high"
+                    fields.diskCwd `shouldBe` Just (fromFilePath "/tmp/work")
+                    fields.diskTaskPath `shouldBe`
+                        Just "/root/research/worker"
+                    fields.diskParentId `shouldBe` Just parentId
+                    fields.diskDepth `shouldBe` Just 2
                 other -> expectationFailure ("unexpected load: " <> show other)
             case subagentStoreDir dir agentId of
                 Right path ->
@@ -104,9 +116,16 @@ spec = describe "Agent.CLI.SubagentStore" do
     it "loads legacy metadata without task topology" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-legacy-1"
-            saveSubagentState dir agentId [] (Just "legacy") Interrupted
-                XAIProvider "xai" "grok-4.6" GrokBuildDialect
-                Nothing Nothing Nothing Nothing Nothing
+                snapshot =
+                    (testSnapshot
+                        []
+                        Interrupted
+                        XAIProvider
+                        "xai"
+                        "grok-4.6"
+                        GrokBuildDialect)
+                        { snapshotPreviousResponseId = Just "legacy" }
+            saveSubagentState dir agentId snapshot
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
             LBS.writeFile
@@ -114,39 +133,53 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "{\"previousResponseId\":\"legacy\"}"
             loaded <- loadSubagentState dir agentId
             case loaded of
-                Right (Just (_, meta)) -> do
-                    meta.diskTaskPath `shouldBe` Nothing
-                    meta.diskParentId `shouldBe` Nothing
-                    meta.diskDepth `shouldBe` Nothing
-                    meta.diskStatus `shouldBe` Nothing
-                    meta.diskProvider `shouldBe` Nothing
-                    meta.diskConnection `shouldBe` Nothing
-                    meta.diskEffectiveModel `shouldBe` Nothing
-                    meta.diskDialect `shouldBe` Nothing
+                Right (Just (_, LegacySubagentDiskMeta fields target)) -> do
+                    fields.diskTaskPath `shouldBe` Nothing
+                    fields.diskParentId `shouldBe` Nothing
+                    fields.diskDepth `shouldBe` Nothing
+                    fields.diskStatus `shouldBe` Nothing
+                    target.legacyDiskProvider `shouldBe` Nothing
+                    target.legacyDiskConnection `shouldBe` Nothing
+                    target.legacyDiskEffectiveModel `shouldBe` Nothing
+                    target.legacyDiskDialect `shouldBe` Nothing
                 other -> expectationFailure ("unexpected load: " <> show other)
 
-    it "derives a missing legacy connection from the persisted provider" do
+    it "normalizes a derivable connection into current target metadata" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-legacy-connection"
-            saveSubagentState dir agentId [] Nothing Interrupted
-                XAIProvider "xai" "grok-4.6" GrokBuildDialect
-                Nothing Nothing Nothing Nothing Nothing
+            saveSubagentState
+                dir
+                agentId
+                (testSnapshot
+                    []
+                    Interrupted
+                    XAIProvider
+                    "xai"
+                    "grok-4.6"
+                    GrokBuildDialect)
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
             LBS.writeFile
                 (toFilePath (path </> fromFilePath "meta.json"))
                 "{\"provider\":\"xai\",\"effectiveModel\":\"grok-4.6\",\"dialect\":\"grok-build\"}"
             loadSubagentState dir agentId >>= \case
-                Right (Just (_, meta)) ->
-                    meta.diskConnection `shouldBe` Just "xai"
+                Right (Just (_, CurrentSubagentDiskMeta _ target)) ->
+                    target.targetConnection `shouldBe` "xai"
                 other -> expectationFailure ("unexpected load: " <> show other)
 
     it "fails closed on corrupt transcript JSON" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-corrupt-1"
-            saveSubagentState dir agentId [] (Just "r") Interrupted
-                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
-                Nothing Nothing Nothing Nothing Nothing
+                snapshot =
+                    (testSnapshot
+                        []
+                        Interrupted
+                        OpenAIProvider
+                        "openai"
+                        "gpt-5.6-luna"
+                        CodexDialect)
+                        { snapshotPreviousResponseId = Just "r" }
+            saveSubagentState dir agentId snapshot
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
             LBS.writeFile
@@ -180,7 +213,12 @@ spec = describe "Agent.CLI.SubagentStore" do
                 Nothing
                 persistedMeta
                 `shouldBe`
-                    Right ("openrouter", "openai/gpt-5.1", CodexDialect)
+                    Right SubagentTarget
+                        { targetProvider = OpenRouterProvider
+                        , targetConnection = "openrouter"
+                        , targetEffectiveModel = "openai/gpt-5.1"
+                        , targetDialect = CodexDialect
+                        }
 
         it "rejects an inherited child after the parent target changes" do
             validatePersistedSubagentTarget
@@ -221,7 +259,12 @@ spec = describe "Agent.CLI.SubagentStore" do
                 (Just legacyTarget)
                 legacyMeta
                 `shouldBe`
-                    Right ("openrouter", "openai/gpt-5.1", GrokBuildDialect)
+                    Right SubagentTarget
+                        { targetProvider = OpenRouterProvider
+                        , targetConnection = "openrouter"
+                        , targetEffectiveModel = "openai/gpt-5.1"
+                        , targetDialect = GrokBuildDialect
+                        }
             validatePersistedSubagentTarget
                 OpenRouterProvider
                 "openrouter"
@@ -246,10 +289,16 @@ spec = describe "Agent.CLI.SubagentStore" do
                 persistedItems =
                     replicate 20000 (messageItem RoleUser "persisted")
                 workerCount = 16
-            saveSubagentState dir agentId persistedItems Nothing
-                (Completed Nothing)
-                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
-                Nothing Nothing Nothing Nothing Nothing
+            saveSubagentState
+                dir
+                agentId
+                (testSnapshot
+                    persistedItems
+                    (Completed Nothing)
+                    OpenAIProvider
+                    "openai"
+                    "gpt-5.6-luna"
+                    CodexDialect)
                 `shouldReturn` Right ()
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef (Just dir)
@@ -282,10 +331,16 @@ spec = describe "Agent.CLI.SubagentStore" do
                 persisted = [messageItem RoleUser "persisted"]
                 inMemory = [messageItem RoleAssistant "in-memory"]
                 workerCount = 8
-            saveSubagentState dir agentId persisted Nothing
-                (Completed Nothing)
-                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
-                Nothing Nothing Nothing Nothing Nothing
+            saveSubagentState
+                dir
+                agentId
+                (testSnapshot
+                    persisted
+                    (Completed Nothing)
+                    OpenAIProvider
+                    "openai"
+                    "gpt-5.6-luna"
+                    CodexDialect)
                 `shouldReturn` Right ()
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef (Just dir)
@@ -463,21 +518,29 @@ legacyTarget = LegacySubagentTarget
     }
 
 persistedMeta :: SubagentDiskMeta
-persistedMeta = legacyMeta
-    { diskProvider = Just OpenRouterProvider
-    , diskConnection = Just "openrouter"
-    , diskEffectiveModel = Just "openai/gpt-5.1"
-    , diskDialect = Just CodexDialect
-    }
+persistedMeta =
+    CurrentSubagentDiskMeta emptyDiskFields SubagentTarget
+        { targetProvider = OpenRouterProvider
+        , targetConnection = "openrouter"
+        , targetEffectiveModel = "openai/gpt-5.1"
+        , targetDialect = CodexDialect
+        }
 
 legacyMeta :: SubagentDiskMeta
-legacyMeta = SubagentDiskMeta
+legacyMeta =
+    LegacySubagentDiskMeta
+        emptyDiskFields
+        LegacySubagentTargetFields
+            { legacyDiskProvider = Nothing
+            , legacyDiskConnection = Nothing
+            , legacyDiskEffectiveModel = Nothing
+            , legacyDiskDialect = Nothing
+            }
+
+emptyDiskFields :: SubagentDiskFields
+emptyDiskFields = SubagentDiskFields
     { diskPreviousResponseId = Nothing
     , diskStatus = Nothing
-    , diskProvider = Nothing
-    , diskConnection = Nothing
-    , diskEffectiveModel = Nothing
-    , diskDialect = Nothing
     , diskAgentType = Nothing
     , diskAgentModel = Nothing
     , diskReasoningEffort = Nothing
@@ -486,6 +549,32 @@ legacyMeta = SubagentDiskMeta
     , diskParentId = Nothing
     , diskDepth = Nothing
     }
+
+testSnapshot
+    :: [ResponseItem]
+    -> SubagentStatus
+    -> Provider
+    -> Text
+    -> Text
+    -> DialectId
+    -> SubagentStateSnapshot
+testSnapshot items status provider connection effectiveModel dialect =
+    SubagentStateSnapshot
+        { snapshotItems = items
+        , snapshotPreviousResponseId = Nothing
+        , snapshotStatus = status
+        , snapshotTarget = SubagentTarget
+            { targetProvider = provider
+            , targetConnection = connection
+            , targetEffectiveModel = effectiveModel
+            , targetDialect = dialect
+            }
+        , snapshotAgentType = Nothing
+        , snapshotAgentModel = Nothing
+        , snapshotReasoningEffort = Nothing
+        , snapshotCwd = Nothing
+        , snapshotIdentity = Nothing
+        }
 
 isLeft :: Either a b -> Bool
 isLeft = \case

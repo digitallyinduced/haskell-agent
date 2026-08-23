@@ -141,6 +141,8 @@ data UiState = UiState
     , uiQueuedInputs :: !(Seq Text)
     , uiFocus :: !Focus
     , uiSelectedBlock :: !(Maybe BlockId)
+    , uiSelectedBlockIndex :: !(Maybe Int)
+    , uiBlockIndices :: !(Map.Map BlockId Int)
     , uiFollow :: !Bool
     , uiRunning :: !Bool
     , uiAwaitingInput :: !Bool
@@ -154,7 +156,7 @@ data UiState = UiState
     , uiElapsedMillis :: !Int
     , uiCompletionRemainingMillis :: !Int
     , uiTurnStartBlock :: !Int
-    , uiToolCalls :: !(Map.Map Text ToolCall)
+    , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     }
     deriving (Eq, Show)
 
@@ -197,6 +199,8 @@ initialUiState = UiState
     , uiQueuedInputs = Seq.empty
     , uiFocus = FocusComposer
     , uiSelectedBlock = Nothing
+    , uiSelectedBlockIndex = Nothing
+    , uiBlockIndices = Map.empty
     , uiFollow = True
     , uiRunning = False
     , uiAwaitingInput = False
@@ -346,8 +350,11 @@ reduceUi event state = case event of
         state
             { uiBlocks = Seq.empty
             , uiSelectedBlock = Nothing
+            , uiSelectedBlockIndex = Nothing
+            , uiBlockIndices = Map.empty
             , uiNextBlockId = 1
             , uiTurnStartBlock = 0
+            , uiToolCalls = Map.empty
             }
     UiSetFollow follow ->
         state
@@ -358,12 +365,28 @@ reduceUi event state = case event of
                         (Seq.length state.uiBlocks - 1)
                         state.uiBlocks
                     else state.uiSelectedBlock
+            , uiSelectedBlockIndex =
+                if follow
+                    then
+                        if Seq.null state.uiBlocks
+                            then Nothing
+                            else Just (Seq.length state.uiBlocks - 1)
+                    else state.uiSelectedBlockIndex
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
     UiTurnRestarted ->
-        state
-            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+        let blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            selected =
+                selectionAfterTruncate
+                    blocks
+                    state.uiSelectedBlockIndex
+        in state
+            { uiBlocks = blocks
+            , uiSelectedBlock = (.blockId) . snd <$> selected
+            , uiSelectedBlockIndex = fst <$> selected
+            , uiBlockIndices =
+                Map.filter (< Seq.length blocks) state.uiBlockIndices
             , uiRunning = False
             , uiActivity = "Restarting…"
             , uiNotice =
@@ -469,6 +492,7 @@ reduceLoop event state = case event of
         let
             kind = toolBlockKind call.name
             title = toolCallTitle call
+            blockIndex = Seq.length state.uiBlocks
             body = case call.name of
                 "search_replace" ->
                     formatSearchReplaceDiff call.arguments
@@ -480,22 +504,33 @@ reduceLoop event state = case event of
                 { uiRunning = True
                 , uiAwaitingInput = False
                 , uiActivity = title
-                , uiToolCalls = Map.insert call.callId call state.uiToolCalls
+                , uiToolCalls =
+                    Map.insert
+                        call.callId
+                        (blockIndex, call)
+                        state.uiToolCalls
                 }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
-        let displayed = case Map.lookup result.callId state.uiToolCalls of
+        let activeCall = Map.lookup result.callId state.uiToolCalls
+            displayed = case activeCall of
                 Nothing -> result
-                Just call ->
+                Just (_, call) ->
                     result
                         { output = formatToolOutput call result.output }
-        in completeTool displayed state
-            { uiRunning = True
-            , uiAwaitingInput = False
-            , uiActivity = "Thinking…"
-            , uiToolCalls = Map.delete result.callId state.uiToolCalls
-            }
+            next =
+                state
+                    { uiRunning = True
+                    , uiAwaitingInput = False
+                    , uiActivity = "Thinking…"
+                    , uiToolCalls =
+                        Map.delete result.callId state.uiToolCalls
+                    }
+        in case activeCall of
+            Nothing -> next
+            Just (blockIndex, _) ->
+                completeTool blockIndex displayed next
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -549,7 +584,8 @@ appendBlock
     -> UiState
     -> UiState
 appendBlock kind title body detail blockState callId state =
-    let ident = BlockId state.uiNextBlockId
+    let index = Seq.length state.uiBlocks
+        ident = BlockId state.uiNextBlockId
         block = UiBlock
             { blockId = ident
             , blockKind = kind
@@ -565,13 +601,15 @@ appendBlock kind title body detail blockState callId state =
         { uiBlocks = state.uiBlocks Seq.|> block
         , uiNextBlockId = state.uiNextBlockId + 1
         , uiSelectedBlock = Just ident
+        , uiSelectedBlockIndex = Just index
+        , uiBlockIndices = Map.insert ident index state.uiBlockIndices
         }
 
-completeTool :: ToolCallResult -> UiState -> UiState
-completeTool result state =
+completeTool :: Int -> ToolCallResult -> UiState -> UiState
+completeTool blockIndex result state =
     state
         { uiBlocks =
-            fmap
+            Seq.adjust
                 (\block ->
                     if block.blockCallId == Just result.callId
                         then block
@@ -579,21 +617,26 @@ completeTool result state =
                             , blockState = toolResultState result.output
                             }
                         else block)
+                blockIndex
                 state.uiBlocks
         }
 
 updateToolOutput :: Text -> Text -> UiState -> UiState
 updateToolOutput callId output state =
-    state
-        { uiBlocks =
-            fmap
-                (\block ->
-                    if block.blockCallId == Just callId
-                        && block.blockState == BlockRunning
-                        then block { blockBody = output }
-                        else block)
-                state.uiBlocks
-        }
+    case Map.lookup callId state.uiToolCalls of
+        Nothing -> state
+        Just (blockIndex, _) ->
+            state
+                { uiBlocks =
+                    Seq.adjust
+                        (\block ->
+                            if block.blockCallId == Just callId
+                                && block.blockState == BlockRunning
+                                then block { blockBody = output }
+                                else block)
+                        blockIndex
+                        state.uiBlocks
+                }
 
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
@@ -669,10 +712,15 @@ hasAssistantTextSince start =
 moveSelection :: Int -> UiState -> UiState
 moveSelection delta state =
     case Seq.lookup next blocks of
-        Nothing -> state { uiSelectedBlock = Nothing }
+        Nothing ->
+            state
+                { uiSelectedBlock = Nothing
+                , uiSelectedBlockIndex = Nothing
+                }
         Just block ->
             state
                 { uiSelectedBlock = Just block.blockId
+                , uiSelectedBlockIndex = Just next
                 , uiFollow = next == lastIndex
                 }
   where
@@ -682,22 +730,24 @@ moveSelection delta state =
 
 selectBlock :: BlockId -> UiState -> UiState
 selectBlock ident state =
-    case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
+    case Map.lookup ident state.uiBlockIndices of
         Nothing -> state
-        Just index ->
-            state
-                { uiSelectedBlock = Just ident
-                , uiFollow = index == Seq.length state.uiBlocks - 1
-                }
+        Just index -> case Seq.lookup index state.uiBlocks of
+            Just block
+                | block.blockId == ident ->
+                    state
+                        { uiSelectedBlock = Just ident
+                        , uiSelectedBlockIndex = Just index
+                        , uiFollow =
+                            index == Seq.length state.uiBlocks - 1
+                        }
+            _ -> state
 
 selectedBlockIndex :: UiState -> Int
 selectedBlockIndex state =
-    case state.uiSelectedBlock of
-        Nothing -> max 0 (Seq.length state.uiBlocks - 1)
-        Just ident ->
-            case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
-                Nothing -> max 0 (Seq.length state.uiBlocks - 1)
-                Just index -> index
+    maybe fallback fst (selectedBlockEntry state)
+  where
+    fallback = max 0 (Seq.length state.uiBlocks - 1)
 
 -- | Delete whitespace and the previous non-whitespace word before the cursor.
 deleteWordBefore :: Text -> Int -> (Text, Int)
@@ -768,19 +818,41 @@ moveWordRight text cursor =
 
 toggleSelected :: UiState -> UiState
 toggleSelected state =
-    case state.uiSelectedBlock of
+    case selectedBlockEntry state of
         Nothing -> state
-        Just ident ->
+        Just (index, _) ->
             state
                 { uiBlocks =
-                    fmap
+                    Seq.adjust
                         (\block ->
-                            if block.blockId == ident
-                                then block
-                                    { blockExpanded = not block.blockExpanded }
-                                else block)
+                            block
+                                { blockExpanded = not block.blockExpanded })
+                        index
                         state.uiBlocks
                 }
+
+selectedBlockEntry :: UiState -> Maybe (Int, UiBlock)
+selectedBlockEntry state = do
+    ident <- state.uiSelectedBlock
+    index <- state.uiSelectedBlockIndex
+    storedIndex <- Map.lookup ident state.uiBlockIndices
+    block <- Seq.lookup index state.uiBlocks
+    if storedIndex == index && block.blockId == ident
+        then Just (index, block)
+        else Nothing
+
+selectionAfterTruncate
+    :: Seq UiBlock
+    -> Maybe Int
+    -> Maybe (Int, UiBlock)
+selectionAfterTruncate blocks selected =
+    case selected of
+        Just index
+            | Just block <- Seq.lookup index blocks ->
+                Just (index, block)
+        _ ->
+            let index = Seq.length blocks - 1
+            in (\block -> (index, block)) <$> Seq.lookup index blocks
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName
