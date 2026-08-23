@@ -223,15 +223,14 @@ spec = do
             let backend = statelessResponsesBackend
                     (scriptedStatelessSend seen remaining)
                     (pure baseParams)
-                    transcript
 
-            first <- backend.submitTurn Nothing [UserMessage "read it"]
+            first <- submitWithState transcript backend Nothing [UserMessage "read it"]
                 (modifyIORef' events . (:))
             first `shouldBe` Right (emptyTurnOutput "resp-1"
                 [functionToolCall "c1" "read_file" "{\"target_file\":\"README.md\"}"]
                 Nothing)
 
-            second <- backend.submitTurn (Just "resp-1")
+            second <- submitWithState transcript backend (Just "resp-1")
                 [CompletedTool (functionResult "c1" "file contents")]
                 (const (pure ()))
             second `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "done"))
@@ -266,12 +265,12 @@ spec = do
                             modifyIORef' seen (++ [request])
                             pure (Left (ConnectionError "boom"))
                         else scriptedStatelessSend seen remaining request onEvent
-                backend = statelessResponsesBackend send (pure baseParams) transcript
+                backend = statelessResponsesBackend send (pure baseParams)
 
-            failed <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
+            failed <- submitWithState transcript backend Nothing [UserMessage "hi"] (const (pure ()))
             failed `shouldBe` Left (ConnectionError "boom")
 
-            recovered <- backend.submitTurn Nothing [UserMessage "hi"] (const (pure ()))
+            recovered <- submitWithState transcript backend Nothing [UserMessage "hi"] (const (pure ()))
             recovered `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "hi"))
             map inputItems <$> readIORef seen `shouldReturn`
                 [ turnInputsToItems [UserMessage "hi"]
@@ -289,10 +288,9 @@ spec = do
             let backend = statelessResponsesBackend
                     (scriptedStatelessSend seen remaining)
                     (readIORef paramsRef)
-                    transcript
-            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            _ <- submitWithState transcript backend Nothing [UserMessage "one"] (const (pure ()))
             writeIORef paramsRef (withEffort "high" baseParams)
-            _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"]
+            _ <- submitWithState transcript backend (Just "resp-1") [UserMessage "two"]
                 (const (pure ()))
             requests <- readIORef seen
             map reasoningEffort requests `shouldBe` [Just "low", Just "high"]
@@ -308,8 +306,8 @@ spec = do
             seen <- newIORef []
             events <- newIORef []
             transcript <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) (pure baseParams) transcript
-            result <- backend.submitTurn (Just "resp-prev")
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-prev")
                 [UserMessage "hello"]
                 (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-1" [] (Just "ok"))
@@ -322,9 +320,9 @@ spec = do
         it "does not accumulate prior turns on the OpenAI transport" do
             seen <- newIORef []
             transcript <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) (pure baseParams) transcript
-            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
-            _ <- backend.submitTurn (Just "resp-1")
+            let backend = openAiBackendWith (recordingSend seen) (pure baseParams)
+            _ <- submitWithState transcript backend Nothing [UserMessage "one"] (const (pure ()))
+            _ <- submitWithState transcript backend (Just "resp-1")
                 [CompletedTool (functionResult "c1" "out")]
                 (const (pure ()))
             requests <- readIORef seen
@@ -338,10 +336,10 @@ spec = do
             seen <- newIORef []
             paramsRef <- newIORef (withEffort "low" baseParams)
             transcript <- newIORef []
-            let backend = openAiBackendWith (recordingSend seen) (readIORef paramsRef) transcript
-            _ <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
+            let backend = openAiBackendWith (recordingSend seen) (readIORef paramsRef)
+            _ <- submitWithState transcript backend Nothing [UserMessage "one"] (const (pure ()))
             writeIORef paramsRef (withEffort "high" baseParams)
-            _ <- backend.submitTurn (Just "resp-1") [UserMessage "two"] (const (pure ()))
+            _ <- submitWithState transcript backend (Just "resp-1") [UserMessage "two"] (const (pure ()))
             map (reasoningEffort . fst) <$> readIORef seen
                 `shouldReturn` [Just "low", Just "high"]
 
@@ -358,8 +356,8 @@ spec = do
                         Nothing -> do
                             onEvent (deltaEvent EventOutputTextDelta "ok")
                             pure $ Right (testResponse "resp-2" [assistantItem "ok"])
-                backend = openAiBackendWith send (pure baseParams) transcript
-            result <- backend.submitTurn (Just "resp-missing")
+                backend = openAiBackendWith send (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-missing")
                 [UserMessage "new"]
                 (const (pure ()))
             result `shouldBe` Right (emptyTurnOutput "resp-2" [] (Just "ok"))
@@ -381,8 +379,7 @@ spec = do
             let backend = openAiBackendWith
                     (recordingSend seen)
                     (pure baseParams)
-                    transcript
-            _ <- backend.submitTurn Nothing [UserMessage "new"] (const (pure ()))
+            _ <- submitWithState transcript backend Nothing [UserMessage "new"] (const (pure ()))
             [(request, previous)] <- readIORef seen
             previous `shouldBe` Nothing
             inputItems request `shouldBe`
@@ -408,8 +405,7 @@ spec = do
                     (constantDelay 0 <> limitRetries 3)
                     send
                     (pure baseParams)
-                    transcript
-            result <- backend.submitTurn Nothing [UserMessage "one"]
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
                 (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-retried" [] (Just "ok"))
             readIORef attempts `shouldReturn` 3
@@ -438,8 +434,7 @@ spec = do
                     (constantDelay 0 <> limitRetries 3)
                     send
                     (pure baseParams)
-                    transcript
-            result <- backend.submitTurn Nothing [UserMessage "one"]
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
                 (modifyIORef' events . (:))
             result `shouldBe` Left serverError
             readIORef attempts `shouldReturn` 1
@@ -650,9 +645,9 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            first <- backend.submitTurn Nothing [UserMessage "one"] (const (pure ()))
-            second <- backend.submitTurn (Just "resp-fresh")
+                    healthy sendCurrent sendFresh (pure baseParams)
+            first <- submitWithState transcript backend Nothing [UserMessage "one"] (const (pure ()))
+            second <- submitWithState transcript backend (Just "resp-fresh")
                 [UserMessage "two"] (const (pure ()))
             first `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             second `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
@@ -672,8 +667,8 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 streamingBackend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- streamingBackend.submitTurn Nothing [UserMessage "one"]
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript streamingBackend Nothing [UserMessage "one"]
                 (modifyIORef' events . (:))
             result `shouldBe` Left (ConnectionError "socket closed")
             reverse <$> readIORef events `shouldReturn` [TextDelta "partial"]
@@ -690,8 +685,8 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 providerErrorBackend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- providerErrorBackend.submitTurn Nothing
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript providerErrorBackend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ProviderError InvalidRequestError "bad request" Nothing)
             readIORef healthy `shouldReturn` True
@@ -710,8 +705,8 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- backend.submitTurn Nothing
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             readIORef healthy `shouldReturn` False
@@ -729,8 +724,8 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- backend.submitTurn Nothing
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             readIORef healthy `shouldReturn` False
@@ -757,8 +752,8 @@ spec = do
                             pure $ Right $
                                 testResponse "resp-fresh" [assistantItem "ok"]
                 backend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- backend.submitTurn (Just "resp-old")
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
             result `shouldBe`
                 Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
@@ -815,19 +810,24 @@ spec = do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
             fallbackCalls <- newIORef (0 :: Int)
-            let primary = Backend \_previous _inputs _onEvent -> do
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent -> do
                     modifyIORef' primaryCalls (+ 1)
                     pure (Left (ConnectionError
                         "WebSocket receive error: ParseException \"not enough bytes\""))
-                fallback = Backend \_previous _inputs _onEvent -> do
+                fallback = Backend \state _previous _inputs _onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
-                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
                 backend =
                     openAiBackendWithTransportFallback
                         fallbackActive primary fallback
-            first <- backend.submitTurn Nothing
+            first <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
-            second <- backend.submitTurn (Just "resp-http")
+            second <- submitWithState transcript backend (Just "resp-http")
                 [UserMessage "two"] (const (pure ()))
             first `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
             second `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
@@ -838,16 +838,21 @@ spec = do
         it "does not replay a failed turn after model output was exposed" do
             fallbackActive <- newIORef False
             fallbackCalls <- newIORef (0 :: Int)
-            let primary = Backend \_previous _inputs onEvent -> do
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs onEvent -> do
                     onEvent (TextDelta "partial")
                     pure (Left (ConnectionError "socket closed"))
-                fallback = Backend \_previous _inputs _onEvent -> do
+                fallback = Backend \state _previous _inputs _onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
-                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
                 backend =
                     openAiBackendWithTransportFallback
                         fallbackActive primary fallback
-            result <- backend.submitTurn Nothing
+            result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ConnectionError "socket closed")
             readIORef fallbackActive `shouldReturn` True
@@ -867,14 +872,17 @@ spec = do
                     (constantDelay 0 <> limitRetries 3)
                     sendPrimary
                     (pure baseParams)
-                    primaryTranscript
-                fallback = Backend \_previous _inputs _onEvent -> do
+                fallback = Backend \state _previous _inputs _onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
-                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
                 backend =
                     openAiBackendWithTransportFallback
                         fallbackActive primary fallback
-            result <- backend.submitTurn Nothing
+            result <- submitWithState primaryTranscript backend Nothing
                 [UserMessage "one"] (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-http" [] (Just "ok"))
             readIORef events `shouldReturn` []
@@ -884,16 +892,21 @@ spec = do
         it "preserves non-transport provider failures" do
             fallbackActive <- newIORef False
             fallbackCalls <- newIORef (0 :: Int)
-            let primary = Backend \_previous _inputs _onEvent ->
+            transcript <- newIORef []
+            let primary = Backend \_state _previous _inputs _onEvent ->
                     pure (Left (ProviderError InvalidRequestError
                         "bad request" Nothing))
-                fallback = Backend \_previous _inputs _onEvent -> do
+                fallback = Backend \state _previous _inputs _onEvent -> do
                     modifyIORef' fallbackCalls (+ 1)
-                    pure (Right (emptyTurnOutput "resp-http" [] (Just "ok")))
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "ok")
+                        , backendState = state
+                        }
                 backend =
                     openAiBackendWithTransportFallback
                         fallbackActive primary fallback
-            result <- backend.submitTurn Nothing
+            result <- submitWithState transcript backend Nothing
                 [UserMessage "one"] (const (pure ()))
             result `shouldBe` Left (ProviderError InvalidRequestError
                 "bad request" Nothing)
@@ -903,6 +916,22 @@ spec = do
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
+
+submitWithState
+    :: IORef state
+    -> Backend state
+    -> Maybe Text
+    -> [TurnInput]
+    -> (LoopEvent -> IO ())
+    -> IO (Either ApiError TurnOutput)
+submitWithState stateRef backend previous inputs onEvent = do
+    state <- readIORef stateRef
+    result <- backend.submitTurn state previous inputs onEvent
+    case result of
+        Left err -> pure (Left err)
+        Right BackendResult{..} -> do
+            writeIORef stateRef backendState
+            pure (Right backendOutput)
 
 baseParams :: ResponseCreateParams
 baseParams = withModel (Just "gpt-5.6-luna") defaultResponseCreateParams

@@ -3,8 +3,8 @@
 -- OpenRouter does not store transcripts ('store = false', no
 -- @previous_response_id@). This backend keeps a local item list so tool
 -- follow-ups can resend the conversation the loop only supplies as
--- 'CompletedTool' items. Callers own the 'IORef' so a resumed session can
--- seed history and the CLI can persist it.
+-- 'CompletedTool' items. The loop threads that history explicitly so a
+-- resumed session can seed it and the CLI can persist it.
 module Agent.OpenRouter.LoopBackend
     ( openRouterBackend
     , openRouterBackendWith
@@ -20,7 +20,6 @@ import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.OpenRouter.Client (createResponseWithEvents)
 import Agent.OpenRouter.Options (ClientOptions)
-import Data.IORef
 
 -- | Close over OpenRouter options, a token provider, and the request fields
 -- the loop does not own (model, instructions, tools, reasoning). Credentials
@@ -31,8 +30,7 @@ openRouterBackend
     :: ClientOptions
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
+    -> Backend [ResponseItem]
 openRouterBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
@@ -43,6 +41,5 @@ openRouterBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
+    -> Backend [ResponseItem]
 openRouterBackendWith = statelessResponsesBackend

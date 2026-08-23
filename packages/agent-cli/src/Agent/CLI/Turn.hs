@@ -82,11 +82,13 @@ import Agent.CLI.TurnState
     )
 import Agent.Loop
     ( LoopConfig(..)
+    , LoopExecution(..)
     , LoopError(..)
+    , LoopProgress(..)
     , LoopResult(..)
     , TurnInput(..)
     , addTokenUsage
-    , runLoopInputs
+    , runLoopInputsDetailed
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -224,12 +226,13 @@ runOneTurn env@SessionEnv
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout osc133CommandStart
     rootTurnId <- beginSubagentTurn
-    result <- runLoopInputs config prev turnInputs
+    execution <- runLoopInputsDetailed config prev turnInputs
         `onException`
             ( commitConversationPatch
                 (finishConversation prepared ConversationInterrupted)
                 >> abortSubagentTurn rootTurnId
             )
+    let result = execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-
@@ -299,10 +302,9 @@ runOneTurn env@SessionEnv
             pure TurnSucceeded
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
-            afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
-                    | length afterItems == length beforeItems
+                    | execution.executionProgress == NoResponseCommitted
                     , isProviderUnavailable apiError -> do
                         commitConversationPatch
                             (finishConversation
@@ -389,8 +391,8 @@ runOneTurn env@SessionEnv
                     useColor <- resolveColor stdout
                     putTextLn stdout (renderAssistantText useColor text)
                 _ -> pure ()
-            afterItems <- readIORef transcriptRef
-            let newItems = turnNewItems beforeItems afterItems
+            let newItems =
+                    turnNewItems beforeItems execution.executionState
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef -> do

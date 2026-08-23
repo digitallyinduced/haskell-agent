@@ -3,8 +3,8 @@
 -- The proxy does not store transcripts ('store = false', no
 -- @previous_response_id@). This backend keeps a local item list so tool
 -- follow-ups can resend the conversation the loop only supplies as
--- 'CompletedTool' items. Callers own the 'IORef' so a resumed session can
--- seed history and the CLI can persist it.
+-- 'CompletedTool' items. The loop threads that history explicitly so a
+-- resumed session can seed it and the CLI can persist it.
 module Agent.XAI.LoopBackend
     ( xaiBackend
     , xaiBackendWith
@@ -20,7 +20,6 @@ import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.XAI.Client (createResponseWithEvents)
 import Agent.XAI.Options (ClientOptions)
-import Data.IORef
 
 -- | Close over xAI options, a token provider, and the request fields the loop
 -- does not own (model, instructions, tools, reasoning). Credentials stay
@@ -31,8 +30,7 @@ xaiBackend
     :: ClientOptions
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
+    -> Backend [ResponseItem]
 xaiBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
@@ -43,6 +41,5 @@ xaiBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
+    -> Backend [ResponseItem]
 xaiBackendWith = statelessResponsesBackend
