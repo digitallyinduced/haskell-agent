@@ -5,6 +5,7 @@ module Agent.CLI.Subagents.Runtime
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
+    , freshOpenAiBackendWithParams
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , persistSubagentSnapshotWithStatus
@@ -12,6 +13,7 @@ module Agent.CLI.Subagents.Runtime
     , restoreAgentFromDisk
     , runCodexSubagent
     , runHttpSubagent
+    , runHttpSubagentWithParams
     , validatePersistedSubagentTarget
     ) where
 
@@ -543,6 +545,13 @@ freshOpenAiBackend provider getParams = Backend \state previous inputs onEvent -
         let Backend submit = openAiBackend conn getParams
         in submit state previous inputs onEvent
 
+freshOpenAiBackendWithParams
+    :: TokenProvider
+    -> ResponseCreateParams
+    -> Backend
+freshOpenAiBackendWithParams provider params =
+    freshOpenAiBackend provider (pure params)
+
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
@@ -613,17 +622,16 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         childParams = requestParams model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     httpFallbackActive <- newIORef False
                     let websocketBackend =
-                            freshOpenAiBackend tokenProvider
-                                (readIORef childParamsRef)
+                            freshOpenAiBackendWithParams
+                                tokenProvider childParams
                         httpBackend =
                             statelessResponsesBackend
                                 (\request _onEvent ->
                                     OpenAI.createCodexMessageWithProvider
                                         tokenProvider request)
-                                (readIORef childParamsRef)
+                                (pure childParams)
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
@@ -634,7 +642,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 autoCompactOpenAiBackendWithThreshold
                                     runtime.subagentOptions.optCompactThreshold
                                     tokenProvider
-                                    (readIORef childParamsRef)
+                                    (pure childParams)
                                     prepared.preparedSession.subSessionContextTokens
                                     baseBackend
                     runPreparedChild
@@ -652,6 +660,28 @@ runHttpSubagent
     -> (IORef ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
+    runHttpSubagentUsing runtime dialect provider sendToRoot
+        (\params -> mkBackend <$> newIORef params)
+
+runHttpSubagentWithParams
+    :: SubagentRuntime
+    -> Dialect
+    -> Provider
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> Backend)
+    -> RunSubagent
+runHttpSubagentWithParams runtime dialect provider sendToRoot mkBackend =
+    runHttpSubagentUsing runtime dialect provider sendToRoot
+        (pure . mkBackend)
+
+runHttpSubagentUsing
+    :: SubagentRuntime
+    -> Dialect
+    -> Provider
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> IO Backend)
+    -> RunSubagent
+runHttpSubagentUsing runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
         agentType <-
             fromMaybe defaultSubagentType
@@ -758,10 +788,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         childParams = requestParams model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
-                    let backend =
-                            withConnectionRecovery $
-                                mkBackend childParamsRef
+                    childBackend <- mkBackend childParams
+                    let backend = withConnectionRecovery childBackend
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent

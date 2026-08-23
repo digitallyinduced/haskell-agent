@@ -1,12 +1,48 @@
 module Agent.Retry
-    ( ExceptionRetry(..)
+    ( AttemptObservation(..)
+    , AttemptOutcome(..)
+    , ExceptionRetry(..)
     , handleSyncExceptions
+    , runObservedAttempt
     , retryingBeforeCommit
     ) where
 
 import qualified Control.Exception.Safe as Safe
 import Control.Retry (RetryPolicyM, retrying)
 import Data.IORef (newIORef, readIORef, writeIORef)
+
+-- | Whether an attempt exposed output that makes replay observable.
+data AttemptObservation
+    = NoOutputObserved
+    | OutputObserved
+    deriving (Eq, Show)
+
+-- | The result of one operation attempt together with its replay boundary.
+data AttemptOutcome result = AttemptOutcome
+    { attemptObservation :: !AttemptObservation
+    , attemptResult :: !result
+    } deriving (Eq, Show)
+
+-- | Run one callback-driven attempt and report whether matching output was
+-- observed. The marker is set before invoking the callback, so a callback
+-- exception still makes the attempt replay-unsafe.
+runObservedAttempt
+    :: (event -> Bool)
+    -> (event -> IO ())
+    -> ((event -> IO ()) -> IO result)
+    -> IO (AttemptOutcome result)
+runObservedAttempt observed onEvent action = do
+    observationRef <- newIORef NoOutputObserved
+    result <- action \event -> do
+        if observed event
+            then writeIORef observationRef OutputObserved
+            else pure ()
+        onEvent event
+    observation <- readIORef observationRef
+    pure AttemptOutcome
+        { attemptObservation = observation
+        , attemptResult = result
+        }
 
 -- | How a synchronous exception raised before an operation commits should be
 -- represented. Both constructors return the error as data; only

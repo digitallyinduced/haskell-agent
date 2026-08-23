@@ -11,9 +11,13 @@ module Agent.CLI.SessionTitle
     , titleRefreshIndex
     , waitForSessionTitleResults
     , withSessionTitleManager
+    , withSessionTitleManagerExplicit
     ) where
 
-import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.Btw
+    ( BtwBackendFactory
+    , ExplicitBtwBackendFactory
+    )
 import Agent.CLI.Error (formatApiErrorInline)
 import Agent.Loop
     ( Backend(..)
@@ -70,8 +74,8 @@ data SessionTitleManager = SessionTitleManager
     , titleResults :: !(TQueue SessionTitleResult)
     , titleRequested :: !(TVar (Set (Text, Int, Int)))
     , titleGenerations :: !(TVar (Map Text Int))
-    , titleBackendFactory :: !BtwBackendFactory
-    , titleParams :: !(IORef ResponseCreateParams)
+    , titleBackendFactory :: !(ResponseCreateParams -> IO Backend)
+    , titleParams :: !(IO ResponseCreateParams)
     }
 
 withSessionTitleManager
@@ -81,6 +85,28 @@ withSessionTitleManager
     -> (SessionTitleManager -> IO a)
     -> IO a
 withSessionTitleManager backendFactory paramsRef onEvent action = do
+    withSessionTitleManagerUsing
+        (\params -> backendFactory <$> newIORef params)
+        (readIORef paramsRef)
+        onEvent
+        action
+
+withSessionTitleManagerExplicit
+    :: ExplicitBtwBackendFactory
+    -> IO ResponseCreateParams
+    -> (SessionTitleEvent -> IO ())
+    -> (SessionTitleManager -> IO a)
+    -> IO a
+withSessionTitleManagerExplicit backendFactory =
+    withSessionTitleManagerUsing (pure . backendFactory)
+
+withSessionTitleManagerUsing
+    :: (ResponseCreateParams -> IO Backend)
+    -> IO ResponseCreateParams
+    -> (SessionTitleEvent -> IO ())
+    -> (SessionTitleManager -> IO a)
+    -> IO a
+withSessionTitleManagerUsing backendFactory getParams onEvent action = do
     jobs <- newTQueueIO
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
@@ -91,7 +117,7 @@ withSessionTitleManager backendFactory paramsRef onEvent action = do
             , titleRequested = requested
             , titleGenerations = generations
             , titleBackendFactory = backendFactory
-            , titleParams = paramsRef
+            , titleParams = getParams
             }
     withAsync (titleWorker onEvent manager) \_ -> action manager
 
@@ -202,11 +228,9 @@ titleWorker onEvent manager = forever do
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
-    baseParams <- readIORef manager.titleParams
+    baseParams <- manager.titleParams
     let params = titleRequestParams baseParams
-    privateParams <- newIORef params
-    let Backend submit =
-            manager.titleBackendFactory privateParams
+    Backend submit <- manager.titleBackendFactory params
     timeout 45000000
         (submit [] Nothing
             [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))

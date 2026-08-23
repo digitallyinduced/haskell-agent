@@ -1,9 +1,13 @@
 -- | Isolated one-shot side questions over a snapshot of the main transcript.
 module Agent.CLI.Btw
     ( BtwBackendFactory
+    , ExplicitBtwBackendFactory
     , BtwError(..)
+    , adaptExplicitBtwBackendFactory
+    , adaptLegacyBtwBackendFactory
     , formatBtwError
     , runBtwWithCancel
+    , runBtwWithCancelExplicit
     , sideQuestionPrompt
     , trimDanglingToolSuffix
     ) where
@@ -36,8 +40,34 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Construct a provider backend over private request parameters and transcript.
+--
+-- This legacy alias is retained for downstream callers. New code should use
+-- 'ExplicitBtwBackendFactory' so immutable side-request parameters are passed
+-- directly rather than hidden in a private reference.
 type BtwBackendFactory =
     IORef ResponseCreateParams -> Backend
+
+type ExplicitBtwBackendFactory =
+    ResponseCreateParams -> Backend
+
+-- | Adapt an explicit factory to the legacy reference-taking API.
+adaptExplicitBtwBackendFactory
+    :: ExplicitBtwBackendFactory
+    -> BtwBackendFactory
+adaptExplicitBtwBackendFactory makeBackend paramsRef =
+    Backend \state previous inputs onEvent -> do
+        params <- readIORef paramsRef
+        (makeBackend params).submitTurn state previous inputs onEvent
+
+-- | Adapt a legacy reference-taking factory to the explicit API. The private
+-- reference is confined to this migration adapter.
+adaptLegacyBtwBackendFactory
+    :: BtwBackendFactory
+    -> ExplicitBtwBackendFactory
+adaptLegacyBtwBackendFactory makeBackend params =
+    Backend \state previous inputs onEvent -> do
+        privateParams <- newIORef params
+        (makeBackend privateParams).submitTurn state previous inputs onEvent
 
 data BtwError
     = BtwTransport !ApiError
@@ -124,9 +154,39 @@ runBtwWithCancel
 runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = do
     params <- clearTurnSpecificParams <$> readIORef paramsRef
     transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
-    privateParams <- newIORef params
+    runBtwWithCancelUsing withCancelScope
+        (\fixedParams -> makeBackend <$> newIORef fixedParams)
+        params transcript question
+
+runBtwWithCancelExplicit
+    :: (CancelFlag
+        -> IO (Either BtwError Text)
+        -> IO (Either BtwError Text))
+    -> ExplicitBtwBackendFactory
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Text
+    -> IO (Either BtwError Text)
+runBtwWithCancelExplicit withCancelScope makeBackend params transcript question =
+    runBtwWithCancelUsing withCancelScope
+        (pure . makeBackend)
+        (clearTurnSpecificParams params)
+        (trimDanglingToolSuffix transcript)
+        question
+
+runBtwWithCancelUsing
+    :: (CancelFlag
+        -> IO (Either BtwError Text)
+        -> IO (Either BtwError Text))
+    -> (ResponseCreateParams -> IO Backend)
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Text
+    -> IO (Either BtwError Text)
+runBtwWithCancelUsing withCancelScope makeBackend params transcript question = do
+    backend <- makeBackend params
     cancel <- newCancelFlag
-    let Backend submit = makeBackend privateParams
+    let Backend submit = backend
         request =
             submit transcript Nothing
                 [UserMessage (sideQuestionPrompt question)] (\_ -> pure ())

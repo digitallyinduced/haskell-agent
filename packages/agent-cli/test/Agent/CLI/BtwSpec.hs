@@ -53,7 +53,7 @@ spec = do
             trimDanglingToolSuffix items `shouldBe` items
 
     describe "runBtwWithCancel" do
-        it "uses private state and preserves parent params including tools" do
+        it "threads explicit state and preserves parent params including tools" do
             let originalItems = turnInputsToItems [UserMessage "earlier context"]
                 tool = KnownResponseTool ToolWebSearch
                     (TaggedObject "web_search" KeyMap.empty)
@@ -75,7 +75,7 @@ spec = do
                     Backend \privateTranscript previous inputs _onEvent -> do
                         writeIORef seenPrevious previous
                         writeIORef seenInputs inputs
-                        writeIORef seenPrivateParams . Just =<< readIORef privateParams
+                        writeIORef seenPrivateParams (Just privateParams)
                         writeIORef seenPrivateTranscript privateTranscript
                         pure $ Right BackendResult
                             { backendOutput =
@@ -83,8 +83,8 @@ spec = do
                                     "side-response" [] (Just "side answer")
                             , backendState = privateTranscript
                             }
-            result <- runBtwWithCancel (\_ action -> action)
-                factory mainParams mainTranscript "why?"
+            result <- runBtwWithCancelExplicit (\_ action -> action)
+                factory originalParams originalItems "why?"
             result `shouldBe` Right "side answer"
             readIORef seenPrevious `shouldReturn` Nothing
             seen <- readIORef seenInputs

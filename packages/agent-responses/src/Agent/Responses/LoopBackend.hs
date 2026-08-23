@@ -1,7 +1,12 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
-    ( statelessResponsesBackend
+    ( ResponsesTurn(..)
+    , completeResponsesTurn
+    , prepareResponsesTurn
+    , statelessResponsesBackend
+    , statelessResponsesBackendWithParams
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendWithParams
     , turnInputsToItems
     , responseToTurnOutput
     , responseTokenUsage
@@ -53,6 +58,40 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Text.Printf (printf)
 
+-- | Pure request/transcript transition shared by Responses-compatible
+-- backends. Stateless transports send 'responsesFullRequest'; OpenAI's
+-- response-chain transport normally sends 'responsesDeltaRequest' and falls
+-- back to the full request when the remote chain is unavailable.
+data ResponsesTurn = ResponsesTurn
+    { responsesNewItems :: ![ResponseItem]
+    , responsesTranscript :: ![ResponseItem]
+    , responsesDeltaRequest :: !ResponseCreateParams
+    , responsesFullRequest :: !ResponseCreateParams
+    } deriving (Eq, Show)
+
+prepareResponsesTurn
+    :: ResponseCreateParams
+    -> [ResponseItem]
+    -> [TurnInput]
+    -> ResponsesTurn
+prepareResponsesTurn baseParams history inputs =
+    ResponsesTurn
+        { responsesNewItems = newItems
+        , responsesTranscript = transcript
+        , responsesDeltaRequest = withRequestInput baseParams newItems
+        , responsesFullRequest = withRequestInput baseParams transcript
+        }
+  where
+    newItems = turnInputsToItems inputs
+    transcript = history <> newItems
+
+completeResponsesTurn :: ResponsesTurn -> Response -> BackendResult
+completeResponsesTurn turn response =
+    BackendResult
+        { backendOutput = responseToTurnOutput response
+        , backendState = turn.responsesTranscript <> response.output
+        }
+
 -- | Adapt a stateless Responses transport to the provider-neutral loop.
 statelessResponsesBackend
     :: (ResponseCreateParams
@@ -63,18 +102,25 @@ statelessResponsesBackend
 statelessResponsesBackend send getParams =
     Backend \history _previousResponseId inputs onEvent -> do
         baseParams <- getParams
-        let newItems = turnInputsToItems inputs
-            requestItems = history <> newItems
-            request = withRequestInput baseParams requestItems
-        result <- send request \event ->
+        let turn = prepareResponsesTurn baseParams history inputs
+        result <- send turn.responsesFullRequest \event ->
             mapM_ onEvent (streamEventToLoopEvent event)
         case result of
             Left err -> pure (Left err)
             Right response ->
-                pure $ Right BackendResult
-                    { backendOutput = responseToTurnOutput response
-                    , backendState = requestItems <> response.output
-                    }
+                pure (Right (completeResponsesTurn turn response))
+
+-- | Fixed-parameter adapter for isolated requests and child agents. The
+-- action-taking variant remains available for live sessions whose effort or
+-- model can change between turns.
+statelessResponsesBackendWithParams
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Backend
+statelessResponsesBackendWithParams send params =
+    statelessResponsesBackend send (pure params)
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
@@ -92,6 +138,17 @@ tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->
         runWithTokenProvider provider \credential ->
             send credential params onEvent
+
+tokenProviderStatelessResponsesBackendWithParams
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendWithParams provider send params =
+    tokenProviderStatelessResponsesBackend provider send (pure params)
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.

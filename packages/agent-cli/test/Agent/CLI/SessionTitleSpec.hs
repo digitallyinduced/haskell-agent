@@ -47,14 +47,15 @@ spec = describe "Agent.CLI.SessionTitle" do
         paramsRef <- newIORef baseParams
         let backendFactory privateParams =
                 Backend \state _ _ _ -> do
-                    writeIORef seenParams . Just =<< readIORef privateParams
+                    writeIORef seenParams (Just privateParams)
                     pure $ Right BackendResult
                         { backendOutput =
                             emptyTurnOutput "title-response" []
                                 (Just "Auth race cleanup")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory paramsRef (putMVar notified) \manager -> do
+        withSessionTitleManagerExplicit backendFactory (readIORef paramsRef)
+                (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             results <- waitForResults manager 100
             let expected = SessionTitleResult

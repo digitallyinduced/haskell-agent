@@ -4,6 +4,7 @@
 -- "Agent.Responses.LoopBackend" and are re-exported here for compatibility.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
+    , openAiBackendWithParams
     , openAiBackendReconnecting
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiAuxiliaryResponseSenderWithConnectionRecovery
@@ -12,6 +13,7 @@ module Agent.OpenAI.LoopBackend
     , openAiResponseSenderWithConnectionRecovery
     , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
+    , openAiBackendWithRetryPolicyParams
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
@@ -31,7 +33,7 @@ import Agent.Error
     , isInlineRetryableProviderError
     , isInlineRetryableProviderResponseError
     )
-import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
+import Agent.Loop (Backend(..), LoopEvent(..))
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
@@ -46,8 +48,16 @@ import Agent.Provider
     , TokenProvider
     , accountFailureFromApiError
     )
+import Agent.Retry
+    ( AttemptObservation(..)
+    , AttemptOutcome(..)
+    , runObservedAttempt
+    )
 import Agent.Responses.LoopBackend
-    ( assistantTextFromResponse
+    ( ResponsesTurn(..)
+    , assistantTextFromResponse
+    , completeResponsesTurn
+    , prepareResponsesTurn
     , responseToTurnOutput
     , responseTokenUsage
     , statelessResponsesBackend
@@ -88,6 +98,10 @@ openAiBackend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
+
+openAiBackendWithParams :: CodexConn -> ResponseCreateParams -> Backend
+openAiBackendWithParams conn params =
+    openAiBackend conn (pure params)
 
 -- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
 openAiBackendReconnecting
@@ -184,19 +198,10 @@ openAiResponseSenderReconnectingWhen observed markObservedFailure provider
                 withCodexWsRetrying provider
                     (sendOnFresh request previousResponseId onEvent)
     sendOnFresh request previousResponseId onEvent freshConn _credential =
-        do
-            emittedOutput <- newIORef False
-            result <-
-                sendWsRequestWithEvents freshConn request previousResponseId
-                    \event -> do
-                        if observed event
-                            then writeIORef emittedOutput True
-                            else pure ()
-                        onEvent event
-            emitted <- readIORef emittedOutput
-            pure $ case result of
-                Left err | emitted -> Left (markObservedFailure err)
-                _ -> result
+        runObservedAttempt observed onEvent
+            (\emit ->
+                sendWsRequestWithEvents freshConn request previousResponseId emit)
+            >>= pure . markObservedResult markObservedFailure
 
 -- | Injectable connection recovery used by the reconnecting backend.
 openAiBackendWithConnectionRecovery
@@ -310,10 +315,10 @@ openAiResponseSenderWithConnectionRecoveryUsing observed markObservedFailure
             else sendFreshTracked Nothing request previousResponseId onEvent
 
     tryCurrent request previousResponseId onEvent = do
-        emittedLoopEvent <- newIORef False
-        result <- sendCurrent request previousResponseId
-            (trackOutput emittedLoopEvent onEvent)
-            `onException` writeIORef connectionHealthy False
+        AttemptOutcome{attemptObservation, attemptResult = result} <-
+            runObservedAttempt observed onEvent \emit ->
+                sendCurrent request previousResponseId emit
+                    `onException` writeIORef connectionHealthy False
         case result of
             Left err -> do
                 let deadConnectionOrAccount =
@@ -321,8 +326,7 @@ openAiResponseSenderWithConnectionRecoveryUsing observed markObservedFailure
                 if deadConnectionOrAccount
                     then writeIORef connectionHealthy False
                     else pure ()
-                emitted <- readIORef emittedLoopEvent
-                if emitted
+                if attemptObservation == OutputObserved
                     then pure (Left (markObservedFailure err))
                     else if deadConnectionOrAccount
                         then sendFreshTracked
@@ -334,20 +338,9 @@ openAiResponseSenderWithConnectionRecoveryUsing observed markObservedFailure
             _ -> pure result
 
     sendFreshTracked previousFailure request previousResponseId onEvent = do
-        emittedOutput <- newIORef False
-        result <-
-            sendFresh previousFailure request previousResponseId
-                (trackOutput emittedOutput onEvent)
-        emitted <- readIORef emittedOutput
-        pure $ case result of
-            Left err | emitted -> Left (markObservedFailure err)
-            _ -> result
-
-    trackOutput emittedLoopEvent onEvent event = do
-        if observed event
-            then writeIORef emittedLoopEvent True
-            else pure ()
-        onEvent event
+        outcome <- runObservedAttempt observed onEvent \emit ->
+            sendFresh previousFailure request previousResponseId emit
+        pure (markObservedResult markObservedFailure outcome)
 
     isDeadConnectionOrAccount = \case
         ConnectionError {} -> True
@@ -368,28 +361,34 @@ openAiResponseSenderWithRetryPolicy
     -> (ResponseStreamEvent -> IO ())
     -> IO (Either ApiError Response)
 openAiResponseSenderWithRetryPolicy retryPolicy observed send
-        request previousResponseId onEvent = do
-    emittedOutput <- newIORef False
-    go emittedOutput defaultRetryStatus
+        request previousResponseId onEvent =
+    go defaultRetryStatus
   where
-    go emittedOutput retryStatus = do
-        result <- send request previousResponseId \event -> do
-            if observed event
-                then writeIORef emittedOutput True
-                else pure ()
-            onEvent event
-        emitted <- readIORef emittedOutput
+    go retryStatus = do
+        AttemptOutcome{attemptObservation, attemptResult = result} <-
+            runObservedAttempt observed onEvent
+                (send request previousResponseId)
         case result of
             Left apiError
-                | not emitted
+                | attemptObservation == NoOutputObserved
                 , isInlineRetryableProviderError apiError ->
                     applyPolicy retryPolicy retryStatus >>= \case
                         Nothing -> pure result
                         Just nextStatus -> do
                             threadDelay
                                 (fromMaybe 0 nextStatus.rsPreviousDelay)
-                            go emittedOutput nextStatus
+                            go nextStatus
             _ -> pure result
+
+markObservedResult
+    :: (ApiError -> ApiError)
+    -> AttemptOutcome (Either ApiError value)
+    -> Either ApiError value
+markObservedResult markFailure AttemptOutcome{..} =
+    case attemptResult of
+        Left err | attemptObservation == OutputObserved ->
+            Left (markFailure err)
+        result -> result
 
 auxiliaryOutputObserved :: ResponseStreamEvent -> Bool
 auxiliaryOutputObserved = streamOutputObserved
@@ -442,18 +441,14 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
             else tryPrimary state previousResponseId inputs onEvent
   where
     tryPrimary state previousResponseId inputs onEvent = do
-        emittedModelOutput <- newIORef False
-        result <- primary.submitTurn state previousResponseId inputs \event -> do
-            if isModelOutput event
-                then writeIORef emittedModelOutput True
-                else pure ()
-            onEvent event
+        AttemptOutcome{attemptObservation, attemptResult = result} <-
+            runObservedAttempt isModelOutput onEvent
+                (primary.submitTurn state previousResponseId inputs)
         case result of
             Left err
                 | isWebSocketTransportFailure err -> do
                     writeIORef fallbackActive True
-                    emitted <- readIORef emittedModelOutput
-                    if emitted
+                    if attemptObservation == OutputObserved
                         then pure result
                         else fallback.submitTurn
                             state previousResponseId inputs onEvent
@@ -480,6 +475,17 @@ openAiBackendWith
 openAiBackendWith =
     openAiBackendWithRetryPolicy transientStreamingResultPolicy
 
+openAiBackendWithRetryPolicyParams
+    :: RetryPolicyM IO
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Backend
+openAiBackendWithRetryPolicyParams retryPolicy send params =
+    openAiBackendWithRetryPolicy retryPolicy send (pure params)
+
 -- | Streaming retries are replay-safe only until the loop has observed output.
 -- Server error events themselves are not loop-visible, so transient Codex
 -- failures can wait and retry without printing an error or duplicating output.
@@ -494,52 +500,44 @@ openAiBackendWithRetryPolicy
 openAiBackendWithRetryPolicy retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
         baseParams <- sanitizeCodexRequest <$> getParams
-        let newItems = turnInputsToItems inputs
-            deltaRequest = withRequestInput baseParams newItems
+        let turn = prepareResponsesTurn baseParams history inputs
+            deltaRequest = turn.responsesDeltaRequest
             -- Live and resumed transcripts already apply compaction snapshots
             -- as full replacements. Remote v2 intentionally keeps retained
             -- messages before its opaque checkpoint, so replay the complete
             -- replacement instead of trimming that retained prefix.
-            fullRequest = withRequestInput baseParams (history <> newItems)
+            fullRequest = turn.responsesFullRequest
             emit event = mapM_ onLoopEvent (streamEventToLoopEvent event)
             (initialRequest, initialPrevious) =
                 case previousResponseId of
                     Nothing | not (null history) -> (fullRequest, Nothing)
                     _ -> (deltaRequest, previousResponseId)
-        result <- sendRetrying onLoopEvent initialRequest initialPrevious emit
-        recovered <- case result of
-            Left err
+        initial <- sendRetrying onLoopEvent initialRequest initialPrevious emit
+        recovered <- case initial of
+            AttemptOutcome NoOutputObserved (Left err)
                 | isJust initialPrevious
                 , isResponseChainCompatibilityError err
                 , not (null history) ->
                     sendRetrying onLoopEvent fullRequest Nothing emit
-                | otherwise -> pure (Left err)
-            Right response -> pure (Right response)
-        case recovered of
+            _ -> pure initial
+        case recovered.attemptResult of
             Left err -> pure (Left err)
             Right response ->
-                pure $ Right BackendResult
-                    { backendOutput = responseToTurnOutput response
-                    , backendState = history <> newItems <> response.output
-                    }
+                pure (Right (completeResponsesTurn turn response))
   where
-    sendRetrying onLoopEvent request previousResponseId onStreamEvent = do
-        emittedLoopEvent <- newIORef False
-        go emittedLoopEvent defaultRetryStatus
+    sendRetrying onLoopEvent request previousResponseId onStreamEvent =
+        go defaultRetryStatus
       where
-        go emittedLoopEvent retryStatus = do
-            result <- send request previousResponseId \event -> do
-                if streamOutputObserved event
-                    then writeIORef emittedLoopEvent True
-                    else pure ()
-                onStreamEvent event
-            emitted <- readIORef emittedLoopEvent
+        go retryStatus = do
+            outcome@AttemptOutcome{attemptObservation, attemptResult = result} <-
+                runObservedAttempt streamOutputObserved onStreamEvent
+                    (send request previousResponseId)
             case result of
                 Left apiError
-                    | not emitted
+                    | attemptObservation == NoOutputObserved
                     , isInlineRetryableProviderResponseError apiError ->
                         applyPolicy retryPolicy retryStatus >>= \case
-                            Nothing -> pure result
+                            Nothing -> pure outcome
                             Just nextStatus -> do
                                 let delayMicros =
                                         fromMaybe 0 nextStatus.rsPreviousDelay
@@ -550,8 +548,8 @@ openAiBackendWithRetryPolicy retryPolicy send getParams =
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                go emittedLoopEvent nextStatus
-                _ -> pure result
+                                go nextStatus
+                _ -> pure outcome
 
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =

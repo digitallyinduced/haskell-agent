@@ -7,14 +7,18 @@
 -- resumed session can seed it and the CLI can persist it.
 module Agent.OpenRouter.LoopBackend
     ( openRouterBackend
+    , openRouterBackendWithParams
     , openRouterBackendWith
+    , openRouterBackendWithFixedParams
     ) where
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendWithParams
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendWithParams
     )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
@@ -35,6 +39,15 @@ openRouterBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
 
+openRouterBackendWithParams
+    :: ClientOptions
+    -> TokenProvider
+    -> ResponseCreateParams
+    -> Backend
+openRouterBackendWithParams options provider =
+    tokenProviderStatelessResponsesBackendWithParams provider
+        (createResponseWithEvents options)
+
 -- | Same mapping as 'openRouterBackend', with an injectable transport for tests
 -- and downstream integrations.
 openRouterBackendWith
@@ -44,3 +57,12 @@ openRouterBackendWith
     -> IO ResponseCreateParams
     -> Backend
 openRouterBackendWith = statelessResponsesBackend
+
+openRouterBackendWithFixedParams
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> Backend
+openRouterBackendWithFixedParams =
+    statelessResponsesBackendWithParams
