@@ -95,6 +95,7 @@ library
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
+                    , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
