@@ -13,7 +13,13 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
+import Agent.Tools
+    ( CodingTools(..)
+    , appToolHandlers
+    , codingToolsFor
+    , defaultToolEnv
+    , setToolSessionTmp
+    )
 import Agent.Tools.Types (jsonToolParameters, toolAllowsWithoutPrompt)
 import Agent.Tools.ApplyPatch (applyPatch, parsePatch)
 import Agent.Tools.Codex (codexTools)
@@ -311,6 +317,25 @@ spec = describe "Agent.Tools.Codex" do
             timed <- runFn env "shell_command"
                 "{\"command\":\"sleep 5\",\"timeout_ms\":\"200\"}"
             timed `shouldSatisfy` Text.isInfixOf "timed out"
+
+    it "allows shell_command in the private session temp root" do
+        tmp <- getTemporaryDirectory
+        bracket
+            (mkdtemp (tmp </> "agent-codex-scratch-XXXXXX"))
+            removeDirectoryRecursive
+            \scratch ->
+                withTempEnv \base -> do
+                    let scratchPath = fromFilePath scratch
+                        env = base
+                        args =
+                            "{\"command\":\"printf '%s:%s' \\\"$TMPDIR\\\" \\\"$HASKELL_AGENT_TMPDIR\\\"\",\"workdir\":\""
+                                <> Text.pack scratch
+                                <> "\"}"
+                    setToolSessionTmp env (Just scratchPath)
+                    output <- runFn env "shell_command" args
+                    output `shouldSatisfy`
+                        Text.isInfixOf
+                            (Text.pack scratch <> ":" <> Text.pack scratch)
 
     it "rejects timeout_ms together with yield_time_ms" do
         withTempEnv \env -> do

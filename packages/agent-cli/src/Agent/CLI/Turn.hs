@@ -427,7 +427,7 @@ runOneTurn env@SessionEnv
 
 isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
-    PersistencePending _ -> True
+    PersistencePending _ _ _ -> True
     PersistenceActive _ -> False
 
 -- | Pure state transition for a cancelled or failed logical turn. It preserves
@@ -474,7 +474,7 @@ applyPendingSessionTitles env =
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef ->
                 readIORef slotRef >>= \case
-                    PersistencePending _ -> pure ()
+                    PersistencePending _ _ _ -> pure ()
                     PersistenceActive handle
                         | handle.sessionMeta.metaId /= resultSessionId -> pure ()
                         | handle.sessionMeta.metaTitleIsManual -> pure ()

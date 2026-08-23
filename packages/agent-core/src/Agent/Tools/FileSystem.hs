@@ -15,6 +15,7 @@ import Control.Exception.Safe (SomeException, try, tryIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
+import Data.IORef (readIORef)
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath
@@ -41,10 +42,15 @@ import System.OsPath
 import System.IO.Error (isDoesNotExistError)
 
 -- | Resolve a model-supplied path against the tool cwd and reject anything
--- that canonicalizes outside that tree, including via symlinks.
+-- that canonicalizes outside the cwd or an explicitly allowed root, including
+-- via symlinks. Relative paths are always cwd-relative.
 resolveUnderCwd :: ToolEnv -> OsPath -> IO (Either Text OsPath)
 resolveUnderCwd env requested = do
     absCwd <- canonicalizePath env.toolCwd
+    configuredRoots <- readIORef env.toolAllowedRoots
+    sessionTmp <- readIORef env.toolSessionTmp
+    allowedRoots <- mapM canonicalizePath
+        (configuredRoots <> maybe [] pure sessionTmp)
     let combined
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
@@ -55,9 +61,10 @@ resolveUnderCwd env requested = do
     pure $ case resolvedResult of
         Left err -> Left err
         Right resolved
-            | isInside absCwd resolved -> Right resolved
+            | any (`isInside` resolved) (absCwd : allowedRoots) ->
+                Right resolved
             | otherwise -> Left $
-                "Path escapes the working directory: " <> toText requested
+                "Path escapes the allowed filesystem roots: " <> toText requested
 
 resolveMissing :: OsPath -> IO (Either Text OsPath)
 resolveMissing path = do

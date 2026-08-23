@@ -122,6 +122,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
+    , setToolSessionTmp
     )
 import Control.Exception.Safe (finally)
 import Data.IORef
@@ -147,6 +148,7 @@ data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
+    , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentParams :: !(IORef ResponseCreateParams)
     , subagentRegistry :: !SubagentRegistry
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
@@ -447,6 +449,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                 (dialectId codexDialect)
                 env
                 sendToRoot
+        sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 OpenAIProvider model prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
@@ -465,7 +468,11 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     let baseInstructions =
                             fromMaybe
                                 (systemPrompt
-                                    codexDialect env.subCwd today True)
+                                    codexDialect
+                                    env.subCwd
+                                    sessionTmp
+                                    today
+                                    True)
                                 prepared.preparedParentParams.instructions
                         instructions =
                             baseInstructions
@@ -545,6 +552,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                     childModel)
                 env
                 sendToRoot
+        sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 provider effectiveModel prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
@@ -574,12 +582,17 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
                                     systemPrompt
-                                        childDialect env.subCwd today True
+                                        childDialect
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
                                 GrokTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
                                         (map (.appToolName) tools)
                                         env.subCwd
+                                        sessionTmp
                                         today
                                         True
                                 GenericTaskProtocol ->
@@ -587,6 +600,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         childDialect
                                         (map (.appToolName) tools)
                                         env.subCwd
+                                        sessionTmp
                                         today
                                         True
                         instructions =
@@ -629,6 +643,8 @@ prepareChild
 prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- defaultToolEnv env.subCwd
+    sessionTmp <- readIORef runtime.subagentSessionTmp
+    setToolSessionTmp childEnv sessionTmp
     childPath <-
         fromMaybe taskPathRoot
             <$> getTaskPath runtime.subagentRegistry env.subId
