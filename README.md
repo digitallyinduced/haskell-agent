@@ -53,16 +53,16 @@ features, but not the core differentiation.
 ## Try it out
 
 ```console
-nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+nix run github:digitallyinduced/haskell-agent
 ```
 
 ## Install
 
-Install [Nix](https://nixos.org/download/) with flakes enabled, make sure your
-GitHub SSH access is configured, then install `haskell-agent`:
+Install [Nix](https://nixos.org/download/) with flakes enabled, then install
+`haskell-agent`:
 
 ```console
-nix profile add "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+nix profile add github:digitallyinduced/haskell-agent
 ```
 
 ## Run
