@@ -21,6 +21,7 @@ import Agent.CLI.Session
     , SessionTurn(..)
     , createSession
     , loadSession
+    , sessionTempDirForId
     , sessionTitleFromPrompt
     )
 import Agent.CLI.SessionLock
@@ -497,6 +498,11 @@ sessionHandle root meta =
     let dir = root </> fromText meta.metaId
     in SessionHandle
         { sessionDir = dir
+        , sessionTempDir =
+            either
+                (error . Text.unpack)
+                id
+                (sessionTempDirForId root meta.metaId)
         , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
         , sessionTranscriptPath =
             dir </> unsafeEncodeUtf "transcript.jsonl"

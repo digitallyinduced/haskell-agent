@@ -73,6 +73,7 @@ import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8With)
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose, hFlush)
 import System.Posix.Signals
@@ -212,12 +213,14 @@ runShellCommandStreaming
     -> IO CommandResult
 runShellCommandStreaming env workdir command timeoutMs onSnapshot =
     mask \restore -> do
+    processEnv <- configuredProcessEnv env
     let spec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
+            , env = processEnv
             }
     try @_ @SomeException (createProcess spec) >>= \case
         Left err -> pure CommandResult
@@ -354,17 +357,36 @@ startShellCommandWithStdin
     -> String
     -> IO (Either Text RunningCommand)
 startShellCommandWithStdin keepStdin env workdir command = do
+    processEnv <- configuredProcessEnv env
     let spec = (shell command)
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
             , create_group = True
+            , env = processEnv
             }
     try @_ @SomeException
         (acquireRunningCommand spec env.toolStdoutCap keepStdin) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
+
+configuredProcessEnv :: ToolEnv -> IO (Maybe [(String, String)])
+configuredProcessEnv env = readIORef env.toolSessionTmp >>= \case
+    Nothing -> pure Nothing
+    Just temp -> do
+        inherited <- getEnvironment
+        let tempPath = unsafeToFilePath temp
+            withoutTemp =
+                filter
+                    (\(name, _) ->
+                        name /= "TMPDIR" && name /= "HASKELL_AGENT_TMPDIR")
+                    inherited
+        pure $ Just
+            ( ("TMPDIR", tempPath)
+            : ("HASKELL_AGENT_TMPDIR", tempPath)
+            : withoutTemp
+            )
 
 acquireRunningCommand :: CreateProcess -> Int -> Bool -> IO RunningCommand
 acquireRunningCommand spec outputCap keepStdin = mask \restore -> do

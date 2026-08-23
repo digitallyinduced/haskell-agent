@@ -24,7 +24,7 @@ import Agent.Tools.IO
     , writeShellCommandInput
     , writeTextFile
     )
-import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
+import Agent.Tools.Types (ToolEnv(..), defaultToolEnv, setToolSessionTmp)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket, tryIO)
@@ -187,6 +187,72 @@ spec = describe "Agent.Tools.IO" do
             canonicalParent <- canonicalizePath targetParent
             result `shouldBe` Right
                 (fromFilePath (canonicalParent </> "file.txt"))
+
+    it "allows absolute paths under an additional filesystem root" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                scratchFile = scratch </> "artifact.txt"
+            createDirectory workspace
+            createDirectory scratch
+            writeFile scratchFile "artifact"
+            base <- defaultToolEnv (fromFilePath workspace)
+            writeIORef base.toolAllowedRoots [fromFilePath scratch]
+            setToolSessionTmp base (Just (fromFilePath scratch))
+            let env = base
+            resolveUnderCwd env (fromFilePath scratchFile)
+                >>= (`shouldSatisfy` isRight)
+            resolveUnderCwd env
+                (fromFilePath (dir </> "unrelated" </> "file.txt"))
+                >>= (`shouldSatisfy` isLeft)
+
+    it "rejects symlink escapes from an additional filesystem root" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+                outside = dir </> "outside"
+            createDirectory workspace
+            createDirectory scratch
+            createDirectory outside
+            createDirectoryLink outside (scratch </> "link")
+            base <- defaultToolEnv (fromFilePath workspace)
+            writeIORef base.toolAllowedRoots [fromFilePath scratch]
+            let env = base
+            result <- resolveUnderCwd env
+                (fromFilePath (scratch </> "link" </> "missing.txt"))
+            result `shouldSatisfy` isLeft
+
+    it "sets the private temp environment for shell commands" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                scratch = dir </> "scratch"
+            createDirectory workspace
+            createDirectory scratch
+            base <- defaultToolEnv (fromFilePath workspace)
+            let scratchPath = fromFilePath scratch
+                env = base
+            setToolSessionTmp env (Just scratchPath)
+            result <- runShellCommand env scratchPath
+                "printf '%s\\n%s' \"$TMPDIR\" \"$HASKELL_AGENT_TMPDIR\""
+                5000
+            result.commandStdout `shouldBe`
+                Text.pack scratch <> "\n" <> Text.pack scratch
+
+    it "switches the effective session temp root without retaining the old one" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                first = dir </> "first"
+                second = dir </> "second"
+            mapM_ createDirectory [workspace, first, second]
+            env <- defaultToolEnv (fromFilePath workspace)
+            setToolSessionTmp env (Just (fromFilePath first))
+            resolveUnderCwd env (fromFilePath (first </> "file.txt"))
+                >>= (`shouldSatisfy` isRight)
+            setToolSessionTmp env (Just (fromFilePath second))
+            resolveUnderCwd env (fromFilePath (first </> "file.txt"))
+                >>= (`shouldSatisfy` isLeft)
+            resolveUnderCwd env (fromFilePath (second </> "file.txt"))
+                >>= (`shouldSatisfy` isRight)
 
     it "cancels a long-running shell command via toolCancel" do
         withTempDir \dir -> do

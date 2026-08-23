@@ -6,7 +6,7 @@ import Agent.CLI.Session
 import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopDispatch)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -355,4 +355,10 @@ withTempDir prefix action = do
     bracket
         (mkdtemp (tmp FilePath.</> prefix))
         Directory.removeDirectoryRecursive
-        (action . fromFilePath)
+        \basePath -> do
+            let root =
+                    fromFilePath basePath
+                        </> fromFilePath ".haskell-agent"
+                        </> fromFilePath "sessions"
+            Directory.createDirectoryIfMissing True (toFilePath root)
+            action root

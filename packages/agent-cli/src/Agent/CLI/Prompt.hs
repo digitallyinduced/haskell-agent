@@ -1,6 +1,7 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
     ( defaultModelFor
+    , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
     ) where
@@ -35,9 +36,15 @@ defaultModelFor = \case
     OpenRouterProvider -> "openai/gpt-5.1"
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
-systemPrompt :: Dialect -> OsPath -> Day -> Bool -> Text
-systemPrompt dialect cwd today isNonInteractive =
-    base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
+systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
+systemPrompt dialect cwd sessionTmp today isNonInteractive =
+    Text.intercalate "\n\n" $
+        filter (not . Text.null)
+            [ base
+            , sessionTempGuidance sessionTmp
+            , ghciGuidanceForDialect dialect
+            , timeContextGuidance
+            ]
   where
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
@@ -48,12 +55,21 @@ systemPrompt dialect cwd today isNonInteractive =
 
 -- | Render a child prompt against the final filtered application-tool set.
 -- @web_search@ is server-side and remains available independently.
-systemPromptForTools :: Dialect -> [Text] -> OsPath -> Day -> Bool -> Text
-systemPromptForTools dialect toolNames cwd today isNonInteractive =
+systemPromptForTools
+    :: Dialect
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForTools
+        dialect toolNames cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
-            , ghciGuidanceForTools available
+            , sessionTempGuidance sessionTmp
+            , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
   where
@@ -75,6 +91,19 @@ systemPromptForTools dialect toolNames cwd today isNonInteractive =
                 today
                 isNonInteractive
 
+-- | Tell the model about its second filesystem sandbox root without changing
+-- the project/worktree used for relative paths.
+sessionTempGuidance :: Maybe OsPath -> Text
+sessionTempGuidance = \case
+    Nothing -> ""
+    Just path ->
+        Text.unlines
+            [ "Session temporary directory: " <> toText path
+            , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
+            , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
+            , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands."
+            ]
+
 -- | Prefer GHCI as the general-purpose scripting environment.
 ghciGuidance :: Text
 ghciGuidance =
@@ -88,8 +117,16 @@ ghciGuidance =
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
-ghciGuidanceForTools :: [Text] -> Text
-ghciGuidanceForTools available
+ghciGuidanceForDialect :: Dialect -> Text
+ghciGuidanceForDialect dialect =
+    case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            Text.replace "run_terminal_cmd" "run_terminal_command"
+                ghciGuidance
+        _ -> ghciGuidance
+
+ghciGuidanceForTools :: Dialect -> [Text] -> Text
+ghciGuidanceForTools dialect available
     | "run_ghci" `notElem` available = ""
     | otherwise =
         Text.unlines $
@@ -103,8 +140,13 @@ ghciGuidanceForTools available
                 <> [ "Drive GHCi with complete expressions; do not expect interactive human input."
                    ]
   where
-    shellNames =
-        filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+    shellNames = case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            [ "run_terminal_command"
+            | "run_terminal_cmd" `elem` available
+                || "run_terminal_command" `elem` available
+            ]
+        _ -> filter (`elem` available) ["run_terminal_cmd", "shell_command"]
     shellGuidance = case shellNames of
         [] -> []
         names ->

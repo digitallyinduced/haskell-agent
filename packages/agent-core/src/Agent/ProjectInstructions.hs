@@ -1,8 +1,9 @@
--- | Discover AGENTS.md project instructions.
+-- | Discover project instructions.
 --
--- Discovery follows Codex's narrow rules (one file per directory from the
--- project root down to cwd, with an optional global home file). Dialect
--- packages own the model-facing formatting of the discovered documents.
+-- Codex keeps its narrow one-file-per-directory discovery contract. Grok-style
+-- homes use the broader Grok Build compatibility surface: common Claude/agent
+-- filenames plus vendor rules directories. Dialect packages own model-facing
+-- formatting of the discovered documents.
 module Agent.ProjectInstructions
     ( InstructionFile(..)
     , LoadedAgentsMd(..)
@@ -14,17 +15,33 @@ module Agent.ProjectInstructions
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.OsPath (directoryChain, unsafeToFilePath)
+import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Exception.Safe (tryAny)
+import Control.Monad (filterM, foldM)
 import qualified Data.ByteString as BS
+import Data.List (sort)
 import Data.Maybe (mapMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.Encoding.Error as TextEncodingError
 import qualified Data.Text.IO as Text
-import System.Directory.OsPath (doesFileExist, doesPathExist)
-import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
+import System.Directory.OsPath
+    ( canonicalizePath
+    , doesDirectoryExist
+    , doesFileExist
+    , doesPathExist
+    , listDirectory
+    )
+import System.OsPath
+    ( OsPath
+    , takeDirectory
+    , takeExtension
+    , takeFileName
+    , unsafeEncodeUtf
+    , (</>)
+    )
 
 -- | One loaded instruction file and its absolute path.
 data InstructionFile = InstructionFile
@@ -62,8 +79,12 @@ defaultDiscoverOptions = DiscoverOptions
     , discoverRootMarkers = [unsafeEncodeUtf ".git"]
     }
 
--- | Load global + project AGENTS.md files for @cwd@. Empty / unreadable files
--- are skipped. Project files are ordered root -> cwd.
+-- | Load global + project instruction files for @cwd@. Empty / unreadable
+-- files are skipped. Project files are ordered root -> cwd.
+--
+-- A @.codex@ global directory selects Codex's narrow discovery contract.
+-- Other homes (including @.grok@ and @.haskell-agent@), and calls without a
+-- global directory, use Grok-compatible discovery.
 discoverProjectInstructions :: DiscoverOptions -> OsPath -> IO LoadedAgentsMd
 discoverProjectInstructions options cwd
     | options.discoverMaxBytes <= 0 =
@@ -71,12 +92,144 @@ discoverProjectInstructions options cwd
     | otherwise = do
         root <- findProjectRoot options.discoverRootMarkers cwd
         let dirs = directoryChain root cwd
-        global <- maybe (pure Nothing) readPreferredAgentsMd options.discoverGlobalDir
-        project <- mapMaybe id <$> traverse readPreferredAgentsMd dirs
-        pure (applyByteBudget options.discoverMaxBytes LoadedAgentsMd
-            { loadedGlobal = global
+        loaded <-
+            if usesCodexDiscovery options
+                then do
+                    global <-
+                        maybe (pure Nothing) readPreferredAgentsMd
+                            options.discoverGlobalDir
+                    project <- mapMaybe id <$> traverse readPreferredAgentsMd dirs
+                    pure LoadedAgentsMd
+                        { loadedGlobal = global
+                        , loadedProject = project
+                        }
+                else discoverGrokInstructions options dirs
+        pure (applyByteBudget options.discoverMaxBytes loaded)
+
+usesCodexDiscovery :: DiscoverOptions -> Bool
+usesCodexDiscovery options =
+    maybe False
+        ((== unsafeEncodeUtf ".codex") . takeFileName)
+        options.discoverGlobalDir
+
+discoverGrokInstructions
+    :: DiscoverOptions
+    -> [OsPath]
+    -> IO LoadedAgentsMd
+discoverGrokInstructions options dirs = do
+    home <- maybe (pure []) readGrokHomeInstructions options.discoverGlobalDir
+    project <- concat <$> traverse readGrokDirectoryInstructions dirs
+    pure $ case home of
+        [] -> LoadedAgentsMd
+            { loadedGlobal = Nothing
             , loadedProject = project
-            })
+            }
+        first : rest -> LoadedAgentsMd
+            { loadedGlobal = Just first
+            , loadedProject = rest <> project
+            }
+
+-- | Grok Build reads its own home first, followed by compatible Claude and
+-- Cursor homes. For custom harness homes, only that explicit directory is
+-- inspected.
+readGrokHomeInstructions :: OsPath -> IO [InstructionFile]
+readGrokHomeInstructions globalDir = do
+    primary <- readGrokHomeRoot globalDir
+    compatible <-
+        if takeFileName globalDir == unsafeEncodeUtf ".grok"
+            then concat <$> traverse readGrokHomeRoot
+                [ takeDirectory globalDir </> unsafeEncodeUtf ".claude"
+                , takeDirectory globalDir </> unsafeEncodeUtf ".cursor"
+                ]
+            else pure []
+    pure (primary <> compatible)
+
+readGrokHomeRoot :: OsPath -> IO [InstructionFile]
+readGrokHomeRoot dir = do
+    named <- readNamedInstructionFiles dir
+    rules <- readRulesDirectory (dir </> unsafeEncodeUtf "rules")
+    pure (named <> rules)
+
+readGrokDirectoryInstructions :: OsPath -> IO [InstructionFile]
+readGrokDirectoryInstructions dir = do
+    named <- readNamedInstructionFiles dir
+    rules <- concat <$> traverse
+        (readRulesDirectory . (dir </>))
+        grokProjectRulesDirectories
+    pure (named <> rules)
+
+grokProjectRulesDirectories :: [OsPath]
+grokProjectRulesDirectories =
+    [ unsafeEncodeUtf ".grok/rules"
+    , unsafeEncodeUtf ".claude/rules"
+    , unsafeEncodeUtf ".cursor/rules"
+    ]
+
+readNamedInstructionFiles :: OsPath -> IO [InstructionFile]
+readNamedInstructionFiles dir = do
+    preferredAgents <- readPreferredAgentsMd dir
+    let names = case preferredAgents of
+            Just file
+                | takeFileName file.instructionPath
+                    == unsafeEncodeUtf "AGENTS.override.md" ->
+                    filter (not . isAgentsMdSpelling) grokInstructionNames
+            _ -> grokInstructionNames
+    other <- mapMaybe id <$> traverse
+        (readAgentsFile . (dir </>))
+        names
+    dedupeInstructionFiles (maybe [] pure preferredAgents <> other)
+
+isAgentsMdSpelling :: OsPath -> Bool
+isAgentsMdSpelling name =
+    Text.toLower (toText (takeFileName name)) == "agents.md"
+
+-- | Current Grok Build compatibility filenames other than @AGENTS.md@, whose
+-- place is occupied by @AGENTS.override.md@ when present.
+grokInstructionNames :: [OsPath]
+grokInstructionNames =
+    [ unsafeEncodeUtf "Agents.md"
+    , unsafeEncodeUtf "Claude.md"
+    , unsafeEncodeUtf "CLAUDE.md"
+    , unsafeEncodeUtf "CLAUDE.local.md"
+    , unsafeEncodeUtf "AGENT.md"
+    , unsafeEncodeUtf ".claude/CLAUDE.md"
+    , unsafeEncodeUtf ".claude/CLAUDE.local.md"
+    ]
+
+readRulesDirectory :: OsPath -> IO [InstructionFile]
+readRulesDirectory dir = do
+    exists <- doesDirectoryExist dir
+    if not exists
+        then pure []
+        else do
+            entries <- sort <$> listDirectory dir
+            markdown <- filterM
+                (doesFileExist . (dir </>))
+                [ name
+                | name <- entries
+                , Text.toLower (toText (takeExtension name)) == ".md"
+                ]
+            mapMaybe id <$> traverse (readAgentsFile . (dir </>)) markdown
+
+-- | Case-insensitive filesystems can resolve several compatibility spellings
+-- to the same file. Symlinked rule files can do the same. Keep the first
+-- occurrence so order and precedence stay deterministic.
+dedupeInstructionFiles :: [InstructionFile] -> IO [InstructionFile]
+dedupeInstructionFiles files =
+    reverse . snd <$> foldM step (Set.empty, []) files
+  where
+    step
+        :: (Set.Set OsPath, [InstructionFile])
+        -> InstructionFile
+        -> IO (Set.Set OsPath, [InstructionFile])
+    step (seen, kept) file = do
+        canonical <-
+            tryAny (canonicalizePath file.instructionPath) >>= \case
+                Left _ -> pure file.instructionPath
+                Right path -> pure path
+        if Set.member canonical seen
+            then pure (seen, kept)
+            else pure (Set.insert canonical seen, file : kept)
 
 findProjectRoot :: [OsPath] -> OsPath -> IO OsPath
 findProjectRoot markers start = go start

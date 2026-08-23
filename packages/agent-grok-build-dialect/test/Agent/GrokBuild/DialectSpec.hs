@@ -32,7 +32,7 @@ spec = describe "Grok Build dialect" do
                     (fromGregorian 2026 8 23)
                     False
         prompt `shouldSatisfy` Text.isInfixOf "search_replace"
-        prompt `shouldSatisfy` Text.isInfixOf "run_terminal_cmd"
+        prompt `shouldSatisfy` Text.isInfixOf "run_terminal_command"
         prompt `shouldSatisfy` Text.isInfixOf "<tool_calling>"
 
     it "constructs only the Grok Build tool surface" do
@@ -45,9 +45,12 @@ spec = describe "Grok Build dialect" do
                 [ "run_terminal_cmd"
                 , "search_replace"
                 , "get_task_output"
+                , "wait_tasks"
+                , "todo_write"
+                , "monitor"
                 , "exit_plan_mode"
                 ]
-                `shouldBe` replicate 4 True
+                `shouldBe` replicate 7 True
             names `shouldNotContain` ["shell_command", "apply_patch"]
             coding.grokClose
 

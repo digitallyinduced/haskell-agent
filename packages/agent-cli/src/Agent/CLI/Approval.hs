@@ -25,7 +25,10 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal (resolveColor)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , canonicalToolName
+    )
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
@@ -104,8 +107,9 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
+    let toolName = canonicalToolName call.name
     -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked call.name call.arguments of
+    case shellCommandBlocked toolName call.arguments of
         Just msg -> do
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
@@ -128,7 +132,7 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                         then pure (Right True)
                         else do
                             allowed <- readIORef allowedToolsRef
-                            if Set.member call.name allowed
+                            if Set.member toolName allowed
                                 then pure (Right True)
                                 else case policy of
                                     ApproveAll -> pure (Right True)
@@ -142,7 +146,7 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                                     pure (Right True)
                                                 Just PermissionAllowTool -> do
                                                     modifyIORef' allowedToolsRef
-                                                        (Set.insert call.name)
+                                                        (Set.insert toolName)
                                                     report $
                                                         ApprovalSuccess
                                                             (glyphOk
@@ -156,31 +160,35 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
 planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
 planModeBlocksCall active planPath readOnly call
     | not active = False
-    | call.name == "apply_patch" = True
-    | call.name == "write_plan" = False
-    | call.name == "exit_plan_mode" = False
-    | call.name == "search_replace" =
+    | name == "apply_patch" = True
+    | name == "write_plan" = False
+    | name == "exit_plan_mode" = False
+    | name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in Text.null target
             || not (isPlanFileEditTarget planPath (fromText target))
-    | call.name `elem` ["shell_command", "run_terminal_cmd"] =
+    | name `elem` ["shell_command", "run_terminal_cmd"] =
         True
-    | call.name == "write_stdin" = True
-    | call.name `elem`
+    | name == "write_stdin" = True
+    | name `elem`
         [ "spawn_agent", "followup_task", "create_agent_session"
         , "send_agent_session_message"
         ] = True
     | otherwise = not readOnly
+  where
+    name = canonicalToolName call.name
 
 isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
 isPlanFileWrite active planPath call
     | not active = False
-    | call.name == "write_plan" = True
-    | call.name == "search_replace" =
+    | name == "write_plan" = True
+    | name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in not (Text.null target)
             && isPlanFileEditTarget planPath (fromText target)
     | otherwise = False
+  where
+    name = canonicalToolName call.name
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do

@@ -64,7 +64,7 @@ grepTool env = jsonTool "grep" grepDescription
     [ PropertySchema "pattern" PropertyString True $ Just
         "The regular expression pattern to search for in file contents (rg --regexp)"
     , PropertySchema "path" PropertyString False $ Just
-        "File or directory to search in (rg pattern -- PATH). Defaults to workspace path."
+        "File or directory to search in. Defaults to the workspace; absolute paths may point into the workspace or session temp directory."
     , PropertySchema "glob" PropertyString False $ Just
         "Glob pattern (rg --glob GLOB -- PATH) to filter files (e.g. \"*.js\", \"*.{ts,tsx}\")."
     , PropertySchema "-B" PropertyInteger False $ Just
@@ -81,8 +81,6 @@ grepTool env = jsonTool "grep" grepDescription
         "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries."
     , PropertySchema "multiline" PropertyBoolean False $ Just
         "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall)."
-    , PropertySchema "output_mode" PropertyString False $ Just
-        "content (default), files_with_matches, or count."
     ]
     True
     ParallelSafe

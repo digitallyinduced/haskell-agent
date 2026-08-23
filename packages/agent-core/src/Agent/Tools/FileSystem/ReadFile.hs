@@ -36,15 +36,11 @@ instance FromJSON ReadFileArgs where
 readFileTool :: ToolEnv -> AppTool
 readFileTool env = jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
-        "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is."
+        "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
     , PropertySchema "offset" PropertyInteger False $ Just
         "The line number to start reading from. Only provide if the file is too large to read at once."
     , PropertySchema "limit" PropertyInteger False $ Just
         "The number of lines to read. Only provide if the file is too large to read at once."
-    , PropertySchema "pages" PropertyString False $ Just
-        "Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files."
-    , PropertySchema "format" PropertyString False $ Just
-        "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files."
     ]
     True
     ParallelSafe
@@ -54,7 +50,7 @@ readFileDescription :: Text
 readFileDescription =
     "Read a file.\n\
     \\n\
-    \- The target_file parameter can be a relative path in the workspace or an absolute path\n\
+    \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
 
@@ -70,7 +66,7 @@ runReadFile env args = resolveUnderCwd env (fromText args.targetFile) >>= \case
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
             pure $ Left
-                "PDF rendering is not available. Use run_terminal_cmd with pdftotext, or convert the file to text first."
+                "PDF rendering is not available. Use run_terminal_command with pdftotext, or convert the file to text first."
         | otherwise -> doesFileExist path >>= \case
             False -> pure $ Left $ "File not found: " <> args.targetFile
             True -> readTextFile path >>= \case

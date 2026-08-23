@@ -28,6 +28,8 @@ module Agent.Dialect
     , dialectForModel
     , legacyDialectIdForProvider
     , providerSupportsDialect
+    , grokBuildPublicToolName
+    , grokBuildCanonicalToolName
     , dialectSlug
     , parseDialect
     ) where
@@ -213,6 +215,26 @@ providerSupportsDialect provider dialect = case provider of
     OpenAIProvider -> dialect == CodexDialect
     XAIProvider -> dialect == GrokBuildDialect
     OpenRouterProvider -> True
+
+-- | Current public Grok Build names for stable internal tool identifiers.
+grokBuildPublicToolName :: Text -> Text
+grokBuildPublicToolName = \case
+    "run_terminal_cmd" -> "run_terminal_command"
+    "task" -> "spawn_subagent"
+    "get_task_output" -> "get_command_or_subagent_output"
+    "wait_tasks" -> "wait_commands_or_subagents"
+    "kill_task" -> "kill_command_or_subagent"
+    name -> name
+
+-- | Resolve current public Grok Build tool names to stable internal names.
+grokBuildCanonicalToolName :: Text -> Text
+grokBuildCanonicalToolName = \case
+    "run_terminal_command" -> "run_terminal_cmd"
+    "spawn_subagent" -> "task"
+    "get_command_or_subagent_output" -> "get_task_output"
+    "wait_commands_or_subagents" -> "wait_tasks"
+    "kill_command_or_subagent" -> "kill_task"
+    name -> name
 
 dialectSlug :: DialectId -> Text
 dialectSlug = \case

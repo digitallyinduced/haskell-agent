@@ -15,6 +15,7 @@ import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
+import Agent.GrokBuild.Dialect.Monitor (monitorTool)
 import Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool)
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession(..)
@@ -29,8 +30,10 @@ import Agent.GrokBuild.Dialect.Task
 import Agent.GrokBuild.Dialect.TaskControl
     ( getTaskOutputTool
     , killTaskTool
+    , waitTasksTool
     )
 import Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool)
+import Agent.GrokBuild.Dialect.Todo (todoWriteTool)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
@@ -40,8 +43,8 @@ import Agent.Tools.PlanMode
     )
 import Agent.Tools.Types (AppTool, ToolEnv(..))
 
--- Upstream: grok-build grok_build::{read_file, grep, list_dir, search_replace, bash,
--- get_task_output, kill_task, task, enter_plan_mode, exit_plan_mode, ask_user_question}.
+-- Core upstream parity: file tools, terminal/background lifecycle, progress,
+-- monitor, subagents, and plan-mode interaction.
 -- Local extension: run_ghci (persistent GHCi with per-call purity approval).
 grokTools
     :: GrokSession
@@ -59,8 +62,11 @@ grokTools session ghci planMode multi typesRef =
             , searchReplaceTool env planMode
             , runTerminalCmdTool session
             , runGhciTool ghci
+            , todoWriteTool session
             , getTaskOutputTool session multi
+            , waitTasksTool session multi
             , killTaskTool session multi
+            , monitorTool session
             , enterPlanModeTool planMode
             , exitPlanModeTool planMode
             , askUserQuestionTool planMode

@@ -1,7 +1,6 @@
 -- | Lightweight fullscreen Markdown block rendering.
 module Agent.TUI.Markdown
-    ( InlineSpan(..)
-    , InlineStyle(..)
+    ( Inline(..)
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithCodeControls
@@ -13,6 +12,11 @@ import Agent.TUI.FencedCode
     ( FenceChunk(..)
     , FencedBlock(..)
     , fenceChunks
+    )
+import Agent.TUI.Markdown.Inline
+    ( Inline(..)
+    , inlinePlainText
+    , parseInline
     )
 import Agent.Syntax
     ( SyntaxHighlighter
@@ -26,10 +30,8 @@ import Agent.TUI.TextWidth
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
-import Data.Char
-    ( isDigit
-    , isSpace
-    )
+import Data.Bits ((.|.))
+import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
@@ -40,22 +42,6 @@ import qualified Graphics.Vty as V
 
 terminalCharWidth :: Char -> Int
 terminalCharWidth = displayCharCellWidth
-
-data InlineStyle
-    = InlinePlain
-    | InlineStrong
-    | InlineEmphasis
-    | InlineCode
-    | InlineLink !Text
-    | InlineStrongLink !Text
-    | InlineEmphasisLink !Text
-    deriving (Eq, Show)
-
-data InlineSpan = InlineSpan
-    { inlineStyle :: !InlineStyle
-    , inlineText :: !Text
-    }
-    deriving (Eq, Show)
 
 markdownWidget :: Text -> Widget n
 markdownWidget =
@@ -123,25 +109,27 @@ renderLines lines_
         table : renderLines rest
 renderLines (line : rest)
     | Just heading <- stripHeading line =
-        withAttr Theme.headingAttr
-            (padTop (Pad 1) (inlineWidget (parseInline heading)))
+        padTop (Pad 1)
+            (inlineWidgetWithAttr Theme.headingAttr (parseInline heading))
             : renderLines rest
-    | Just item <- stripBullet line =
+    | Just (indent, item) <- stripBullet line =
         hBox
-            [ withAttr Theme.headingAttr (txt "• ")
-            , inlineWidget (parseInline item)
+            [ txt indent
+            , withAttr Theme.headingAttr (txt "• ")
+            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just (number, item) <- stripOrdered line =
+    | Just (indent, number, item) <- stripOrdered line =
         hBox
-            [ withAttr Theme.headingAttr (txt (number <> ". "))
-            , inlineWidget (parseInline item)
+            [ txt indent
+            , withAttr Theme.headingAttr (txt (number <> ". "))
+            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just quote <- Text.stripPrefix "> " (Text.stripStart line) =
+    | Just quote <- stripBlockQuote line =
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
-            , withAttr Theme.mutedAttr (inlineWidget (parseInline quote))
+            , inlineWidgetWithAttr Theme.mutedAttr (parseInline quote)
             ]
             : renderLines rest
     | Text.null (Text.strip line) =
@@ -150,7 +138,7 @@ renderLines (line : rest)
         withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             : renderLines rest
     | otherwise =
-        inlineWidget (parseInline line)
+        inlineWidgetWithAttr Theme.assistantAttr (parseInline line)
             : renderLines rest
 
 codeBodyLines :: Text -> [Text]
@@ -250,21 +238,26 @@ stripHeading line =
         then Just (Text.strip rest)
         else Nothing
 
-stripBullet :: Text -> Maybe Text
+stripBullet :: Text -> Maybe (Text, Text)
 stripBullet line =
-    let stripped = Text.stripStart line
-    in asumPrefix ["- ", "* ", "+ "] stripped
+    let (indent, stripped) = Text.span isSpace line
+    in (indent,) <$> asumPrefix ["- ", "* ", "+ "] stripped
 
-stripOrdered :: Text -> Maybe (Text, Text)
+stripOrdered :: Text -> Maybe (Text, Text, Text)
 stripOrdered line =
     let
-        stripped = Text.stripStart line
+        (indent, stripped) = Text.span isSpace line
         (number, rest) = Text.span isDigit stripped
     in if Text.null number
         then Nothing
         else
-            (\item -> (number, Text.strip item))
+            (\item -> (indent, number, Text.strip item))
                 <$> Text.stripPrefix ". " rest
+
+stripBlockQuote :: Text -> Maybe Text
+stripBlockQuote line = do
+    rest <- Text.stripPrefix ">" (Text.stripStart line)
+    pure (fromMaybe rest (Text.stripPrefix " " rest))
 
 isThematicBreak :: Text -> Bool
 isThematicBreak line =
@@ -307,11 +300,10 @@ tableWidget rows@(headerCells : _) =
             traverse
                 (\(rowIndex, cells) ->
                     traverse
-                        (traverse
-                            (resolveInlineSpan
-                                (if rowIndex == 0
-                                    then Theme.headingAttr
-                                    else Theme.assistantAttr))
+                        (resolveInline
+                            (if rowIndex == 0
+                                then Theme.headingAttr
+                                else Theme.assistantAttr)
                             . parseInline)
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
@@ -632,140 +624,11 @@ asumPrefix prefixes text = case prefixes of
         Just value -> Just value
         Nothing -> asumPrefix rest text
 
-parseInline :: Text -> [InlineSpan]
-parseInline = go Nothing []
-  where
-    go _ plain text
-        | Text.null text = flushPlain plain []
-    go previous plain text
-        | Just (body, rest) <- delimited "**" text =
-            flushPlain plain $
-                strongSpans body
-                    <> go (lastChar body) [] rest
-        | Just (body, rest) <- delimited "__" text =
-            flushPlain plain $
-                strongSpans body
-                    <> go (lastChar body) [] rest
-        | Just (body, rest) <- codeSpan text =
-            flushPlain plain $
-                InlineSpan InlineCode body
-                    : go (lastChar body) [] rest
-        | Just (label, url, rest) <- linkSpan text =
-            flushPlain plain $
-                InlineSpan (InlineLink url)
-                    (label
-                        <> if Text.null url || label == url
-                            then ""
-                            else " (" <> url <> ")")
-                    : go (lastChar label) [] rest
-        | Just (body, rest) <- emphasis previous '*' text =
-            flushPlain plain $
-                emphasisSpans body
-                    <> go (lastChar body) [] rest
-        | Just (body, rest) <- emphasis previous '_' text =
-            flushPlain plain $
-                emphasisSpans body
-                    <> go (lastChar body) [] rest
-        | otherwise =
-            case Text.uncons text of
-                Nothing -> flushPlain plain []
-                Just (character, rest) ->
-                    let (ordinary, remaining) =
-                            Text.span (not . inlineMarker) rest
-                        chunk = Text.cons character ordinary
-                    in go (lastChar chunk) (chunk : plain) remaining
-
-    delimited marker text = do
-        after <- Text.stripPrefix marker text
-        let (body, closing) = Text.breakOn marker after
-        if Text.null body || Text.null closing
-            then Nothing
-            else Just (body, Text.drop (Text.length marker) closing)
-
-    codeSpan text = do
-        let (ticks, after) = Text.span (== '`') text
-        if Text.null ticks
-            then Nothing
-            else
-                let (body, closing) = Text.breakOn ticks after
-                in if Text.null closing
-                    then Nothing
-                    else Just
-                        ( body
-                        , Text.drop (Text.length ticks) closing
-                        )
-
-    linkSpan text = do
-        afterOpen <- Text.stripPrefix "[" text
-        let (label, afterLabel) = Text.breakOn "](" afterOpen
-        afterUrl <- Text.stripPrefix "](" afterLabel
-        let (url, closing) = Text.breakOn ")" afterUrl
-        if Text.null label || Text.null closing
-            then Nothing
-            else Just (label, url, Text.drop 1 closing)
-
-    emphasis previous marker text = do
-        after <- Text.stripPrefix (Text.singleton marker) text
-        let (body, closing) =
-                Text.breakOn (Text.singleton marker) after
-            openingBoundary =
-                maybe True (\character -> isSpace character
-                    || character `elem` ("([{\"'" :: String)) previous
-            closingRest = Text.drop 1 closing
-            closingBoundary = case Text.uncons closingRest of
-                Nothing -> True
-                Just (character, _) ->
-                    isSpace character
-                        || character `elem` (".,;:!?)]}\"'" :: String)
-        if Text.null body
-            || Text.null closing
-            || Text.any isSpace (Text.take 1 body)
-            || not openingBoundary
-            || not closingBoundary
-            then Nothing
-            else Just (body, closingRest)
-
-    lastChar value =
-        snd <$> Text.unsnoc value
-
-    inlineMarker character =
-        character `elem` ("*_`[" :: String)
-
-    strongSpans = nestedLinkSpans InlineStrong InlineStrongLink
-
-    emphasisSpans = nestedLinkSpans InlineEmphasis InlineEmphasisLink
-
-    nestedLinkSpans plainStyle linkStyle body =
-        let spans = parseInline body
-        in if any isLinkSpan spans
-            then map (applyNestedStyle plainStyle linkStyle) spans
-            else [InlineSpan plainStyle body]
-
-    isLinkSpan InlineSpan{inlineStyle = InlineLink _} = True
-    isLinkSpan _ = False
-
-    applyNestedStyle plainStyle linkStyle span_ =
-        span_
-            { inlineStyle =
-                case span_.inlineStyle of
-                    InlinePlain -> plainStyle
-                    InlineLink url -> linkStyle url
-                    other -> other
-            }
-
-    flushPlain [] rest = rest
-    flushPlain chunks rest =
-        InlineSpan InlinePlain (Text.concat (reverse chunks))
-            : rest
-
-inlinePlainText :: [InlineSpan] -> Text
-inlinePlainText = Text.concat . map (.inlineText)
-
-inlineWidget :: [InlineSpan] -> Widget n
-inlineWidget spans =
+inlineWidgetWithAttr :: AttrName -> [Inline] -> Widget n
+inlineWidgetWithAttr plainAttr inlines =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
-        styled <- traverse (resolveInlineSpan Theme.assistantAttr) spans
+        styled <- resolveInline plainAttr inlines
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
             rendered =
@@ -778,45 +641,54 @@ inlineWidget spans =
                     ]
         pure B.emptyResult { B.image = rendered }
 
-resolveInlineSpan
-    :: AttrName
-    -> InlineSpan
-    -> B.RenderM n (V.Attr, Text)
-resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
-    baseAttr <-
-        B.lookupAttrName $
-            case inlineStyle of
-                InlinePlain -> plainAttr
-                _ -> styleAttr inlineStyle
-    let attr = case inlineStyle of
-            InlineStrongLink _ -> baseAttr `V.withStyle` V.bold
-            InlineEmphasisLink _ -> baseAttr `V.withStyle` V.italic
-            _ -> baseAttr
-    pure
-        ( case inlineStyle of
-            InlineLink url
-                | safeUrl url -> attr `V.withURL` url
-            InlineStrongLink url
-                | safeUrl url -> attr `V.withURL` url
-            InlineEmphasisLink url
-                | safeUrl url -> attr `V.withURL` url
-            _ -> attr
-        , displayTerminalText inlineText
-        )
+data InlineContext = InlineContext
+    { inlineStrong :: !Bool
+    , inlineEmphasis :: !Bool
+    , inlineUrl :: !(Maybe Text)
+    }
+
+resolveInline :: AttrName -> [Inline] -> B.RenderM n [(V.Attr, Text)]
+resolveInline plainAttr = fmap concat . traverse (go emptyContext)
   where
+    emptyContext = InlineContext False False Nothing
+
+    go context = \case
+        InlineText text -> one plainAttr context text
+        InlineCode text -> one Theme.inlineCodeAttr context text
+        InlineStrong children ->
+            concat <$> traverse (go context{inlineStrong = True}) children
+        InlineEmphasis children ->
+            concat <$> traverse (go context{inlineEmphasis = True}) children
+        InlineLink url children -> do
+            let linkContext = context{inlineUrl = Just url}
+            label <- concat <$> traverse (go linkContext) children
+            suffix <-
+                if Text.null url || inlinePlainText children == url
+                    then pure []
+                    else one Theme.linkAttr linkContext (" (" <> url <> ")")
+            pure (label <> suffix)
+
+    one baseName context text = do
+        base <- B.lookupAttrName $
+            case context.inlineUrl of
+                Just _ -> Theme.linkAttr
+                Nothing -> baseName
+        let addedStyle =
+                (if context.inlineStrong then V.bold else 0)
+                    .|. (if context.inlineEmphasis then V.italic else 0)
+            style = V.styleMask base .|. addedStyle
+            emphasisAttr
+                | style == 0 = base
+                | otherwise = base `V.withStyle` style
+            linkedAttr = case context.inlineUrl of
+                Just url
+                    | safeUrl url -> emphasisAttr `V.withURL` url
+                _ -> emphasisAttr
+        pure [(linkedAttr, displayTerminalText text)]
+
     safeUrl url =
         not (Text.null url)
             && displayTerminalText url == url
-
-styleAttr :: InlineStyle -> AttrName
-styleAttr = \case
-    InlinePlain -> Theme.assistantAttr
-    InlineStrong -> Theme.strongAttr
-    InlineEmphasis -> Theme.emphasisAttr
-    InlineCode -> Theme.inlineCodeAttr
-    InlineLink _ -> Theme.linkAttr
-    InlineStrongLink _ -> Theme.linkAttr
-    InlineEmphasisLink _ -> Theme.linkAttr
 
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =

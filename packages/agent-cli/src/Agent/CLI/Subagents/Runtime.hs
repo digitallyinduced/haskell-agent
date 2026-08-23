@@ -26,6 +26,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( defaultModelFor
+    , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
     )
@@ -106,7 +107,10 @@ import Agent.Subagents.TaskPath
     ( parseTaskPath
     , taskPathRoot
     )
-import Agent.GrokBuild.Dialect.Subagent (grokSubagentSuffix)
+import Agent.GrokBuild.Dialect.Prompt
+    ( codingGrokPromptTools
+    , grokSubagentSystemPrompt
+    )
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
     , GrokSubagentSpecs
@@ -126,6 +130,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
+    , setToolSessionTmp
     )
 import Control.Concurrent.MVar
     ( MVar
@@ -143,6 +148,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
+import System.Environment (lookupEnv)
+import qualified System.Info as SystemInfo
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
@@ -162,6 +169,7 @@ data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
+    , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentParams :: !(IORef ResponseCreateParams)
     , subagentRegistry :: !SubagentRegistry
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
@@ -529,6 +537,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                 (dialectId codexDialect)
                 env
                 sendToRoot
+        sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 OpenAIProvider model prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
@@ -547,7 +556,11 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     let baseInstructions =
                             fromMaybe
                                 (systemPrompt
-                                    codexDialect env.subCwd today True)
+                                    codexDialect
+                                    env.subCwd
+                                    sessionTmp
+                                    today
+                                    True)
                                 prepared.preparedParentParams.instructions
                         instructions =
                             baseInstructions
@@ -627,6 +640,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                     childModel)
                 env
                 sendToRoot
+        sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 provider effectiveModel prepared.preparedSession of
             Just err -> pure (Left (LoopUnexpected err))
@@ -642,6 +656,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         (Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    shellPath <-
+                        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
                     let tools = case
                                 dialectChildAgentProtocol childDialect of
                             CodexCollaborationProtocol ->
@@ -656,19 +672,31 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
                                     systemPrompt
-                                        childDialect env.subCwd today True
-                                GrokTaskProtocol ->
-                                    systemPromptForTools
                                         childDialect
-                                        (map (.appToolName) tools)
                                         env.subCwd
+                                        sessionTmp
                                         today
                                         True
+                                GrokTaskProtocol ->
+                                    Text.intercalate "\n\n" $
+                                        filter (not . Text.null)
+                                            [ grokSubagentSystemPrompt
+                                                codingGrokPromptTools
+                                                ("web_search" : map (.appToolName) tools)
+                                                env.subCwd
+                                                today
+                                                (Text.pack SystemInfo.os)
+                                                shellPath
+                                                agentType
+                                                env.subId.unSubagentId
+                                            , sessionTempGuidance sessionTmp
+                                            ]
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
                                         (map (.appToolName) tools)
                                         env.subCwd
+                                        sessionTmp
                                         today
                                         True
                         instructions =
@@ -679,7 +707,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                     CodexCollaborationProtocol ->
                                         codexSubagentSuffix env.subId
                                     GrokTaskProtocol ->
-                                        grokSubagentSuffix agentType env.subId
+                                        ""
                                     GenericTaskProtocol ->
                                         genericSubagentSuffix agentType env.subId
                         childParams = requestParams model instructions
@@ -700,6 +728,11 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 previous
                                 (interAgentMessagePayload prompt))
 
+defaultShell :: String
+defaultShell
+    | SystemInfo.os == "mingw32" = "cmd.exe"
+    | otherwise = "/bin/sh"
+
 prepareChild
     :: SubagentRuntime
     -> Provider
@@ -711,6 +744,8 @@ prepareChild
 prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- defaultToolEnv env.subCwd
+    sessionTmp <- readIORef runtime.subagentSessionTmp
+    setToolSessionTmp childEnv sessionTmp
     childPath <-
         fromMaybe taskPathRoot
             <$> getTaskPath runtime.subagentRegistry env.subId

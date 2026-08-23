@@ -5,7 +5,7 @@ import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Responses.Types
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
@@ -19,7 +19,9 @@ import qualified System.Directory as Directory
 import System.Directory.OsPath
     ( doesDirectoryExist
     , doesFileExist
+    , createDirectoryIfMissing
     , listDirectory
+    , removePathForcibly
     )
 import qualified System.FilePath as FilePath
 import System.Posix.Files (fileMode, getFileStatus)
@@ -35,6 +37,10 @@ spec = describe "Agent.CLI.Session" do
         it "is ~/.haskell-agent/sessions" do
             sessionsRoot (fromFilePath "/home/marc")
                 `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"
+            sessionTempsRoot
+                (fromFilePath "/home/marc/.haskell-agent/sessions")
+                `shouldBe`
+                    fromFilePath "/home/marc/.haskell-agent/tmp/sessions"
 
     describe "sessionTitleFromPrompt" do
         it "collapses whitespace and keeps the first ten words" do
@@ -62,9 +68,11 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
+                doesDirectoryExist handle.sessionTempDir `shouldReturn` True
                 doesFileExist handle.sessionMetaPath `shouldReturn` True
                 handle.sessionMeta.metaTitle `shouldBe` "untitled"
                 modeOf handle.sessionDir `shouldReturn` 0o700
+                modeOf handle.sessionTempDir `shouldReturn` 0o700
                 modeOf handle.sessionMetaPath `shouldReturn` 0o600
 
                 let item = MessageItem ResponseMessage
@@ -424,6 +432,7 @@ spec = describe "Agent.CLI.Session" do
                 deleteSession root handle.sessionMeta.metaId
                     `shouldReturn` Right ()
                 doesDirectoryExist handle.sessionDir `shouldReturn` False
+                doesDirectoryExist handle.sessionTempDir `shouldReturn` False
                 deleteSession root "../outside"
                     `shouldReturn` Left "invalid session id"
 
@@ -473,10 +482,33 @@ spec = describe "Agent.CLI.Session" do
             withTempDir "agent-sessions-" \root -> do
                 PersistenceEnabled slot <- newPendingPersistence (testCreate root)
                 listDirectory root `shouldReturn` []
+                PersistencePending _ reservedId tempDir <- readIORef slot
+                doesDirectoryExist tempDir `shouldReturn` True
+                modeOf tempDir `shouldReturn` 0o700
                 handle <- ensureSession slot
                 doesDirectoryExist handle.sessionDir `shouldReturn` True
+                handle.sessionMeta.metaId `shouldBe` reservedId
+                handle.sessionTempDir `shouldBe` tempDir
                 PersistenceActive again <- readIORef slot
                 again.sessionMeta.metaId `shouldBe` handle.sessionMeta.metaId
+
+        it "cleans scratch space for a pending session that never persists" $
+            withTempDir "agent-sessions-" \root -> do
+                persist@(PersistenceEnabled slot) <-
+                    newPendingPersistence (testCreate root)
+                PersistencePending _ _ tempDir <- readIORef slot
+                cleanupPendingPersistence persist
+                doesDirectoryExist tempDir `shouldReturn` False
+                listDirectory root `shouldReturn` []
+
+        it "recreates missing scratch space when a session resumes" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                removePathForcibly handle.sessionTempDir
+                doesDirectoryExist handle.sessionTempDir `shouldReturn` False
+                _ <- newActivePersistence handle
+                doesDirectoryExist handle.sessionTempDir `shouldReturn` True
+                modeOf handle.sessionTempDir `shouldReturn` 0o700
 
     describe "json codec" do
         it "encodes and decodes SessionTurn" do
@@ -534,4 +566,10 @@ withTempDir prefix action = do
     bracket
         (mkdtemp (tmp FilePath.</> prefix))
         Directory.removeDirectoryRecursive
-        (action . fromFilePath)
+        \basePath -> do
+            let root =
+                    fromFilePath basePath
+                        </> fromFilePath ".haskell-agent"
+                        </> fromFilePath "sessions"
+            createDirectoryIfMissing True root
+            action root

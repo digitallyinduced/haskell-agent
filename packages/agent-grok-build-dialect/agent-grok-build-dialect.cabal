@@ -34,6 +34,7 @@ common common-opts
 library
     import:           common-opts
     exposed-modules:  Agent.GrokBuild.Dialect.Common
+                    , Agent.GrokBuild.Dialect.Monitor
                     , Agent.GrokBuild.Dialect.Prompt
                     , Agent.GrokBuild.Dialect.ProjectInstructions
                     , Agent.GrokBuild.Dialect.Runtime
@@ -43,6 +44,7 @@ library
                     , Agent.GrokBuild.Dialect.Task
                     , Agent.GrokBuild.Dialect.TaskControl
                     , Agent.GrokBuild.Dialect.Terminal
+                    , Agent.GrokBuild.Dialect.Todo
                     , Agent.GrokBuild.Dialect.Tools
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2

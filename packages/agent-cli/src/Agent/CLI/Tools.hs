@@ -9,13 +9,16 @@ module Agent.CLI.Tools
 import Agent.Responses.Types
 import Agent.Dialect
     ( Dialect
+    , DialectId(..)
     , FunctionSchemaStyle(..)
     , ToolLayout(..)
+    , dialectId
     , dialectFunctionSchemaStyle
     , dialectToolLayout
+    , grokBuildPublicToolName
     )
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
-import Agent.ToolDSL (PropertySchema, parametersObjectLoose)
+import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
@@ -69,9 +72,50 @@ schemaFromAppTool dialect tool = case tool.appToolSchema of
         let build = case dialectFunctionSchemaStyle dialect of
                 StrictFunctionSchemas -> buildTool
                 LooseFunctionSchemas -> buildGrokTool
-        in build tool.appToolName tool.appToolDescription parameters
+            (name, description, projectedParameters) =
+                projectFunctionTool dialect tool parameters
+        in build name description projectedParameters
     FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
+
+projectFunctionTool
+    :: Dialect
+    -> AppTool
+    -> [PropertySchema]
+    -> (Text, Text, [PropertySchema])
+projectFunctionTool dialect tool parameters
+    | dialectId dialect == GrokBuildDialect =
+        ( grokBuildPublicToolName tool.appToolName
+        , grokPublicText tool.appToolDescription
+        , map (projectProperty tool.appToolName) parameters
+        )
+    | otherwise =
+        (tool.appToolName, tool.appToolDescription, parameters)
+
+projectProperty :: Text -> PropertySchema -> PropertySchema
+projectProperty toolName property =
+    property
+        { propertyName =
+            if toolName == "task"
+                && property.propertyName == "run_in_background"
+                then "background"
+                else property.propertyName
+        , description = grokPublicText <$> property.description
+        }
+
+grokPublicText :: Text -> Text
+grokPublicText =
+    replace "run_in_background" "background"
+        . replace "run_terminal_cmd" "run_terminal_command"
+        . replace "get_task_output" "get_command_or_subagent_output"
+        . replace "wait_tasks" "wait_commands_or_subagents"
+        . replace "kill_task" "kill_command_or_subagent"
+        . replaceTaskName
+  where
+    replace = Text.replace
+    -- Avoid replacing ordinary prose uses of "task"; only the common
+    -- backtick-delimited tool reference is unambiguous.
+    replaceTaskName = Text.replace "`task`" "`spawn_subagent`"
 
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool

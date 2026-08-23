@@ -22,6 +22,18 @@ spec = describe "tool presentation" do
         summarizeToolCall
             (functionToolCall "continue" "write_stdin" "{\"session_id\":12}")
             `shouldBe` "Continued session 12"
+        toolDetail
+            (functionToolCall
+                "ask"
+                "ask_user_question"
+                "{\"questions\":[{\"question\":\"Choose a backend\",\"options\":[]}]}")
+            `shouldBe` "Choose a backend"
+        summarizeToolCall
+            (functionToolCall
+                "wait"
+                "wait_commands_or_subagents"
+                "{\"task_ids\":[\"t1\"]}")
+            `shouldBe` "Waited"
 
     it "parses and truncates search-replace diffs once for all renderers" do
         let oldText = Text.intercalate "\\n"

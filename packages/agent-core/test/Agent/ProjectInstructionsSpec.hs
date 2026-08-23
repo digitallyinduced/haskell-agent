@@ -39,6 +39,76 @@ spec = describe "Agent.ProjectInstructions" do
                 loaded <- discoverProjectInstructions defaultDiscoverOptions (fromFilePath dir)
                 map (.instructionContent) loaded.loadedProject `shouldBe` ["override\n"]
 
+        it "loads Grok-compatible filenames and sorted project rules" do
+            withTempDir \dir -> do
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True (dir </> ".claude")
+                createDirectoryIfMissing True (dir </> ".grok" </> "rules")
+                createDirectoryIfMissing True (dir </> ".cursor" </> "rules")
+                writeFile (dir </> "AGENTS.md") "agents\n"
+                writeFile (dir </> "Claude.md") "claude\n"
+                writeFile (dir </> "AGENT.md") "agent\n"
+                writeFile (dir </> ".claude" </> "CLAUDE.local.md") "claude local\n"
+                writeFile (dir </> ".grok" </> "rules" </> "b.md") "grok b\n"
+                writeFile (dir </> ".grok" </> "rules" </> "a.md") "grok a\n"
+                writeFile (dir </> ".grok" </> "rules" </> "ignored.txt") "ignored\n"
+                writeFile (dir </> ".cursor" </> "rules" </> "c.md") "cursor c\n"
+                loaded <- discoverProjectInstructions defaultDiscoverOptions
+                    (fromFilePath dir)
+                map (.instructionContent) loaded.loadedProject `shouldBe`
+                    [ "agents\n"
+                    , "claude\n"
+                    , "agent\n"
+                    , "claude local\n"
+                    , "grok a\n"
+                    , "grok b\n"
+                    , "cursor c\n"
+                    ]
+
+        it "keeps Codex discovery narrow when the global home is .codex" do
+            withTempDir \dir -> do
+                let home = dir </> ".codex"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True home
+                createDirectoryIfMissing True (dir </> ".grok" </> "rules")
+                writeFile (home </> "AGENTS.md") "global agents\n"
+                writeFile (home </> "Claude.md") "global claude\n"
+                writeFile (dir </> "AGENTS.md") "project agents\n"
+                writeFile (dir </> "Claude.md") "project claude\n"
+                writeFile (dir </> ".grok" </> "rules" </> "rule.md") "rule\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir = Just (fromFilePath home) }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe` ["global agents\n", "project agents\n"]
+
+        it "loads Grok, Claude, and Cursor home instructions before project files" do
+            withTempDir \dir -> do
+                let home = dir </> "home"
+                    grokHome = home </> ".grok"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True (grokHome </> "rules")
+                createDirectoryIfMissing True (home </> ".claude" </> "rules")
+                createDirectoryIfMissing True (home </> ".cursor" </> "rules")
+                writeFile (grokHome </> "AGENTS.md") "grok agents\n"
+                writeFile (grokHome </> "rules" </> "a.md") "grok rule\n"
+                writeFile (home </> ".claude" </> "Claude.md") "claude agents\n"
+                writeFile (home </> ".claude" </> "rules" </> "b.md") "claude rule\n"
+                writeFile (home </> ".cursor" </> "rules" </> "c.md") "cursor rule\n"
+                writeFile (dir </> "AGENTS.md") "project\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir = Just (fromFilePath grokHome) }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe`
+                        [ "grok agents\n"
+                        , "grok rule\n"
+                        , "claude agents\n"
+                        , "claude rule\n"
+                        , "cursor rule\n"
+                        , "project\n"
+                        ]
+
         it "waits for a transient lock instead of dropping instructions" do
             withTempDir checkLockedInstructions
 

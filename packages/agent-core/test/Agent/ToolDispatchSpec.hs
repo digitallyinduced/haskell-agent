@@ -44,6 +44,41 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
         result `shouldBe` functionResult "call-1" "echo:hello"
 
+    it "dispatches current Grok Build public aliases to stable handlers" do
+        result <- dispatchToolCall testConfig
+            [noArgsTool "run_terminal_cmd" (pure (Right "ran"))]
+            (functionToolCall "call-1" "run_terminal_command" "{}")
+        result `shouldBe` functionResult "call-1" "ran"
+
+    it "canonicalizes every current Grok Build public tool name" do
+        map canonicalToolName
+            [ "run_terminal_command"
+            , "spawn_subagent"
+            , "get_command_or_subagent_output"
+            , "wait_commands_or_subagents"
+            , "kill_command_or_subagent"
+            ]
+            `shouldBe`
+                [ "run_terminal_cmd"
+                , "task"
+                , "get_task_output"
+                , "wait_tasks"
+                , "kill_task"
+                ]
+
+    it "maps the public subagent background parameter to the internal schema" do
+        let value = toolArgumentsValue
+                "{\"prompt\":\"inspect\",\"description\":\"inspect code\",\"background\":false}"
+        canonicalToolArguments "spawn_subagent" value
+            `shouldBe`
+                toolArgumentsValue
+                    "{\"prompt\":\"inspect\",\"description\":\"inspect code\",\"run_in_background\":false}"
+
+    it "keeps the internal subagent background parameter when both are sent" do
+        let value = toolArgumentsValue
+                "{\"background\":true,\"run_in_background\":false}"
+        canonicalToolArguments "spawn_subagent" value `shouldBe` value
+
     it "passes the originating call to call-aware typed handlers" do
         result <- dispatchToolCall testConfig
             [ typedToolWithCall "echo" \call (EchoArgs message) ->
