@@ -145,6 +145,22 @@ spec = describe "Agent.ProjectInstructions" do
                 Nothing ->
                     expectationFailure "expected rendered Grok instructions"
 
+        it "shares whitespace-only filtering with Codex formatting" do
+            let loaded = LoadedAgentsMd
+                    { loadedGlobal = Just
+                        (InstructionFile
+                            (fromFilePath "/home/.codex/AGENTS.md")
+                            " \n\t")
+                    , loadedProject =
+                        [ InstructionFile
+                            (fromFilePath "/repo/AGENTS.md")
+                            "\n  "
+                        ]
+                    }
+            formatCodexAgentsMd (fromFilePath "/repo") loaded
+                `shouldBe` Nothing
+            formatGrokAgentsMd loaded `shouldBe` Nothing
+
         it "neutralizes forged reminder tags in file content" do
             let loaded = LoadedAgentsMd
                     { loadedGlobal = Nothing
