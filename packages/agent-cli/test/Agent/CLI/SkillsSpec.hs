@@ -2,7 +2,7 @@ module Agent.CLI.SkillsSpec (spec) where
 
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
-import Agent.CLI.SessionState (SessionState(..))
+import Agent.CLI.SessionState (SessionAccountState(..), SessionState(..))
 import Agent.CLI.Skills
 import Agent.CLI.TurnState (ConversationState(..))
 import Agent.Loop (emptyTokenUsage)
@@ -74,16 +74,14 @@ spec = describe "Agent.CLI.Skills" do
 
     it "installs a deferred catalog, invocations, and startup context together" do
         context <- newIORef (testSessionState (Just "agents"))
-        catalogRef <- newIORef (SkillCatalog [] [])
-        invocationsRef <- newIORef []
         let catalog = SkillCatalog [fakeSkill] []
         _ <- installSkillCatalogWithOmissions
-            ["help"] True context catalogRef invocationsRef catalog
-        readIORef catalogRef `shouldReturn` catalog
-        readIORef invocationsRef `shouldReturn`
+            ["help"] True context catalog
+        state <- readIORef context
+        state.sessionSkillCatalog `shouldBe` catalog
+        state.sessionSkillInvocations `shouldBe`
             [SkillInvocation "deploy" fakeSkill True]
-        (.sessionConversation.conversationStartupContext)
-            <$> readIORef context >>= \case
+        case state.sessionConversation.conversationStartupContext of
             Nothing -> expectationFailure "expected startup context"
             Just text ->
                 text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
@@ -122,5 +120,12 @@ testSessionState startup =
             , conversationStartupContext = startup
             , conversationUsage = emptyTokenUsage
             , conversationLastAssistant = Nothing
+            }
+        , sessionSkillCatalog = SkillCatalog [] []
+        , sessionSkillInvocations = []
+        , sessionAccount = SessionAccountState
+            { accountLabel = ""
+            , accountId = ""
+            , accountSelectionId = ""
             }
         }

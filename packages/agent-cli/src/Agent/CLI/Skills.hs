@@ -19,7 +19,7 @@ import Agent.CLI.Command
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.SessionState
-    ( SessionState
+    ( SessionState(..)
     , appendSessionStartupContext
     )
 import Agent.CLI.Style
@@ -33,7 +33,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (toText)
 import Agent.Skills
 import Control.Monad (void, when)
-import Data.IORef (IORef, atomicModifyIORef', writeIORef)
+import Data.IORef (IORef, atomicModifyIORef')
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -158,34 +158,40 @@ installSkillCatalog
     :: [Text]
     -> Bool
     -> IORef SessionState
-    -> IORef SkillCatalog
-    -> IORef [SkillInvocation]
     -> SkillCatalog
     -> IO ()
-installSkillCatalog reservedNames queueContext contextRef catalogRef invocationsRef catalog = do
+installSkillCatalog reservedNames queueContext stateRef catalog = do
     void $
         installSkillCatalogWithOmissions
             reservedNames
             queueContext
-            contextRef
-            catalogRef
-            invocationsRef
+            stateRef
             catalog
 
 installSkillCatalogWithOmissions
     :: [Text]
     -> Bool
     -> IORef SessionState
-    -> IORef SkillCatalog
-    -> IORef [SkillInvocation]
     -> SkillCatalog
     -> IO Int
-installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRef invocationsRef catalog = do
-    writeIORef catalogRef catalog
-    writeIORef invocationsRef (buildSkillInvocations reservedNames catalog)
-    if queueContext
-        then queueSkillCatalogContextWithOmissions contextRef catalog
-        else pure 0
+installSkillCatalogWithOmissions reservedNames queueContext stateRef catalog =
+    atomicModifyIORef' stateRef \state ->
+        let (context, omitted) =
+                if queueContext
+                    then formatSkillCatalogContext
+                        defaultSkillCatalogMaxChars
+                        catalog
+                    else (Nothing, 0)
+            installed =
+                state
+                    { sessionSkillCatalog = catalog
+                    , sessionSkillInvocations =
+                        buildSkillInvocations reservedNames catalog
+                    }
+            updated = maybe installed
+                (`appendSessionStartupContext` installed)
+                context
+        in (updated, omitted)
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =

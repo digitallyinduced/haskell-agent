@@ -226,7 +226,10 @@ import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.SessionState
     ( SessionState(..)
+    , SessionAccountPatch(..)
+    , SessionAccountState(..)
     , addSessionTokenUsage
+    , applySessionAccountPatch
     , clearSessionPreviousResponseId
     , replaceSessionTranscript
     , resetSessionConversation
@@ -338,7 +341,7 @@ import Agent.TUI.Model
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
-import Agent.CLI.TurnState (ConversationState(..))
+import Agent.CLI.TurnState (ConversationState(..), FieldUpdate(..))
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
@@ -1394,9 +1397,37 @@ runAgentInitializedWithLock
                     "automatic provider fallback would cross from subscription \
                     \billing to API-credit billing"
         _ -> pure ()
-    activeAccountRef <- newIORef ""
-    activeAccountIdRef <- newIORef ""
-    activeSelectionRef <- newIORef ""
+    sessionStateRef <- newIORef SessionState
+        { sessionConversation = ConversationState
+            { conversationPreviousResponseId = Nothing
+            , conversationTranscript = []
+            , conversationStartupContext = Nothing
+            , conversationUsage = emptyTokenUsage
+            , conversationLastAssistant = Nothing
+            }
+        , sessionSkillCatalog = SkillCatalog [] []
+        , sessionSkillInvocations = []
+        , sessionAccount = SessionAccountState
+            { accountLabel = ""
+            , accountId = ""
+            , accountSelectionId = ""
+            }
+        }
+    let commitAccount patch =
+            atomicModifyIORef' sessionStateRef \state ->
+                (applySessionAccountPatch patch state, ())
+        replaceAccount label accountId selectionId =
+            commitAccount SessionAccountPatch
+                { patchAccountLabel = SetField label
+                , patchAccountId = SetField accountId
+                , patchAccountSelectionId = SetField selectionId
+                }
+        replaceAccountIdentity label accountId =
+            commitAccount SessionAccountPatch
+                { patchAccountLabel = SetField label
+                , patchAccountId = SetField accountId
+                , patchAccountSelectionId = KeepField
+                }
     preferredOpenAiAccountRef <- newIORef Nothing
     let selectableTokenProvider =
             case loaded.loadedOpenAiPool of
@@ -1409,7 +1440,7 @@ runAgentInitializedWithLock
                     loaded.loadedTokenProvider
     initialHttp <- case customResponses of
         Just (connectionId, _) -> do
-            writeIORef activeAccountRef connectionId
+            replaceAccountIdentity connectionId ""
             pure
                 ( selectableTokenProvider
                 , const (pure connectionId)
@@ -1426,13 +1457,11 @@ runAgentInitializedWithLock
                 probeLoadedAuthCredential loaded >>= \case
                     Right (credential, usable) -> do
                         label <- usable.loadedAccountLabel credential
-                        writeIORef activeAccountRef label
-                        writeIORef activeAccountIdRef credential.accountId
                         let selectionId =
                                 fromMaybe
                                     credential.accountId
                                     usable.loadedSelectionId
-                        writeIORef activeSelectionRef selectionId
+                        replaceAccount label credential.accountId selectionId
                         pure
                             ( usable.loadedTokenProvider
                             , usable.loadedAccountLabel
@@ -1443,8 +1472,7 @@ runAgentInitializedWithLock
                                 XAIProvider -> "Grok"
                                 OpenRouterProvider -> "OpenRouter"
                             selectionId = fromMaybe "" loaded.loadedSelectionId
-                        writeIORef activeAccountRef fallback
-                        writeIORef activeSelectionRef selectionId
+                        replaceAccount fallback "" selectionId
                         pure
                             ( selectableTokenProvider
                             , loaded.loadedAccountLabel
@@ -1484,10 +1512,9 @@ runAgentInitializedWithLock
                                     if current.activeHttpGeneration
                                         == snapshot.activeHttpGeneration
                                         then do
-                                            writeIORef
-                                                activeAccountIdRef
+                                            replaceAccountIdentity
+                                                label
                                                 credential.accountId
-                                            writeIORef activeAccountRef label
                                             pure current
                                                 { activeHttpAccountId =
                                                     credential.accountId
@@ -1505,9 +1532,7 @@ runAgentInitializedWithLock
             case loaded.loadedProvider of
                 OpenAIProvider ->
                     trackCredentialAccount
-                        activeAccountRef
-                        activeAccountIdRef
-                        activeSelectionRef
+                        sessionStateRef
                         resolveActiveAccountLabel
                         selectableTokenProvider
                 _ -> switchableTokenProvider
@@ -1534,13 +1559,10 @@ runAgentInitializedWithLock
                                                 selectedSelectionId
                                                 usable.loadedSelectionId
                                     modifyMVar_ activeHttpAuth \current -> do
-                                        writeIORef
-                                            activeAccountIdRef
+                                        replaceAccount
+                                            label
                                             credential.accountId
-                                        writeIORef
-                                            activeSelectionRef
                                             selectionId
-                                        writeIORef activeAccountRef label
                                         pure ActiveHttpAuth
                                             { activeHttpGeneration =
                                                 current.activeHttpGeneration + 1
@@ -1932,25 +1954,21 @@ runAgentInitializedWithLock
                 cwd
                 (if refreshDialectContext then [] else initialItems)
                 (if refreshDialectContext then Nothing else initialPrevious)
-        -- Fullscreen sessions load skills after Brick has taken over the
-        -- terminal, so filesystem discovery cannot delay the first frame.
-        -- Minimal and one-shot sessions still initialize them synchronously
-        -- before their first prompt/turn below.
-        skillsRef <- newIORef (SkillCatalog [] [])
-        skillInvocationsRef <- newIORef []
-
         let initialUsage = case resumed of
                 Just (meta, turns) -> sessionUsageFromTurns meta turns
                 Nothing -> emptyTokenUsage
-        sessionStateRef <- newIORef SessionState
-            { sessionConversation = ConversationState
-                { conversationPreviousResponseId = initialPrevious
-                , conversationTranscript = initialItems
-                , conversationStartupContext = startupContext
-                , conversationUsage = initialUsage
-                , conversationLastAssistant = Nothing
+        atomicModifyIORef' sessionStateRef \state ->
+            ( state
+                { sessionConversation = ConversationState
+                    { conversationPreviousResponseId = initialPrevious
+                    , conversationTranscript = initialItems
+                    , conversationStartupContext = startupContext
+                    , conversationUsage = initialUsage
+                    , conversationLastAssistant = Nothing
+                    }
                 }
-            }
+            , ()
+            )
         writeIORef subagentForkSource $
             Just
                 ( (.sessionConversation.conversationTranscript)
@@ -2097,15 +2115,10 @@ runAgentInitializedWithLock
                                                                     newCredential
                                                                     newHealthy
                                                                     newConn
-                                                            writeIORef
-                                                                activeAccountIdRef
-                                                                newCredential.accountId
-                                                            writeIORef
-                                                                activeSelectionRef
-                                                                newCredential.accountId
-                                                            writeIORef
-                                                                activeAccountRef
+                                                            replaceAccount
                                                                 label
+                                                                newCredential.accountId
+                                                                newCredential.accountId
                                                             pure (newHealthy, label)
                                                     awaitNext newHealthy =
                                                         readChan switchRequests
@@ -2116,7 +2129,8 @@ runAgentInitializedWithLock
                                                 oldConnection <-
                                                     readIORef activeConnectionRef
                                                 previousAccountId <-
-                                                    readIORef activeAccountIdRef
+                                                    (.sessionAccount.accountId)
+                                                        <$> readIORef sessionStateRef
                                                 let OpenAiPersistentConnection
                                                         _
                                                         oldHealthy
@@ -2252,8 +2266,8 @@ runAgentInitializedWithLock
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                                        persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -2316,8 +2330,8 @@ runAgentInitializedWithLock
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -2388,8 +2402,8 @@ runAgentInitializedWithLock
                             prepareTransitionBackend
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
-                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -2397,20 +2411,27 @@ runAgentInitializedWithLock
                     (Text.unpack (formatApiErrorAt now err))
 
 trackCredentialAccount
-    :: IORef Text
-    -> IORef Text
-    -> IORef Text
+    :: IORef SessionState
     -> (Credential -> IO Text)
     -> TokenProvider
     -> TokenProvider
-trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
+trackCredentialAccount sessionStateRef resolveLabel provider =
     tokenProvider (tokenProviderBillingMode provider) \failed ->
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
-                writeIORef accountIdRef credential.accountId
-                writeIORef selectionRef credential.accountId
-                resolveLabel credential >>= writeIORef accountRef
+                label <- resolveLabel credential
+                atomicModifyIORef' sessionStateRef \state ->
+                    ( applySessionAccountPatch
+                        SessionAccountPatch
+                            { patchAccountLabel = SetField label
+                            , patchAccountId = SetField credential.accountId
+                            , patchAccountSelectionId =
+                                SetField credential.accountId
+                            }
+                        state
+                    , ()
+                    )
                 pure (Right credential)
 
 preparePersistence
@@ -2593,8 +2614,6 @@ runSession
     -> OsPath
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
-    -> IORef SkillCatalog
-    -> IORef [SkillInvocation]
     -> IORef Bool
     -> InterruptState
     -> Maybe MultiAgentContext
@@ -2604,17 +2623,13 @@ runSession
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
     -> Maybe LegacySubagentTarget
-    -> IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> (Credential -> IO Text)
     -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns persist projectRoot home cwd tokenProvider openAiPool skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns persist projectRoot home cwd tokenProvider openAiPool escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <-
       (.sessionConversation.conversationPreviousResponseId)
           <$> readIORef sessionStateRef
@@ -2857,15 +2872,13 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             deactivatePlanMode planMode
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames True sessionStateRef
-                skillsRef skillInvocationsRef freshSkills
+                reservedSlashNames True sessionStateRef freshSkills
             reportSkillCatalog True freshSkills omitted
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext sessionStateRef
-                skillsRef skillInvocationsRef refreshed
+                reservedSlashNames queueContext sessionStateRef refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
         formatSkillWarning warning =
@@ -3058,8 +3071,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionSkills = skillsRef
-            , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
             , sessionEscPaused = escPaused
             , sessionAttachments = attachmentsRef
@@ -3067,10 +3078,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
             , sessionStoreRoot = storeRoot
-            , sessionAccount = accountRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
-            , sessionAccountLabel = accountLabel
             , sessionSelectAccount = selectAccount
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
@@ -3093,7 +3100,7 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames
                 (null initialTurns && not (isJust initialPrevious))
-                sessionStateRef skillsRef skillInvocationsRef skills
+                sessionStateRef skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
@@ -3257,10 +3264,9 @@ syncFullscreenPrompt env =
         planState <- readIORef env.sessionPlanMode.planStateRef
         params <- readIORef env.sessionParams
         policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
-        usage <-
-            (.sessionConversation.conversationUsage)
-                <$> readIORef env.sessionState
+        sessionState <- readIORef env.sessionState
+        let account = sessionState.sessionAccount.accountLabel
+            usage = sessionState.sessionConversation.conversationUsage
         attachments <- readIORef env.sessionAttachments
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
@@ -3518,17 +3524,12 @@ replWithDraft env@SessionEnv
     , sessionCwd = cwd
     , sessionTokenProvider = tokenProvider
     , sessionOpenAiPool = openAiPool
-    , sessionSkills = skillsRef
-    , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
-    , sessionAccount = accountRef
-    , sessionAccountId = accountIdRef
-    , sessionAccountSelectionId = selectionRef
     , sessionSelectAccount = selectAccount
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
@@ -3537,8 +3538,9 @@ replWithDraft env@SessionEnv
     , sessionReset = sessionReset
     } draft = do
     refreshSkills False
-    skillInvocations <- readIORef skillInvocationsRef
-    conversation <- (.sessionConversation) <$> readIORef sessionStateRef
+    sessionState <- readIORef sessionStateRef
+    let skillInvocations = sessionState.sessionSkillInvocations
+        conversation = sessionState.sessionConversation
     let skillCommands =
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
@@ -3550,8 +3552,8 @@ replWithDraft env@SessionEnv
     policy <- readIORef policyRef
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
-    let usage = conversation.conversationUsage
-    account <- readIORef accountRef
+        usage = conversation.conversationUsage
+        account = sessionState.sessionAccount.accountLabel
     mlineResult <- case fullscreen of
         Just runtime -> do
             setFullscreenImagePreviews runtime pendingAttachments
@@ -3837,8 +3839,9 @@ replWithDraft env@SessionEnv
                                 finishTurn env False result
                     ReplSkills reloadFirst -> do
                         when reloadFirst (refreshSkills True)
-                        current <- readIORef skillsRef
-                        invocations <- readIORef skillInvocationsRef
+                        currentState <- readIORef sessionStateRef
+                        let current = currentState.sessionSkillCatalog
+                            invocations = currentState.sessionSkillInvocations
                         let listing =
                                 formatSkillsListing color current invocations
                         displayInfo (formatSkillsListing False current invocations) $
@@ -4595,8 +4598,9 @@ replWithDraft env@SessionEnv
     chooseAccount keptDraft next =
         case fullscreen of
             Just runtime -> do
-                currentSelectionId <- readIORef selectionRef
-                currentAccountId <- readIORef accountIdRef
+                sessionAccount <- (.sessionAccount) <$> readIORef sessionStateRef
+                let currentSelectionId = sessionAccount.accountSelectionId
+                    currentAccountId = sessionAccount.accountId
                 options <- withReplActivity
                     "Loading account usage…"
                     (loadAllAccountPickerOptions provider)
@@ -5910,7 +5914,8 @@ preparePromptSkillInputs
     -> [TurnInput]
     -> IO (Either Text [TurnInput])
 preparePromptSkillInputs env prompt inputs = do
-    invocations <- readIORef env.sessionSkillInvocations
+    invocations <-
+        (.sessionSkillInvocations) <$> readIORef env.sessionState
     pure do
         selected <- resolveSkillMentions invocations prompt
         let activations =
