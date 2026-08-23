@@ -31,17 +31,15 @@ spec = describe "fullscreen Markdown rendering" do
         parseInline
             "Use **bold**, *italics*, `code`, and [docs](https://example.com)."
             `shouldBe`
-                [ InlineSpan InlinePlain "Use "
-                , InlineSpan InlineStrong "bold"
-                , InlineSpan InlinePlain ", "
-                , InlineSpan InlineEmphasis "italics"
-                , InlineSpan InlinePlain ", "
-                , InlineSpan InlineCode "code"
-                , InlineSpan InlinePlain ", and "
-                , InlineSpan
-                    (InlineLink "https://example.com")
-                    "docs (https://example.com)"
-                , InlineSpan InlinePlain "."
+                [ InlineText "Use "
+                , InlineStrong [InlineText "bold"]
+                , InlineText ", "
+                , InlineEmphasis [InlineText "italics"]
+                , InlineText ", "
+                , InlineCode "code"
+                , InlineText ", and "
+                , InlineLink "https://example.com" [InlineText "docs"]
+                , InlineText "."
                 ]
 
     it "renders links with native terminal hyperlink metadata" do
@@ -55,13 +53,17 @@ spec = describe "fullscreen Markdown rendering" do
         parseInline
             "**[PR #316](https://example.com/316)** and *[docs](https://example.com)*"
             `shouldBe`
-                [ InlineSpan
-                    (InlineStrongLink "https://example.com/316")
-                    "PR #316 (https://example.com/316)"
-                , InlineSpan InlinePlain " and "
-                , InlineSpan
-                    (InlineEmphasisLink "https://example.com")
-                    "docs (https://example.com)"
+                [ InlineStrong
+                    [ InlineLink
+                        "https://example.com/316"
+                        [InlineText "PR #316"]
+                    ]
+                , InlineText " and "
+                , InlineEmphasis
+                    [ InlineLink
+                        "https://example.com"
+                        [InlineText "docs"]
+                    ]
                 ]
 
     it "renders a strong link with hyperlink metadata and bold styling" do
@@ -86,7 +88,7 @@ spec = describe "fullscreen Markdown rendering" do
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
-        spans `shouldContain` [InlineSpan InlineCode "a ` b"]
+        spans `shouldContain` [InlineCode "a ` b"]
 
     it "lets inline code override surrounding strong text" do
         let input =
@@ -94,11 +96,12 @@ spec = describe "fullscreen Markdown rendering" do
                 \`state = [ResponseItem]` would be simpler.**"
         parseInline input
             `shouldBe`
-                [ InlineSpan InlinePlain "Yes—"
-                , InlineSpan InlineStrong
-                    "for this repository, hardcoding "
-                , InlineSpan InlineCode "state = [ResponseItem]"
-                , InlineSpan InlineStrong " would be simpler."
+                [ InlineText "Yes—"
+                , InlineStrong
+                    [ InlineText "for this repository, hardcoding "
+                    , InlineCode "state = [ResponseItem]"
+                    , InlineText " would be simpler."
+                    ]
                 ]
 
         let region = (80, 3)
@@ -119,16 +122,48 @@ spec = describe "fullscreen Markdown rendering" do
                 Just
                     (attrMapLookup
                         Theme.inlineCodeAttr
-                        Theme.solarizedDark)
+                        Theme.solarizedDark
+                        `V.withStyle` V.bold)
 
     it "leaves unmatched delimiters visible" do
         inlinePlainText (parseInline "unfinished **bold")
             `shouldBe` "unfinished **bold"
 
+    it "inherits heading and blockquote attributes in plain inline spans" do
+        let region = (40, 6)
+            rendered input =
+                concatMap toList $
+                    toList $
+                        displayOpsForPic
+                            (renderWidget
+                                (Just Theme.solarizedDark)
+                                [markdownWidget input :: Widget ()]
+                                region)
+                            region
+            headingSpan = find (hasText "Title") (rendered "# Title")
+            quoteSpan = find (containsText "quoted") (rendered ">quoted")
+        fmap spanAttr headingSpan
+            `shouldBe`
+                Just
+                    (attrMapLookup Theme.headingAttr Theme.solarizedDark)
+        fmap spanAttr quoteSpan
+            `shouldBe`
+                Just
+                    (attrMapLookup Theme.mutedAttr Theme.solarizedDark)
+
+    it "preserves nested list indentation and compact blockquotes" do
+        renderRows 40 "- parent\n  - child\n    1. grandchild\n>quote"
+            `shouldBe`
+                [ "• parent"
+                , "  • child"
+                , "    1. grandchild"
+                , "│ quote"
+                ]
+
     it "keeps long unstyled input in one plain span" do
         let input = Text.replicate 10000 "a"
         parseInline input
-            `shouldBe` [InlineSpan InlinePlain input]
+            `shouldBe` [InlineText input]
 
     it "wraps long fenced-code lines inside the available terminal width" do
         let code = Text.replicate 100 "a"
@@ -580,6 +615,13 @@ hasUrl url = \case
     Skip _ -> False
     RowEnd _ -> False
 
+containsText :: Text.Text -> SpanOp -> Bool
+containsText expected = \case
+    TextSpan{textSpanText} ->
+        expected `Text.isInfixOf` LazyText.toStrict textSpanText
+    Skip _ -> False
+    RowEnd _ -> False
+
 hasText :: Text.Text -> SpanOp -> Bool
 hasText expected = \case
     TextSpan{textSpanText} ->
@@ -597,7 +639,9 @@ hasUrlWithStyle :: Text.Text -> V.Style -> SpanOp -> Bool
 hasUrlWithStyle url style = \case
     TextSpan{textSpanAttr} ->
         V.attrURL textSpanAttr == V.SetTo url
-            && V.attrStyle textSpanAttr == V.SetTo style
+            && case V.attrStyle textSpanAttr of
+                V.SetTo actual -> V.hasStyle actual style
+                _ -> False
     Skip _ -> False
     RowEnd _ -> False
 
