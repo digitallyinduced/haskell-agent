@@ -45,7 +45,9 @@ import Agent.CLI.AgentViewport
     , responseItemStepPreviews
     )
 import Agent.CLI.SessionTitle
-    ( SessionTitleResult(..)
+    ( SessionTitleEvent(..)
+    , SessionTitleFailure(..)
+    , SessionTitleResult(..)
     , invalidateSessionTitles
     , requestSessionTitle
     , waitForSessionTitleResults
@@ -2513,7 +2515,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdout title
-      showGeneratedTitle SessionTitleResult{..} =
+      showTitleEvent = \case
+        SessionTitleGenerated SessionTitleResult{..} ->
           case persist of
               PersistenceDisabled -> pure ()
               PersistenceEnabled slotRef ->
@@ -2526,7 +2529,29 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                                       (cliWindowTitle handle.sessionMeta.metaCwd
                                           (Just resultTitle))
                       _ -> pure ()
-  withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
+        SessionTitleFailed SessionTitleFailure{..} ->
+          case persist of
+              PersistenceDisabled -> pure ()
+              PersistenceEnabled slotRef ->
+                  readIORef slotRef >>= \case
+                      PersistenceActive handle
+                          | handle.sessionMeta.metaId == failureSessionId
+                          , not handle.sessionMeta.metaTitleIsManual ->
+                              withMVar ioLock \_ -> do
+                                  let message =
+                                          "session title generation failed: "
+                                              <> failureMessage
+                                  case fullscreen of
+                                      Just runtime ->
+                                          emitUiEvent runtime
+                                              (UiErrorMessage message)
+                                      Nothing -> do
+                                          color <- resolveColor stderr
+                                          putTextLn stderr
+                                              (roleWarn color
+                                                  (glyphWarn <> message))
+                      _ -> pure ()
+  withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
     attachmentsRef <- newIORef []
