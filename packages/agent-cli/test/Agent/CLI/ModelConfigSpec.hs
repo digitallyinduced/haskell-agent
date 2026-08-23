@@ -34,6 +34,13 @@ spec = describe "Agent.CLI.ModelConfig" do
         fmap (.catalogModelId)
             (catalogDefaultForProvider catalog OpenRouterProvider)
             `shouldBe` Just "stealth/ox-alpha"
+        fmap (.catalogModelId)
+            (catalogModelsForConnection "openai" catalog)
+            `shouldBe`
+                [ "gpt-5.6-sol"
+                , "gpt-5.6-terra"
+                , "gpt-5.6-luna"
+                ]
 
     it "adds a custom Responses connection and model" do
         defaults <- readPackagedDefaults

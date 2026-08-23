@@ -38,8 +38,13 @@ spec = do
                 `shouldBe` defaultModelFor catalog OpenRouterProvider
 
 
-        it "ships only the frontier model for each provider" do
-            modelIdsFor OpenAIProvider `shouldBe` ["gpt-5.6-sol"]
+        it "ships the GPT-5.6 series and each other provider frontier model" do
+            modelIdsFor OpenAIProvider
+                `shouldBe`
+                    [ "gpt-5.6-sol"
+                    , "gpt-5.6-terra"
+                    , "gpt-5.6-luna"
+                    ]
             modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
 
