@@ -731,18 +731,21 @@ parseInline = go Nothing []
     inlineMarker character =
         character `elem` ("*_`[" :: String)
 
-    strongSpans = nestedLinkSpans InlineStrong InlineStrongLink
+    strongSpans = nestedStyleSpans InlineStrong InlineStrongLink
 
-    emphasisSpans = nestedLinkSpans InlineEmphasis InlineEmphasisLink
+    emphasisSpans = nestedStyleSpans InlineEmphasis InlineEmphasisLink
 
-    nestedLinkSpans plainStyle linkStyle body =
+    -- Links retain the surrounding style through a combined constructor,
+    -- while code and other semantic child styles override it.
+    nestedStyleSpans plainStyle linkStyle body =
         let spans = parseInline body
-        in if any isLinkSpan spans
+        in if any overridesParentStyle spans
             then map (applyNestedStyle plainStyle linkStyle) spans
             else [InlineSpan plainStyle body]
 
-    isLinkSpan InlineSpan{inlineStyle = InlineLink _} = True
-    isLinkSpan _ = False
+    overridesParentStyle InlineSpan{inlineStyle = InlineLink _} = True
+    overridesParentStyle InlineSpan{inlineStyle = InlineCode} = True
+    overridesParentStyle _ = False
 
     applyNestedStyle plainStyle linkStyle span_ =
         span_
