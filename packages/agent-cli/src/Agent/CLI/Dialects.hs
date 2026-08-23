@@ -5,6 +5,10 @@ module Agent.CLI.Dialects
     , filterBashTools
     , filterChildGrokTools
     , filterGhciTools
+    , isBashTool
+    , isBashToolName
+    , isGhciTool
+    , isGhciToolName
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     ) where
@@ -110,13 +114,25 @@ filterChildGrokTools = filterGrokToolsForType
 
 filterBashTools :: Bool -> [AppTool] -> [AppTool]
 filterBashTools True = id
-filterBashTools False = filter \tool ->
-    tool.appToolName `notElem`
-        ["shell_command", "write_stdin", "run_terminal_cmd"]
+filterBashTools False = filter (not . isBashTool)
 
 filterGhciTools :: Bool -> [AppTool] -> [AppTool]
 filterGhciTools True = id
-filterGhciTools False = filter ((/= "run_ghci") . (.appToolName))
+filterGhciTools False = filter (not . isGhciTool)
+
+isBashTool :: AppTool -> Bool
+isBashTool = isBashToolName . (.appToolName)
+
+isBashToolName :: Text -> Bool
+isBashToolName name =
+    name `elem`
+        ["shell_command", "write_stdin", "run_terminal_cmd"]
+
+isGhciTool :: AppTool -> Bool
+isGhciTool = isGhciToolName . (.appToolName)
+
+isGhciToolName :: Text -> Bool
+isGhciToolName = (== "run_ghci")
 
 formatAgentsMdForDialect :: Dialect -> OsPath -> LoadedAgentsMd -> Maybe Text
 formatAgentsMdForDialect dialect cwd loaded =

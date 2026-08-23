@@ -49,6 +49,16 @@ spec = do
             parseReplLine ":yolo" `shouldBe` ReplToggleAlwaysApprove
             parseReplLine ":always-approve" `shouldBe` ReplToggleAlwaysApprove
 
+        it "shows or selects the runtime shell tools" do
+            parseReplLine "/shell" `shouldBe` ReplShowShell
+            parseReplLine "/shell ghci" `shouldBe` ReplSetShell ShellGhci
+            parseReplLine "/shell BASH" `shouldBe` ReplSetShell ShellBash
+            parseReplLine "/shell both" `shouldBe` ReplSetShell ShellBoth
+            parseReplLine "/shell none" `shouldBe` ReplSetShell ShellNone
+            parseReplLine "/shell fish"
+                `shouldBe` ReplCommandError
+                    "usage: /shell [ghci|bash|both|none]"
+
         it "rejects extra args on /always-approve" do
             parseReplLine "/always-approve now"
                 `shouldBe` ReplCommandError "usage: /always-approve"
@@ -228,6 +238,7 @@ spec = do
                     , "terminal"
                     , "agents"
                     , "skills"
+                    , "shell"
                     , "always-approve"
                     ]
 
@@ -272,6 +283,8 @@ spec = do
                 `shouldBe` ["qwen-local"]
             slashCompletionCandidates "emaner/" "-"
                 `shouldBe` ["--auto"]
+            slashCompletionCandidates "llehs/" "b"
+                `shouldBe` ["bash", "both"]
 
         it "does not complete ordinary prompts" do
             slashCompletionCandidates "" "help" `shouldBe` []
