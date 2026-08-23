@@ -144,6 +144,11 @@ billing fallback. Built-in connection names (`openai`, `xai`, and
 `openrouter`) are reserved. A malformed catalog is reported at startup with
 the file and invalid field instead of being silently ignored.
 
+The built-in `add-model` skill handles requests such as “use the model running
+at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
+Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
+naturally and let the agent activate it.
+
 ### Authentication
 
 Works with your Codex subscription, Grok subscription, and provider API keys.

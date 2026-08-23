@@ -67,7 +67,8 @@ data SkillOrigin
     deriving (Eq, Ord, Show)
 
 data SkillScope
-    = UserSkill
+    = BuiltinSkill
+    | UserSkill
     | RepositorySkill
         { skillDepth :: !Int
         , skillAtCwd :: !Bool
@@ -113,6 +114,7 @@ data SkillDiscoverOptions = SkillDiscoverOptions
     , skillsProjectRoot :: !OsPath
     , skillsCwd :: !OsPath
     , skillsMaxDepth :: !Int
+    , skillsBuiltinRoots :: ![(SkillOrigin, OsPath)]
     } deriving (Eq, Show)
 
 data SkillInvocation = SkillInvocation
@@ -236,7 +238,11 @@ skillRoots options = do
             [ (UserSkill, origin, home </> userRoot origin)
             | origin <- origins
             ]
-    pure (projectRoots <> userRoots)
+        builtinRoots =
+            [ (BuiltinSkill, origin, unsafeToFilePath root)
+            | (origin, root) <- options.skillsBuiltinRoots
+            ]
+    pure (projectRoots <> userRoots <> builtinRoots)
   where
     origins = [AgentSkills, GrokSkills, CodexSkills]
     relativeRoot = \case
@@ -391,6 +397,7 @@ skillSortKey skill =
     )
   where
     (scopeRank, depth) = case skill.skillScope of
+        BuiltinSkill -> (-1, 0)
         UserSkill -> (0, 0)
         RepositorySkill d _ -> (1, d)
     originRank = case skill.skillOrigin of
@@ -461,6 +468,7 @@ qualifiedInvocation name siblings index skill =
 
 scopeQualifier :: Skill -> Text
 scopeQualifier skill = case skill.skillScope of
+    BuiltinSkill -> "builtin"
     UserSkill -> "user"
     RepositorySkill _ True -> "local"
     RepositorySkill _ False -> "repo"

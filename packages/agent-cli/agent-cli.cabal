@@ -12,6 +12,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 data-files:         config/models.default.json
+                  , skills/add-model/SKILL.md
 
 common common-options
     default-language: GHC2021
