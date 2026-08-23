@@ -251,4 +251,3 @@ exceptionText = Text.pack . displayException
 
 encodeJson :: Value -> Text
 encodeJson = Text.decodeUtf8 . LBS.toStrict . Aeson.encode
-

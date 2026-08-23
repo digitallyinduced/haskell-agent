@@ -153,6 +153,32 @@ naturally and let the agent activate it.
 
 Works with your Codex subscription, Grok subscription, and provider API keys.
 
+### Local MCP servers
+
+Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "seo-mcp": {
+      "command": "nix",
+      "args": ["run", "/absolute/path/to/seo-mcp"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/credentials.json"
+      },
+      "startupTimeoutSeconds": 120,
+      "requestTimeoutSeconds": 60
+    }
+  }
+}
+```
+
+The harness starts enabled servers once per root session and shares their tools
+with subagents. MCP tool names are preserved, so they must not collide with
+built-in or other configured tools. Only tools explicitly annotated
+`readOnlyHint: true` are exposed.
+
 ### Secret entry
 
 Interactive root agents can request API keys and tokens with the built-in
