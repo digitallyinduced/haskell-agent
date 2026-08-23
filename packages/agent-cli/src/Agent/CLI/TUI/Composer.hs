@@ -26,10 +26,6 @@ module Agent.CLI.TUI.Composer
     , wrapDraft
     ) where
 
-import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
-    , readClipboardImages
-    )
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
@@ -142,6 +138,7 @@ isPromptPrelude :: FullscreenInput -> Bool
 isPromptPrelude input =
     case input.fullscreenInputLine of
         ReplClipboardPaste _ _ -> True
+        ReplClipboardPasteOrText _ _ -> True
         _ -> False
 
 takeFullscreenInput
@@ -780,15 +777,15 @@ handleComposerKey
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
-            images <- liftIO $
-                nonEmptyClipboardImages <$> readClipboardImages
-            case images of
-                Just attached ->
-                    submitRaw
-                        (ReplClipboardPaste ui.uiDraft (Just attached))
-                Nothing -> do
-                    insertText (decodePaste bytes)
-                    modify' \current -> current { appPasted = True }
+            let pasted = decodePaste bytes
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            modifyUi
+                (UiSetNotice
+                    (Just (progressNotice "Reading clipboard…")))
+            submitRaw
+                (ReplClipboardPasteOrText ui.uiDraft pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do

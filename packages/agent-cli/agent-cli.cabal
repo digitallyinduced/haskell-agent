@@ -226,3 +226,15 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+
+benchmark image-preview-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ImagePreviewLatency.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-cli
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , JuicyPixels

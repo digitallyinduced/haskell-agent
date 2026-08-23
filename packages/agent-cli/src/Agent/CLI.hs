@@ -71,8 +71,10 @@ import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
     , loadImagesFromPastedText
+    , nonEmptyClipboardImages
     , readClipboard
     , readClipboardImages
+    , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
 import Agent.CLI.Compaction
@@ -3146,6 +3148,7 @@ replWithDraft env@SessionEnv
                         (isNothing fullscreen)
                         images
                     syncFullscreenImagePreviews
+                    fullscreenEvent (UiSetNotice Nothing)
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted stdoutColor
@@ -3168,6 +3171,26 @@ replWithDraft env@SessionEnv
                                         (roleMuted stdoutColor
                                             (glyphOk <> message))
             continueWith keptDraft
+        ReplClipboardPasteOrText keptDraft pastedDraft -> do
+            imagesResult <- readClipboardImagesImageFirst
+            case nonEmptyClipboardImages imagesResult of
+                Just images -> do
+                    message <- queueAttachedImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        images
+                    syncFullscreenImagePreviews
+                    fullscreenEvent (UiSetNotice Nothing)
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted stdoutColor
+                                (glyphOk <> message))
+                    continueWith keptDraft
+                Nothing -> do
+                    fullscreenEvent (UiSetNotice Nothing)
+                    continueWith pastedDraft
         ReplChooseModel keptDraft ->
             chooseModel keptDraft (continueWith keptDraft)
         ReplChooseEffort keptDraft ->

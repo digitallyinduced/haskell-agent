@@ -58,11 +58,15 @@ spec = describe "fullscreen composer" do
             appendFullscreenInput
                 buffer
                 (input (ReplClipboardPaste "draft" Nothing))
+            appendFullscreenInput
+                buffer
+                (input (ReplClipboardPasteOrText "before" "before/path.png"))
             promoteFullscreenInput buffer (input (ReplText "urgent"))
         queued <- atomically (readFullscreenInputs buffer)
         map (.fullscreenInputLine) (toList queued)
             `shouldBe`
                 [ ReplClipboardPaste "draft" Nothing
+                , ReplClipboardPasteOrText "before" "before/path.png"
                 , ReplText "urgent"
                 , ReplText "queued"
                 ]

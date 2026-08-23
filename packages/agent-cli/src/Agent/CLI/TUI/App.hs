@@ -136,6 +136,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
+import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -347,8 +348,31 @@ setFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
     -> IO ()
-setFullscreenImagePreviews runtime =
-    enqueueAppEvent runtime . AppSetImagePreviews
+setFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else do
+                let next =
+                        mapMaybe
+                            (\image ->
+                                case prepareTuiImagePreview image of
+                                    Left _ -> Nothing
+                                    Right preview -> Just (image, preview))
+                            images
+                -- ANSI previews force the sampled image during Brick drawing.
+                -- Build that sample here on the model worker instead of
+                -- stalling the Brick event/render thread.
+                unless runtime.runtimeNativeImagePreviews $
+                    mapM_
+                        (\(_, preview) ->
+                            void $
+                                pure $!
+                                    pixelAt preview.previewSample 0 0)
+                        next
+                pure next
+    enqueueAppEvent runtime (AppSetImagePreviews prepared)
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -3280,22 +3304,13 @@ handleEventInner event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
-    AppEvent (AppSetImagePreviews images) ->
+    AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
             previous <-
                 liftIO $
                     readIORef state.appRuntime.runtimeImagePreviews
-            let unchanged = map fst previous == images
-                prepared
-                    | unchanged = previous
-                    | otherwise =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
+            let unchanged = map fst previous == map fst prepared
             liftIO do
                 when (not unchanged) do
                     writeIORef
