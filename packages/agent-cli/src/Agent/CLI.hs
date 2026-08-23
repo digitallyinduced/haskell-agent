@@ -198,6 +198,7 @@ import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
+    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     )
@@ -493,6 +494,7 @@ import Text.Printf (printf)
 import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
+    , addUTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
@@ -3314,32 +3316,57 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    let waitMessage =
-            "provider credentials temporarily unavailable; retrying this turn in "
-                <> formatDuration delay
-                <> " (Esc to cancel)"
-    case env.sessionFullscreen of
-        Just runtime ->
-            emitUiEvent runtime
-                (UiSetNotice (Just (warningNotice waitMessage)))
-        Nothing -> do
-            color <- resolveColor stderr
-            putTextLn stderr $
-                roleWarn color (glyphWarn <> waitMessage)
     let cancel = env.sessionLoop.loopCancel
-        -- Give the provider reset boundary a small margin so the automatic
-        -- retry does not race a rounded server timestamp.
-        waitMicros = max 1 (ceiling ((realToFrac delay + 0.25) * 1_000_000 :: Double))
-        waitForCancel =
-            isJust <$> timeout waitMicros (waitCancel cancel)
+        renderCountdown seconds =
+            let message = automaticRetryCountdownText seconds
+            in case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSetNotice (Just (progressNotice message)))
+                Nothing ->
+                    renderEvent env.sessionRender (ActivityUpdated message)
+        waitForCancel = do
+            startedAt <- getCurrentTime
+            let retryAt = addUTCTime (max 0 delay) startedAt
+                poll lastShown = do
+                    now <- getCurrentTime
+                    let remaining = max 0 (diffUTCTime retryAt now)
+                        seconds = max 0 (ceiling remaining)
+                    when (lastShown /= Just seconds) (renderCountdown seconds)
+                    if remaining <= 0
+                        then do
+                            -- Give the provider reset boundary a small margin
+                            -- so the retry does not race a rounded timestamp.
+                            isJust <$> timeout 250000 (waitCancel cancel)
+                        else do
+                            let waitMicros =
+                                    max 1 $
+                                        min 1000000
+                                            (ceiling
+                                                (realToFrac remaining
+                                                    * 1_000_000
+                                                    :: Double))
+                            cancelled <-
+                                isJust <$> timeout waitMicros (waitCancel cancel)
+                            if cancelled
+                                then pure True
+                                else poll (Just seconds)
+            poll Nothing
         waitAction = case env.sessionFullscreen of
             Just _ -> waitForCancel
             Nothing ->
                 withEscCancel cancel env.sessionEscPaused waitForCancel
     resetCancel cancel
+    case env.sessionFullscreen of
+        Just _ -> pure ()
+        Nothing -> renderEvent env.sessionRender TurnStarted
     cancelled <-
         (withTurnCancel env.sessionInterrupt cancel waitAction)
-            `finally` resetCancel cancel
+            `finally` do
+                resetCancel cancel
+                case env.sessionFullscreen of
+                    Just _ -> pure ()
+                    Nothing -> clearThinking env.sessionRender
     if cancelled
         then do
             case env.sessionFullscreen of

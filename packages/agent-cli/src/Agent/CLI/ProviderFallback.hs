@@ -2,6 +2,7 @@
 module Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
+    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
@@ -13,6 +14,8 @@ import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Data.List (nubBy, sortOn)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
 
 -- | Keep brief provider cooldowns invisible to the user when no fallback
@@ -42,6 +45,15 @@ automaticCooldownRetryDelay now = \case
             then Just delay
             else Nothing
     _ -> Nothing
+
+-- | Live status text for a brief automatic provider retry. Keep the remaining
+-- time in seconds so a one-minute cooldown visibly counts down instead of
+-- staying at the coarser "1m" duration for most of the wait.
+automaticRetryCountdownText :: Int -> Text
+automaticRetryCountdownText rawSeconds =
+    "Provider temporarily unavailable; retrying automatically in "
+        <> Text.pack (show (max 0 rawSeconds))
+        <> "s · Esc to cancel"
 
 -- | Curated models ordered from strongest to weakest for automatic selection.
 --
