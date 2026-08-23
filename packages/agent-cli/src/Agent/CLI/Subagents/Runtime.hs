@@ -547,6 +547,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         codexDialect
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
+                        Nothing
                         (Just prepared.preparedMultiContext)
                 syncStoreRootFromPlan
                     runtime.subagentStoreRoot
@@ -653,6 +654,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         childDialect
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
+                        Nothing
                         (Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime

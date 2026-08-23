@@ -1,6 +1,7 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
     ( defaultModelFor
+    , secretInputGuidance
     , sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
@@ -69,6 +70,7 @@ systemPromptForTools
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
+            , secretInputGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
@@ -102,6 +104,20 @@ sessionTempGuidance = \case
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
             , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands."
+            ]
+
+-- | Keep sensitive values outside model-visible text and tool arguments when
+-- the host exposes the dedicated secret-entry capability.
+secretInputGuidance :: [Text] -> Text
+secretInputGuidance available
+    | "ask_secret" `notElem` available = ""
+    | otherwise =
+        Text.unlines
+            [ "Secret handling:"
+            , "- Never ask the user to paste a token, API key, password, or other secret into chat or a normal tool argument."
+            , "- Use ask_secret to request sensitive values. It returns a private temporary file path, never the secret value."
+            , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
+            , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.
