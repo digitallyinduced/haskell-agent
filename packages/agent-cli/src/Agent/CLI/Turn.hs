@@ -267,7 +267,7 @@ runOneTurn env@SessionEnv
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
             restorePlanStateAfterIncomplete planMode initialPlanState
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 130 "Agent cancelled"
+                terminal wallStarted finishedAt 130 Nothing
             abortSubagentTurn rootTurnId
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
@@ -289,7 +289,7 @@ runOneTurn env@SessionEnv
                     putTextLn stderr
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete checkpoint.checkpointTurnItems "cancelled"
-            pure TurnSucceeded
+            pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
@@ -305,7 +305,7 @@ runOneTurn env@SessionEnv
                                     (UiTurnEnded BlockFailed)
                         finishTerminal (isNothing fullscreen)
                             terminal wallStarted finishedAt 1
-                            "Agent provider unavailable"
+                            (Just "Agent provider unavailable")
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
@@ -316,7 +316,8 @@ runOneTurn env@SessionEnv
                 _ -> do
                     restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
-                        terminal wallStarted finishedAt 1 "Agent turn failed"
+                        terminal wallStarted finishedAt 1
+                        (Just "Agent turn failed")
                     let checkpoint =
                             checkpointIncompleteTurn beforeItems turnInputs
                     writeIORef transcriptRef checkpoint.checkpointTranscript
@@ -344,7 +345,7 @@ runOneTurn env@SessionEnv
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 0 "Agent finished"
+                terminal wallStarted finishedAt 0 (Just "Agent finished")
             finishSubagentTurn rootTurnId
             writeIORef previous (Just loopResult.finalResponseId)
             modifyIORef' usageRef (`addTokenUsage` loopResult.tokenUsage)
@@ -504,15 +505,18 @@ finishTerminal
     -> UTCTime
     -> UTCTime
     -> Int
-    -> Text
+    -> Maybe Text
     -> IO ()
-finishTerminal semanticPrompts terminal started finished exitCode message = do
+finishTerminal semanticPrompts terminal started finished exitCode notification = do
     when (semanticPrompts && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout
             (osc133CommandFinished (Just exitCode))
     let seconds = realToFrac (diffUTCTime finished started) :: Double
-    when (exitCode /= 0 || seconds >= 10) $
-        notifyTerminal terminal stdout message
+    case notification of
+        Just message
+            | exitCode /= 0 || seconds >= 10 ->
+                notifyTerminal terminal stdout message
+        _ -> pure ()
 
 handleProposedPlan
     :: PlanModeEnv

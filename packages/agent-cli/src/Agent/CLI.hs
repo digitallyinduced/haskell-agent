@@ -2886,6 +2886,13 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         if exitAfter
             then pure RunQuit
             else continueAfterTurn env
+    TurnCancelled -> do
+        case env.sessionFullscreen of
+            Nothing -> putTrailingNewline env.sessionPrinted
+            Just _ -> pure ()
+        if exitAfter
+            then pure RunQuit
+            else repl env
     TurnFailed ->
         if exitAfter
             then exitFailure
