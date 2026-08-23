@@ -8,15 +8,22 @@ import Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceClosesOnUiTransition
     , elapsedMillisSince
     , fullscreenVtyConfig
     , motionDemandFor
+    , lambdaArtWidget
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
     , repositoryHeaderText
+    , resumeSearchCursorColumn
     , selectedAgentConversation
     , uiEventRestartsMotionSchedule
+    )
+import Agent.CLI.TUI.Types
+    ( ChoiceOverlay(..)
+    , ChoicePresentation(..)
     )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
@@ -41,6 +48,60 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "choice overlay lifecycle" do
+        it "closes a running-turn choice on success or cancellation" do
+            let running =
+                    reduceUi (UiLoop TurnStarted) initialUiState
+                finished =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    []
+                                    Nothing)))
+                        running
+                cancelled =
+                    reduceUi (UiTurnEnded BlockCancelled) running
+            choiceClosesOnUiTransition
+                running
+                finished
+                (choiceOverlay True)
+                `shouldBe` True
+            choiceClosesOnUiTransition
+                running
+                cancelled
+                (choiceOverlay True)
+                `shouldBe` True
+
+        it "preserves ordinary choices and continuing tool rounds" do
+            let running =
+                    reduceUi (UiLoop TurnStarted) initialUiState
+                call =
+                    functionToolCall
+                        "tool-1"
+                        "shell_command"
+                        "{\"command\":\"true\"}"
+                continuing =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    [call]
+                                    Nothing)))
+                        running
+            choiceClosesOnUiTransition
+                running
+                (reduceUi (UiTurnEnded BlockCancelled) running)
+                (choiceOverlay False)
+                `shouldBe` False
+            choiceClosesOnUiTransition
+                running
+                continuing
+                (choiceOverlay True)
+                `shouldBe` False
+
     describe "prompt model refresh" do
         it "preserves the live draft and cursor across a provider restart" do
             let before =
@@ -83,6 +144,21 @@ spec = do
         it "still renders a path when git state is unavailable" do
             repositoryHeaderText "" "~/scratch"
                 `shouldBe` "~/scratch"
+
+    describe "bounded custom rendering" do
+        it "crops the empty-conversation art to tiny render contexts" do
+            let image =
+                    V.picImage $
+                        renderWidget Nothing [lambdaArtWidget 0] (5, 3)
+            V.imageWidth image `shouldSatisfy` (<= 5)
+            V.imageHeight image `shouldSatisfy` (<= 3)
+
+    describe "resume search cursor" do
+        it "uses terminal cells for wide and combining characters" do
+            resumeSearchCursorColumn "search: " "漢"
+                `shouldBe` 10
+            resumeSearchCursorColumn "search: " "e\x0301"
+                `shouldBe` 9
 
     describe "onboarding layout" do
         it "uses the complete 18-row surface when it fits" do
@@ -373,6 +449,16 @@ spec = do
                 `shouldBe` Map.singleton (BlockId 7) 1
             advanceCompletionFlashes 400 active
                 `shouldBe` Map.empty
+
+choiceOverlay :: Bool -> ChoiceOverlay
+choiceOverlay closeOnTurnEnd = ChoiceOverlay
+    { choicePresentation = ChoiceDialog
+    , choiceTitle = "choice"
+    , choiceBody = ""
+    , choiceIndex = 0
+    , choiceRows = [("one", "")]
+    , choiceCloseOnTurnEnd = closeOnTurnEnd
+    }
 
 rootEntry :: AgentEntry
 rootEntry = AgentEntry

@@ -6,6 +6,12 @@
 OpenRouter models with first-class GHCi integration and a runtime designed
 around types, pure functions, explicit effects, and composable concurrency.
 
+## Try it out
+
+```console
+nix run github:digitallyinduced/haskell-agent
+```
+
 ## What is distinctive
 
 Most agent harnesses are effectively untyped imperative programming
@@ -50,19 +56,13 @@ persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
 web search, and interactive terminal interfaces. Those are important product
 features, but not the core differentiation.
 
-## Try it out
-
-```console
-nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
-```
-
 ## Install
 
-Install [Nix](https://nixos.org/download/) with flakes enabled, make sure your
-GitHub SSH access is configured, then install `haskell-agent`:
+Install [Nix](https://nixos.org/download/) with flakes enabled, then install
+`haskell-agent`:
 
 ```console
-nix profile add "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+nix profile add github:digitallyinduced/haskell-agent
 ```
 
 ## Run

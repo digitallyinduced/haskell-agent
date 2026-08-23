@@ -73,6 +73,7 @@ library
                     , Agent.Tools.Grok.Common
                     , Agent.Tools.Grok.Grep
                     , Agent.Tools.Grok.ListDir
+                    , Agent.Tools.Grok.Monitor
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.ReadFile
                     , Agent.Tools.Grok.SearchReplace
@@ -80,6 +81,7 @@ library
                     , Agent.Tools.Grok.Task
                     , Agent.Tools.Grok.TaskControl
                     , Agent.Tools.Grok.Terminal
+                    , Agent.Tools.Grok.Todo
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime

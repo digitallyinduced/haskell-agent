@@ -27,7 +27,7 @@ import Agent.CLI.Input
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.Markdown (renderMarkdown)
 import Agent.CLI.Notification
-    ( AttentionRequest(InputRequested)
+    ( AttentionRequest(InputRequested, PlanModeRequested)
     , notifyAttention
     )
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
@@ -95,7 +95,7 @@ confirmEnter resolveColor reason = do
     if not isTty
         then pure False
         else do
-            notifyAttention stderr InputRequested
+            notifyAttention stderr PlanModeRequested
             result <-
                 runOverlay
                     (renderPlanEnterFrame color)
@@ -222,6 +222,10 @@ readChangeNotes interrupt color = do
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
+        ReplClipboardPasteOrText _ text ->
+            if Text.null (Text.strip text)
+                then readChangeNotes interrupt color
+                else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
             readChangeNotes interrupt color
@@ -259,6 +263,10 @@ askQuestion interrupt resolveColor question options = do
                                 then pure Nothing
                                 else pure (Just (Text.strip text))
                         ReplClipboardPaste text _ ->
+                            if Text.null (Text.strip text)
+                                then askQuestion interrupt resolveColor question []
+                                else pure (Just (Text.strip text))
+                        ReplClipboardPasteOrText _ text ->
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))

@@ -141,6 +141,20 @@ executable agent-cli
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
+benchmark subagent-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SubagentRetention.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-responses
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , containers
+                    , text
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -208,6 +222,7 @@ test-suite agent-cli-test
                     , agent-xai
                     , aeson
                     , ansi-terminal
+                    , async
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , bytestring
@@ -226,3 +241,15 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+
+benchmark image-preview-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ImagePreviewLatency.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-cli
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , JuicyPixels

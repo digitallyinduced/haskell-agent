@@ -130,6 +130,10 @@ data ReplLine
     | ReplPasted Text
     -- | Attach a native clipboard image while keeping the current draft.
     | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
+    -- | Classify a bracketed paste off the UI thread. If the clipboard contains
+    -- an image, attach it and keep the original draft; otherwise restore the
+    -- supplied draft with the pasted terminal text inserted.
+    | ReplClipboardPasteOrText !Text !Text
     | ReplCycleMode Text
     -- ^ Shift+Tab: cycle idle mode and keep the current draft.
     | ReplChooseModel Text

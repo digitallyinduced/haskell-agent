@@ -21,6 +21,22 @@ spec = describe "buildStreamResponse" do
         [name | FunctionCallItem FunctionCall { name } <- response.output]
             `shouldBe` ["echo"]
 
+    it "assembles a partial response.done after a function call" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-done\",\"created_at\":0,\"model\":\"test\",\"status\":\"in_progress\",\"output\":[]}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-done\",\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"echo done\\\"}\"}}"
+            , sseBlock "response.done"
+                "{\"type\":\"response.done\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}"
+            ]
+        response <- expectRight (buildStreamResponse config events)
+        response.responseId `shouldBe` "resp-done"
+        response.status `shouldBe` ResponseCompleted
+        fmap (.totalTokens) response.usage `shouldBe` Just 12
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["shell_command"]
+
     it "uses provider classifiers when no terminal response is present" do
         streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"
             "{\"type\":\"error\",\"error\":{\"message\":\"stream broke\"}}"

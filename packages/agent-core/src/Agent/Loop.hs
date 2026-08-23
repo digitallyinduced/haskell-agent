@@ -42,6 +42,7 @@ import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
+import Data.Maybe (catMaybes, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -306,13 +307,16 @@ runToolCalls config = go
                             ((== ParallelSafe)
                                 . toolExecutionPolicyFor config.loopTools)
                             calls
-                prepared <- traverse (prepareToolCall config) batch
+                prepared <- prepareToolCalls config batch
                 batchResults <-
-                    mapConcurrently (runPreparedToolCall config) prepared
+                    catMaybes
+                        <$> mapConcurrently
+                            (runPreparedToolCall config)
+                            prepared
                 continue batchResults remaining
             TurnSequential -> do
                 result <- runOne config call
-                continue [result] rest
+                continue (maybeToList result) rest
 
     continue completed remaining = do
         cancelled <- isCancelled config.loopCancel
@@ -328,7 +332,20 @@ data ToolApproval
 data PreparedToolCall =
     PreparedToolCall !ToolCall !ToolApproval
 
-runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
+prepareToolCalls :: LoopConfig -> [ToolCall] -> IO [PreparedToolCall]
+prepareToolCalls _ [] = pure []
+prepareToolCalls config (call : rest) = do
+    cancelled <- isCancelled config.loopCancel
+    if cancelled
+        then pure []
+        else do
+            prepared <- prepareToolCall config call
+            cancelledAfter <- isCancelled config.loopCancel
+            if cancelledAfter
+                then pure []
+                else (prepared :) <$> prepareToolCalls config rest
+
+runOne :: LoopConfig -> ToolCall -> IO (Maybe ToolCallResult)
 runOne config call =
     prepareToolCall config call >>= runPreparedToolCall config
 
@@ -347,31 +364,35 @@ prepareToolCall config call = do
 runPreparedToolCall
     :: LoopConfig
     -> PreparedToolCall
-    -> IO ToolCallResult
+    -> IO (Maybe ToolCallResult)
 runPreparedToolCall config (PreparedToolCall call approval) = do
-    config.loopOnEvent (ToolStarted call)
-    result <- case approval of
-        ToolApprovalDenied denial ->
-            pure ToolCallResult
-                { callId = call.callId
-                , output = denial
-                , callKind = call.callKind
-                }
-        ToolApprovalRejected ->
-            pure ToolCallResult
-                { callId = call.callId
-                , output = "Tool call rejected by user."
-                , callKind = call.callKind
-                }
-        ToolApprovalGranted ->
-            dispatchRegisteredToolCall
-                config.loopDispatch
-                    { toolDispatchOnOutput = \progressCall output ->
-                        config.loopDispatch.toolDispatchOnOutput progressCall output
-                            >> config.loopOnEvent
-                                (ToolOutputUpdated progressCall.callId output)
-                    }
-                config.loopTools
-                call
-    config.loopOnEvent (ToolFinished result)
-    pure result
+    cancelled <- isCancelled config.loopCancel
+    if cancelled
+        then pure Nothing
+        else do
+            config.loopOnEvent (ToolStarted call)
+            result <- case approval of
+                ToolApprovalDenied denial ->
+                    pure ToolCallResult
+                        { callId = call.callId
+                        , output = denial
+                        , callKind = call.callKind
+                        }
+                ToolApprovalRejected ->
+                    pure ToolCallResult
+                        { callId = call.callId
+                        , output = "Tool call rejected by user."
+                        , callKind = call.callKind
+                        }
+                ToolApprovalGranted ->
+                    dispatchRegisteredToolCall
+                        config.loopDispatch
+                            { toolDispatchOnOutput = \progressCall output ->
+                                config.loopDispatch.toolDispatchOnOutput progressCall output
+                                    >> config.loopOnEvent
+                                        (ToolOutputUpdated progressCall.callId output)
+                            }
+                        config.loopTools
+                        call
+            config.loopOnEvent (ToolFinished result)
+            pure (Just result)

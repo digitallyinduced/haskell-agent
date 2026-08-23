@@ -304,6 +304,11 @@ assistantTextFromResponse response = case
 
 streamEventToLoopEvent :: ResponseStreamEvent -> Maybe LoopEvent
 streamEventToLoopEvent = \case
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown eventType } ->
+            Just
+                (ActivityUpdated
+                    ("Warning: unsupported provider event " <> eventType))
     OtherResponseStreamEvent { otherEventType, eventExtraFields } ->
         case extraDeltaText eventExtraFields of
             Just text -> case otherEventType of

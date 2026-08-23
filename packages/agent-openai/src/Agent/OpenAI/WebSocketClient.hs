@@ -26,6 +26,7 @@ import Agent.Error
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.Responses.ResponseMerge (mergeCompletedResponseOutput)
+import Agent.Responses.StreamAssembly (assembleDoneResponse)
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
@@ -369,15 +370,16 @@ buildWsPayloadWithOptions options request previousResponseId =
 
 -- | Receive typed WebSocket events until the response is complete.
 -- Accumulates output items from 'ResponseOutputItemDoneEvent' values and
--- returns the response carried by 'ResponseCompletedEvent'.
+-- returns the response carried by a terminal response event.
 receiveWsResponse :: WebSocket.WebSocketRequest -> StreamEventCallback -> IO (Either ApiError Response)
 receiveWsResponse cc onEvent = do
     itemsRef <- newIORef ([] :: [Aeson.Value])
+    lifecycleResponseRef <- newIORef (Nothing :: Maybe Response)
     framesRef <- newIORef (0 :: Int)
     bytesRef <- newIORef (0 :: Int64)
-    loop itemsRef framesRef bytesRef
+    loop itemsRef lifecycleResponseRef framesRef bytesRef
   where
-    loop itemsRef framesRef bytesRef = do
+    loop itemsRef lifecycleResponseRef framesRef bytesRef = do
         msgResult <- WebSocket.receiveWebSocketData cc
         case msgResult of
             Left e -> do
@@ -407,13 +409,36 @@ receiveWsResponse cc onEvent = do
 
                             ResponseOutputItemDoneEvent { item } -> do
                                 modifyIORef' itemsRef (Aeson.toJSON item :)
-                                loop itemsRef framesRef bytesRef
+                                loop itemsRef lifecycleResponseRef framesRef bytesRef
+
+                            ResponseCreatedEvent { response } -> do
+                                writeIORef lifecycleResponseRef (Just response)
+                                loop itemsRef lifecycleResponseRef framesRef bytesRef
+
+                            ResponseInProgressEvent { response } -> do
+                                writeIORef lifecycleResponseRef (Just response)
+                                loop itemsRef lifecycleResponseRef framesRef bytesRef
+
+                            ResponseQueuedEvent { response } -> do
+                                writeIORef lifecycleResponseRef (Just response)
+                                loop itemsRef lifecycleResponseRef framesRef bytesRef
 
                             ResponseCompletedEvent { response } -> do
                                 items <- reverse <$> readIORef itemsRef
                                 logStreamStats "completed" itemsRef framesRef bytesRef
                                 WebSocket.completeWebSocketRequest cc
                                 parseCompletedResponse items (Aeson.toJSON response)
+
+                            ResponseDoneEvent { responseValue } -> do
+                                items <- reverse <$> readIORef itemsRef
+                                lifecycleResponse <- readIORef lifecycleResponseRef
+                                logStreamStats "done" itemsRef framesRef bytesRef
+                                WebSocket.completeWebSocketRequest cc
+                                pure $
+                                    assembleDoneResponse
+                                        lifecycleResponse
+                                        items
+                                        responseValue
 
                             ResponseIncompleteEvent { response } -> do
                                 items <- reverse <$> readIORef itemsRef
@@ -426,9 +451,9 @@ receiveWsResponse cc onEvent = do
                                 WebSocket.completeWebSocketRequest cc
                                 pure $ Left (failedResponseError response)
 
-                            -- Ignore other event variants (created, added,
-                            -- content deltas, and future event types).
-                            _ -> loop itemsRef framesRef bytesRef
+                            -- Ignore other event variants (added, content
+                            -- deltas, and future event types).
+                            _ -> loop itemsRef lifecycleResponseRef framesRef bytesRef
 
     recordFrame :: IORef Int -> IORef Int64 -> LBS.ByteString -> IO ()
     recordFrame framesRef bytesRef msgBytes = do

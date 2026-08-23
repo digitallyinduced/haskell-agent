@@ -47,6 +47,66 @@ spec = describe "schemasFromAppTools" do
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "projects current Grok Build public tool and parameter names" do
+        let task = jsonAppTool "task"
+                "Use `task`, then get_task_output or kill_task."
+                [ PropertySchema "prompt" PropertyString True Nothing
+                , PropertySchema "run_in_background" PropertyBoolean False
+                    (Just "Use get_task_output after run_in_background=true.")
+                ]
+                AlwaysPrompt
+                (noArgsTool "task" (pure (Right "ok")))
+            terminal = jsonAppTool "run_terminal_cmd"
+                "Run with run_terminal_cmd."
+                []
+                AlwaysPrompt
+                (noArgsTool "run_terminal_cmd" (pure (Right "ok")))
+            getOutput = testTool "get_task_output"
+            waitTasks = testTool "wait_tasks"
+            killTask = testTool "kill_task"
+        case schemasFromAppTools grokBuildDialect
+            [terminal, task, getOutput, waitTasks, killTask] of
+            [ _
+                , FunctionToolValue terminalTool
+                , FunctionToolValue taskTool
+                , FunctionToolValue getOutputTool
+                , FunctionToolValue waitTasksTool
+                , FunctionToolValue killTaskTool
+                ] -> do
+                terminalTool.name `shouldBe` "run_terminal_command"
+                terminalTool.description
+                    `shouldBe` Just "Run with run_terminal_command."
+                taskTool.name `shouldBe` "spawn_subagent"
+                getOutputTool.name `shouldBe` "get_command_or_subagent_output"
+                waitTasksTool.name `shouldBe` "wait_commands_or_subagents"
+                killTaskTool.name `shouldBe` "kill_command_or_subagent"
+                taskTool.description `shouldBe`
+                    Just
+                        "Use `spawn_subagent`, then get_command_or_subagent_output or kill_command_or_subagent."
+                Just (Aeson.Object parameters) <- pure taskTool.parameters
+                Just (Aeson.Object properties) <-
+                    pure (KeyMap.lookup "properties" parameters)
+                KeyMap.member "background" properties `shouldBe` True
+                KeyMap.member "run_in_background" properties `shouldBe` False
+                Just (Aeson.Object background) <-
+                    pure (KeyMap.lookup "background" properties)
+                KeyMap.lookup "description" background `shouldBe`
+                    Just
+                        (Aeson.String
+                            "Use get_command_or_subagent_output after background=true.")
+            other -> expectationFailure
+                ("expected projected Grok tools, got " <> show other)
+
+    it "keeps internal tool names for non-Grok dialects" do
+        let task = testTool "task"
+            terminal = testTool "run_terminal_cmd"
+        case schemasFromAppTools codexDialect [terminal, task] of
+            [_, FunctionToolValue terminalTool, FunctionToolValue taskTool] -> do
+                terminalTool.name `shouldBe` "run_terminal_cmd"
+                taskTool.name `shouldBe` "task"
+            other -> expectationFailure
+                ("expected stable internal tool names, got " <> show other)
+
     it "builds a loose grok-build function tool for xAI" do
         case schemasFromAppTools grokBuildDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
@@ -177,6 +237,11 @@ patchTool =
     freeformApplyPatchAppTool
         "apply_patch" "Apply a patch." AlwaysPrompt
         (noArgsTool "apply_patch" (pure (Right "ok")))
+
+testTool :: Text -> AppTool
+testTool name =
+    jsonAppTool name ("Use " <> name <> ".") [] AlwaysPrompt
+        (noArgsTool name (pure (Right "ok")))
 
 waitAgentObject :: Aeson.Value -> Maybe Aeson.Object
 waitAgentObject (Aeson.Object tool)

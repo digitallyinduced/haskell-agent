@@ -1,6 +1,7 @@
 -- | Watch stdin for a bare Esc during an agent turn and soft-cancel.
 module Agent.CLI.CancelWatch
-    ( withEscCancel
+    ( drainEscapeContinuation
+    , withEscCancel
     , withStdinPaused
     , isBareEscape
     ) where
@@ -153,12 +154,20 @@ escLoop cancel paused stopped = go
                                                         then requestCancel cancel
                                                         else do
                                                             c2 <- hGetChar stdin
-                                                            case c2 of
-                                                                '[' -> drainCsi stdin >> go
-                                                                'O' -> do
-                                                                    _ <- hGetChar stdin
-                                                                    go
-                                                                _ -> go
+                                                            drainEscapeContinuation stdin c2
+                                                            go
+
+-- | Consume the remainder of an escape sequence without ever waiting
+-- indefinitely for a fragmented terminal input. SS3 sequences normally have
+-- one byte after @ESC O@, but terminals, tmux, or a truncated paste may omit
+-- it while the writer remains open.
+drainEscapeContinuation :: Handle -> Char -> IO ()
+drainEscapeContinuation h = \case
+    '[' -> drainCsi h
+    'O' -> do
+        ready <- hWaitForInput h 50
+        when ready (void (hGetChar h))
+    _ -> pure ()
 
 drainCsi :: Handle -> IO ()
 drainCsi h = go
