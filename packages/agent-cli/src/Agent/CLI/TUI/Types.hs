@@ -14,6 +14,7 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , TextInputMode(..)
     , TextOverlay(..)
     ) where
 
@@ -83,6 +84,7 @@ data AppEvent
         ![(Text, Text)]
         !(TMVar (Maybe Int))
     | AppAskText
+        !TextInputMode
         !Text
         !Text
         !Text
@@ -231,4 +233,10 @@ data TextOverlay = TextOverlay
     , textBody :: !Text
     , textDraft :: !Text
     , textCursor :: !Int
+    , textInputMode :: !TextInputMode
     }
+
+data TextInputMode
+    = TextInputPlain
+    | TextInputSecret
+    deriving (Eq, Show)

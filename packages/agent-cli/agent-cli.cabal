@@ -80,6 +80,7 @@ library
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
@@ -200,6 +201,7 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec

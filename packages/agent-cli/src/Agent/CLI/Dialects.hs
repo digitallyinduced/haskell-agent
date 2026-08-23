@@ -33,7 +33,14 @@ import Agent.GrokBuild.Dialect.Task
 import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
+import Agent.Tools.Secret
+    ( SecretPromptHooks
+    , askSecretTool
+    , closeSecretStore
+    , newSecretStore
+    )
 import Agent.Tools.Types (AppTool, ToolEnv)
+import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -50,37 +57,51 @@ codingToolsFor
     :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
+    -> Maybe SecretPromptHooks
     -> Maybe MultiAgentContext
     -> IO CodingTools
-codingToolsFor dialect env hooks multi = do
+codingToolsFor dialect env planHooks secretHooks multi = do
     typesRef <- newIORef Map.empty
-    codingToolsForWithTypes dialect env hooks multi typesRef
+    codingToolsForWithTypes
+        dialect env planHooks secretHooks multi typesRef
 
 codingToolsForWithTypes
     :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
+    -> Maybe SecretPromptHooks
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
     -> IO CodingTools
-codingToolsForWithTypes dialect env hooks multi typesRef =
-    case dialectToolSurface dialect of
+codingToolsForWithTypes
+        dialect env planHooks secretHooks multi typesRef = do
+    secretStore <- traverse (newSecretStore env) secretHooks
+    let closeSecrets = mapM_ closeSecretStore secretStore
+        secretTools = maybe [] (pure . askSecretTool) secretStore
+        finish tools plan close agentTypes =
+            CodingTools
+                { codingAppTools = tools <> secretTools
+                , codingPlanMode = plan
+                , codingClose = close `finally` closeSecrets
+                , codingAgentTypes = agentTypes
+                }
+    flip onException closeSecrets $ case dialectToolSurface dialect of
         CodexToolSurface -> do
-            coding <- newCodexCodingTools env hooks multi
-            pure CodingTools
-                { codingAppTools = coding.codexAppTools
-                , codingPlanMode = coding.codexPlanMode
-                , codingClose = coding.codexClose
-                , codingAgentTypes = typesRef
-                }
+            coding <- newCodexCodingTools env planHooks multi
+            pure $
+                finish
+                    coding.codexAppTools
+                    coding.codexPlanMode
+                    coding.codexClose
+                    typesRef
         GrokBuildToolSurface -> do
-            coding <- newGrokCodingTools env hooks multi typesRef
-            pure CodingTools
-                { codingAppTools = coding.grokAppTools
-                , codingPlanMode = coding.grokPlanMode
-                , codingClose = coding.grokClose
-                , codingAgentTypes = coding.grokAgentTypes
-                }
+            coding <- newGrokCodingTools env planHooks multi typesRef
+            pure $
+                finish
+                    coding.grokAppTools
+                    coding.grokPlanMode
+                    coding.grokClose
+                    coding.grokAgentTypes
 
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
 filterChildGrokTools = filterGrokToolsForType

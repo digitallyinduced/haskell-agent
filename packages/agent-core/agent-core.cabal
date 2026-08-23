@@ -76,6 +76,7 @@ library
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
+                    , Agent.Tools.Secret
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
@@ -142,6 +143,7 @@ test-suite agent-core-test
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec
+                    , Agent.Tools.SecretSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
