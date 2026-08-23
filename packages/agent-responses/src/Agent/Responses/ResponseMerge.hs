@@ -1,5 +1,6 @@
 module Agent.Responses.ResponseMerge
     ( mergeCompletedResponseOutput
+    , mergeDoneResponse
     ) where
 
 import qualified Data.Aeson as Aeson
@@ -25,6 +26,34 @@ mergeCompletedResponseOutput streamedItems responseVal =
                     mergedItems = mergeOutputItems finalItems streamedItems
                 in Aeson.Object (KeyMap.insert "output" (Aeson.Array (Vector.fromList mergedItems)) robj)
         _ -> responseVal
+
+-- | Reconstruct the terminal response carried by the Codex WebSocket
+-- @response.done@ event. That event can contain only a partial response
+-- object, so overlay it on the latest lifecycle response, normalize a missing
+-- final status to @completed@, and attach streamed output items.
+mergeDoneResponse
+    :: Maybe Aeson.Value
+    -> [Aeson.Value]
+    -> Aeson.Value
+    -> Aeson.Value
+mergeDoneResponse baseResponse streamedItems doneResponse =
+    mergeCompletedResponseOutput streamedItems withTerminalStatus
+  where
+    mergedResponse = case (baseResponse, doneResponse) of
+        (Just (Aeson.Object baseObject), Aeson.Object doneObject) ->
+            Aeson.Object $
+                KeyMap.foldrWithKey
+                    KeyMap.insert
+                    baseObject
+                    doneObject
+        (_, value) -> value
+
+    withTerminalStatus = case (doneResponse, mergedResponse) of
+        (Aeson.Object doneObject, Aeson.Object mergedObject)
+            | not (KeyMap.member "status" doneObject) ->
+                Aeson.Object
+                    (KeyMap.insert "status" (Aeson.String "completed") mergedObject)
+        _ -> mergedResponse
 
 mergeOutputItems :: [Aeson.Value] -> [Aeson.Value] -> [Aeson.Value]
 mergeOutputItems finalItems streamedItems =

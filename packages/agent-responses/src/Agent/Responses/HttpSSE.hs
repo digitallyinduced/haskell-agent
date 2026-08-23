@@ -122,8 +122,12 @@ performResponsesHttpSse
 
 retainForResponse :: ResponseStreamEvent -> Bool
 retainForResponse = \case
+    ResponseCreatedEvent {} -> True
+    ResponseInProgressEvent {} -> True
+    ResponseQueuedEvent {} -> True
     ResponseOutputItemDoneEvent {} -> True
     ResponseCompletedEvent {} -> True
+    ResponseDoneEvent {} -> True
     ResponseIncompleteEvent {} -> True
     ResponseErrorEvent {} -> True
     ResponseNestedErrorEvent {} -> True
