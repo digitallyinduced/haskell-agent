@@ -338,7 +338,7 @@ spec = describe "Agent.Tools.Codex" do
                 threadDelay 150000
                 finished <- runFnWith tools "write_stdin" $
                     "{\"session_id\":" <> Text.pack (show sessionId)
-                        <> ",\"chars\":\"late\",\"yield_time_ms\":10}"
+                        <> ",\"chars\":\"late\",\"yield_time_ms\":1000}"
                 finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
                 finished `shouldSatisfy` Text.isInfixOf "done"
 
