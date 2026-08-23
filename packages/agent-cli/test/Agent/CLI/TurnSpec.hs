@@ -2,6 +2,7 @@ module Agent.CLI.TurnSpec (spec) where
 
 import Agent.CLI.Turn
     ( IncompleteTurnCheckpoint(..)
+    , automaticTitleMilestone
     , checkpointIncompleteTurn
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
@@ -165,6 +166,22 @@ spec = do
                 `shouldNotBe` partialTranscript <> turnInputsToItems inputs
             checkpoint.checkpointTranscript
                 `shouldBe` history <> turnInputsToItems inputs
+
+    describe "automaticTitleMilestone" do
+        it "starts the initial title only after the first completed turn" do
+            automaticTitleMilestone 0 False 0 `shouldBe` Nothing
+            automaticTitleMilestone 1 False 0 `shouldBe` Just 1
+
+        it "refreshes at completed turns three and six" do
+            automaticTitleMilestone 2 False 0 `shouldBe` Nothing
+            automaticTitleMilestone 3 False 0 `shouldBe` Just 3
+            automaticTitleMilestone 3 False 1 `shouldBe` Nothing
+            automaticTitleMilestone 6 False 1 `shouldBe` Just 6
+            automaticTitleMilestone 6 False 2 `shouldBe` Nothing
+
+        it "never replaces a manual title" do
+            automaticTitleMilestone 1 True 0 `shouldBe` Nothing
+            automaticTitleMilestone 3 True 0 `shouldBe` Nothing
 
     describe "restorePlanStateAfterIncomplete" do
         it "undoes an agent-initiated plan-mode entry after cancellation" do

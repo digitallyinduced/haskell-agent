@@ -6,6 +6,7 @@ module Agent.CLI.Turn
     , grokFirstTurnPrefix
     , grokFrameLastUserInput
     , grokUserQuery
+    , automaticTitleMilestone
     , restorePlanStateAfterIncomplete
     , runOneTurn
     ) where
@@ -202,14 +203,6 @@ runOneTurn env@SessionEnv
                             (roleMuted color
                                 (glyphSession <> "session: "
                                     <> handle.sessionMeta.metaId))
-            titleTurns <- readIORef env.sessionTitleTurnCount
-            when
-                ( titleTurns == 0
-                    && not handle.sessionMeta.metaTitleIsManual
-                    && handle.sessionMeta.metaTitleRefreshIndex == 0
-                )
-                (requestSessionTitle env.sessionTitleManager
-                    handle.sessionMeta.metaId 1 promptText)
         PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
@@ -459,13 +452,13 @@ runOneTurn env@SessionEnv
                     writeIORef env.sessionTitleTurnCount titleTurns
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
-                    when
-                        ( titleTurns `elem` [3, 6]
-                            && not countedMeta.metaTitleIsManual
-                            && countedMeta.metaTitleRefreshIndex
-                                < titleRefreshIndex titleTurns
-                        )
-                        (requestConversationTitle env countedHandle titleTurns)
+                    case automaticTitleMilestone
+                            titleTurns
+                            countedMeta.metaTitleIsManual
+                            countedMeta.metaTitleRefreshIndex of
+                        Nothing -> pure ()
+                        Just milestone ->
+                            requestConversationTitle env countedHandle milestone
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
                         setWindowTitle
                             (cliWindowTitle countedMeta.metaCwd
@@ -627,6 +620,18 @@ requestConversationTitle env handle milestone =
                     handle.sessionMeta.metaId
                     milestone
                     (sessionConversationText turns)
+
+-- | Select automatic title milestones only after their completed user turn
+-- has been persisted. Milestone one intentionally shares refresh index zero
+-- with the prompt-derived fallback title; later milestones require a strictly
+-- newer generated-title refresh index.
+automaticTitleMilestone :: Int -> Bool -> Int -> Maybe Int
+automaticTitleMilestone completedTurns manual refreshIndex
+    | manual = Nothing
+    | completedTurns == 1 && refreshIndex == 0 = Just 1
+    | completedTurns `elem` [3, 6]
+    , refreshIndex < titleRefreshIndex completedTurns = Just completedTurns
+    | otherwise = Nothing
 
 applyPendingSessionTitles :: SessionEnv -> IO ()
 applyPendingSessionTitles env =
