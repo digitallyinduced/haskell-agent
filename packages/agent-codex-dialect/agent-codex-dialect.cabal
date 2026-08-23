@@ -1,0 +1,72 @@
+cabal-version:      2.2
+name:               agent-codex-dialect
+version:            0.1.0.0
+synopsis:           Codex model-facing dialect for the universal agent harness
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.Codex.Dialect.ApplyPatch
+                    , Agent.Codex.Dialect.Prompt
+                    , Agent.Codex.Dialect.ProjectInstructions
+                    , Agent.Codex.Dialect.Runtime
+                    , Agent.Codex.Dialect.Shell
+                    , Agent.Codex.Dialect.Subagent
+                    , Agent.Codex.Dialect.Tools
+    hs-source-dirs:   src
+    build-depends:    agent-core >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.14 && < 5
+                    , containers
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , time
+                    , transformers
+                    , unix
+
+test-suite agent-codex-dialect-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.Codex.DialectSpec
+    build-depends:    agent-codex-dialect
+                    , agent-core
+                    , base >= 4.14 && < 5
+                    , directory
+                    , filepath
+                    , hspec
+                    , safe-exceptions
+                    , text
+                    , time
+                    , unix
