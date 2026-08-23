@@ -2531,6 +2531,10 @@ cacheableBlock :: AppState -> UiBlock -> Bool
 cacheableBlock state block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        && maybe
+            True
+            ((/= block.blockId) . (.retryCountdownBlockId))
+            state.appUi.uiRetryCountdown
         && not (blockFlashing state block)
 
 blockStateGlyph :: AppState -> UiBlock -> Text

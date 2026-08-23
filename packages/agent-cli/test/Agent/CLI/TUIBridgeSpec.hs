@@ -36,6 +36,9 @@ spec = describe "fullscreen TUI bridge" do
     it "follows retained output events but not draft-only events" do
         eventFollows (UiSystemMessage "copied") `shouldBe` True
         eventFollows (UiErrorMessage "failed") `shouldBe` True
+        eventFollows
+            (UiRetryCountdown "Provider unavailable.\n" 60000 ".")
+            `shouldBe` True
         eventFollows (UiSetDraft "draft" 5) `shouldBe` False
 
     it "starts and clears native terminal progress" do

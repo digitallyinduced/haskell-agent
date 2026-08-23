@@ -22,6 +22,7 @@ eventFollows = \case
     UiAssistantHistory _ -> True
     UiSystemMessage _ -> True
     UiErrorMessage _ -> True
+    UiRetryCountdown{} -> True
     UiConversationCleared -> True
     _ -> False
 

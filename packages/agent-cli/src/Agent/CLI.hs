@@ -101,6 +101,7 @@ import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
+    , formatApiErrorRetryCountdownParts
     )
 import Agent.CLI.ImagePreview
     ( detectImagePreviewProtocol
@@ -3505,15 +3506,29 @@ reportProviderUnavailable
     -> IO ()
 reportProviderUnavailable fullscreen apiError = do
     now <- getCurrentTime
-    let message =
-            "No usable fallback provider account is available.\n"
-            <> formatApiErrorAt now apiError
+    let leading = "No usable fallback provider account is available.\n"
+        message = leading <> formatApiErrorAt now apiError
     case fullscreen of
         Nothing -> do
             color <- resolveColor stderr
             putTextLn stderr (roleError color message)
         Just runtime ->
-            emitUiEvent runtime (UiErrorMessage message)
+            case (apiError, formatApiErrorRetryCountdownParts apiError) of
+                (CredentialsExhausted{retryAt}, Just (prefix, suffix)) ->
+                    let remainingMillis =
+                            max 0
+                                (ceiling
+                                    ( realToFrac (diffUTCTime retryAt now)
+                                        * 1000
+                                        :: Double
+                                    ))
+                    in emitUiEvent runtime
+                        (UiRetryCountdown
+                            (leading <> prefix)
+                            remainingMillis
+                            suffix)
+                _ ->
+                    emitUiEvent runtime (UiErrorMessage message)
 
 setSessionEffort :: SessionEnv -> Text -> IO ()
 setSessionEffort env level = do
