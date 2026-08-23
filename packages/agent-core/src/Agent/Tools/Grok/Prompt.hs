@@ -7,6 +7,7 @@ module Agent.Tools.Grok.Prompt
     ( GrokPromptTools(..)
     , codingGrokPromptTools
     , grokSystemPrompt
+    , grokSystemPromptForTools
     ) where
 
 import Agent.OsPath (toText)
@@ -57,6 +58,28 @@ grokSystemPrompt tools cwd today isNonInteractive =
         , formatting
         ]
 
+-- | Render the prompt against the tools actually registered for a child.
+-- Sections and individual instructions that require absent tools are omitted.
+grokSystemPromptForTools
+    :: GrokPromptTools
+    -> [Text]
+    -> OsPath
+    -> Day
+    -> Bool
+    -> Text
+grokSystemPromptForTools tools available cwd today isNonInteractive =
+    Text.intercalate "\n\n" $
+        filter (not . Text.null)
+            [ identity tools isNonInteractive
+            , environment cwd today
+            , workPolicy
+            , toolCallingForTools tools available
+            , backgroundTasksForTools tools available
+            , planModeForTools tools available
+            , communication
+            , formatting
+            ]
+
 identity :: GrokPromptTools -> Bool -> Text
 identity _ isNonInteractive =
     "You are Grok released by xAI. You are "
@@ -104,6 +127,32 @@ toolCalling tools =
     \- Do not mention tools this session does not register.\n\
     \</tool_calling>"
 
+toolCallingForTools :: GrokPromptTools -> [Text] -> Text
+toolCallingForTools tools available =
+    taggedSection "tool_calling" $
+        [ "- Use specialized tools instead of shell commands when possible."
+        ]
+            <> toolLine tools.grokRead
+                ("- Use `" <> tools.grokRead <> "` to read files.")
+            <> toolLine tools.grokEdit
+                ("- Use `" <> tools.grokEdit <> "` for focused file edits.")
+            <> toolLine tools.grokSearch
+                ("- Use `" <> tools.grokSearch <> "` to search file contents.")
+            <> toolLine tools.grokList
+                ("- Use `" <> tools.grokList <> "` to list directories.")
+            <> toolLine tools.grokExecute
+                ( "- Reserve `"
+                    <> tools.grokExecute
+                    <> "` for system commands and terminal operations."
+                )
+            <> toolLine "web_search"
+                "- Use `web_search` to look up current public information on the internet."
+            <> ["- Do not mention tools this session does not register."]
+  where
+    toolLine name line
+        | name `elem` available = [line]
+        | otherwise = []
+
 backgroundTasks :: GrokPromptTools -> Text
 backgroundTasks tools =
     "<background_tasks>\n\
@@ -118,6 +167,28 @@ backgroundTasks tools =
         <> "` to stop a background task.\n\
     \</background_tasks>"
 
+backgroundTasksForTools :: GrokPromptTools -> [Text] -> Text
+backgroundTasksForTools tools available
+    | null linesForTools = ""
+    | otherwise = taggedSection "background_tasks" linesForTools
+  where
+    linesForTools =
+        toolLine tools.grokExecute
+            ( "- Run long-lived commands as background commands in `"
+                <> tools.grokExecute
+                <> "` and continue independent work."
+            )
+            <> toolLine tools.grokGetOutput
+                ( "- Use `"
+                    <> tools.grokGetOutput
+                    <> "` for a snapshot or one bounded wait, not repeated polling."
+                )
+            <> toolLine tools.grokKill
+                ("- Use `" <> tools.grokKill <> "` to stop a background task.")
+    toolLine name line
+        | name `elem` available = [line]
+        | otherwise = []
+
 planMode :: GrokPromptTools -> Text
 planMode tools =
     "<plan_mode>\n\
@@ -131,6 +202,38 @@ planMode tools =
         <> tools.grokExitPlan
         <> "` so the user can approve, request changes, or cancel.\n\
     \</plan_mode>"
+
+planModeForTools :: GrokPromptTools -> [Text] -> Text
+planModeForTools tools available
+    | null linesForTools = ""
+    | otherwise = taggedSection "plan_mode" linesForTools
+  where
+    linesForTools =
+        toolLine tools.grokEnterPlan
+            ( "- For genuinely ambiguous architectural work, call `"
+                <> tools.grokEnterPlan
+                <> "` to request Plan Mode."
+            )
+            <> toolLine tools.grokAskUser
+                ( "- While planning, use `"
+                    <> tools.grokAskUser
+                    <> "` when clarification is required."
+                )
+            <> toolLine tools.grokExitPlan
+                ( "- When the plan is ready, call `"
+                    <> tools.grokExitPlan
+                    <> "` for user review."
+                )
+    toolLine name line
+        | name `elem` available = [line]
+        | otherwise = []
+
+taggedSection :: Text -> [Text] -> Text
+taggedSection tagName body =
+    Text.unlines $
+        ["<" <> tagName <> ">"]
+            <> body
+            <> ["</" <> tagName <> ">"]
 
 communication :: Text
 communication = Text.unlines

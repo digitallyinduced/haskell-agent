@@ -10,6 +10,7 @@ module Agent.CLI.Subagents.Runtime
     , restoreAgentFromDisk
     , runCodexSubagent
     , runHttpSubagent
+    , validatePersistedSubagentTarget
     ) where
 
 import Agent.CLI.Approval (childApprove)
@@ -21,8 +22,13 @@ import Agent.CLI.Options
     , CliOptions(..)
     , defaultEffortFor
     )
-import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Prompt
+    ( defaultModelFor
+    , systemPrompt
+    , systemPromptForTools
+    )
 import Agent.CLI.Request (requestParams)
+import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
     ( SubagentDiskMeta(..)
     , forkSubagentTranscript
@@ -30,6 +36,18 @@ import Agent.CLI.SubagentStore
     , saveSubagentState
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.Dialect
+    ( ChildAgentProtocol(..)
+    , Dialect
+    , DialectId
+    , codexDialect
+    , dialectChildAgentProtocol
+    , dialectForId
+    , dialectId
+    , dialectIdForModel
+    , dialectSlug
+    , providerSupportsDialect
+    )
 import Agent.InterAgentMessage
     ( InterAgentMessage
     , interAgentMessagePayload
@@ -37,7 +55,7 @@ import Agent.InterAgentMessage
 import Agent.Loop
     ( Backend(..)
     , LoopConfig(..)
-    , LoopError
+    , LoopError(..)
     , LoopEvent
     , LoopResult(..)
     , TurnInput(..)
@@ -53,7 +71,7 @@ import Agent.OpenAI.LoopBackend
     )
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
 import System.OsPath (OsPath)
-import Agent.Provider (Provider(..), TokenProvider)
+import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.Responses.Types
     ( ReasoningConfig(..)
     , ResponseCreateParams(..)
@@ -100,7 +118,8 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
 import Agent.Tools.Types
-    ( ToolEnv(..)
+    ( AppTool(..)
+    , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
     )
@@ -115,6 +134,9 @@ import Data.Time.Clock (getCurrentTime, utctDay)
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
     , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
+    , subSessionProvider :: !Provider
+    , subSessionEffectiveModel :: !Text
+    , subSessionDialect :: !DialectId
     }
 
 -- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
@@ -130,6 +152,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
     , subagentStoreRoot :: !SubagentStoreRoot
     , subagentTypes :: !GrokSubagentSpecs
+    , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
+    , subagentMapModel :: !(Text -> Text)
     }
 
 data PreparedChild = PreparedChild
@@ -152,7 +176,12 @@ syncStoreRootFromPlan storeRootRef planMode = do
                 Nothing -> pure ()
 
 prepareCollaborationSpawn
-    :: IORef (Map SubagentId SubagentSession)
+    :: Provider
+    -> (Text -> Text)
+    -> Text
+    -> DialectId
+    -> Maybe LegacySubagentTarget
+    -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
     -> IORef (Maybe (IORef [ResponseItem]))
@@ -160,6 +189,11 @@ prepareCollaborationSpawn
     -> CollaborationSpawnOptions
     -> IO ()
 prepareCollaborationSpawn
+        provider
+        mapModel
+        currentEffectiveModel
+        currentDialect
+        legacyTarget
         sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
     recordAgentSpec typesRef agentId GrokSubagentSpec
         { agentType = defaultSubagentType
@@ -167,9 +201,23 @@ prepareCollaborationSpawn
         , reasoningEffortOverride =
             spawnOptions.collaborationReasoningEffort
         }
+    let effectiveModel =
+            maybe currentEffectiveModel mapModel spawnOptions.collaborationModel
+        childDialect =
+            maybe
+                currentDialect
+                (dialectIdForModel provider . mapModel)
+                spawnOptions.collaborationModel
     session <-
         lookupOrCreateSubagentSession
-            sessionsRef storeRootRef typesRef agentId
+            sessionsRef
+            storeRootRef
+            typesRef
+            provider
+            legacyTarget
+            effectiveModel
+            childDialect
+            agentId
     source <- readIORef sourceRef
     sourceItems <- maybe (pure []) readIORef source
     writeIORef session.subSessionTranscript
@@ -180,12 +228,13 @@ persistSubagentSnapshot
     -> SubagentRegistry
     -> GrokSubagentSpecs
     -> SubagentId
-    -> IORef [ResponseItem]
+    -> SubagentSession
     -> IO ()
-persistSubagentSnapshot storeRootRef registry typesRef agentId transcriptRef = do
+persistSubagentSnapshot
+        storeRootRef registry typesRef agentId session = do
     status <- getStatus registry agentId
     persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status transcriptRef
+        storeRootRef registry typesRef agentId status session
 
 persistSubagentSnapshotWithStatus
     :: SubagentStoreRoot
@@ -193,15 +242,17 @@ persistSubagentSnapshotWithStatus
     -> GrokSubagentSpecs
     -> SubagentId
     -> SubagentStatus
-    -> IORef [ResponseItem]
+    -> SubagentSession
     -> IO ()
 persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status transcriptRef = do
+        storeRootRef registry typesRef agentId status session = do
     mroot <- readIORef storeRootRef
     case mroot of
         Nothing -> pure ()
         Just sessionDir -> do
-            items <- trimDanglingToolSuffix <$> readIORef transcriptRef
+            items <-
+                trimDanglingToolSuffix
+                    <$> readIORef session.subSessionTranscript
             previous <- getPreviousResponseId registry agentId
             agentType <- lookupAgentType typesRef agentId
             agentModel <- lookupAgentModel typesRef agentId
@@ -209,7 +260,10 @@ persistSubagentSnapshotWithStatus
             agentCwd <- getSubagentCwd registry agentId
             identity <- getSubagentIdentity registry agentId
             _ <- saveSubagentState
-                sessionDir agentId items previous status agentType agentModel
+                sessionDir agentId items previous status
+                session.subSessionProvider session.subSessionEffectiveModel
+                session.subSessionDialect
+                agentType agentModel
                 reasoningEffort agentCwd identity
             pure ()
 
@@ -223,20 +277,27 @@ flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
     sessions <- readIORef sessionsRef
     mapM_
         (\(agentId, session) ->
-            persistSubagentSnapshot storeRootRef registry typesRef agentId
-                session.subSessionTranscript)
+            persistSubagentSnapshot
+                storeRootRef registry typesRef agentId session)
         (Map.toList sessions)
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
 -- 'resume_agent' / 'resume_from' can continue the prior transcript.
 restoreAgentFromDisk
-    :: SubagentStoreRoot
+    :: Provider
+    -> (Text -> Text)
+    -> Text
+    -> DialectId
+    -> Maybe LegacySubagentTarget
+    -> SubagentStoreRoot
     -> SubagentRegistry
     -> IORef (Map SubagentId SubagentSession)
     -> GrokSubagentSpecs
     -> SubagentId
     -> IO (Either Text ())
-restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
+restoreAgentFromDisk
+        provider mapModel parentEffectiveModel parentDialect legacyTarget
+        storeRootRef registry sessionsRef typesRef agentId = do
     status <- getStatus registry agentId
     case status of
         NotFound -> restore
@@ -255,29 +316,66 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
                         -- Same-process close with no disk yet: still reopen.
                         reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
-                        result <- reopenPersisted meta
-                        case result of
+                        let expectedEffectiveModel =
+                                maybe
+                                    parentEffectiveModel
+                                    mapModel
+                                    meta.diskAgentModel
+                            expectedDialect =
+                                maybe
+                                    parentDialect
+                                    (dialectIdForModel provider . mapModel)
+                                    meta.diskAgentModel
+                        case validatePersistedSubagentTarget
+                                provider
+                                expectedEffectiveModel
+                                expectedDialect
+                                legacyTarget
+                                meta of
                             Left err -> pure (Left err)
-                            Right () -> do
-                                case meta.diskAgentType of
-                                    Just agentType ->
-                                        recordAgentSpec typesRef agentId GrokSubagentSpec
-                                            { agentType
-                                            , modelOverride = meta.diskAgentModel
-                                            , reasoningEffortOverride =
-                                                meta.diskReasoningEffort
-                                            }
-                                    Nothing -> pure ()
-                                transcript <- newIORef items
-                                contextTokens <- newIORef Nothing
-                                let session =
-                                        SubagentSession
-                                            { subSessionTranscript = transcript
-                                            , subSessionContextTokens = contextTokens
-                                            }
-                                atomicModifyIORef' sessionsRef \m ->
-                                    (Map.insert agentId session m, ())
-                                pure (Right ())
+                            Right (_, storedDialect)
+                                | not
+                                    (providerSupportsDialect
+                                        provider storedDialect) ->
+                                    pure $ Left $
+                                        unsupportedDialectMessage
+                                            provider agentId storedDialect
+                            Right (storedEffectiveModel, storedDialect) -> do
+                                result <- reopenPersisted meta
+                                case result of
+                                    Left err -> pure (Left err)
+                                    Right () -> do
+                                        case meta.diskAgentType of
+                                            Just agentType ->
+                                                recordAgentSpec
+                                                    typesRef
+                                                    agentId
+                                                    GrokSubagentSpec
+                                                        { agentType
+                                                        , modelOverride =
+                                                            meta.diskAgentModel
+                                                        , reasoningEffortOverride =
+                                                            meta.diskReasoningEffort
+                                                        }
+                                            Nothing -> pure ()
+                                        transcript <- newIORef items
+                                        contextTokens <- newIORef Nothing
+                                        let session =
+                                                SubagentSession
+                                                    { subSessionTranscript =
+                                                        transcript
+                                                    , subSessionContextTokens =
+                                                        contextTokens
+                                                    , subSessionProvider =
+                                                        provider
+                                                    , subSessionEffectiveModel =
+                                                        storedEffectiveModel
+                                                    , subSessionDialect =
+                                                        storedDialect
+                                                    }
+                                        atomicModifyIORef' sessionsRef \m ->
+                                            (Map.insert agentId session m, ())
+                                        pure (Right ())
     reopenPersisted meta =
         case meta.diskTaskPath of
             Nothing -> restoreAt taskPathRoot
@@ -332,124 +430,203 @@ runCodexSubagent
     -> RunSubagent
 runCodexSubagent runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
-        prepared <- prepareChild runtime env sendToRoot
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
-        coding <-
-            codingToolsFor
+        parentParams <- readIORef runtime.subagentParams
+        let (model, effort) =
+                resolveChildModelAndEffort
+                    OpenAIProvider
+                    parentParams
+                    childModel
+                    childEffort
+        prepared <-
+            prepareChild
+                runtime
                 OpenAIProvider
-                prepared.preparedToolEnv
-                (Just runtime.subagentPlanHooks)
-                (Just prepared.preparedMultiContext)
-        syncStoreRootFromPlan runtime.subagentStoreRoot coding.codingPlanMode
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let (model, effort) =
-                    resolveChildModelAndEffort
-                        OpenAIProvider
-                        prepared.preparedParentParams
-                        childModel
-                        childEffort
-                baseInstructions =
-                    fromMaybe
-                        (systemPrompt OpenAIProvider env.subCwd today True)
-                        prepared.preparedParentParams.instructions
-                instructions =
-                    baseInstructions
-                        <> "\n\nYou are a Codex subagent. Complete the assigned task and "
-                        <> "report results clearly. Your agent id is "
-                        <> env.subId.unSubagentId
-                        <> "."
-                tools = coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools OpenAIProvider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            httpFallbackActive <- newIORef False
-            let websocketBackend =
-                    freshOpenAiBackend tokenProvider
-                        (readIORef childParamsRef)
-                        prepared.preparedSession.subSessionTranscript
-                httpBackend =
-                    statelessResponsesBackend
-                        (\request _onEvent ->
-                            OpenAI.createCodexMessageWithProvider tokenProvider request)
-                        (readIORef childParamsRef)
-                        prepared.preparedSession.subSessionTranscript
-                baseBackend =
-                    openAiBackendWithTransportFallback
-                        httpFallbackActive
-                        websocketBackend
-                        httpBackend
-                backend =
-                    withConnectionRecovery $
-                        autoCompactOpenAiBackendWithThreshold
-                            runtime.subagentOptions.optCompactThreshold
-                            tokenProvider
-                            (readIORef childParamsRef)
-                            prepared.preparedSession.subSessionTranscript
-                            prepared.preparedSession.subSessionContextTokens
-                            baseBackend
-            runPreparedChild
-                runtime env prepared.preparedSession toolRegistry backend onEvent
-                (\config ->
-                    runLoopInputs config previous [AgentMessage prompt])
+                model
+                (dialectId codexDialect)
+                env
+                sendToRoot
+        case activeSubagentTargetError
+                OpenAIProvider model prepared.preparedSession of
+            Just err -> pure (Left (LoopUnexpected err))
+            Nothing -> do
+                coding <-
+                    codingToolsFor
+                        codexDialect
+                        prepared.preparedToolEnv
+                        (Just runtime.subagentPlanHooks)
+                        (Just prepared.preparedMultiContext)
+                syncStoreRootFromPlan
+                    runtime.subagentStoreRoot
+                    coding.codingPlanMode
+                flip finally coding.codingClose do
+                    today <- utctDay <$> getCurrentTime
+                    let baseInstructions =
+                            fromMaybe
+                                (systemPrompt
+                                    codexDialect env.subCwd today True)
+                                prepared.preparedParentParams.instructions
+                        instructions =
+                            baseInstructions
+                                <> "\n\nYou are a Codex subagent. Complete the assigned task and "
+                                <> "report results clearly. Your agent id is "
+                                <> env.subId.unSubagentId
+                                <> "."
+                        tools = coding.codingAppTools
+                        childParams = requestParams model instructions
+                            (schemasFromAppTools codexDialect tools) effort
+                    toolRegistry <- requireToolRegistry tools
+                    childParamsRef <- newIORef childParams
+                    httpFallbackActive <- newIORef False
+                    let websocketBackend =
+                            freshOpenAiBackend tokenProvider
+                                (readIORef childParamsRef)
+                                prepared.preparedSession.subSessionTranscript
+                        httpBackend =
+                            statelessResponsesBackend
+                                (\request _onEvent ->
+                                    OpenAI.createCodexMessageWithProvider
+                                        tokenProvider request)
+                                (readIORef childParamsRef)
+                                prepared.preparedSession.subSessionTranscript
+                        baseBackend =
+                            openAiBackendWithTransportFallback
+                                httpFallbackActive
+                                websocketBackend
+                                httpBackend
+                        backend =
+                            withConnectionRecovery $
+                                autoCompactOpenAiBackendWithThreshold
+                                    runtime.subagentOptions.optCompactThreshold
+                                    tokenProvider
+                                    (readIORef childParamsRef)
+                                    prepared.preparedSession.subSessionTranscript
+                                    prepared.preparedSession.subSessionContextTokens
+                                    baseBackend
+                    runPreparedChild
+                        runtime env prepared.preparedSession toolRegistry
+                        backend onEvent
+                        (\config ->
+                            runLoopInputs config previous [AgentMessage prompt])
 
 -- | Child XAI/OpenRouter agent: HTTP backend, filtered tools by subagent_type.
 runHttpSubagent
     :: SubagentRuntime
+    -> Dialect
     -> Provider
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> (IORef ResponseCreateParams -> IORef [ResponseItem] -> Backend)
     -> RunSubagent
-runHttpSubagent runtime provider mkBackend =
+runHttpSubagent runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
-        prepared <- prepareChild runtime env Nothing
         agentType <-
             fromMaybe defaultSubagentType
                 <$> lookupAgentType runtime.subagentTypes env.subId
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <-
             lookupAgentReasoningEffort runtime.subagentTypes env.subId
-        coding <-
-            codingToolsFor
+        parentParams <- readIORef runtime.subagentParams
+        let (model, effort) =
+                resolveChildModelAndEffort
+                    provider
+                    parentParams
+                    childModel
+                    childEffort
+            effectiveModel = runtime.subagentMapModel model
+        prepared <-
+            prepareChild
+                runtime
                 provider
-                prepared.preparedToolEnv
-                (Just runtime.subagentPlanHooks)
-                (Just prepared.preparedMultiContext)
-        flip finally coding.codingClose do
-            today <- utctDay <$> getCurrentTime
-            let (model, effort) =
-                    resolveChildModelAndEffort
-                        provider
-                        prepared.preparedParentParams
-                        childModel
-                        childEffort
-                baseInstructions = systemPrompt provider env.subCwd today True
-                instructions =
-                    baseInstructions
-                        <> "\n\n"
-                        <> grokSubagentSuffix agentType env.subId
-                tools = filterChildGrokTools agentType coding.codingAppTools
-                childParams = requestParams model instructions
-                    (schemasFromAppTools provider tools) effort
-            toolRegistry <- requireToolRegistry tools
-            childParamsRef <- newIORef childParams
-            let backend =
-                    withConnectionRecovery $
-                        mkBackend
-                            childParamsRef
-                            prepared.preparedSession.subSessionTranscript
-            runPreparedChild
-                runtime env prepared.preparedSession toolRegistry backend onEvent
-                (\config ->
-                    runLoop config previous (interAgentMessagePayload prompt))
+                effectiveModel
+                (maybe
+                    (dialectId dialect)
+                    (dialectIdForModel provider . runtime.subagentMapModel)
+                    childModel)
+                env
+                sendToRoot
+        case activeSubagentTargetError
+                provider effectiveModel prepared.preparedSession of
+            Just err -> pure (Left (LoopUnexpected err))
+            Nothing -> do
+                let childDialect =
+                        dialectForId
+                            prepared.preparedSession.subSessionDialect
+                coding <-
+                    codingToolsFor
+                        childDialect
+                        prepared.preparedToolEnv
+                        (Just runtime.subagentPlanHooks)
+                        (Just prepared.preparedMultiContext)
+                flip finally coding.codingClose do
+                    today <- utctDay <$> getCurrentTime
+                    let tools = case
+                                dialectChildAgentProtocol childDialect of
+                            CodexCollaborationProtocol ->
+                                coding.codingAppTools
+                            GrokTaskProtocol ->
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                            GenericTaskProtocol ->
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                        baseInstructions =
+                            case dialectChildAgentProtocol childDialect of
+                                CodexCollaborationProtocol ->
+                                    systemPrompt
+                                        childDialect env.subCwd today True
+                                GrokTaskProtocol ->
+                                    systemPromptForTools
+                                        childDialect
+                                        (map (.appToolName) tools)
+                                        env.subCwd
+                                        today
+                                        True
+                                GenericTaskProtocol ->
+                                    systemPromptForTools
+                                        childDialect
+                                        (map (.appToolName) tools)
+                                        env.subCwd
+                                        today
+                                        True
+                        instructions =
+                            baseInstructions
+                                <> "\n\n"
+                                <> case
+                                    dialectChildAgentProtocol childDialect of
+                                    CodexCollaborationProtocol ->
+                                        codexSubagentSuffix env.subId
+                                    GrokTaskProtocol ->
+                                        grokSubagentSuffix agentType env.subId
+                                    GenericTaskProtocol ->
+                                        genericSubagentSuffix agentType env.subId
+                        childParams = requestParams model instructions
+                            (schemasFromAppTools childDialect tools) effort
+                    toolRegistry <- requireToolRegistry tools
+                    childParamsRef <- newIORef childParams
+                    let backend =
+                            withConnectionRecovery $
+                                mkBackend
+                                    childParamsRef
+                                    prepared.preparedSession.subSessionTranscript
+                    runPreparedChild
+                        runtime env prepared.preparedSession toolRegistry
+                        backend onEvent
+                        (\config ->
+                            runLoop
+                                config
+                                previous
+                                (interAgentMessagePayload prompt))
 
 prepareChild
     :: SubagentRuntime
+    -> Provider
+    -> Text
+    -> DialectId
     -> SubagentSpawnEnv
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> IO PreparedChild
-prepareChild runtime env sendToRoot = do
+prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- defaultToolEnv env.subCwd
     childPath <-
@@ -460,9 +637,14 @@ prepareChild runtime env sendToRoot = do
             runtime.subagentSessions
             runtime.subagentStoreRoot
             runtime.subagentTypes
+            provider
+            runtime.subagentLegacyTarget
+            currentEffectiveModel
+            currentDialect
             env.subId
     nestedForkSource <- newIORef (Just session.subSessionTranscript)
-    let childToolEnv = childEnv { toolCancel = env.subCancel }
+    let sessionDialect = dialectForId session.subSessionDialect
+        childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
             { multiRegistry = runtime.subagentRegistry
             , multiSelfId = Just env.subId
@@ -473,11 +655,27 @@ prepareChild runtime env sendToRoot = do
             , multiCreateWorktree = Nothing
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
+                    provider
+                    runtime.subagentMapModel
+                    session.subSessionEffectiveModel
+                    session.subSessionDialect
+                    (Just LegacySubagentTarget
+                        { legacyTargetProvider =
+                            session.subSessionProvider
+                        , legacyTargetEffectiveModel =
+                            session.subSessionEffectiveModel
+                        , legacyTargetDialect =
+                            session.subSessionDialect
+                        })
                     runtime.subagentSessions
                     runtime.subagentStoreRoot
                     runtime.subagentTypes
                     nestedForkSource)
-            , multiSendToRoot = sendToRoot
+            , multiSendToRoot =
+                case dialectChildAgentProtocol sessionDialect of
+                    CodexCollaborationProtocol -> sendToRoot
+                    GrokTaskProtocol -> Nothing
+                    GenericTaskProtocol -> Nothing
             }
     pure PreparedChild
         { preparedParentParams = parentParams
@@ -539,7 +737,7 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
         runtime.subagentRegistry
         runtime.subagentTypes
         env.subId
-        session.subSessionTranscript
+        session
     pure result
 
 grokSubagentSuffix :: Text -> SubagentId -> Text
@@ -565,13 +763,49 @@ grokSubagentSuffix agentType agentId =
                 "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
                 \Never create documentation files unless explicitly requested."
 
+codexSubagentSuffix :: SubagentId -> Text
+codexSubagentSuffix agentId =
+    "You are a Codex subagent. Complete the assigned task and report results clearly. \
+    \Your agent id is "
+        <> agentId.unSubagentId
+        <> "."
+
+genericSubagentSuffix :: Text -> SubagentId -> Text
+genericSubagentSuffix agentType agentId =
+    "You are a focused subagent delegated a specific task.\n\
+    \Complete the assigned task directly and efficiently. Do not broaden scope beyond what was asked. \
+    \Report blocked or unverified work explicitly.\n\n\
+    \Subagent type: "
+        <> agentType
+        <> "\nAgent id: "
+        <> agentId.unSubagentId
+        <> case agentType of
+            "explore" ->
+                "\n\n=== READ-ONLY MODE ===\n\
+                \You have no file editing or command execution tools. Search broadly, narrow down, \
+                \and return absolute file paths and relevant findings."
+            "plan" ->
+                "\n\n=== READ-ONLY MODE ===\n\
+                \Do not create, modify, or delete implementation files. Explore the codebase, \
+                \consider trade-offs, and produce a concrete implementation strategy. End with \
+                \a Critical Files for Implementation section listing 3-5 files."
+            _ ->
+                "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
+                \Never create documentation files unless explicitly requested."
+
 lookupOrCreateSubagentSession
     :: IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
+    -> Provider
+    -> Maybe LegacySubagentTarget
+    -> Text
+    -> DialectId
     -> SubagentId
     -> IO SubagentSession
-lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
+lookupOrCreateSubagentSession
+        sessionsRef storeRootRef typesRef provider legacyTarget
+        currentEffectiveModel currentDialect agentId = do
     sessions <- readIORef sessionsRef
     case Map.lookup agentId sessions of
         Just session -> pure session
@@ -580,9 +814,18 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
             loaded <- case mroot of
                 Just sessionDir -> loadSubagentState sessionDir agentId
                 Nothing -> pure (Right Nothing)
-            let (items, meta) = case loaded of
-                    Right (Just (xs, m)) -> (xs, Just m)
-                    _ -> ([], Nothing)
+            let (items, meta, sessionEffectiveModel, sessionDialect) = case loaded of
+                    Right (Just (xs, m))
+                        | Right (storedEffectiveModel, storedDialect) <-
+                            validatePersistedSubagentTarget
+                                provider
+                                currentEffectiveModel
+                                currentDialect
+                                legacyTarget
+                                m
+                        , providerSupportsDialect provider storedDialect ->
+                            (xs, Just m, storedEffectiveModel, storedDialect)
+                    _ -> ([], Nothing, currentEffectiveModel, currentDialect)
             transcript <- newIORef items
             contextTokens <- newIORef Nothing
             case meta >>= (.diskAgentType) of
@@ -597,6 +840,117 @@ lookupOrCreateSubagentSession sessionsRef storeRootRef typesRef agentId = do
             let session = SubagentSession
                     { subSessionTranscript = transcript
                     , subSessionContextTokens = contextTokens
+                    , subSessionProvider = provider
+                    , subSessionEffectiveModel = sessionEffectiveModel
+                    , subSessionDialect = sessionDialect
                     }
             atomicModifyIORef' sessionsRef \m -> (Map.insert agentId session m, ())
             pure session
+
+validatePersistedSubagentTarget
+    :: Provider
+    -> Text
+    -> DialectId
+    -> Maybe LegacySubagentTarget
+    -> SubagentDiskMeta
+    -> Either Text (Text, DialectId)
+validatePersistedSubagentTarget
+        provider expectedEffectiveModel expectedDialect legacyTarget meta = do
+    let legacyDialect =
+            legacyDialectForTarget
+                legacyTarget
+                provider
+                expectedEffectiveModel
+                expectedDialect
+    storedProvider <- case meta.diskProvider of
+        Just storedProvider -> Right storedProvider
+        Nothing
+            | Nothing <- legacyDialect ->
+                Left
+                    "cannot restore a legacy subagent without provider metadata \
+                    \after changing the session target; reopen the parent \
+                    \session under its original target first"
+        Nothing -> Right provider
+    storedEffectiveModel <- case meta.diskEffectiveModel of
+        Just stored -> Right stored
+        Nothing
+            | Just _ <- legacyDialect -> Right expectedEffectiveModel
+            | otherwise ->
+                Left
+                    "cannot restore a legacy subagent without effective model \
+                    \metadata after changing the session target; reopen the \
+                    \parent session under its original target first"
+    case subagentTargetError
+            provider expectedEffectiveModel storedProvider storedEffectiveModel of
+        Just err -> Left err
+        Nothing -> Right ()
+    storedDialect <- case meta.diskDialect of
+        Just stored -> Right stored
+        Nothing -> case legacyDialect of
+            Just legacy -> Right legacy
+            Nothing ->
+                Left
+                    "cannot restore a legacy subagent without dialect metadata \
+                    \after changing the session target; reopen the parent \
+                    \session under its original target first"
+    Right (storedEffectiveModel, storedDialect)
+
+legacyDialectForTarget
+    :: Maybe LegacySubagentTarget
+    -> Provider
+    -> Text
+    -> DialectId
+    -> Maybe DialectId
+legacyDialectForTarget target provider effectiveModel dialect = do
+    legacy <- target
+    if legacy.legacyTargetProvider == provider
+        && legacy.legacyTargetEffectiveModel == effectiveModel
+        && legacy.legacyTargetDialect == dialect
+        then Just dialect
+        else Nothing
+
+activeSubagentTargetError
+    :: Provider
+    -> Text
+    -> SubagentSession
+    -> Maybe Text
+activeSubagentTargetError provider effectiveModel session =
+    subagentTargetError
+        provider
+        effectiveModel
+        session.subSessionProvider
+        session.subSessionEffectiveModel
+
+subagentTargetError
+    :: Provider
+    -> Text
+    -> Provider
+    -> Text
+    -> Maybe Text
+subagentTargetError provider effectiveModel storedProvider storedEffectiveModel
+    | storedProvider /= provider =
+        Just
+            ( "cannot continue subagent created for the "
+                <> providerSlug storedProvider
+                <> " transport under "
+                <> providerSlug provider
+            )
+    | storedEffectiveModel /= effectiveModel =
+        Just
+            ( "cannot continue subagent after its effective model changed \
+                \from "
+                <> storedEffectiveModel
+                <> " to "
+                <> effectiveModel
+            )
+    | otherwise = Nothing
+
+unsupportedDialectMessage :: Provider -> SubagentId -> DialectId -> Text
+unsupportedDialectMessage provider agentId storedDialect =
+    "cannot restore subagent "
+        <> agentId.unSubagentId
+        <> ": dialect "
+        <> dialectSlug storedDialect
+        <> " is not supported by the current "
+        <> providerSlug provider
+        <> " transport"

@@ -13,6 +13,7 @@ import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.TUI.App (FullscreenRuntime)
+import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -32,6 +33,7 @@ data SessionEnv = SessionEnv
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
+    , sessionDialect :: !Dialect
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionPrevious :: !(IORef (Maybe Text))

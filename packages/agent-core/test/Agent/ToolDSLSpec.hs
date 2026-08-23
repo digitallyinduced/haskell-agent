@@ -60,6 +60,22 @@ spec = do
                     (fromGregorian 2026 8 20) True
             prompt `shouldSatisfy` Text.isInfixOf "no human operator"
 
+        it "omits sections and names for tools unavailable to a child" do
+            let prompt =
+                    grokSystemPromptForTools
+                        codingGrokPromptTools
+                        ["read_file", "list_dir", "grep", "web_search"]
+                        (fromFilePath "/tmp/repo")
+                        (fromGregorian 2026 8 20)
+                        True
+            prompt `shouldSatisfy` Text.isInfixOf "read_file"
+            prompt `shouldSatisfy` Text.isInfixOf "web_search"
+            prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
+            prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
+            prompt `shouldNotSatisfy` Text.isInfixOf "get_task_output"
+            prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
+            prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
+
 propertyType :: Text -> Aeson.Object -> Maybe Aeson.Value
 propertyType name object = do
     Aeson.Object properties <- KeyMap.lookup "properties" object

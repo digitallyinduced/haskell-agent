@@ -310,41 +310,52 @@ resumeTask
     -> IO (Either Text Text)
 resumeTask ctx typesRef args resumeId = do
     let agentId = SubagentId resumeId
-    _ <- case ctx.multiResumeFromDisk of
+    restored <- case ctx.multiResumeFromDisk of
         Just restore -> restore agentId
         Nothing -> pure (Right ())
-    status <- getStatus ctx.multiRegistry agentId
-    case status of
-        NotFound -> pure (Left ("unknown subagent id: " <> resumeId))
-        Closed -> pure (Left "cannot resume a closed subagent; it must still be open (completed).")
-        Running -> pure (Left "cannot resume_from a running subagent; wait for it to finish first.")
-        Pending -> pure (Left "cannot resume_from a pending subagent; wait for it to finish first.")
-        _ -> do
-            mtype <- lookupAgentType typesRef agentId
-            case mtype of
-                Just prior
-                    | prior /= args.subagentType ->
-                        pure $ Left $
-                            "resume_from subagent_type mismatch: source is "
-                                <> prior
-                                <> ", requested "
-                                <> args.subagentType
+    case restored of
+        Left err -> pure (Left err)
+        Right () -> do
+            status <- getStatus ctx.multiRegistry agentId
+            case status of
+                NotFound -> pure (Left ("unknown subagent id: " <> resumeId))
+                Closed -> pure (Left "cannot resume a closed subagent; it must still be open (completed).")
+                Running -> pure (Left "cannot resume_from a running subagent; wait for it to finish first.")
+                Pending -> pure (Left "cannot resume_from a pending subagent; wait for it to finish first.")
                 _ -> do
-                    recordAgentType typesRef agentId args.subagentType
-                    rootTurnId <- ctx.multiRootTurnId
-                    sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
-                        ctx.multiTaskPath agentId
-                        (plainInterAgentContent args.prompt) False
-                    case sent of
-                        Left err -> pure (Left err)
-                        Right _ ->
-                            if args.runInBackground
-                                then pure $ Right $ formatTaskStarted agentId args Nothing
-                                else do
-                                    (statuses, timedOut) <-
-                                        waitSubagents ctx.multiRegistry [agentId] defaultWaitTimeoutMs
-                                    pure $ Right $ formatTaskCompleted agentId args Nothing timedOut
-                                        (Map.lookup agentId statuses)
+                    mtype <- lookupAgentType typesRef agentId
+                    case mtype of
+                        Just prior
+                            | prior /= args.subagentType ->
+                                pure $ Left $
+                                    "resume_from subagent_type mismatch: source is "
+                                        <> prior
+                                        <> ", requested "
+                                        <> args.subagentType
+                        _ -> do
+                            recordAgentType typesRef agentId args.subagentType
+                            rootTurnId <- ctx.multiRootTurnId
+                            sent <- sendInputMessageForTurn ctx.multiRegistry rootTurnId
+                                ctx.multiTaskPath agentId
+                                (plainInterAgentContent args.prompt) False
+                            case sent of
+                                Left err -> pure (Left err)
+                                Right _ ->
+                                    if args.runInBackground
+                                        then pure $ Right $ formatTaskStarted agentId args Nothing
+                                        else do
+                                            (statuses, timedOut) <-
+                                                waitSubagents
+                                                    ctx.multiRegistry
+                                                    [agentId]
+                                                    defaultWaitTimeoutMs
+                                            pure $ Right $
+                                                formatTaskCompleted
+                                                    agentId
+                                                    args
+                                                    Nothing
+                                                    timedOut
+                                                    (Map.lookup agentId statuses)
 
 formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
 formatTaskStarted agentId args worktreePath =

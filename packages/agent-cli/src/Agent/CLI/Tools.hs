@@ -7,8 +7,14 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.Responses.Types
+import Agent.Dialect
+    ( Dialect
+    , FunctionSchemaStyle(..)
+    , ToolLayout(..)
+    , dialectFunctionSchemaStyle
+    , dialectToolLayout
+    )
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
-import Agent.Provider (Provider(..))
 import Agent.ToolDSL (PropertySchema, parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
@@ -43,27 +49,26 @@ webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
     , fields = KeyMap.empty
     }
 
-schemasFromAppTools :: Provider -> [AppTool] -> [ResponseTool]
-schemasFromAppTools provider tools = case provider of
-    OpenAIProvider ->
+schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
+schemasFromAppTools dialect tools = case dialectToolLayout dialect of
+    CollaborationNamespaceLayout ->
         let (multi, rest) = partition isMultiAgentTool tools
-            base = webSearchTool : map (schemaFromAppTool provider) rest
+            base = webSearchTool : map (schemaFromAppTool dialect) rest
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
-    _ ->
-        webSearchTool : map (schemaFromAppTool provider) tools
+    FlatToolLayout ->
+        webSearchTool : map (schemaFromAppTool dialect) tools
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
-schemaFromAppTool :: Provider -> AppTool -> ResponseTool
-schemaFromAppTool provider tool = case tool.appToolSchema of
+schemaFromAppTool :: Dialect -> AppTool -> ResponseTool
+schemaFromAppTool dialect tool = case tool.appToolSchema of
     JsonFunctionSchema parameters ->
-        let build = case provider of
-                XAIProvider -> buildGrokTool
-                OpenRouterProvider -> buildGrokTool
-                OpenAIProvider -> buildTool
+        let build = case dialectFunctionSchemaStyle dialect of
+                StrictFunctionSchemas -> buildTool
+                LooseFunctionSchemas -> buildGrokTool
         in build tool.appToolName tool.appToolDescription parameters
     FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription

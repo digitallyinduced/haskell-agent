@@ -2,7 +2,12 @@ module Agent.CLI.ResumeSpec (spec) where
 
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Resume
-import Agent.CLI.Session (SessionMeta(..), SessionTurn(..))
+import Agent.CLI.Session
+    ( LegacySubagentTarget(..)
+    , SessionMeta(..)
+    , SessionTurn(..)
+    )
+import Agent.Dialect (DialectId(..))
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Data.Time.Clock (addUTCTime)
@@ -183,6 +188,13 @@ sampleMeta sid title =
         , metaUpdatedAt = posixSecondsToUTCTime 0
         , metaProvider = XAIProvider
         , metaModel = "grok-4.6"
+        , metaTransportModel = Just "grok-4.6"
+        , metaDialect = GrokBuildDialect
+        , metaLegacySubagentTarget = Just LegacySubagentTarget
+            { legacyTargetProvider = XAIProvider
+            , legacyTargetEffectiveModel = "grok-4.6"
+            , legacyTargetDialect = GrokBuildDialect
+            }
         , metaCwd = fromFilePath "/tmp/repo"
         , metaEffort = "high"
         , metaTitle = title

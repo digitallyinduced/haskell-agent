@@ -3,6 +3,7 @@ module Agent.CLI.ProviderTransitionSpec (spec) where
 import Agent.CLI.Models (ModelOption(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
+import Agent.Dialect (DialectId(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
 import Data.Text (Text)
@@ -59,6 +60,8 @@ transition sessionId pending = ProviderTransition
     { transitionTarget = ModelOption
         { modelProvider = OpenAIProvider
         , modelId = "gpt-5.6-sol"
+        , modelTransportId = "gpt-5.6-sol"
+        , modelDialect = CodexDialect
         , modelLabel = Nothing
         }
     , transitionAccountSelectionId = Nothing

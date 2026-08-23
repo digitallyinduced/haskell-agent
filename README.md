@@ -28,9 +28,11 @@ have to be.
   typed workspace. The harness distinguishes pure expressions from effectful
   actions, preserves bindings across calls, and recovers or restarts GHCi when
   interruption makes its state uncertain.
-- **One runtime without one generic tool dialect:** the harness owns the agent
-  loop and connects to providers directly, but OpenAI still receives
-  Codex-style tools while xAI receives the Grok Build tool surface.
+- **First-class model dialects:** providers own authentication, billing, and
+  transport, while dialects own the model-facing prompt, tool surface, schema
+  conventions, project-instruction formatting, and subagent protocol. This
+  keeps Codex-style and Grok Build behavior intact even when a transport such
+  as OpenRouter serves models from several families.
 - **Cross-provider state and billing policy:** provider transitions preserve
   the pending turn and durable session state. Credential failover understands
   account cooldowns and prevents automatic fallback from silently converting
@@ -212,6 +214,11 @@ The provider-neutral loop sees typed turns, tool calls, tool results, usage,
 and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
+
+Model targets resolve independently to a provider transport and a model-facing
+dialect. OpenAI models use the Codex dialect, xAI models use the Grok Build
+dialect, and OpenRouter selects Codex, Grok Build, or a portable Responses
+dialect from the model family.
 
 ## Development
 

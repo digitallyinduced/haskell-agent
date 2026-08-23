@@ -1,8 +1,12 @@
 module Agent.ProjectInstructionsSpec (spec) where
 
+import Agent.Dialect
+    ( codexDialect
+    , genericResponsesDialect
+    , grokBuildDialect
+    )
 import Agent.ProjectInstructions
 import System.OsPath (unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
@@ -175,27 +179,27 @@ spec = describe "Agent.ProjectInstructions" do
                 Nothing ->
                     expectationFailure "expected rendered Grok instructions"
 
-    describe "formatAgentsMdForProvider" do
-        it "picks Codex formatting for OpenAI and Grok formatting otherwise" do
+    describe "formatAgentsMdForDialect" do
+        it "picks the instruction format declared by the dialect" do
             let loaded = LoadedAgentsMd
                     { loadedGlobal = Nothing
                     , loadedProject = [InstructionFile (fromFilePath "/repo/AGENTS.md") "x"]
                     }
-            formatAgentsMdForProvider OpenAIProvider (fromFilePath "/repo") loaded
+            formatAgentsMdForDialect codexDialect (fromFilePath "/repo") loaded
                 `shouldSatisfy` maybe False (Text.isPrefixOf "# AGENTS.md instructions")
-            formatAgentsMdForProvider XAIProvider (fromFilePath "/repo") loaded
+            formatAgentsMdForDialect grokBuildDialect (fromFilePath "/repo") loaded
                 `shouldSatisfy` maybe False (Text.isInfixOf "<system-reminder>")
-            formatAgentsMdForProvider OpenRouterProvider (fromFilePath "/repo") loaded
+            formatAgentsMdForDialect genericResponsesDialect (fromFilePath "/repo") loaded
                 `shouldSatisfy` maybe False (Text.isInfixOf "<system-reminder>")
 
     describe "globalAgentsHomeDir" do
-        it "uses ~/.codex for OpenAI and ~/.grok for the others" do
-            globalAgentsHomeDir OpenAIProvider (fromFilePath "/home/u")
+        it "uses the compatibility directory declared by the dialect" do
+            globalAgentsHomeDir codexDialect (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.codex"
-            globalAgentsHomeDir XAIProvider (fromFilePath "/home/u")
+            globalAgentsHomeDir grokBuildDialect (fromFilePath "/home/u")
                 `shouldBe` fromFilePath "/home/u/.grok"
-            globalAgentsHomeDir OpenRouterProvider (fromFilePath "/home/u")
-                `shouldBe` fromFilePath "/home/u/.grok"
+            globalAgentsHomeDir genericResponsesDialect (fromFilePath "/home/u")
+                `shouldBe` fromFilePath "/home/u/.haskell-agent"
 
 checkLockedInstructions :: FilePath -> IO ()
 checkLockedInstructions dir = do

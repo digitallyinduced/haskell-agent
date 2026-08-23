@@ -4,6 +4,7 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
+import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopDispatch)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
@@ -60,9 +61,30 @@ spec = describe "Agent.CLI.AgentSessions" do
             handle.sessionMeta.metaTitle `shouldBe` "worker"
             handle.sessionMeta.metaTitleIsManual `shouldBe` True
             handle.sessionMeta.metaModel `shouldBe` "model-2"
+            handle.sessionMeta.metaDialect `shouldBe` GrokBuildDialect
             handle.sessionMeta.metaEffort `shouldBe` "high"
             loadSession env.toolsRoot handle.sessionMeta.metaId
                 `shouldReturn` Right (handle.sessionMeta, [])
+
+    it "inherits the active dialect and resolves explicit model overrides" $
+        withTempEnv \env launched -> do
+            let openRouterEnv = env
+                    { toolsProvider = OpenRouterProvider
+                    , toolsModel = "openai/gpt-5.1"
+                    , toolsTransportModel = "openai/gpt-5.1"
+                    , toolsDialect = GrokBuildDialect
+                    }
+            _ <- runTool openRouterEnv "create_agent_session"
+                "{\"message\":\"inherit legacy dialect\"}"
+            _ <- runTool openRouterEnv "create_agent_session"
+                "{\"message\":\"use portable dialect\",\"model\":\"anthropic/claude-sonnet-4\"}"
+            [(inherited, _), (overridden, _)] <- readIORef launched
+            inherited.sessionMeta.metaModel `shouldBe` "openai/gpt-5.1"
+            inherited.sessionMeta.metaDialect `shouldBe` GrokBuildDialect
+            overridden.sessionMeta.metaModel
+                `shouldBe` "anthropic/claude-sonnet-4"
+            overridden.sessionMeta.metaDialect
+                `shouldBe` GenericResponsesDialect
 
     it "reads recent turns without exposing raw response items" $
         withTempEnv \env _ -> do
@@ -228,6 +250,8 @@ withTempEnv action =
                 { toolsRoot = root
                 , toolsProvider = XAIProvider
                 , toolsModel = "model-1"
+                , toolsTransportModel = "model-1"
+                , toolsDialect = GrokBuildDialect
                 , toolsCwd = fromFilePath "/tmp/work"
                 , toolsEffort = "low"
                 , toolsCurrentSessionId = pure Nothing
@@ -241,6 +265,8 @@ testCreate root = SessionCreate
     { createRoot = root
     , createProvider = XAIProvider
     , createModel = "model-1"
+    , createTransportModel = "model-1"
+    , createDialect = GrokBuildDialect
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Just "test"

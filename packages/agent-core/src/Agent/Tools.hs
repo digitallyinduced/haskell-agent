@@ -29,7 +29,11 @@ module Agent.Tools
     , filterChildGrokTools
     ) where
 
-import Agent.Provider (Provider(..))
+import Agent.Dialect
+    ( Dialect
+    , ToolSurface(..)
+    , dialectToolSurface
+    )
 import Agent.ResourceScope
     ( allocateResource
     , closeResourceScope
@@ -66,34 +70,32 @@ data CodingTools = CodingTools
 -- persistent cwd/environment shell state. 'codingClose' closes owned sessions;
 -- run it in 'finally'.
 codingToolsFor
-    :: Provider
+    :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
     -> Maybe MultiAgentContext
     -> IO CodingTools
-codingToolsFor provider env hooks multi = do
+codingToolsFor dialect env hooks multi = do
     typesRef <- newIORef Map.empty
-    codingToolsForWithTypes provider env hooks multi typesRef
+    codingToolsForWithTypes dialect env hooks multi typesRef
 
 -- | Same as 'codingToolsFor', but reuses an existing agent-type map so the
 -- host can wire resume-from-disk before tools are built.
 codingToolsForWithTypes
-    :: Provider
+    :: Dialect
     -> ToolEnv
     -> Maybe PlanModeHooks
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
     -> IO CodingTools
-codingToolsForWithTypes provider env hooks multi typesRef = do
+codingToolsForWithTypes dialect env hooks multi typesRef = do
     resources <- newResourceScope
     flip onException (closeResourceScope resources) do
         plan <- newPlanModeEnv env.toolCwd hooks
-        case provider of
-            XAIProvider ->
+        case dialectToolSurface dialect of
+            GrokBuildToolSurface ->
                 grokCodingTools resources plan
-            OpenRouterProvider ->
-                grokCodingTools resources plan
-            OpenAIProvider -> do
+            CodexToolSurface -> do
                 (_, shellSession) <- allocateResource resources
                     (newCodexShellSession env)
                     closeCodexShellSession

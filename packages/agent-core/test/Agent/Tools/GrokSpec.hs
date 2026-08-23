@@ -1,8 +1,8 @@
 module Agent.Tools.GrokSpec (spec) where
 
+import Agent.Dialect (genericResponsesDialect, grokBuildDialect)
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
 import Agent.Subagents (SubagentId, closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.ToolDSL (PropertySchema(..))
@@ -69,12 +69,14 @@ spec = describe "Agent.Tools.Grok" do
                     ]
             map (map (.propertyName)) outputSchemas
                 `shouldBe` [["task_ids", "timeout_ms"]]
-            xai <- codingToolsFor XAIProvider session.grokEnv Nothing Nothing
-            openrouter <- codingToolsFor OpenRouterProvider session.grokEnv Nothing Nothing
+            grok <- codingToolsFor grokBuildDialect session.grokEnv Nothing Nothing
+            generic <-
+                codingToolsFor
+                    genericResponsesDialect session.grokEnv Nothing Nothing
             (do
-                map (.appToolName) xai.codingAppTools `shouldBe` names
-                map (.appToolName) openrouter.codingAppTools `shouldBe` names)
-                `finally` (xai.codingClose >> openrouter.codingClose)
+                map (.appToolName) grok.codingAppTools `shouldBe` names
+                map (.appToolName) generic.codingAppTools `shouldBe` names)
+                `finally` (grok.codingClose >> generic.codingClose)
 
 
     it "registers task when a multi-agent context is provided" do

@@ -2,6 +2,7 @@ module Main (main) where
 
 import qualified Agent.Auth.JWTSpec as JWTSpec
 import qualified Agent.CancelSpec as CancelSpec
+import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
@@ -33,6 +34,7 @@ main :: IO ()
 main = hspec do
     JWTSpec.spec
     CancelSpec.spec
+    DialectSpec.spec
     ErrorSpec.spec
     HttpHeaderSpec.spec
     JsonTextSpec.spec
