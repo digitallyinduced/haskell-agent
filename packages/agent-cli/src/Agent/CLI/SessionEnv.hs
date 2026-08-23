@@ -5,6 +5,7 @@ module Agent.CLI.SessionEnv
 
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
+import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
@@ -13,6 +14,7 @@ import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.TUI.App (FullscreenRuntime)
+import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -32,6 +34,9 @@ data SessionEnv = SessionEnv
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig
     , sessionProvider :: !Provider
+    , sessionConnection :: !Text
+    , sessionModelCatalog :: !ModelCatalog
+    , sessionDialect :: !Dialect
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionPrevious :: !(IORef (Maybe Text))
@@ -46,6 +51,7 @@ data SessionEnv = SessionEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
+    , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
     , sessionStartupContext :: !(IORef (Maybe Text))

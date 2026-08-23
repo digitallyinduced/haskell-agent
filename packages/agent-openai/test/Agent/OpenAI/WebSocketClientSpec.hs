@@ -9,6 +9,7 @@ import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
 
@@ -79,6 +80,91 @@ spec = do
         run (ProviderError UsageLimitReached "quota" (Just 3600))
             `shouldReturn` Left (ProviderError UsageLimitReached "quota" (Just 3600))
         readIORef attempts `shouldReturn` 3
+
+  describe "receiveWsResponseWithActions" do
+    it "assembles the Codex indexless function-call sequence through response.done" do
+        testPartialTerminalResponse
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "call_id" Aeson..= ("call-test" :: Text)
+                    , "name" Aeson..= ("shell_command" :: Text)
+                    , "arguments" Aeson..= ("{}" :: Text)
+                    ]
+                ]
+            , lifecycleFrame "response.done"
+                (Aeson.object
+                    [ "usage" Aeson..= Aeson.object
+                        [ "input_tokens" Aeson..= (10 :: Int)
+                        , "output_tokens" Aeson..= (2 :: Int)
+                        , "total_tokens" Aeson..= (12 :: Int)
+                        ]
+                    ])
+            ]
+            [EventResponseCreated, EventOutputItemDone, EventResponseDone]
+            \response ->
+                [name | FunctionCallItem FunctionCall { name } <- response.output]
+                    `shouldBe` ["shell_command"]
+
+    it "assembles a minimal response.created followed by response.completed" do
+        testPartialTerminalResponse
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , lifecycleFrame "response.completed" (Aeson.object [])
+            ]
+            [EventResponseCreated, EventResponseCompleted]
+            \response -> response.output `shouldBe` []
+
+testPartialTerminalResponse
+    :: [LBS.ByteString]
+    -> [StreamEventType]
+    -> (Response -> Expectation)
+    -> Expectation
+testPartialTerminalResponse inputFrames expectedTypes checkResponse = do
+    frames <- newIORef inputFrames
+    receiveCount <- newIORef (0 :: Int)
+    completeCount <- newIORef (0 :: Int)
+    invalidations <- newIORef ([] :: [Text])
+    callbackTypes <- newIORef ([] :: [StreamEventType])
+
+    let actions = WebSocketReceiveActions
+            { receiveFrame = do
+                modifyIORef' receiveCount (+ 1)
+                atomicModifyIORef' frames \case
+                    frame : rest -> (rest, Right frame)
+                    [] -> error "unexpected receive after terminal event"
+            , completeRequest = modifyIORef' completeCount (+ 1)
+            , invalidateRequest = \reason ->
+                modifyIORef' invalidations (<> [reason])
+            }
+        onEvent event =
+            modifyIORef' callbackTypes (<> [responseStreamEventType event])
+
+    result <- receiveWsResponseWithActions (Just "gpt-test") actions onEvent
+
+    case result of
+        Left err -> expectationFailure ("unexpected error: " <> show err)
+        Right response -> do
+            response.responseId `shouldBe` "resp-test"
+            response.model `shouldBe` "gpt-test"
+            response.object `shouldBe` "response"
+            response.status `shouldBe` ResponseCompleted
+            checkResponse response
+
+    readIORef callbackTypes `shouldReturn` expectedTypes
+    readIORef receiveCount `shouldReturn` length inputFrames
+    readIORef completeCount `shouldReturn` 1
+    readIORef invalidations `shouldReturn` []
+    readIORef frames `shouldReturn` []
+
+lifecycleFrame :: Text -> Aeson.Value -> LBS.ByteString
+lifecycleFrame eventType responseValue = Aeson.encode $ Aeson.object
+    [ "type" Aeson..= eventType
+    , "response" Aeson..= responseValue
+    ]
 
 contextManagement :: CodexWsOptions -> Maybe Aeson.Value
 contextManagement options =

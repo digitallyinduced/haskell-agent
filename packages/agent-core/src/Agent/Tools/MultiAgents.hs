@@ -43,6 +43,7 @@ import Agent.InterAgentMessage
 import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
+    , objectArgsLenient
     , optInt
     , optText
     , readExactInt
@@ -100,6 +101,8 @@ data MultiAgentContext = MultiAgentContext
         :: !(Maybe (SubagentId -> CollaborationSpawnOptions -> IO ()))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
+      -- | Optional provider/billing-specific guidance for model overrides.
+    , multiSpawnModelGuidance :: !(Maybe Text)
     }
 
 multiAgentNamespace :: Text
@@ -152,7 +155,10 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
     , PropertySchema "message"
         (encryptedString "Initial plain-text task for the new agent.") True Nothing
     , PropertySchema "model" PropertyString False $ Just
-        "Model override for the new agent. Omit unless an explicit override is needed."
+        (Text.intercalate " " $
+            [ "Model override for the new agent. Omit unless an explicit override is needed."
+            ]
+                <> maybe [] pure ctx.multiSpawnModelGuidance)
     , PropertySchema "reasoning_effort" PropertyString False $ Just
         "Reasoning effort override for the new agent. Omit to inherit the parent effort."
     , PropertySchema "fork_turns" PropertyString False $ Just
@@ -237,7 +243,7 @@ data WaitAgentArgs = WaitAgentArgs
     }
 
 instance FromJSON WaitAgentArgs where
-    parseJSON = objectArgs \object_ -> do
+    parseJSON = objectArgsLenient \object_ -> do
         targets <- case KeyMap.lookup (Key.fromText "targets") object_ of
             Nothing -> pure Nothing
             Just _ -> Just <$> reqTextList object_ "targets"
@@ -451,7 +457,7 @@ data ListAgentsArgs = ListAgentsArgs
     }
 
 instance FromJSON ListAgentsArgs where
-    parseJSON = objectArgs \object_ -> ListAgentsArgs
+    parseJSON = objectArgsLenient \object_ -> ListAgentsArgs
         <$> optText object_ "path_prefix"
 
 listAgentsTool :: MultiAgentContext -> AppTool

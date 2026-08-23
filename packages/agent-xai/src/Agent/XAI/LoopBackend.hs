@@ -35,7 +35,8 @@ xaiBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
 
--- | Same mapping as 'xaiBackend', with an injectable transport for tests.
+-- | Same mapping as 'xaiBackend', with an injectable transport for tests and
+-- downstream integrations.
 xaiBackendWith
     :: (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())

@@ -1,7 +1,6 @@
 -- | Lightweight fullscreen Markdown block rendering.
 module Agent.TUI.Markdown
-    ( InlineSpan(..)
-    , InlineStyle(..)
+    ( Inline(..)
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithCodeControls
@@ -14,22 +13,28 @@ import Agent.TUI.FencedCode
     , FencedBlock(..)
     , fenceChunks
     )
+import Agent.TUI.Markdown.Inline
+    ( Inline(..)
+    , inlinePlainText
+    , parseInline
+    )
+import qualified Agent.TUI.Markdown.Block as Block
 import Agent.Syntax
-    ( HighlightedLine
-    , SyntaxHighlighter
+    ( SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
     )
-import Agent.TUI.TextWidth (displayCharCellWidth)
+import Agent.TUI.TextWidth
+    ( displayCharCellWidth
+    , displayTerminalText
+    )
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
-import Data.Char
-    ( isDigit
-    , isSpace
-    )
+import Data.Bits ((.|.))
+import Data.Char (isSpace)
 import qualified Data.List as List
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -38,20 +43,6 @@ import qualified Graphics.Vty as V
 
 terminalCharWidth :: Char -> Int
 terminalCharWidth = displayCharCellWidth
-
-data InlineStyle
-    = InlinePlain
-    | InlineStrong
-    | InlineEmphasis
-    | InlineCode
-    | InlineLink !Text
-    deriving (Eq, Show)
-
-data InlineSpan = InlineSpan
-    { inlineStyle :: !InlineStyle
-    , inlineText :: !Text
-    }
-    deriving (Eq, Show)
 
 markdownWidget :: Text -> Widget n
 markdownWidget =
@@ -115,38 +106,42 @@ renderLines
     -> [Widget n]
 renderLines [] = []
 renderLines lines_
-    | Just (table, rest) <- takeTable lines_ =
-        table : renderLines rest
+    | Just (rows, rest) <- Block.takeTableRows lines_ =
+        tableWidget rows : renderLines rest
 renderLines (line : rest)
-    | Just heading <- stripHeading line =
-        withAttr Theme.headingAttr
-            (padTop (Pad 1) (inlineWidget (parseInline heading)))
+    | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
+        padTop (Pad 1)
+            (inlineWidgetWithAttr Theme.headingAttr (parseInline heading))
             : renderLines rest
-    | Just item <- stripBullet line =
+    | Just (indent, item) <- Block.bulletPartsWith (== ' ') line =
         hBox
-            [ withAttr Theme.headingAttr (txt "• ")
-            , inlineWidget (parseInline item)
+            [ txt indent
+            , withAttr Theme.headingAttr (txt "• ")
+            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just (number, item) <- stripOrdered line =
+    | Just (indent, number, item) <- Block.orderedParts line =
         hBox
-            [ withAttr Theme.headingAttr (txt (number <> ". "))
-            , inlineWidget (parseInline item)
+            [ txt indent
+            , withAttr Theme.headingAttr (txt (number <> ". "))
+            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just quote <- Text.stripPrefix "> " (Text.stripStart line) =
+    | Just rawQuote <- Block.blockQuoteRemainder line =
+        let quote = fromMaybe rawQuote (Text.stripPrefix " " rawQuote)
+        in
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
-            , withAttr Theme.mutedAttr (inlineWidget (parseInline quote))
+            , inlineWidgetWithAttr Theme.mutedAttr (parseInline quote)
             ]
             : renderLines rest
     | Text.null (Text.strip line) =
         txt " " : renderLines rest
-    | isThematicBreak line =
+    | Block.isThematicBreak line =
         withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             : renderLines rest
     | otherwise =
-        inlineWidget (parseInline line)
+        inlineWidgetWithAttr Theme.assistantAttr (parseInline line)
             : renderLines rest
 
 codeBodyLines :: Text -> [Text]
@@ -168,21 +163,43 @@ renderCodeBody syntaxHighlighter language bodyLines =
     -- Keep tokenization inside the render action. Brick's 'cached' inspects a
     -- widget's size policy before consulting its cache; returning a concrete
     -- vBox here would therefore force tokenization on every streamed redraw.
-    B.Widget B.Fixed B.Fixed $
-        B.render (buildCodeBody syntaxHighlighter language bodyLines)
-
-buildCodeBody
-    :: Maybe SyntaxHighlighter
-    -> Text
-    -> [Text]
-    -> Widget n
-buildCodeBody syntaxHighlighter language bodyLines =
-    vBox $
-        case syntaxHighlighter >>= highlighted of
-            Just highlightedLines
-                | length highlightedLines == length bodyLines ->
-                    map renderHighlightedCodeLine highlightedLines
-            _ -> map renderFlatCodeLine bodyLines
+    --
+    -- Code must also be bounded here rather than relying on the surrounding
+    -- vertical viewport. An over-wide Vty image can reach the terminal as one
+    -- physical line, where terminal-side wrapping corrupts subsequent rows.
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        codeAttr <- B.lookupAttrName Theme.codeAttr
+        styledLines <-
+            case syntaxHighlighter >>= highlighted of
+                Just highlightedLines
+                    | length highlightedLines == length bodyLines ->
+                        traverse (traverse resolveSyntaxSpan) highlightedLines
+                _ ->
+                    pure
+                        [ [(codeAttr, displayTerminalText line)]
+                        | line <- bodyLines
+                        ]
+        let availableWidth = max 1 context.availWidth
+            horizontalPadding =
+                if availableWidth >= 3 then 1 else 0
+            contentWidth =
+                max 1 (availableWidth - 2 * horizontalPadding)
+            rows =
+                concatMap (wrapStyled contentWidth) styledLines
+            image =
+                V.vertCat
+                    [ renderCodeRow
+                        codeAttr
+                        horizontalPadding
+                        row
+                    | row <- rows
+                    ]
+            boundedImage
+                | V.imageWidth image > availableWidth =
+                    V.cropRight availableWidth image
+                | otherwise = image
+        pure B.emptyResult { B.image = boundedImage }
   where
     highlighted highlighter =
         either (const Nothing) Just $
@@ -190,76 +207,29 @@ buildCodeBody syntaxHighlighter language bodyLines =
                 highlighter
                 language
                 (Text.intercalate "\n" bodyLines)
+    resolveSyntaxSpan span_ = do
+        attr <- B.lookupAttrName (Theme.syntaxClassAttr span_.syntaxClass)
+        pure (attr, displayTerminalText span_.syntaxText)
 
-renderFlatCodeLine :: Text -> Widget n
-renderFlatCodeLine =
-    withAttr Theme.codeAttr . padLeftRight 1 . txt
-
-renderHighlightedCodeLine :: HighlightedLine -> Widget n
-renderHighlightedCodeLine spans =
-    withAttr Theme.codeAttr $
-        padLeftRight 1 $
-            case spans of
-                [] -> txt ""
-                _ ->
-                    hBox
-                        [ withAttr
-                            (Theme.syntaxClassAttr span_.syntaxClass)
-                            (txt span_.syntaxText)
-                        | span_ <- spans
-                        ]
-
-stripHeading :: Text -> Maybe Text
-stripHeading line =
-    let stripped = Text.stripStart line
-        (marks, rest) = Text.span (== '#') stripped
-    in if not (Text.null marks)
-        && Text.length marks <= 6
-        && Text.isPrefixOf " " rest
-        then Just (Text.strip rest)
-        else Nothing
-
-stripBullet :: Text -> Maybe Text
-stripBullet line =
-    let stripped = Text.stripStart line
-    in asumPrefix ["- ", "* ", "+ "] stripped
-
-stripOrdered :: Text -> Maybe (Text, Text)
-stripOrdered line =
-    let
-        stripped = Text.stripStart line
-        (number, rest) = Text.span isDigit stripped
-    in if Text.null number
-        then Nothing
-        else
-            (\item -> (number, Text.strip item))
-                <$> Text.stripPrefix ". " rest
-
-isThematicBreak :: Text -> Bool
-isThematicBreak line =
-    let stripped = Text.filter (not . isSpace) (Text.strip line)
-    in Text.length stripped >= 3
-        && (Text.all (== '-') stripped
-            || Text.all (== '*') stripped
-            || Text.all (== '_') stripped)
-
-takeTable :: [Text] -> Maybe (Widget n, [Text])
-takeTable (rawHeader : separator : rest)
-    | Just headerCells <- splitTableRow rawHeader
-    , Just separatorCells <- splitTableRow separator
-    , length separatorCells == length headerCells
-    , all isSeparatorCell separatorCells =
-        let
-            (body, after) = span isTableRow rest
-            rows = headerCells : mapMaybe splitTableRow body
-        in Just (tableWidget rows, after)
-takeTable _ = Nothing
-
-isSeparatorCell :: Text -> Bool
-isSeparatorCell cell =
-    Text.any (== '-') cell
-        && Text.null
-            (Text.filter (`notElem` ['-', ':', ' ']) cell)
+renderCodeRow
+    :: V.Attr
+    -> Int
+    -> [(V.Attr, Text)]
+    -> V.Image
+renderCodeRow paddingAttr horizontalPadding fragments =
+    V.horizCat
+        [ blank
+        , V.horizCat
+            [ V.text attr (LazyText.fromStrict text)
+            | (attr, text) <- fragments
+            ]
+        , blank
+        ]
+  where
+    blank
+        | horizontalPadding <= 0 = V.emptyImage
+        | otherwise =
+            V.charFill paddingAttr ' ' horizontalPadding 1
 
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
@@ -276,11 +246,10 @@ tableWidget rows@(headerCells : _) =
             traverse
                 (\(rowIndex, cells) ->
                     traverse
-                        (traverse
-                            (resolveInlineSpan
-                                (if rowIndex == 0
-                                    then Theme.headingAttr
-                                    else Theme.assistantAttr))
+                        (resolveInline
+                            (if rowIndex == 0
+                                then Theme.headingAttr
+                                else Theme.assistantAttr)
                             . parseInline)
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
@@ -507,212 +476,11 @@ fragmentsDisplayWidth =
                 0
                 . snd)
 
-isTableRow :: Text -> Bool
-isTableRow = isJust . splitTableRow
-
--- | Split a pipe row on actual column delimiters. Escaped pipes and pipes
--- inside matching backtick spans remain part of their cell.
-splitTableRow :: Text -> Maybe [Text]
-splitTableRow raw =
-    let stripped = Text.strip raw
-        content = fromMaybe stripped (Text.stripPrefix "|" stripped)
-        (cells, delimiterCount) = scan Nothing [] [] 0 False
-            (Text.unpack content)
-    in if delimiterCount >= 1
-        then Just cells
-        else Nothing
-  where
-    scan
-        :: Maybe Int
-        -> String
-        -> [Text]
-        -> Int
-        -> Bool
-        -> String
-        -> ([Text], Int)
-    scan _ current cells delimiterCount trailingDelimiter [] =
-        let allCells =
-                reverse
-                    (finishCell current : cells)
-            withoutOuterBorder
-                | trailingDelimiter = dropLast allCells
-                | otherwise = allCells
-        in (withoutOuterBorder, delimiterCount)
-    scan codeRun current cells delimiterCount _ ('\\' : rest) =
-        let (slashes, afterSlashes) = span (== '\\') rest
-            slashCount = 1 + length slashes
-            literalSlashes = replicate
-                (if startsWithPipe afterSlashes
-                    then slashCount `div` 2
-                    else slashCount)
-                '\\'
-            current' = literalSlashes <> current
-        in case afterSlashes of
-            '|' : afterPipe
-                | odd slashCount ->
-                    scan codeRun ('|' : current') cells
-                        delimiterCount False afterPipe
-                | codeRun == Nothing ->
-                    splitCell codeRun current' cells
-                        delimiterCount afterPipe
-            _ ->
-                scan codeRun current' cells
-                    delimiterCount False afterSlashes
-    scan codeRun current cells delimiterCount _ ('`' : rest) =
-        let (ticks, afterTicks) = span (== '`') rest
-            tickCount = 1 + length ticks
-            marker = replicate tickCount '`'
-            nextCodeRun = case codeRun of
-                Just openCount
-                    | tickCount >= openCount -> Nothing
-                Just openCount -> Just openCount
-                Nothing
-                    | hasClosingRun tickCount afterTicks ->
-                        Just tickCount
-                Nothing -> Nothing
-        in scan nextCodeRun (marker <> current) cells
-            delimiterCount False afterTicks
-    scan Nothing current cells delimiterCount _ ('|' : rest) =
-        splitCell Nothing current cells delimiterCount rest
-    scan codeRun current cells delimiterCount _ (character : rest) =
-        scan codeRun (character : current) cells
-            delimiterCount False rest
-
-    splitCell codeRun current cells delimiterCount rest =
-        scan codeRun [] (finishCell current : cells)
-            (delimiterCount + 1) True rest
-
-    finishCell = Text.strip . Text.pack . reverse
-
-    startsWithPipe ('|' : _) = True
-    startsWithPipe _ = False
-
-    hasClosingRun count =
-        Text.isInfixOf (Text.replicate count "`") . Text.pack
-
-    dropLast values = case reverse values of
-        _ : rest -> reverse rest
-        [] -> []
-
-asumPrefix :: [Text] -> Text -> Maybe Text
-asumPrefix prefixes text = case prefixes of
-    [] -> Nothing
-    prefix : rest -> case Text.stripPrefix prefix text of
-        Just value -> Just value
-        Nothing -> asumPrefix rest text
-
-parseInline :: Text -> [InlineSpan]
-parseInline = go Nothing []
-  where
-    go _ plain text
-        | Text.null text = flushPlain plain []
-    go previous plain text
-        | Just (body, rest) <- delimited "**" text =
-            flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
-        | Just (body, rest) <- delimited "__" text =
-            flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
-        | Just (body, rest) <- codeSpan text =
-            flushPlain plain $
-                InlineSpan InlineCode body
-                    : go (lastChar body) [] rest
-        | Just (label, url, rest) <- linkSpan text =
-            flushPlain plain $
-                InlineSpan (InlineLink url)
-                    (label
-                        <> if Text.null url || label == url
-                            then ""
-                            else " (" <> url <> ")")
-                    : go (lastChar label) [] rest
-        | Just (body, rest) <- emphasis previous '*' text =
-            flushPlain plain $
-                InlineSpan InlineEmphasis body
-                    : go (lastChar body) [] rest
-        | Just (body, rest) <- emphasis previous '_' text =
-            flushPlain plain $
-                InlineSpan InlineEmphasis body
-                    : go (lastChar body) [] rest
-        | otherwise =
-            case Text.uncons text of
-                Nothing -> flushPlain plain []
-                Just (character, rest) ->
-                    let (ordinary, remaining) =
-                            Text.span (not . inlineMarker) rest
-                        chunk = Text.cons character ordinary
-                    in go (lastChar chunk) (chunk : plain) remaining
-
-    delimited marker text = do
-        after <- Text.stripPrefix marker text
-        let (body, closing) = Text.breakOn marker after
-        if Text.null body || Text.null closing
-            then Nothing
-            else Just (body, Text.drop (Text.length marker) closing)
-
-    codeSpan text = do
-        let (ticks, after) = Text.span (== '`') text
-        if Text.null ticks
-            then Nothing
-            else
-                let (body, closing) = Text.breakOn ticks after
-                in if Text.null closing
-                    then Nothing
-                    else Just
-                        ( body
-                        , Text.drop (Text.length ticks) closing
-                        )
-
-    linkSpan text = do
-        afterOpen <- Text.stripPrefix "[" text
-        let (label, afterLabel) = Text.breakOn "](" afterOpen
-        afterUrl <- Text.stripPrefix "](" afterLabel
-        let (url, closing) = Text.breakOn ")" afterUrl
-        if Text.null label || Text.null closing
-            then Nothing
-            else Just (label, url, Text.drop 1 closing)
-
-    emphasis previous marker text = do
-        after <- Text.stripPrefix (Text.singleton marker) text
-        let (body, closing) =
-                Text.breakOn (Text.singleton marker) after
-            openingBoundary =
-                maybe True (\character -> isSpace character
-                    || character `elem` ("([{\"'" :: String)) previous
-            closingRest = Text.drop 1 closing
-            closingBoundary = case Text.uncons closingRest of
-                Nothing -> True
-                Just (character, _) ->
-                    isSpace character
-                        || character `elem` (".,;:!?)]}\"'" :: String)
-        if Text.null body
-            || Text.null closing
-            || Text.any isSpace (Text.take 1 body)
-            || not openingBoundary
-            || not closingBoundary
-            then Nothing
-            else Just (body, closingRest)
-
-    lastChar value =
-        snd <$> Text.unsnoc value
-
-    inlineMarker character =
-        character `elem` ("*_`[" :: String)
-
-    flushPlain [] rest = rest
-    flushPlain chunks rest =
-        InlineSpan InlinePlain (Text.concat (reverse chunks))
-            : rest
-
-inlinePlainText :: [InlineSpan] -> Text
-inlinePlainText = Text.concat . map (.inlineText)
-
-inlineWidget :: [InlineSpan] -> Widget n
-inlineWidget spans =
+inlineWidgetWithAttr :: AttrName -> [Inline] -> Widget n
+inlineWidgetWithAttr plainAttr inlines =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
-        styled <- traverse (resolveInlineSpan Theme.assistantAttr) spans
+        styled <- resolveInline plainAttr inlines
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
             rendered =
@@ -725,87 +493,83 @@ inlineWidget spans =
                     ]
         pure B.emptyResult { B.image = rendered }
 
-resolveInlineSpan
-    :: AttrName
-    -> InlineSpan
-    -> B.RenderM n (V.Attr, Text)
-resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
-    attr <-
-        B.lookupAttrName $
-            case inlineStyle of
-                InlinePlain -> plainAttr
-                _ -> styleAttr inlineStyle
-    pure
-        ( case inlineStyle of
-            InlineLink url
-                | not (Text.null url) -> attr `V.withURL` url
-            _ -> attr
-        , inlineText
-        )
+data InlineContext = InlineContext
+    { inlineStrong :: !Bool
+    , inlineEmphasis :: !Bool
+    , inlineUrl :: !(Maybe Text)
+    }
 
-styleAttr :: InlineStyle -> AttrName
-styleAttr = \case
-    InlinePlain -> Theme.assistantAttr
-    InlineStrong -> Theme.strongAttr
-    InlineEmphasis -> Theme.emphasisAttr
-    InlineCode -> Theme.inlineCodeAttr
-    InlineLink _ -> Theme.linkAttr
+resolveInline :: AttrName -> [Inline] -> B.RenderM n [(V.Attr, Text)]
+resolveInline plainAttr = fmap concat . traverse (go emptyContext)
+  where
+    emptyContext = InlineContext False False Nothing
+
+    go context = \case
+        InlineText text -> one plainAttr context text
+        InlineCode text -> one Theme.inlineCodeAttr context text
+        InlineStrong children ->
+            concat <$> traverse (go context{inlineStrong = True}) children
+        InlineEmphasis children ->
+            concat <$> traverse (go context{inlineEmphasis = True}) children
+        InlineLink url children -> do
+            let linkContext = context{inlineUrl = Just url}
+            label <- concat <$> traverse (go linkContext) children
+            suffix <-
+                if Text.null url || inlinePlainText children == url
+                    then pure []
+                    else one Theme.linkAttr linkContext (" (" <> url <> ")")
+            pure (label <> suffix)
+
+    one baseName context text = do
+        base <- B.lookupAttrName $
+            case context.inlineUrl of
+                Just _ -> Theme.linkAttr
+                Nothing -> baseName
+        let addedStyle =
+                (if context.inlineStrong then V.bold else 0)
+                    .|. (if context.inlineEmphasis then V.italic else 0)
+            style = V.styleMask base .|. addedStyle
+            emphasisAttr
+                | style == 0 = base
+                | otherwise = base `V.withStyle` style
+            linkedAttr = case context.inlineUrl of
+                Just url
+                    | safeUrl url -> emphasisAttr `V.withURL` url
+                _ -> emphasisAttr
+        pure [(linkedAttr, displayTerminalText text)]
+
+    safeUrl url =
+        not (Text.null url)
+            && displayTerminalText url == url
 
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =
     finalize $
-        List.foldl' addCell ([[]], 0) cells
+        List.foldl' addCell ([[]], 0) (styledCells spans)
   where
-    cells =
-        [ (attr, character)
-        | (attr, text) <- spans
-        , character <- Text.unpack text
-        ]
-    addCell (rows, used) (attr, cell)
-        | cell == '\n' = ([] : rows, 0)
+    addCell (rows, used) cell@(_, character)
+        | character == '\n' = ([] : rows, 0)
         | used > 0
         , used + cellWidth > width =
-            ([(attr, Builder.singleton cell)] : rows, cellWidth)
+            ([cell] : rows, cellWidth)
         | otherwise =
             case rows of
-                [] ->
-                    ([[(attr, Builder.singleton cell)]], cellWidth)
+                [] -> ([[cell]], cellWidth)
                 row : rest ->
-                    (appendCell attr cell row : rest, used + cellWidth)
+                    ((cell : row) : rest, used + cellWidth)
       where
-        cellWidth = terminalCharWidth cell
-    appendCell attr cell row =
-        case row of
-            (previousAttr, previousText) : prior
-                | previousAttr == attr ->
-                    ( previousAttr
-                    , previousText <> Builder.singleton cell
-                    ) : prior
-            _ -> (attr, Builder.singleton cell) : row
+        cellWidth = terminalCharWidth character
     finalize (rows, _) =
-        let ordered =
-                map
-                    (map
-                        (\(attr, text) ->
-                            ( attr
-                            , LazyText.toStrict (Builder.toLazyText text)
-                            ))
-                        . reverse)
-                    (reverse rows)
+        let ordered = map (groupStyledCells . reverse) (reverse rows)
         in if null ordered then [[]] else ordered
 
 -- | Table cells prefer word boundaries, but still hard-wrap an individual
 -- token that is wider than its column.
 wrapStyledWords :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyledWords width spans =
-    map groupCells (wrapCells cells)
+    map groupStyledCells (wrapCells (styledCells spans))
   where
     width' = max 1 width
-    cells =
-        [ (attr, character)
-        | (attr, text) <- spans
-        , character <- Text.unpack text
-        ]
 
     wrapCells [] = [[]]
     wrapCells remaining =
@@ -845,13 +609,23 @@ wrapStyledWords width spans =
     dropTrailingSpace =
         reverse . dropWhile (isSpace . snd) . reverse
 
-    groupCells =
-        map
-            (\(attr, text) ->
-                (attr, LazyText.toStrict (Builder.toLazyText text)))
-            . reverse
-            . List.foldl' appendCell []
+type StyledCell = (V.Attr, Char)
 
+styledCells :: [(V.Attr, Text)] -> [StyledCell]
+styledCells spans =
+    [ (attr, character)
+    | (attr, text) <- spans
+    , character <- Text.unpack text
+    ]
+
+groupStyledCells :: [StyledCell] -> [(V.Attr, Text)]
+groupStyledCells =
+    map
+        (\(attr, text) ->
+            (attr, LazyText.toStrict (Builder.toLazyText text)))
+        . reverse
+        . List.foldl' appendCell []
+  where
     appendCell grouped (attr, character) =
         case grouped of
             (previousAttr, previousText) : rest

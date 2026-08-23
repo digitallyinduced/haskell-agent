@@ -16,7 +16,12 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
-import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , decodeModelConfig
+    , packagedModelCatalogPath
+    )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -24,6 +29,7 @@ import Agent.CLI.ReplMode
     , cycleReplMode
     , replModeFromState
     )
+import Agent.Dialect (DialectId(..))
 import Agent.Loop (LoopEvent(..), TokenUsage(..), emptyTokenUsage)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types (defaultResponseCreateParams)
@@ -37,6 +43,8 @@ import Agent.TUI.Model
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as Text
 import Data.IORef (newIORef, readIORef)
 import System.Directory
     ( getCurrentDirectory
@@ -51,24 +59,50 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    catalog <- runIO readPackagedCatalog
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
             let target =
                     accountSwitchTarget
+                        catalog
                         OpenAIProvider
+                        "openai"
                         "gpt-5.6-sol"
+                        "gpt-5.6-sol"
+                        CodexDialect
                         XAIProvider
-            target.modelProvider `shouldBe` XAIProvider
-            target.modelId `shouldBe` "grok-4.6"
+            target.modelTarget.targetProvider `shouldBe` XAIProvider
+            target.modelTarget.targetModelId `shouldBe` "grok-4.6"
+            target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
 
         it "keeps the current model when only the account backend restarts" do
             let target =
                     accountSwitchTarget
+                        catalog
                         OpenAIProvider
+                        "openai"
                         "gpt-5.6-sol"
+                        "gpt-5.6-sol"
+                        CodexDialect
                         OpenAIProvider
-            target.modelProvider `shouldBe` OpenAIProvider
-            target.modelId `shouldBe` "gpt-5.6-sol"
+            target.modelTarget.targetProvider `shouldBe` OpenAIProvider
+            target.modelTarget.targetModelId `shouldBe` "gpt-5.6-sol"
+            target.modelTarget.targetDialect `shouldBe` CodexDialect
+
+        it "preserves a legacy OpenRouter dialect on an account restart" do
+            let target =
+                    accountSwitchTarget
+                        catalog
+                        OpenRouterProvider
+                        "openrouter"
+                        "openai/gpt-5.1"
+                        "openai/gpt-5.1"
+                        GrokBuildDialect
+                        OpenRouterProvider
+            target.modelTarget.targetProvider `shouldBe` OpenRouterProvider
+            target.modelTarget.targetModelId `shouldBe` "openai/gpt-5.1"
+            target.modelTarget.targetWireModelId `shouldBe` "openai/gpt-5.1"
+            target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
 
     describe "devArgs" do
         it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do
@@ -281,3 +315,11 @@ withTempDir :: String -> (FilePath -> IO a) -> IO a
 withTempDir prefix action = do
     tmp <- getTemporaryDirectory
     bracket (mkdtemp (tmp <> "/" <> prefix)) removeDirectoryRecursive action
+
+readPackagedCatalog :: IO ModelCatalog
+readPackagedCatalog = do
+    path <- packagedModelCatalogPath
+    bytes <- LBS.readFile path
+    case decodeModelConfig "models.default.json" bytes of
+        Left err -> fail (Text.unpack err)
+        Right catalog -> pure catalog

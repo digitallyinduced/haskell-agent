@@ -10,6 +10,7 @@ module Agent.Subagents.Registry
     , newSubagentRegistry
     , setSubagentRunner
     , setSubagentOnComplete
+    , setSubagentOnSettled
     , beginRootTurn
     , abortRootTurn
     , closeSubagentRegistry
@@ -202,6 +203,7 @@ data SubagentRegistry = SubagentRegistry
     , registryRunRef :: !(IORef RunSubagent)
     , registryOnEvent :: !(SubagentId -> LoopEvent -> IO ())
     , registryOnCompleteRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
+    , registryOnSettledRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
     , registryCwd :: !OsPath
     , registryClosed :: !(TVar Bool)
     , registryNextRootTurnId :: !(TVar Word64)
@@ -228,6 +230,7 @@ newSubagentRegistry config cwd run onEvent = do
     lifecycle <- newMVar ()
     runRef <- newIORef run
     onCompleteRef <- newIORef (\_ _ -> pure ())
+    onSettledRef <- newIORef (\_ _ -> pure ())
     pure SubagentRegistry
         { registryAgents = agents
         , registryPaths = paths
@@ -241,6 +244,7 @@ newSubagentRegistry config cwd run onEvent = do
         , registryRunRef = runRef
         , registryOnEvent = onEvent
         , registryOnCompleteRef = onCompleteRef
+        , registryOnSettledRef = onSettledRef
         , registryCwd = cwd
         , registryClosed = closed
         , registryNextRootTurnId = nextRootTurnId
@@ -258,6 +262,18 @@ setSubagentOnComplete
     -> (SubagentId -> SubagentStatus -> IO ())
     -> IO ()
 setSubagentOnComplete registry = writeIORef registry.registryOnCompleteRef
+
+-- | Invoked synchronously after a child publishes a final turn status,
+-- including completions routed directly to another subagent, and before the
+-- child's supervisor can begin queued follow-up work. A first transition to
+-- 'Closed' is reported after the supervisor has stopped; that callback runs
+-- under the registry lifecycle lock and must not call lifecycle-mutating
+-- registry operations.
+setSubagentOnSettled
+    :: SubagentRegistry
+    -> (SubagentId -> SubagentStatus -> IO ())
+    -> IO ()
+setSubagentOnSettled registry = writeIORef registry.registryOnSettledRef
 
 beginRootTurn :: SubagentRegistry -> IO RootTurnId
 beginRootTurn registry = atomically do
@@ -474,7 +490,9 @@ spawnSubagentAtWithIdPreparedForTurn
                             case registry.registryConfig.maxDepth of
                                 Just limit | nextDepth > limit ->
                                     pure $ Left
-                                        "Agent depth limit reached. Solve the task yourself."
+                                        ("Agent depth limit reached (maximum depth "
+                                            <> Text.pack (show limit)
+                                            <> "). Solve the task yourself.")
                                 _ -> case joinTaskPath parentPath taskName of
                                     Left err -> pure (Left err)
                                     Right childPath -> do
@@ -647,6 +665,7 @@ runSupervisor registry record = awaitWork
                         notifyComplete
                             registry record.recordId work.workRootTurnId status
                     pure ()
+                notifySettled registry record.recordId status
                 atomically (finishSupervisorStep registry record status) >>= \case
                     SupervisorStop -> pure ()
                     SupervisorIdle -> awaitWork
@@ -884,6 +903,17 @@ notifyComplete registry agentId rootTurnId status
             onComplete agentId status
     | otherwise = pure ()
 
+notifySettled
+    :: SubagentRegistry
+    -> SubagentId
+    -> SubagentStatus
+    -> IO ()
+notifySettled registry agentId status
+    | isFinalStatus status && status /= NotFound = do
+        onSettled <- readIORef registry.registryOnSettledRef
+        void $ tryAny $ onSettled agentId status
+    | otherwise = pure ()
+
 releaseSlotSTM :: SubagentRegistry -> SubagentRecord -> STM ()
 releaseSlotSTM registry record = do
     phase <- readTVar record.recordPhase
@@ -1090,11 +1120,17 @@ descendants agents parentId =
 shutdownRecord :: SubagentRegistry -> SubagentRecord -> IO ()
 shutdownRecord registry record = do
     requestCancel record.recordCancel
-    atomically do
+    transitioned <- atomically do
+        phase <- readTVar record.recordPhase
         releaseSlotSTM registry record
         writeTVar record.recordPhase AgentClosed
         void $ flushTQueue record.recordMailbox
+        pure $ case phase of
+            AgentClosed -> False
+            _ -> True
     stopRecordSupervisor record
+    whenIO transitioned $
+        notifySettled registry record.recordId Closed
 
 abortRootTurn :: SubagentRegistry -> RootTurnId -> IO ()
 abortRootTurn registry rootTurnId =
@@ -1103,7 +1139,10 @@ abortRootTurn registry rootTurnId =
             modifyTVar' registry.registryAbortedRootTurns (Set.insert rootTurnId)
             agents <- Map.elems <$> readTVar registry.registryAgents
             fmap concat $ mapM selectOwned agents
-        mapM_ (interruptRecordForTurn registry rootTurnId) records
+        settled <- mapM (interruptRecordForTurn registry rootTurnId) records
+        mapM_
+            (\record -> notifySettled registry record.recordId Interrupted)
+            [record | (record, True) <- zip records settled]
   where
     selectOwned :: SubagentRecord -> STM [SubagentRecord]
     selectOwned record = do
@@ -1115,27 +1154,31 @@ abortRootTurn registry rootTurnId =
             , phaseStatus phase == Pending || phaseStatus phase == Running
             ]
 
-interruptRecordForTurn :: SubagentRegistry -> RootTurnId -> SubagentRecord -> IO ()
+interruptRecordForTurn :: SubagentRegistry -> RootTurnId -> SubagentRecord -> IO Bool
 interruptRecordForTurn registry rootTurnId record = do
-    waitForTurn <- atomically do
+    disposition <- atomically do
         phase <- readTVar record.recordPhase
         if phaseRootTurnId phase /= Just rootTurnId
-            then pure False
+            then pure InterruptUnchanged
             else case phase of
                 AgentPending{} -> do
                     releaseSlotSTM registry record
                     writeTVar record.recordPhase
                         (AgentIdle Interrupted (Just rootTurnId))
-                    pure False
+                    pure InterruptSettled
                 AgentRunning owner -> do
                     writeTVar record.recordPhase (AgentInterrupting owner)
-                    pure True
-                AgentInterrupting{} -> pure True
-                AgentIdle{} -> pure False
-                AgentClosed -> pure False
-    whenIO waitForTurn do
-        requestCancel record.recordCancel
-        atomically $ waitForReleasedSlot record
+                    pure InterruptWait
+                AgentInterrupting{} -> pure InterruptWait
+                AgentIdle{} -> pure InterruptUnchanged
+                AgentClosed -> pure InterruptUnchanged
+    case disposition of
+        InterruptUnchanged -> pure False
+        InterruptSettled -> pure True
+        InterruptWait -> do
+            requestCancel record.recordCancel
+            atomically $ waitForReleasedSlot record
+            pure True
 
 waitForReleasedSlot :: SubagentRecord -> STM ()
 waitForReleasedSlot record = do
@@ -1169,7 +1212,11 @@ interruptActiveSubagents registry =
             agents <- Map.elems <$> readTVar registry.registryAgents
             records <- filterMSTM isActiveRecord agents
             pure (wasClosed, records)
-        mapM_ (interruptRecord registry) records
+        (do
+            settled <- mapM (interruptRecord registry) records
+            mapM_
+                (\record -> notifySettled registry record.recordId Interrupted)
+                [record | (record, True) <- zip records settled])
             `finally`
                 atomically (writeTVar registry.registryClosed wasClosed)
   where
@@ -1178,26 +1225,36 @@ interruptActiveSubagents registry =
         status <- phaseStatus <$> readTVar record.recordPhase
         pure (status == Pending || status == Running)
 
-interruptRecord :: SubagentRegistry -> SubagentRecord -> IO ()
+interruptRecord :: SubagentRegistry -> SubagentRecord -> IO Bool
 interruptRecord registry record = do
-    waitForTurn <- atomically do
+    disposition <- atomically do
         phase <- readTVar record.recordPhase
         void $ flushTQueue record.recordMailbox
         case phase of
             AgentPending{} -> do
                 transitionToIdleSTM registry record Interrupted
-                pure False
+                pure InterruptSettled
             AgentRunning owner -> do
                 writeTVar record.recordPhase (AgentInterrupting owner)
-                pure True
-            AgentInterrupting{} -> pure True
-            AgentIdle _ owner -> do
-                writeTVar record.recordPhase (AgentIdle Interrupted owner)
-                pure False
-            AgentClosed -> pure False
-    whenIO waitForTurn do
-        requestCancel record.recordCancel
-        atomically $ waitForReleasedSlot record
+                pure InterruptWait
+            AgentInterrupting{} -> pure InterruptWait
+            -- The record may have completed after the active snapshot was
+            -- taken. Preserve that published final status rather than
+            -- replacing it with an administrative interruption.
+            AgentIdle{} -> pure InterruptUnchanged
+            AgentClosed -> pure InterruptUnchanged
+    case disposition of
+        InterruptUnchanged -> pure False
+        InterruptSettled -> pure True
+        InterruptWait -> do
+            requestCancel record.recordCancel
+            atomically $ waitForReleasedSlot record
+            pure True
+
+data InterruptDisposition
+    = InterruptUnchanged
+    | InterruptSettled
+    | InterruptWait
 
 filterMSTM :: (a -> STM Bool) -> [a] -> STM [a]
 filterMSTM predicate = fmap reverse . go []

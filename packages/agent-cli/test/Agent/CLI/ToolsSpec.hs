@@ -1,9 +1,9 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.Dialect (codexDialect, grokBuildDialect)
 import Agent.Loop (LoopError(..))
 import Agent.Responses.Types
-import Agent.Provider (Provider(..))
 import Agent.Subagents
     ( closeSubagentRegistry
     , defaultSubagentConfig
@@ -12,13 +12,14 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
+    , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
 import qualified Data.Aeson as Aeson
@@ -34,21 +35,81 @@ import Test.Hspec
 spec :: Spec
 spec = describe "schemasFromAppTools" do
     it "enables built-in web_search ahead of app tools" do
-        case schemasFromAppTools OpenAIProvider [jsonTool] of
+        case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do
                 tagged.tag `shouldBe` "web_search"
                 tagged.fields `shouldBe` KeyMap.empty
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
     it "builds a strict function tool for OpenAI JSON tools" do
-        case schemasFromAppTools OpenAIProvider [jsonTool] of
+        case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "projects current Grok Build public tool and parameter names" do
+        let task = jsonAppTool "task"
+                "Use `task`, then get_task_output or kill_task."
+                [ PropertySchema "prompt" PropertyString True Nothing
+                , PropertySchema "run_in_background" PropertyBoolean False
+                    (Just "Use get_task_output after run_in_background=true.")
+                ]
+                AlwaysPrompt
+                (noArgsTool "task" (pure (Right "ok")))
+            terminal = jsonAppTool "run_terminal_cmd"
+                "Run with run_terminal_cmd."
+                []
+                AlwaysPrompt
+                (noArgsTool "run_terminal_cmd" (pure (Right "ok")))
+            getOutput = testTool "get_task_output"
+            waitTasks = testTool "wait_tasks"
+            killTask = testTool "kill_task"
+        case schemasFromAppTools grokBuildDialect
+            [terminal, task, getOutput, waitTasks, killTask] of
+            [ _
+                , FunctionToolValue terminalTool
+                , FunctionToolValue taskTool
+                , FunctionToolValue getOutputTool
+                , FunctionToolValue waitTasksTool
+                , FunctionToolValue killTaskTool
+                ] -> do
+                terminalTool.name `shouldBe` "run_terminal_command"
+                terminalTool.description
+                    `shouldBe` Just "Run with run_terminal_command."
+                taskTool.name `shouldBe` "spawn_subagent"
+                getOutputTool.name `shouldBe` "get_command_or_subagent_output"
+                waitTasksTool.name `shouldBe` "wait_commands_or_subagents"
+                killTaskTool.name `shouldBe` "kill_command_or_subagent"
+                taskTool.description `shouldBe`
+                    Just
+                        "Use `spawn_subagent`, then get_command_or_subagent_output or kill_command_or_subagent."
+                Just (Aeson.Object parameters) <- pure taskTool.parameters
+                Just (Aeson.Object properties) <-
+                    pure (KeyMap.lookup "properties" parameters)
+                KeyMap.member "background" properties `shouldBe` True
+                KeyMap.member "run_in_background" properties `shouldBe` False
+                Just (Aeson.Object background) <-
+                    pure (KeyMap.lookup "background" properties)
+                KeyMap.lookup "description" background `shouldBe`
+                    Just
+                        (Aeson.String
+                            "Use get_command_or_subagent_output after background=true.")
+            other -> expectationFailure
+                ("expected projected Grok tools, got " <> show other)
+
+    it "keeps internal tool names for non-Grok dialects" do
+        let task = testTool "task"
+            terminal = testTool "run_terminal_cmd"
+        case schemasFromAppTools codexDialect [terminal, task] of
+            [_, FunctionToolValue terminalTool, FunctionToolValue taskTool] -> do
+                terminalTool.name `shouldBe` "run_terminal_cmd"
+                taskTool.name `shouldBe` "task"
+            other -> expectationFailure
+                ("expected stable internal tool names, got " <> show other)
+
     it "builds a loose grok-build function tool for xAI" do
-        case schemasFromAppTools XAIProvider [jsonTool] of
+        case schemasFromAppTools grokBuildDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Nothing
@@ -56,8 +117,52 @@ spec = describe "schemasFromAppTools" do
                 offsetType tool `shouldBe` Just (Aeson.String "integer")
             other -> expectationFailure ("expected function tool, got " <> show other)
 
+    it "preserves a raw MCP schema and disables strict mode for OpenAI" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "siteUrl" Aeson..= Aeson.object
+                        [ "type" Aeson..= ("string" :: Text)
+                        ]
+                    ]
+                , "required" Aeson..= (["siteUrl"] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            tool = rawJsonAppTool
+                "gsc_site_get"
+                "Get a Search Console property."
+                parameters
+                AlwaysReadOnly
+                (noArgsTool "gsc_site_get" (pure (Right "ok")))
+        case schemasFromAppTools codexDialect [tool] of
+            [_, FunctionToolValue function] -> do
+                function.name `shouldBe` "gsc_site_get"
+                function.parameters `shouldBe` Just parameters
+                function.strict `shouldBe` Just False
+            other -> expectationFailure
+                ("expected raw OpenAI function tool, got " <> show other)
+
+    it "preserves raw MCP names and schemas for Grok without strict mode" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object []
+                ]
+            tool = rawJsonAppTool
+                "seo_auth_status"
+                "Show SEO authentication status."
+                parameters
+                AlwaysReadOnly
+                (noArgsTool "seo_auth_status" (pure (Right "ok")))
+        case schemasFromAppTools grokBuildDialect [tool] of
+            [_, FunctionToolValue function] -> do
+                function.name `shouldBe` "seo_auth_status"
+                function.parameters `shouldBe` Just parameters
+                function.strict `shouldBe` Nothing
+            other -> expectationFailure
+                ("expected raw Grok function tool, got " <> show other)
+
     it "registers apply_patch as a custom Lark tool" do
-        case schemasFromAppTools OpenAIProvider [patchTool] of
+        case schemasFromAppTools codexDialect [patchTool] of
             [_, KnownResponseTool ToolCustom tagged] -> do
                 tagged.tag `shouldBe` "custom"
                 KeyMap.lookup "name" tagged.fields
@@ -79,7 +184,7 @@ spec = describe "schemasFromAppTools" do
                 [ PropertySchema "message" PropertyString False Nothing ]
                 AlwaysPrompt
                 (noArgsTool "spawn_agent" (pure (Right "ok")))
-        case schemasFromAppTools OpenAIProvider [jsonTool, spawn] of
+        case schemasFromAppTools codexDialect [jsonTool, spawn] of
             [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
                 tagged.tag `shouldBe` "namespace"
                 KeyMap.lookup "name" tagged.fields
@@ -91,7 +196,7 @@ spec = describe "schemasFromAppTools" do
                 [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
                 AlwaysReadOnly
                 (noArgsTool "wait_agent" (pure (Right "ok")))
-        case schemasFromAppTools OpenAIProvider [wait] of
+        case schemasFromAppTools codexDialect [wait] of
             [_, KnownResponseTool ToolNamespace tagged] ->
                 case KeyMap.lookup "tools" tagged.fields of
                     Just (Aeson.Array tools) -> case toList tools of
@@ -125,12 +230,13 @@ spec = describe "schemasFromAppTools" do
                         , multiCreateWorktree = Nothing
                         , multiPrepareSpawn = Nothing
                         , multiSendToRoot = Nothing
+                        , multiSpawnModelGuidance = Nothing
                         }
                     namespaces =
                         [ tagged
                         | KnownResponseTool ToolNamespace tagged <-
                             schemasFromAppTools
-                                OpenAIProvider
+                                codexDialect
                                 (multiAgentTools context)
                         ]
                 case namespaces of
@@ -177,6 +283,11 @@ patchTool =
     freeformApplyPatchAppTool
         "apply_patch" "Apply a patch." AlwaysPrompt
         (noArgsTool "apply_patch" (pure (Right "ok")))
+
+testTool :: Text -> AppTool
+testTool name =
+    jsonAppTool name ("Use " <> name <> ".") [] AlwaysPrompt
+        (noArgsTool name (pure (Right "ok")))
 
 waitAgentObject :: Aeson.Value -> Maybe Aeson.Object
 waitAgentObject (Aeson.Object tool)

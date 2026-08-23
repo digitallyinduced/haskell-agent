@@ -8,7 +8,7 @@ module Agent.XAI.Stream
     , buildResponse
     ) where
 
-import Agent.Error (ApiError(..), errorTypeFromText)
+import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.Responses.Error (mkOpenAIError)
 import Agent.Responses.SSE
     ( SseDecoder
@@ -18,12 +18,14 @@ import Agent.Responses.SSE
     , parseSseEvents
     )
 import Agent.Responses.StreamAssembly
-    ( StreamAssemblyConfig(..)
+    ( ResponseFailure(..)
+    , StreamAssemblyConfig(..)
     , buildStreamResponse
-    , failedResponseMessage
+    , failedStreamResponseMessage
     )
 import Agent.Responses.Types
 import Agent.XAI.Error (classifyStreamError)
+import Control.Applicative ((<|>))
 
 -- | Merge streamed output-item events into the terminal completed response.
 buildResponse :: [ResponseStreamEvent] -> Either ApiError Response
@@ -34,12 +36,16 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
     , classifyFailedResponse = failedResponseError
     }
 
-failedResponseError :: Response -> ApiError
-failedResponseError response = case response.error of
-    Just responseError ->
-        mkOpenAIError
-            (errorTypeFromText responseError.code)
-            responseError.message
-            (Just responseError.code)
-            Nothing
-    Nothing -> ConnectionError (failedResponseMessage response)
+failedResponseError :: ResponseFailure -> ApiError
+failedResponseError response =
+    case response.failureErrorType
+            <|> response.failureErrorCode
+            <|> response.failureErrorMessage of
+        Nothing -> ConnectionError (failedStreamResponseMessage response)
+        Just _ ->
+            mkOpenAIError
+                (maybe ApiErrorType errorTypeFromText
+                    (response.failureErrorType <|> response.failureErrorCode))
+                (failedStreamResponseMessage response)
+                response.failureErrorCode
+                Nothing

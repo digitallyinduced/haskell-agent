@@ -51,6 +51,7 @@ import Agent.Responses.LoopBackend
     , responseTokenUsage
     , statelessResponsesBackend
     , streamEventToLoopEvent
+    , streamOutputObserved
     , toolResultToItem
     , turnInputsToItems
     , withRequestInput
@@ -118,7 +119,7 @@ openAiResponseSenderReconnecting
     -> IO (Either ApiError Response)
 openAiResponseSenderReconnecting =
     openAiResponseSenderReconnectingWhen
-        (isJust . streamEventToLoopEvent)
+        streamOutputObserved
         markLoopReplayUnsafe
 
 -- | Auxiliary Responses requests are not rendered to the loop, so their
@@ -234,7 +235,7 @@ openAiResponseSenderWithConnectionRecovery
     -> IO (Either ApiError Response)
 openAiResponseSenderWithConnectionRecovery =
     openAiResponseSenderWithConnectionRecoveryUsing
-        (isJust . streamEventToLoopEvent)
+        streamOutputObserved
         markLoopReplayUnsafe
 
 openAiAuxiliaryResponseSenderWithConnectionRecovery
@@ -390,13 +391,7 @@ openAiResponseSenderWithRetryPolicy retryPolicy observed send
             _ -> pure result
 
 auxiliaryOutputObserved :: ResponseStreamEvent -> Bool
-auxiliaryOutputObserved = \case
-    ResponseCompletedEvent{} -> True
-    ResponseFailedEvent{response} -> not (null response.output)
-    ResponseIncompleteEvent{} -> True
-    ResponseOutputItemAddedEvent{} -> True
-    ResponseOutputItemDoneEvent{} -> True
-    event -> isJust (streamEventToLoopEvent event)
+auxiliaryOutputObserved = streamOutputObserved
 
 markLoopReplayUnsafe :: ApiError -> ApiError
 markLoopReplayUnsafe err
@@ -531,7 +526,7 @@ openAiBackendWithRetryPolicy retryPolicy send getParams =
       where
         go emittedLoopEvent retryStatus = do
             result <- send request previousResponseId \event -> do
-                if isJust (streamEventToLoopEvent event)
+                if streamOutputObserved event
                     then writeIORef emittedLoopEvent True
                     else pure ()
                 onStreamEvent event

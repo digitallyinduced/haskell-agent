@@ -7,11 +7,20 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.Responses.Types
+import Agent.Dialect
+    ( Dialect
+    , DialectId(..)
+    , FunctionSchemaStyle(..)
+    , ToolLayout(..)
+    , dialectId
+    , dialectFunctionSchemaStyle
+    , dialectToolLayout
+    , grokBuildPublicToolName
+    )
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
-import Agent.Provider (Provider(..))
-import Agent.ToolDSL (PropertySchema, parametersObjectLoose)
+import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
-import Agent.Tools.ApplyPatch (applyPatchGrammar)
+import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types
     ( AppTool(..)
@@ -43,30 +52,80 @@ webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
     , fields = KeyMap.empty
     }
 
-schemasFromAppTools :: Provider -> [AppTool] -> [ResponseTool]
-schemasFromAppTools provider tools = case provider of
-    OpenAIProvider ->
+schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
+schemasFromAppTools dialect tools = case dialectToolLayout dialect of
+    CollaborationNamespaceLayout ->
         let (multi, rest) = partition isMultiAgentTool tools
-            base = webSearchTool : map (schemaFromAppTool provider) rest
+            base = webSearchTool : map (schemaFromAppTool dialect) rest
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
-    _ ->
-        webSearchTool : map (schemaFromAppTool provider) tools
+    FlatToolLayout ->
+        webSearchTool : map (schemaFromAppTool dialect) tools
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
-schemaFromAppTool :: Provider -> AppTool -> ResponseTool
-schemaFromAppTool provider tool = case tool.appToolSchema of
+schemaFromAppTool :: Dialect -> AppTool -> ResponseTool
+schemaFromAppTool dialect tool = case tool.appToolSchema of
     JsonFunctionSchema parameters ->
-        let build = case provider of
-                XAIProvider -> buildGrokTool
-                OpenRouterProvider -> buildGrokTool
-                OpenAIProvider -> buildTool
-        in build tool.appToolName tool.appToolDescription parameters
+        let build = case dialectFunctionSchemaStyle dialect of
+                StrictFunctionSchemas -> buildTool
+                LooseFunctionSchemas -> buildGrokTool
+            (name, description, projectedParameters) =
+                projectFunctionTool dialect tool parameters
+        in build name description projectedParameters
+    RawJsonFunctionSchema parameters ->
+        FunctionToolValue FunctionTool
+            { name = tool.appToolName
+            , description = Just tool.appToolDescription
+            , parameters = Just parameters
+            , strict = case dialectFunctionSchemaStyle dialect of
+                StrictFunctionSchemas -> Just False
+                LooseFunctionSchemas -> Nothing
+            , extraFields = KeyMap.empty
+            }
     FreeformApplyPatchSchema ->
         applyPatchCustomTool tool.appToolName tool.appToolDescription
+
+projectFunctionTool
+    :: Dialect
+    -> AppTool
+    -> [PropertySchema]
+    -> (Text, Text, [PropertySchema])
+projectFunctionTool dialect tool parameters
+    | dialectId dialect == GrokBuildDialect =
+        ( grokBuildPublicToolName tool.appToolName
+        , grokPublicText tool.appToolDescription
+        , map (projectProperty tool.appToolName) parameters
+        )
+    | otherwise =
+        (tool.appToolName, tool.appToolDescription, parameters)
+
+projectProperty :: Text -> PropertySchema -> PropertySchema
+projectProperty toolName property =
+    property
+        { propertyName =
+            if toolName == "task"
+                && property.propertyName == "run_in_background"
+                then "background"
+                else property.propertyName
+        , description = grokPublicText <$> property.description
+        }
+
+grokPublicText :: Text -> Text
+grokPublicText =
+    replace "run_in_background" "background"
+        . replace "run_terminal_cmd" "run_terminal_command"
+        . replace "get_task_output" "get_command_or_subagent_output"
+        . replace "wait_tasks" "wait_commands_or_subagents"
+        . replace "kill_task" "kill_command_or_subagent"
+        . replaceTaskName
+  where
+    replace = Text.replace
+    -- Avoid replacing ordinary prose uses of "task"; only the common
+    -- backtick-delimited tool reference is unambiguous.
+    replaceTaskName = Text.replace "`task`" "`spawn_subagent`"
 
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
@@ -97,6 +156,7 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
 appToolJsonParameters :: AppTool -> [PropertySchema]
 appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
+    RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.

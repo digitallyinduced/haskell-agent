@@ -3,7 +3,7 @@ name:               agent-tui
 version:            0.1.0.0
 synopsis:           Retained terminal UI for the universal agent harness
 description:        Presentation state and Brick widgets for the agent terminal UI.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
@@ -37,6 +37,8 @@ library
     hs-source-dirs:   src
     exposed-modules:  Agent.TUI.FencedCode
                     , Agent.TUI.Markdown
+                    , Agent.TUI.Markdown.Block
+                    , Agent.TUI.Markdown.Inline
                     , Agent.TUI.Motion
                     , Agent.TUI.Model
                     , Agent.TUI.Presentation
@@ -57,6 +59,8 @@ test-suite agent-tui-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.TUI.FencedCodeSpec
+                    , Agent.TUI.Markdown.BlockSpec
+                    , Agent.TUI.Markdown.InlineSpec
                     , Agent.TUI.MarkdownSpec
                     , Agent.TUI.MotionSpec
                     , Agent.TUI.ModelSpec

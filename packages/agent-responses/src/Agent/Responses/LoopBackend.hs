@@ -6,6 +6,7 @@ module Agent.Responses.LoopBackend
     , responseToTurnOutput
     , responseTokenUsage
     , streamEventToLoopEvent
+    , streamOutputObserved
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
@@ -33,6 +34,7 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
+import Agent.Responses.StreamAssembly (responseFragmentHasOutput)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -45,10 +47,11 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import Text.Printf (printf)
 
 -- | Adapt a stateless Responses transport to the provider-neutral loop.
 statelessResponsesBackend
@@ -266,6 +269,92 @@ responseItemToToolCall = \case
         }
     _ -> Nothing
 
+data CodexRateLimitsPayload = CodexRateLimitsPayload
+    { rateLimits :: !(Maybe CodexRateLimitDetails) }
+
+data CodexRateLimitDetails = CodexRateLimitDetails
+    { allowed :: !(Maybe Bool)
+    , limitReached :: !(Maybe Bool)
+    , primary :: !(Maybe CodexRateLimitWindow)
+    , secondary :: !(Maybe CodexRateLimitWindow)
+    }
+
+data CodexRateLimitWindow = CodexRateLimitWindow
+    { usedPercent :: !Double }
+
+instance Aeson.FromJSON CodexRateLimitsPayload where
+    parseJSON = Aeson.withObject "Codex rate limits payload" \object ->
+        CodexRateLimitsPayload
+            <$> object Aeson..:? "rate_limits"
+
+instance Aeson.FromJSON CodexRateLimitDetails where
+    parseJSON = Aeson.withObject "Codex rate limit details" \object ->
+        CodexRateLimitDetails
+            <$> object Aeson..:? "allowed"
+            <*> object Aeson..:? "limit_reached"
+            <*> object Aeson..:? "primary"
+            <*> object Aeson..:? "secondary"
+
+instance Aeson.FromJSON CodexRateLimitWindow where
+    parseJSON = Aeson.withObject "Codex rate limit window" \object ->
+        CodexRateLimitWindow
+            <$> object Aeson..: "used_percent"
+
+codexRateLimitsWarning :: Aeson.Object -> Maybe Text
+codexRateLimitsWarning fields =
+    case Aeson.fromJSON (Aeson.Object fields)
+        :: Aeson.Result CodexRateLimitsPayload of
+        Aeson.Error _ -> Nothing
+        Aeson.Success payload -> do
+            details <- payload.rateLimits
+            let reportedWindows =
+                    [ ("primary", window)
+                    | window <- maybeToList details.primary
+                    ]
+                    <> [ ("secondary", window)
+                       | window <- maybeToList details.secondary
+                       ]
+                lowWindows =
+                    [ (label, window)
+                    | (label, window) <- reportedWindows
+                    , window.usedPercent >= 90
+                    ]
+                reached =
+                    details.limitReached == Just True
+                        || details.allowed == Just False
+                        || any ((>= 100) . (.usedPercent) . snd) reportedWindows
+            if not reached && null lowWindows
+                then Nothing
+                else
+                    let headline
+                            | reached = "Codex usage limit reached"
+                            | otherwise = "Codex usage is low"
+                        windows =
+                            if null lowWindows && reached
+                                then reportedWindows
+                                else lowWindows
+                        detail = case windows of
+                            [] -> ""
+                            values ->
+                                ": "
+                                    <> Text.intercalate " · "
+                                        (map formatRateLimitWindow values)
+                    in Just
+                        (headline <> detail
+                            <> ". Check /usage for reset details.")
+
+formatRateLimitWindow :: (Text, CodexRateLimitWindow) -> Text
+formatRateLimitWindow (label, window) =
+    label <> " " <> formatPercent remaining <> "% left"
+  where
+    remaining = max 0 (min 100 (100 - window.usedPercent))
+
+formatPercent :: Double -> Text
+formatPercent value
+    | abs (value - fromIntegral (round value :: Int)) < 0.05 =
+        Text.pack (show (round value :: Int))
+    | otherwise = Text.pack (printf "%.1f" value)
+
 encryptedCollaborationArguments :: Text -> Aeson.Object -> Bool
 encryptedCollaborationArguments toolName extras =
     toolName `elem`
@@ -303,6 +392,16 @@ assistantTextFromResponse response = case
 
 streamEventToLoopEvent :: ResponseStreamEvent -> Maybe LoopEvent
 streamEventToLoopEvent = \case
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown eventType } ->
+            Just
+                (ActivityUpdated
+                    ("Warning: unsupported provider event " <> eventType))
+    OtherResponseStreamEvent
+        { otherEventType = EventCodexRateLimits
+        , eventExtraFields
+        } ->
+            WarningRaised <$> codexRateLimitsWarning eventExtraFields
     OtherResponseStreamEvent { otherEventType, eventExtraFields } ->
         case extraDeltaText eventExtraFields of
             Just text -> case otherEventType of
@@ -312,6 +411,26 @@ streamEventToLoopEvent = \case
                 _ -> Nothing
             Nothing -> Nothing
     _ -> Nothing
+
+-- | Whether a stream event proves the provider has begun producing response
+-- output. These events make replay unsafe even when they do not map to a
+-- visible loop delta.
+streamOutputObserved :: ResponseStreamEvent -> Bool
+streamOutputObserved event = case event of
+    ResponseCompletedEvent{} -> True
+    ResponseDoneEvent{} -> True
+    ResponseIncompleteEvent{} -> True
+    ResponseFailedEvent { responseValue } ->
+        responseFragmentHasOutput responseValue
+    ResponseOutputItemAddedEvent{} -> True
+    ResponseOutputItemDoneEvent{} -> True
+    ResponseCustomToolInputDeltaEvent{} -> True
+    ResponseCustomToolInputDoneEvent{} -> True
+    ResponseReasoningSummaryPartAddedEvent{} -> True
+    ResponseReasoningSummaryTextDoneEvent{} -> True
+    _ ->
+        responseStreamEventType event /= EventCodexRateLimits
+            && isJust (streamEventToLoopEvent event)
 
 extraDeltaText :: Aeson.Object -> Maybe Text
 extraDeltaText extras = nonEmptyText extras "delta" <|> nonEmptyText extras "text"

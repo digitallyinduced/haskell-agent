@@ -1,8 +1,10 @@
-{ mkDerivation, aeson, agent-core, agent-openai, agent-openrouter
+{ mkDerivation, aeson, agent-codex-dialect, agent-core
+, agent-grok-build-dialect, agent-openai, agent-openrouter
 , agent-responses, agent-responses-types, agent-syntax, agent-tui, agent-xai
 , ansi-terminal, async, base, base64-bytestring, brick, bytestring
 , colour, containers, directory, filelock, filepath, haskeline, hspec
-, JuicyPixels, lib, mtl, process, safe-exceptions, stm, text, time
+, http-client, http-client-tls, JuicyPixels, lib, mtl, process
+, safe-exceptions, stm, text, time
 , transformers, unix, vector, vty, vty-crossplatform
 }:
 mkDerivation {
@@ -12,15 +14,21 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-core agent-openai agent-openrouter agent-responses agent-responses-types
+    aeson agent-codex-dialect agent-core agent-grok-build-dialect
+    agent-openai agent-openrouter agent-responses agent-responses-types
     agent-syntax agent-tui agent-xai ansi-terminal async base
     base64-bytestring brick bytestring colour containers directory filelock
-    filepath haskeline JuicyPixels mtl process safe-exceptions stm text
+    filepath haskeline http-client http-client-tls JuicyPixels mtl process
+    safe-exceptions stm text
     time transformers unix vector vty vty-crossplatform
   ];
-  executableHaskellDepends = [ base ];
+  executableHaskellDepends = [
+    aeson agent-responses base bytestring containers directory filepath
+    process safe-exceptions text time unix
+  ];
   testHaskellDepends = [
-    aeson agent-core agent-openai agent-responses agent-responses-types agent-tui agent-xai
+    aeson agent-codex-dialect agent-core agent-grok-build-dialect
+    agent-openai agent-responses agent-responses-types agent-tui agent-xai
     ansi-terminal base brick bytestring colour containers directory
     filepath haskeline hspec JuicyPixels process safe-exceptions stm
     text time transformers unix vty

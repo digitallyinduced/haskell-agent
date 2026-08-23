@@ -1,10 +1,18 @@
 # haskell-agent
 
+<img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
+
 **An independent agent harness, written in Haskell.**
 
 `haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI, and
 OpenRouter models with first-class GHCi integration and a runtime designed
 around types, pure functions, explicit effects, and composable concurrency.
+
+## Try it out
+
+```console
+nix run github:digitallyinduced/haskell-agent
+```
 
 ## What is distinctive
 
@@ -28,9 +36,11 @@ have to be.
   typed workspace. The harness distinguishes pure expressions from effectful
   actions, preserves bindings across calls, and recovers or restarts GHCi when
   interruption makes its state uncertain.
-- **One runtime without one generic tool dialect:** the harness owns the agent
-  loop and connects to providers directly, but OpenAI still receives
-  Codex-style tools while xAI receives the Grok Build tool surface.
+- **First-class model dialects:** providers own authentication, billing, and
+  transport, while dialects own the model-facing prompt, tool surface, schema
+  conventions, project-instruction formatting, and subagent protocol. This
+  keeps Codex-style and Grok Build behavior intact even when a transport such
+  as OpenRouter serves models from several families.
 - **Cross-provider state and billing policy:** provider transitions preserve
   the pending turn and durable session state. Credential failover understands
   account cooldowns and prevents automatic fallback from silently converting
@@ -48,19 +58,13 @@ persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
 web search, and interactive terminal interfaces. Those are important product
 features, but not the core differentiation.
 
-## Try it out
-
-```console
-nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
-```
-
 ## Install
 
-Install [Nix](https://nixos.org/download/) with flakes enabled, make sure your
-GitHub SSH access is configured, then install `haskell-agent`:
+Install [Nix](https://nixos.org/download/) with flakes enabled, then install
+`haskell-agent`:
 
 ```console
-nix profile add "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+nix profile add github:digitallyinduced/haskell-agent
 ```
 
 ## Run
@@ -69,6 +73,19 @@ Start an interactive session:
 
 ```console
 agent-cli
+```
+
+`run_ghci` is the primary execution and scripting tool and is enabled by
+default. Enable the provider's explicit shell tool when needed:
+
+```console
+agent-cli --bash
+```
+
+For bash-only operation, disable GHCi explicitly:
+
+```console
+agent-cli --no-ghci --bash
 ```
 
 Run a one-shot task:
@@ -87,9 +104,141 @@ agent-cli --worktree
 Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
 override automatic provider detection.
 
+### Telegram
+
+Create a bot with BotFather, find your numeric Telegram user ID, and run the
+interactive setup command:
+
+```console
+agent-telegram setup --provider openai --cwd /path/to/project \
+  --allowed-user 123456789
+agent-telegram start
+agent-telegram status
+```
+
+Setup reads the BotFather token without terminal echo, validates it against
+Telegram, and stores it separately from the non-secret gateway configuration.
+Never paste the bot token into an agent conversation.
+
+Only allowlisted private-chat text messages are handled. Each chat is mapped
+to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
+session and `/session` shows the current session ID. Mutating tools are denied
+unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
+background gateway.
+
+Incoming updates and pending replies are persisted before they are processed.
+Polling continues while agent turns run, conversations are processed in order,
+and separate chats can run concurrently. Pending work resumes when the gateway
+is restarted.
+
+The built-in `telegram-agent` skill lets the normal agent guide this setup.
+Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
+direct secret entry to the interactive setup command, and start the configured
+gateway after setup is complete.
+
+### Model catalog and local models
+
+The model picker is driven by a versioned catalog. The application ships its
+default OpenAI, xAI, and OpenRouter entries, then merges an optional user file:
+
+```text
+~/.haskell-agent/models.json
+```
+
+User entries with the same `id` replace shipped entries; new entries are
+appended. The `id` is the stable name accepted by `/model` and `--model`.
+Secrets are not stored in this file: custom connections name an environment
+variable containing their API key.
+
+For example, an unauthenticated local server exposing the streaming OpenAI
+Responses API at `POST /v1/responses` can be configured as:
+
+```json
+{
+  "version": 1,
+  "connections": {
+    "ollama": {
+      "api": "responses",
+      "base_url": "http://localhost:11434/v1",
+      "api_key_optional": true,
+      "request_timeout_seconds": 600
+    }
+  },
+  "models": [
+    {
+      "id": "qwen-local",
+      "connection": "ollama",
+      "model": "qwen2.5-coder:32b",
+      "dialect": "generic-responses",
+      "label": "local"
+    }
+  ]
+}
+```
+
+Select it with `agent-cli --model qwen-local` or from `/model`. For an
+authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
+that variable. Omit `"api_key_optional": true` when the key is required.
+
+Supported dialects are:
+
+- `codex` for Codex-style prompts and tools
+- `grok-build` for the Grok Build protocol
+- `generic-responses` for portable Responses-compatible models
+
+Custom connections are selected manually and are not considered for automatic
+billing fallback. Built-in connection names (`openai`, `xai`, and
+`openrouter`) are reserved. A malformed catalog is reported at startup with
+the file and invalid field instead of being silently ignored.
+
+The built-in `add-model` skill handles requests such as “use the model running
+at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
+Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
+naturally and let the agent activate it.
+
 ### Authentication
 
 Works with your Codex subscription, Grok subscription, and provider API keys.
+
+### Local MCP servers
+
+Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "seo-mcp": {
+      "command": "nix",
+      "args": ["run", "/absolute/path/to/seo-mcp"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/credentials.json"
+      },
+      "startupTimeoutSeconds": 120,
+      "requestTimeoutSeconds": 60
+    }
+  }
+}
+```
+
+The harness starts enabled servers once per root session and shares their tools
+with subagents. MCP tool names are preserved, so they must not collide with
+built-in or other configured tools. Only tools explicitly annotated
+`readOnlyHint: true` are exposed.
+
+### Secret entry
+
+Interactive root agents can request API keys and tokens with the built-in
+`ask_secret` tool. The harness reads the value through a masked terminal
+prompt, writes it to a private temporary file, and returns only the file path
+to the model. This keeps the secret out of chat history, tool arguments,
+transcripts, and command text.
+
+Secret files are created below the session scratch directory with owner-only
+permissions and removed when the agent's tool runtime closes. Commands should
+delete them sooner after consumption when possible. This protects against
+accidental persistence; it is not an isolation boundary against commands
+running unsandboxed as the same operating-system user.
 
 ## Vision
 
@@ -213,6 +362,11 @@ and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
 
+Model targets resolve independently to a provider transport and a model-facing
+dialect. OpenAI models use the Codex dialect, xAI models use the Grok Build
+dialect, and OpenRouter selects Codex, Grok Build, or a portable Responses
+dialect from the model family.
+
 ## Development
 
 All compiler and package dependencies come from the pinned Nix flake.
@@ -228,3 +382,7 @@ same session without rebuilding the executable.
 
 See [`AGENTS.md`](AGENTS.md) for the complete development workflow, including
 multi-package GHCi sessions, Nix package maintenance, and CLI testing.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

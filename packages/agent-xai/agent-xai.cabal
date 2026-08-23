@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Haskell client for the xAI Grok subscription transport
 description:        xAI OAuth, typed Responses request projection, HTTP
                     transport, SSE decoding, and provider-specific errors.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

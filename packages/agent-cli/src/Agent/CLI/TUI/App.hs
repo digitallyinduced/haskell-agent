@@ -8,10 +8,12 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
     , hasQueuedFullscreenInput
     , motionDemandFor
+    , lambdaArtWidget
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , newFullscreenInputBuffer
@@ -21,14 +23,18 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineWithModels
     , readFullscreenLineOr
+    , readFullscreenLineOrWithModels
     , repositoryHeaderText
+    , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenOnboarding
     , requestFullscreenResume
+    , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
@@ -36,16 +42,21 @@ module Agent.CLI.TUI.App
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
+    , maskedSecretText
+    , normalizeTextOverlayInsertion
+    , textOverlayDisplayText
     , withFullscreenSuspended
     ) where
 
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readReplHistory
+    , terminalTextWidth
     , truncateDisplayText
     )
 import Agent.CLI.AgentViewport
@@ -100,6 +111,7 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
     )
@@ -136,6 +148,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
+import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -150,6 +163,7 @@ import Control.Concurrent.STM
     , readTMVar
     , registerDelay
     , retry
+    , takeTMVar
     , writeTVar
     )
 import Control.Monad (unless, void, when)
@@ -347,8 +361,31 @@ setFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
     -> IO ()
-setFullscreenImagePreviews runtime =
-    enqueueAppEvent runtime . AppSetImagePreviews
+setFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else do
+                let next =
+                        mapMaybe
+                            (\image ->
+                                case prepareTuiImagePreview image of
+                                    Left _ -> Nothing
+                                    Right preview -> Just (image, preview))
+                            images
+                -- ANSI previews force the sampled image during Brick drawing.
+                -- Build that sample here on the model worker instead of
+                -- stalling the Brick event/render thread.
+                unless runtime.runtimeNativeImagePreviews $
+                    mapM_
+                        (\(_, preview) ->
+                            void $
+                                pure $!
+                                    pixelAt preview.previewSample 0 0)
+                        next
+                pure next
+    enqueueAppEvent runtime (AppSetImagePreviews prepared)
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -369,7 +406,22 @@ readFullscreenLine
     -> Text
     -> IO ReplLine
 readFullscreenLine runtime skills prompt initial = do
-    result <- readFullscreenLineOr runtime skills prompt initial retry
+    result <- readFullscreenLineOrWithModels
+        runtime skills [] prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
+readFullscreenLineWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> IO ReplLine
+readFullscreenLineWithModels runtime skills modelIds prompt initial = do
+    result <- readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial retry
     case result of
         Left impossible -> pure impossible
         Right line -> pure line
@@ -386,7 +438,20 @@ readFullscreenLineOr
     -> STM wake
     -> IO (Either wake ReplLine)
 readFullscreenLineOr runtime skills prompt initial wake = do
+    readFullscreenLineOrWithModels runtime skills [] prompt initial wake
+
+readFullscreenLineOrWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial wake = do
     enqueueAppEvent runtime (AppSetSkillCommands skills)
+    enqueueAppEvent runtime (AppSetModelIds modelIds)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -487,8 +552,28 @@ requestFullscreenText
 requestFullscreenText runtime title body initial = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
-        (AppAskText title body initial reply)
+        (AppAskText TextInputPlain title body initial reply)
     atomically (readTMVar reply)
+
+-- | Request a secret through a masked fullscreen prompt.
+--
+-- The returned value exists only in transient overlay state and the reply
+-- 'TMVar'; it is never rendered or added to normal prompt history.
+requestFullscreenSecret
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> IO (Maybe Text)
+requestFullscreenSecret runtime title body = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskText
+            TextInputSecret
+            (sanitizeSecretPromptText title)
+            (sanitizeSecretPromptText body)
+            ""
+            reply)
+    atomically (takeTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
@@ -539,6 +624,7 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appModelIds = []
             , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
@@ -1034,81 +1120,73 @@ handleDeleteConfirmation state browser sessionId = \case
     _ -> pure ()
 
 handleResumeSearch :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeSearch browser = \case
-    V.EvKey V.KEsc [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KEnter [] ->
-        setBrowser (endResumeSearch browser)
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KBS [] ->
-        setAndReveal $
-            insertResumeSearch ""
-                browser
-                    { resumeBrowserQuery =
-                        Text.dropEnd 1 browser.resumeBrowserQuery
-                    , resumeBrowserIndex = 0
-                    }
-    V.EvKey (V.KChar 'u') modifiers
-        | V.MCtrl `elem` modifiers ->
+handleResumeSearch browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEsc [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KEnter [] ->
+            setBrowser (endResumeSearch browser)
+        V.EvKey V.KBS [] ->
             setAndReveal $
                 insertResumeSearch ""
                     browser
-                        { resumeBrowserQuery = ""
+                        { resumeBrowserQuery =
+                            Text.dropEnd 1 browser.resumeBrowserQuery
                         , resumeBrowserIndex = 0
                         }
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal (insertResumeSearch (Text.singleton char) browser)
-    _ -> pure ()
+        V.EvKey (V.KChar 'u') modifiers
+            | V.MCtrl `elem` modifiers ->
+                setAndReveal $
+                    insertResumeSearch ""
+                        browser
+                            { resumeBrowserQuery = ""
+                            , resumeBrowserIndex = 0
+                            }
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal (insertResumeSearch (Text.singleton char) browser)
+        _ -> pure ()
 
 handleResumeNormal :: ResumeBrowser -> V.Event -> EventM Name AppState ()
-handleResumeNormal browser = \case
-    V.EvKey V.KUp [] ->
-        moveAndReveal (-1) browser
-    V.EvKey V.KDown [] ->
-        moveAndReveal 1 browser
-    V.EvKey V.KPageUp [] ->
-        moveAndReveal (-10) browser
-    V.EvKey V.KPageDown [] ->
-        moveAndReveal 10 browser
-    V.EvMouseDown _ _ V.BScrollUp _ ->
-        moveAndReveal (-mouseScrollLines) browser
-    V.EvMouseDown _ _ V.BScrollDown _ ->
-        moveAndReveal mouseScrollLines browser
-    V.EvKey V.KEnter [] ->
-        resolveResume True
-    V.EvKey V.KEsc [] ->
-        resolveResume False
-    V.EvKey (V.KChar 'e') [] ->
-        expandSelectedResume browser
-    V.EvKey (V.KChar 'f') [] -> do
-        setBrowser (cycleResumeSource browser)
-        revealSelectedResume
-    V.EvKey (V.KChar 'd') [] ->
-        case selectedResumeBrowser browser of
-            Nothing -> pure ()
-            Just entry ->
-                setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
-    V.EvKey (V.KChar '/') [] ->
-        setBrowser (beginResumeSearch browser)
-    V.EvKey (V.KChar char) []
-        | not (isControl char) ->
-            setAndReveal
-                (insertResumeSearch
-                    (Text.singleton char)
-                    (beginResumeSearch browser))
-    _ -> pure ()
+handleResumeNormal browser event
+    | Just delta <- resumeNavigationDelta event =
+        moveAndReveal delta browser
+    | otherwise = case event of
+        V.EvKey V.KEnter [] ->
+            resolveResume True
+        V.EvKey V.KEsc [] ->
+            resolveResume False
+        V.EvKey (V.KChar 'e') [] ->
+            expandSelectedResume browser
+        V.EvKey (V.KChar 'f') [] -> do
+            setBrowser (cycleResumeSource browser)
+            revealSelectedResume
+        V.EvKey (V.KChar 'd') [] ->
+            case selectedResumeBrowser browser of
+                Nothing -> pure ()
+                Just entry ->
+                    setBrowser (setResumeDeletePending (Just entry.resumeId) browser)
+        V.EvKey (V.KChar '/') [] ->
+            setBrowser (beginResumeSearch browser)
+        V.EvKey (V.KChar char) []
+            | not (isControl char) ->
+                setAndReveal
+                    (insertResumeSearch
+                        (Text.singleton char)
+                        (beginResumeSearch browser))
+        _ -> pure ()
+
+resumeNavigationDelta :: V.Event -> Maybe Int
+resumeNavigationDelta = \case
+    V.EvKey V.KUp [] -> Just (-1)
+    V.EvKey V.KDown [] -> Just 1
+    V.EvKey V.KPageUp [] -> Just (-10)
+    V.EvKey V.KPageDown [] -> Just 10
+    V.EvMouseDown _ _ V.BScrollUp _ -> Just (-mouseScrollLines)
+    V.EvMouseDown _ _ V.BScrollDown _ -> Just mouseScrollLines
+    _ -> Nothing
 
 expandSelectedResume :: ResumeBrowser -> EventM Name AppState ()
 expandSelectedResume browser =
@@ -1222,6 +1300,11 @@ handleChoiceKey = \case
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveChoice False)
     _ -> pure ()
   where
     moveChoice delta =
@@ -1334,8 +1417,17 @@ resolveChoice confirmed = do
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
     V.EvKey V.KEsc [] -> resolveTextPrompt False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
-    V.EvKey V.KEnter [V.MShift] -> insert "\n"
+    V.EvKey V.KEnter [V.MShift] -> do
+        state <- get
+        case (.textInputMode) <$> state.appTextPrompt of
+            Just TextInputPlain -> insert "\n"
+            _ -> pure ()
     V.EvKey V.KPageUp [] ->
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
@@ -1374,11 +1466,16 @@ handleTextPromptKey = \case
         | V.MCtrl `elem` modifiers ->
             edit deleteToLineEnd
     V.EvKey (V.KChar character) [] ->
-        insert (Text.singleton character)
+        insertForMode (Text.singleton character)
     V.EvPaste bytes ->
-        insert (Composer.decodePaste bytes)
+        insertForMode (Composer.decodePaste bytes)
     _ -> pure ()
   where
+    insertForMode raw = do
+        state <- get
+        let mode =
+                maybe TextInputPlain (.textInputMode) state.appTextPrompt
+        insert (normalizeTextOverlayInsertion mode raw)
     edit change =
         modify' \state ->
             state
@@ -1487,15 +1584,21 @@ drawImagePreviews native previews =
         context <- getContext
         let maxWidth = viewportPreviewSize context.availWidth
             maxHeight = viewportPreviewSize context.availHeight
-            gaps = max 0 (length previews - 1) * previewGap
+            visible =
+                drop
+                    (max
+                        0
+                        (length previews - previewCountForWidth maxWidth))
+                    previews
+            gaps = max 0 (length visible - 1) * previewGap
             previewWidth =
-                max 1 ((maxWidth - gaps) `div` max 1 (length previews))
+                max 1 ((maxWidth - gaps) `div` max 1 (length visible))
             previewHeight = max 1 (maxHeight - 1)
             content =
                 hBox $
                     intersperse
                         (hLimit previewGap (fill ' '))
-                        (map (drawPreview previewWidth previewHeight) previews)
+                        (map (drawPreview previewWidth previewHeight) visible)
         render $
             hLimit maxWidth $
                 vLimit maxHeight content
@@ -2132,7 +2235,12 @@ lambdaArtWidget frame =
                         ]
                     | y <- [0 .. canvasHeight - 1]
                     ]
-        pure B.emptyResult { B.image = rendered }
+            bounded =
+                V.crop
+                    (max 0 context.availWidth)
+                    (max 0 context.availHeight)
+                    rendered
+        pure B.emptyResult { B.image = bounded }
 
 lambdaComposition :: Int -> Int -> LambdaComposition
 lambdaComposition width height
@@ -2549,9 +2657,13 @@ drawFooter state =
   where
     footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
         (Just _, _, _) ->
-            "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
+                else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
         (Nothing, Just _, _) ->
-            "↑↓ select  │  Enter choose  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
+                else "↑↓ select  │  Enter choose  │  Esc cancel"
         (Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
@@ -2636,12 +2748,18 @@ resumeHeader browser =
             showCursor
                 ResumeSearchCursor
                 (Location
-                    (Text.length prefix + Text.length browser.resumeBrowserQuery, 0))
+                    (resumeSearchCursorColumn
+                        prefix
+                        browser.resumeBrowserQuery, 0))
                 (txt (prefix <> browser.resumeBrowserQuery <> " "))
         | Text.null browser.resumeBrowserQuery =
             withAttr Theme.mutedAttr (txt prefix)
         | otherwise =
             txt (prefix <> browser.resumeBrowserQuery)
+
+resumeSearchCursorColumn :: Text -> Text -> Int
+resumeSearchCursorColumn prefix query =
+    terminalTextWidth prefix + terminalTextWidth query
 
 resumeList :: ResumeBrowser -> Widget Name
 resumeList browser =
@@ -2939,13 +3057,33 @@ drawTextPrompt state prompt =
 
 renderTextDraft :: TextOverlay -> Widget Name
 renderTextDraft prompt =
-    let content =
-            if Text.null prompt.textDraft
+    let displayDraft = textOverlayDisplayText prompt
+        content =
+            if Text.null displayDraft
                 then withAttr Theme.mutedAttr (txt " ")
-                else txt prompt.textDraft
+                else txt displayDraft
         (row, column) =
-            Composer.draftCursorLocation prompt.textDraft prompt.textCursor
+            Composer.draftCursorLocation displayDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
+
+-- | Replace every code point with one fixed-width masking glyph.
+maskedSecretText :: Text -> Text
+maskedSecretText value =
+    Text.replicate (Text.length value) "•"
+
+-- | Text that may be painted for an overlay draft.
+textOverlayDisplayText :: TextOverlay -> Text
+textOverlayDisplayText prompt = case prompt.textInputMode of
+    TextInputPlain -> prompt.textDraft
+    TextInputSecret -> maskedSecretText prompt.textDraft
+
+-- | Secret prompts are deliberately single-line. Plain overlays preserve
+-- multiline input, while secret pastes stop before the first line ending.
+normalizeTextOverlayInsertion :: TextInputMode -> Text -> Text
+normalizeTextOverlayInsertion = \case
+    TextInputPlain -> id
+    TextInputSecret -> Text.takeWhile \character ->
+        character /= '\n' && character /= '\r'
 
 choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
 choiceRow appState selected index (label, detail) =
@@ -3074,7 +3212,7 @@ applyUiEvent uiEvent state =
                 previousUi
                 nextUi
                 newFlashes
-        nextState =
+        nextState0 =
             state
                 { appUi = nextUi
                 , appCompletionFlashes =
@@ -3086,7 +3224,32 @@ applyUiEvent uiEvent state =
                         then 0
                         else state.appNativeProgressKeepaliveBucket
                 }
+        nextState =
+            case state.appChoice of
+                Just choice
+                    | choiceClosesOnUiTransition
+                        previousUi
+                        nextUi
+                        choice ->
+                        nextState0
+                            { appChoice = Nothing
+                            , appChoiceReply = Nothing
+                            }
+                _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
+
+-- | Turn-scoped choices, such as the live effort selector, become invalid
+-- when their turn stops running. Ordinary idle dialogs remain open, and a
+-- model round that continues into tools keeps the selector visible.
+choiceClosesOnUiTransition
+    :: UiState
+    -> UiState
+    -> ChoiceOverlay
+    -> Bool
+choiceClosesOnUiTransition previous next choice =
+    choice.choiceCloseOnTurnEnd
+        && previous.uiRunning
+        && not next.uiRunning
 
 retainExistingFlashes
     :: UiState
@@ -3120,6 +3283,7 @@ uiEventRestartsMotionSchedule event previous next newFlashes =
   where
     explicitReset = case event of
         UiLoop TurnStarted -> True
+        UiLoop (WarningRaised _) -> True
         UiSetNotice (Just _) -> True
         UiInputPromoted _ -> True
         UiTurnRestarted -> True
@@ -3280,22 +3444,22 @@ handleEventInner event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
-    AppEvent (AppSetImagePreviews images) ->
+    AppEvent (AppSetModelIds modelIds) -> do
+        state <- get
+        if state.appModelIds == modelIds
+            then pure ()
+            else modify' \current -> current
+                { appModelIds = modelIds
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
+    AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
             previous <-
                 liftIO $
                     readIORef state.appRuntime.runtimeImagePreviews
-            let unchanged = map fst previous == images
-                prepared
-                    | unchanged = previous
-                    | otherwise =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
+            let unchanged = map fst previous == map fst prepared
             liftIO do
                 when (not unchanged) do
                     writeIORef
@@ -3383,6 +3547,7 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
                 , appAgentHover = Nothing
@@ -3402,7 +3567,7 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)
-    AppEvent (AppAskText title body initial reply) -> do
+    AppEvent (AppAskText mode title body initial reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
@@ -3412,6 +3577,7 @@ handleEventInner event = case event of
                     , textBody = body
                     , textDraft = initial
                     , textCursor = Text.length initial
+                    , textInputMode = mode
                     }
                 , appTextReply = Just reply
                 , appAgentHover = Nothing

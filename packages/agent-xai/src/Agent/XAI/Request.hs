@@ -5,21 +5,26 @@ module Agent.XAI.Request
     , buildRequest
     ) where
 
+import Agent.Responses.Request
+    ( forceStatelessStreaming
+    , mapResponseTools
+    , selectConfiguredModel
+    )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Apply an exact model override, preserve an existing Grok model name, or
 -- use the configured default.
 mapModel :: ClientOptions -> Text -> Text
-mapModel options model = case lookup model options.modelOverrides of
-    Just target -> target
-    Nothing
-        | "grok" `Text.isPrefixOf` model -> model
-        | otherwise -> options.defaultModel
+mapModel options model =
+    selectConfiguredModel
+        options.modelOverrides
+        (Text.isPrefixOf "grok")
+        options.defaultModel
+        (Just model)
 
 -- | Build the typed Responses request sent to xAI.
 --
@@ -28,23 +33,28 @@ mapModel options model = case lookup model options.modelOverrides of
 -- always enabled, ChatGPT-only tool knobs are omitted, and the transcript is
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
-buildRequest options request = defaultResponseCreateParams
-    { model = Just (maybe options.defaultModel (mapModel options) request.model)
-    , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
-    , tools = Maybe.mapMaybe xaiTool <$> request.tools
-    , store = Just False
-    , stream = Just True
-    , reasoning = Just ReasoningConfig
-        { context = Nothing
-        , effort = Just (xaiReasoningEffort (request.reasoning >>= (.effort)))
-        , generateSummary = Nothing
-        , reasoningMode = Nothing
-        , summary = Just "concise"
-        , extraFields = KeyMap.empty
-        }
-    , include = request.include
-    , promptCacheKey = request.promptCacheKey
-    }
+buildRequest options request =
+    mapResponseTools xaiTool $
+        forceStatelessStreaming defaultResponseCreateParams
+            { model = Just $
+                selectConfiguredModel
+                    options.modelOverrides
+                    (Text.isPrefixOf "grok")
+                    options.defaultModel
+                    request.model
+            , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
+            , tools = request.tools
+            , reasoning = Just ReasoningConfig
+                { context = Nothing
+                , effort = Just (xaiReasoningEffort (request.reasoning >>= (.effort)))
+                , generateSummary = Nothing
+                , reasoningMode = Nothing
+                , summary = Just "concise"
+                , extraFields = KeyMap.empty
+                }
+            , include = request.include
+            , promptCacheKey = request.promptCacheKey
+            }
   where
     systemItems = case request.instructions of
         Just instructions

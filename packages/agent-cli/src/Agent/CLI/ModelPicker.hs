@@ -7,8 +7,10 @@ module Agent.CLI.ModelPicker
     ) where
 
 import Agent.CLI.Models
+import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import qualified Agent.CLI.Picker as Picker
+import Agent.Dialect (DialectId, dialectSlug)
 import Agent.CLI.Style
     ( glyphOk
     , roleMuted
@@ -16,7 +18,7 @@ import Agent.CLI.Style
     , roleSuccess
     , roleWarn
     )
-import Agent.Provider (Provider, providerSlug)
+import Agent.Provider (Provider)
 import Control.Monad (join)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -39,29 +41,60 @@ toEvent = \case
 -- | Open the picker when stdin is a TTY; otherwise print the catalog.
 -- Returns the provider/model choice on confirm and @Nothing@ on cancel, EOF,
 -- or non-TTY input.
-pickModel :: Bool -> Provider -> Text -> IO (Maybe ModelOption)
-pickModel color provider current = do
+pickModel
+    :: ModelCatalog
+    -> Bool
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> IO (Maybe ModelOption)
+pickModel catalog color connectionId provider current currentDialect = do
     isTty <- hIsTerminalDevice stdin
+    state0 <-
+        initialPickerStateResolved
+            catalog connectionId provider current currentDialect
     if not isTty
         then do
-            Text.hPutStrLn stderr (formatCatalogListing color provider current)
+            Text.hPutStrLn stderr
+                (formatCatalogListingState
+                    color current currentDialect state0)
             hFlush stderr
             pure Nothing
         else do
-            let state0 = initialPickerState provider current
             result <- runOverlay (renderPickerFrame color) step state0
             pure (join result)
   where
     step key state = applyPickerEvent (toEvent key) state
 
-formatCatalogListing :: Bool -> Provider -> Text -> Text
-formatCatalogListing color provider current =
-    let state = initialPickerState provider current
-        header =
+formatCatalogListing
+    :: ModelCatalog
+    -> Bool
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> IO Text
+formatCatalogListing
+        catalog color connectionId provider current currentDialect = do
+    state <-
+        initialPickerStateResolved
+            catalog connectionId provider current currentDialect
+    pure (formatCatalogListingState
+        color current currentDialect state)
+
+formatCatalogListingState
+    :: Bool
+    -> Text
+    -> DialectId
+    -> PickerState
+    -> Text
+formatCatalogListingState color current currentDialect state =
+    let header =
             roleMuted color
                 (glyphSessionLike
                     <> "model: "
-                    <> providerSlug provider
+                    <> state.pickerConnectionId
                     <> "/"
                     <> current
                     <> " · all providers")
@@ -69,7 +102,11 @@ formatCatalogListing color provider current =
             map
                 (\opt ->
                     let mark
-                            | isCurrent provider current opt =
+                            | isCurrent
+                                state.pickerConnectionId
+                                current
+                                currentDialect
+                                opt =
                                 roleSuccess color
                                     (glyphOk <> formatOptionName opt)
                             | otherwise =
@@ -91,7 +128,7 @@ renderPickerFrame color state =
             rolePrompt color "model"
                 <> roleMuted color
                     (" · all providers · current "
-                        <> providerSlug state.pickerProvider
+                        <> state.pickerConnectionId
                         <> "/"
                         <> state.pickerCurrent)
         filterLine
@@ -105,7 +142,10 @@ renderPickerFrame color state =
             opts ->
                 zipWith
                     (\i opt -> renderRow color (i == idx)
-                        state.pickerProvider state.pickerCurrent opt)
+                        state.pickerConnectionId
+                        state.pickerCurrent
+                        state.pickerCurrentDialect
+                        opt)
                     [0 ..]
                     opts
         footer =
@@ -113,14 +153,22 @@ renderPickerFrame color state =
                 "↑↓/jk or scroll · click/enter · esc/q · type to filter"
     in Text.intercalate "\n" (header : filterLine : body <> [footer])
 
-renderRow :: Bool -> Bool -> Provider -> Text -> ModelOption -> Text
-renderRow color selected currentProvider current opt =
+renderRow
+    :: Bool
+    -> Bool
+    -> Text
+    -> Text
+    -> DialectId
+    -> ModelOption
+    -> Text
+renderRow color selected currentConnection current currentDialect opt =
     let cursor = if selected then roleWarn color "› " else "  "
         name
             | selected = roleSuccess color (formatOptionName opt)
             | otherwise = roleMuted color (formatOptionName opt)
         currentMark
-            | isCurrent currentProvider current opt = roleSuccess color " ✓"
+            | isCurrent currentConnection current currentDialect opt =
+                roleSuccess color " ✓"
             | otherwise = ""
         label = case opt.modelLabel of
             Nothing -> ""
@@ -132,8 +180,15 @@ glyphSessionLike :: Text
 glyphSessionLike = "⧉ "
 
 formatOptionName :: ModelOption -> Text
-formatOptionName opt = providerSlug opt.modelProvider <> " · " <> opt.modelId
+formatOptionName opt =
+    opt.modelTarget.targetConnectionId
+        <> " · "
+        <> opt.modelTarget.targetModelId
+        <> " · "
+        <> dialectSlug opt.modelTarget.targetDialect
 
-isCurrent :: Provider -> Text -> ModelOption -> Bool
-isCurrent provider current opt =
-    opt.modelProvider == provider && opt.modelId == current
+isCurrent :: Text -> Text -> DialectId -> ModelOption -> Bool
+isCurrent connectionId current dialect opt =
+    opt.modelTarget.targetConnectionId == connectionId
+        && opt.modelTarget.targetModelId == current
+        && opt.modelTarget.targetDialect == dialect

@@ -1,5 +1,7 @@
 module Agent.Responses.ResponseMerge
     ( mergeCompletedResponseOutput
+    , mergeDoneResponse
+    , mergeResponseFragments
     ) where
 
 import qualified Data.Aeson as Aeson
@@ -25,6 +27,44 @@ mergeCompletedResponseOutput streamedItems responseVal =
                     mergedItems = mergeOutputItems finalItems streamedItems
                 in Aeson.Object (KeyMap.insert "output" (Aeson.Array (Vector.fromList mergedItems)) robj)
         _ -> responseVal
+
+-- | Reconstruct the terminal response carried by the Codex WebSocket
+-- @response.done@ event. That event can contain only a partial response
+-- object, so overlay it on the latest lifecycle response, normalize a missing
+-- final status to @completed@, and attach streamed output items.
+mergeDoneResponse
+    :: Maybe Aeson.Value
+    -> [Aeson.Value]
+    -> Aeson.Value
+    -> Aeson.Value
+mergeDoneResponse baseResponse streamedItems doneResponse =
+    mergeCompletedResponseOutput streamedItems withTerminalStatus
+  where
+    mergedResponse =
+        mergeResponseFragments
+            (Maybe.maybeToList baseResponse <> [doneResponse])
+
+    withTerminalStatus = case (doneResponse, mergedResponse) of
+        (Aeson.Object doneObject, Aeson.Object mergedObject)
+            | not (KeyMap.member "status" doneObject) ->
+                Aeson.Object
+                    (KeyMap.insert "status" (Aeson.String "completed") mergedObject)
+        _ -> mergedResponse
+
+-- | Overlay partial response objects in wire order. Later fragments win while
+-- fields absent from a terminal fragment remain available from earlier
+-- lifecycle events such as @response.created@.
+mergeResponseFragments :: [Aeson.Value] -> Aeson.Value
+mergeResponseFragments =
+    foldl merge (Aeson.Object KeyMap.empty)
+  where
+    merge (Aeson.Object accumulated) (Aeson.Object fragment) =
+        Aeson.Object $
+            KeyMap.foldrWithKey
+                KeyMap.insert
+                accumulated
+                fragment
+    merge _ fragment = fragment
 
 mergeOutputItems :: [Aeson.Value] -> [Aeson.Value] -> [Aeson.Value]
 mergeOutputItems finalItems streamedItems =

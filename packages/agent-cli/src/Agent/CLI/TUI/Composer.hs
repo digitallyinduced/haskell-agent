@@ -26,14 +26,10 @@ module Agent.CLI.TUI.Composer
     , wrapDraft
     ) where
 
-import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
-    , readClipboardImages
-    )
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
-    , slashMenuForWithSkills
+    , slashMenuForWithSkillsAndModels
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -67,7 +63,6 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
-import Data.Foldable (toList)
 import Data.List (elemIndex, intersperse)
 import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..))
@@ -143,6 +138,7 @@ isPromptPrelude :: FullscreenInput -> Bool
 isPromptPrelude input =
     case input.fullscreenInputLine of
         ReplClipboardPaste _ _ -> True
+        ReplClipboardPasteOrText _ _ -> True
         _ -> False
 
 takeFullscreenInput
@@ -205,9 +201,9 @@ drawSlashRow selected index suggestion =
 
 drawQueuedInputs :: UiState -> Widget Name
 drawQueuedInputs state =
-    case toList state.uiQueuedInputs of
-        [] -> emptyWidget
-        next : _ ->
+    case Seq.viewl state.uiQueuedInputs of
+        EmptyL -> emptyWidget
+        next :< _ ->
             padLeftRight 2 $
                 vLimit 1 $
                     hBox
@@ -590,6 +586,7 @@ handleEffortControlClick applyUiEvent = do
                                 "Changing effort will restart the current turn."
                             , choiceIndex = initial
                             , choiceRows = [(effort, "") | effort <- efforts]
+                            , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose
                         }
@@ -711,7 +708,7 @@ handleComposerKey
             case slashMenu of
                 Just menu -> acceptSlash menu
                 Nothing ->
-                    when (not (null (toList ui.uiBlocks))) $
+                    when (not (Seq.null ui.uiBlocks)) $
                         modifyUi (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter [V.MShift] ->
             insertText "\n"
@@ -781,15 +778,15 @@ handleComposerKey
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
-            images <- liftIO $
-                nonEmptyClipboardImages <$> readClipboardImages
-            case images of
-                Just attached ->
-                    submitRaw
-                        (ReplClipboardPaste ui.uiDraft (Just attached))
-                Nothing -> do
-                    insertText (decodePaste bytes)
-                    modify' \current -> current { appPasted = True }
+            let pasted = decodePaste bytes
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            modifyUi
+                (UiSetNotice
+                    (Just (progressNotice "Reading clipboard…")))
+            submitRaw
+                (ReplClipboardPasteOrText ui.uiDraft pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do
@@ -1093,8 +1090,9 @@ currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
     | state.appSlashDismissed = Nothing
     | otherwise =
-        slashMenuForWithSkills
+        slashMenuForWithSkillsAndModels
             state.appSkillCommands
+            state.appModelIds
             state.appUi.uiDraft
             state.appUi.uiCursor
 

@@ -13,3 +13,7 @@ spec =
         it "distinguishes permission prompts" do
             attentionNotificationSequence PermissionRequested
                 `shouldBe` "\ESC]9;Haskell Agent: permission required\ESC\\"
+
+        it "distinguishes plan-mode requests" do
+            attentionNotificationSequence PlanModeRequested
+                `shouldBe` "\ESC]9;Haskell Agent: plan mode requested\ESC\\"

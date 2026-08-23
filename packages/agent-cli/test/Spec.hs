@@ -11,15 +11,18 @@ import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
+import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
+import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
@@ -38,6 +41,7 @@ import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
+import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
@@ -46,6 +50,7 @@ import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
+import qualified Agent.TelegramSpec as TelegramSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
@@ -67,15 +72,18 @@ main = hspec do
     CancelWatchSpec.spec
     ClipboardSpec.spec
     CommandSpec.spec
+    ConfigSpec.spec
     CompactionSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
+    DialectsSpec.spec
     ErrorSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec
     LoginSpec.spec
     MarkdownSpec.spec
+    ModelConfigSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
     NotificationSpec.spec
@@ -94,10 +102,12 @@ main = hspec do
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
+    SecretSpec.spec
     StyleSpec.spec
     TimestampSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
+    TelegramSpec.spec
     TextLayoutSpec.spec
     SessionSpec.spec
     SessionTitleSpec.spec

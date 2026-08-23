@@ -1,0 +1,49 @@
+module Agent.TUI.Markdown.BlockSpec (spec) where
+
+import Agent.TUI.Markdown.Block
+import Test.Hspec
+
+spec :: Spec
+spec = describe "Markdown block parsing" do
+    it "parses heading levels and requires following whitespace" do
+        headingParts "  ### Title  " `shouldBe` Just (3, "Title")
+        headingParts "###Title" `shouldBe` Nothing
+        headingParts "####### Title" `shouldBe` Nothing
+        headingPartsWith (== ' ') "#\tTitle" `shouldBe` Nothing
+
+    it "parses indented unordered and ordered list items" do
+        bulletParts "  * item" `shouldBe` Just ("  ", "item")
+        bulletParts "\t-\titem" `shouldBe` Just ("\t", "item")
+        bulletPartsWith (== ' ') "\t-\titem" `shouldBe` Nothing
+        orderedParts "    12. item" `shouldBe`
+            Just ("    ", "12", "item")
+
+    it "removes only the block quote marker" do
+        blockQuoteRemainder "  >  quote" `shouldBe` Just "  quote"
+        blockQuoteRemainder "plain" `shouldBe` Nothing
+
+    it "recognizes thematic breaks" do
+        isThematicBreak " * * * " `shouldBe` True
+        isThematicBreak "--" `shouldBe` False
+        isThematicBreak "-*-" `shouldBe` False
+
+    it "parses tables and consumes the separator row" do
+        takeTableRows
+            [ "| name | value |"
+            , "| :--- | ---: |"
+            , "| a | b |"
+            , "after"
+            ]
+            `shouldBe`
+                Just
+                    ( [["name", "value"], ["a", "b"]]
+                    , ["after"]
+                    )
+
+    it "preserves escaped and code-span pipes inside cells" do
+        splitTableRow "| a\\|b | `c|d` | e |" `shouldBe`
+            Just ["a|b", "`c|d`", "e"]
+
+    it "rejects malformed tables" do
+        takeTableRows ["a | b", "---", "c | d"] `shouldBe` Nothing
+        takeTableRows ["a | b", "--- | --- | ---"] `shouldBe` Nothing

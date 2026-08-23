@@ -9,21 +9,24 @@ import Agent.Loop
     )
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Subagents
-import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
+import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot, taskPathText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
     , dispatchToolCall
     )
+import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , appToolHandlers
+    , jsonToolParameters
     )
 import Control.Concurrent.STM
 import Control.Monad (unless)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -65,6 +68,49 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , ("list_agents", True)
                 , ("interrupt_agent", True)
                 ]
+        closeSubagentRegistry registry
+
+    it "spawns canonical paths through depth four and rejects depth five" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        level1 <- spawnFrom (rootContext registry Nothing) "level1"
+        level1Context <- childContext registry level1 1
+        level2 <- spawnFrom level1Context "level2"
+        level2Context <- childContext registry level2 2
+        level3 <- spawnFrom level2Context "level3"
+        level3Context <- childContext registry level3 3
+        level4 <- spawnFrom level3Context "level4"
+        level4Path <- fromMaybe taskPathRoot <$> getTaskPath registry level4
+        taskPathText level4Path
+            `shouldBe` "/root/level1/level2/level3/level4"
+        level4Context <- childContext registry level4 4
+        rejected <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers
+                (multiAgentTools level4Context))
+            (spawnCall "level5")
+        rejected.output `shouldSatisfy`
+            Text.isInfixOf "maximum depth 4"
+        closeSubagentRegistry registry
+
+    it "adds host-provided model guidance to spawn_agent" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiSpawnModelGuidance =
+                    Just "Prefer `gpt-5.6-luna` for small tasks."
+                }
+            descriptions =
+                [ description
+                | tool <- multiAgentTools context
+                , tool.appToolName == "spawn_agent"
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                , property.propertyName == "model"
+                , description <- maybe [] pure property.description
+                ]
+        descriptions `shouldSatisfy`
+            any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
     it "preserves encrypted spawn payloads" do
@@ -185,6 +231,27 @@ spec = describe "Agent.Tools.MultiAgents" do
         atomically (writeTVar parentGate True)
         closeSubagentRegistry registry
 
+    it "accepts non-object input for optional-only collaboration tools" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "child"))
+            (\_ _ -> pure ())
+        Right _ <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "child"
+                (plainInterAgentContent "child") Nothing
+        let handlers =
+                appToolHandlers (multiAgentTools (rootContext registry Nothing))
+        listed <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "list-empty" "collaboration.list_agents" ""
+                FunctionCallKind False)
+        listed.output `shouldNotSatisfy`
+            Text.isInfixOf "Expected object input"
+        waited <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "wait-array" "collaboration.wait_agent" "[]"
+                FunctionCallKind False)
+        waited.output `shouldNotSatisfy`
+            Text.isInfixOf "Expected object input"
+        closeSubagentRegistry registry
+
     it "propagates restore failures from message tools" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (Left LoopNoResponseId))
@@ -216,6 +283,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiCreateWorktree = Nothing
                 , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
+                , multiSpawnModelGuidance = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -247,6 +315,39 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
+    , multiSpawnModelGuidance = Nothing
+    }
+
+childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext
+childContext registry agentId depth = do
+    path <- fromMaybe taskPathRoot <$> getTaskPath registry agentId
+    pure $ (rootContext registry Nothing)
+        { multiSelfId = Just agentId
+        , multiDepth = depth
+        , multiTaskPath = path
+        }
+
+spawnFrom :: MultiAgentContext -> Text -> IO SubagentId
+spawnFrom context taskName = do
+    result <- dispatchToolCall defaultLoopDispatch
+        (appToolHandlers (multiAgentTools context))
+        (spawnCall taskName)
+    result.output `shouldSatisfy` Text.isInfixOf taskName
+    resolved <-
+        resolveAgentTarget
+            context.multiRegistry context.multiTaskPath taskName
+    case resolved of
+        Left err -> expectationFailure (Text.unpack err) >> fail "unreachable"
+        Right agentId -> pure agentId
+
+spawnCall :: Text -> ToolCall
+spawnCall taskName = ToolCall
+    { callId = "spawn-" <> taskName
+    , name = "collaboration.spawn_agent"
+    , arguments =
+        "{\"task_name\":\"" <> taskName <> "\",\"message\":\"task\"}"
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
     }
 
 encryptedSpawnCall :: ToolCall

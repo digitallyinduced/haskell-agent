@@ -1,11 +1,14 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
+import Agent.CLI.Models (ModelTarget(..))
+import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as Text
 import qualified System.Directory as Directory
 import System.Directory.OsPath
     ( canonicalizePath
@@ -23,6 +26,21 @@ import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
 toFilePath path = either (error . show) id (decodeUtf path)
+
+target
+    :: Provider
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> DialectId
+    -> ModelTarget
+target provider connection model wireModel dialect = ModelTarget
+    { targetProvider = provider
+    , targetConnectionId = connection
+    , targetModelId = model
+    , targetWireModelId = wireModel
+    , targetDialect = dialect
+    }
 
 spec :: Spec
 spec = describe "Agent.CLI.Project" do
@@ -53,23 +71,29 @@ spec = describe "Agent.CLI.Project" do
                 settings' <- loadProjectSettings root
                 settings'.settingsAutoApprove `shouldBe` False
 
-        it "round-trips the last provider/model and preserves other settings" $
+        it "round-trips the last provider/model/dialect and preserves other settings" $
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
-                saveProjectModel root OpenAIProvider "gpt-project"
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-project" "gpt-project" CodexDialect)
 
                 let path = projectSettingsPath root
                 modeOf path `shouldReturn` 0o600
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
                 settings.settingsLastModel `shouldBe` Just ProjectModel
-                    { projectModelProvider = OpenAIProvider
-                    , projectModelName = "gpt-project"
+                    { projectModelTarget =
+                        target OpenAIProvider "openai"
+                            "gpt-project" "gpt-project" CodexDialect
                     }
                 projectModelProvider settings `shouldBe` Just OpenAIProvider
                 projectModelFor OpenAIProvider settings
                     `shouldBe` Just "gpt-project"
+                projectDialectFor OpenAIProvider settings
+                    `shouldBe` Just CodexDialect
                 projectModelFor XAIProvider settings `shouldBe` Nothing
+                projectDialectFor XAIProvider settings `shouldBe` Nothing
 
                 saveProjectAutoApprove root False
                 updated <- loadProjectSettings root
@@ -80,14 +104,42 @@ spec = describe "Agent.CLI.Project" do
         it "replaces the remembered provider/model without resetting approval" $
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
-                saveProjectModel root OpenAIProvider "gpt-old"
-                saveProjectModel root XAIProvider "grok-new"
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-old" "gpt-old" CodexDialect)
+                saveProjectModel root
+                    (target XAIProvider "xai"
+                        "grok-new" "grok-new" GrokBuildDialect)
 
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
                 projectModelProvider settings `shouldBe` Just XAIProvider
                 projectModelFor XAIProvider settings `shouldBe` Just "grok-new"
+                projectDialectFor XAIProvider settings
+                    `shouldBe` Just GrokBuildDialect
                 projectModelFor OpenAIProvider settings `shouldBe` Nothing
+
+        it "loads legacy OpenRouter settings with the old Grok dialect" $
+            withTempDir "agent-project-" \root -> do
+                let dir = root </> fromFilePath ".haskell-agent"
+                    path = projectSettingsPath root
+                createDirectoryIfMissing True dir
+                LBS.writeFile
+                    (toFilePath path)
+                    "{\"version\":1,\"autoApprove\":true,\"lastModel\":{\"provider\":\"openrouter\",\"model\":\"openai/gpt-5.1\"}}"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                projectModelFor OpenRouterProvider settings
+                    `shouldBe` Just "openai/gpt-5.1"
+                projectDialectFor OpenRouterProvider settings
+                    `shouldBe` Just GrokBuildDialect
+                fmap (.projectModelTarget.targetWireModelId)
+                    settings.settingsLastModel
+                    `shouldBe` Just "openai/gpt-5.1"
+                fmap (.projectModelTarget.targetConnectionId)
+                    settings.settingsLastModel
+                    `shouldBe` Just "openrouter"
 
         it "loads legacy settings without a remembered model" $
             withTempDir "agent-project-" \root -> do
@@ -97,6 +149,32 @@ spec = describe "Agent.CLI.Project" do
                 LBS.writeFile
                     (toFilePath path)
                     "{\"version\":1,\"autoApprove\":true}"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsLastModel `shouldBe` Nothing
+
+        it "ignores an unknown remembered dialect without resetting approval" $
+            withTempDir "agent-project-" \root -> do
+                let dir = root </> fromFilePath ".haskell-agent"
+                    path = projectSettingsPath root
+                createDirectoryIfMissing True dir
+                LBS.writeFile
+                    (toFilePath path)
+                    "{\"version\":1,\"autoApprove\":true,\"lastModel\":{\"provider\":\"openrouter\",\"model\":\"openai/gpt-5.1\",\"dialect\":\"retired\"}}"
+
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsLastModel `shouldBe` Nothing
+
+        it "ignores an incompatible remembered dialect" $
+            withTempDir "agent-project-" \root -> do
+                let dir = root </> fromFilePath ".haskell-agent"
+                    path = projectSettingsPath root
+                createDirectoryIfMissing True dir
+                LBS.writeFile
+                    (toFilePath path)
+                    "{\"version\":1,\"autoApprove\":true,\"lastModel\":{\"provider\":\"openai\",\"model\":\"gpt-5.6-luna\",\"dialect\":\"grok-build\"}}"
 
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True

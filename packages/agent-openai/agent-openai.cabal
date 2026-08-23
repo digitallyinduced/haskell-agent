@@ -5,7 +5,7 @@ synopsis:           Haskell client for the OpenAI Responses API
 description:        REST + WebSocket clients, OAuth pool with round-robin and
                     cooldown tracking, JWT-aware token refresh, and a tool DSL
                     for the OpenAI Responses API and ChatGPT Codex transport.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

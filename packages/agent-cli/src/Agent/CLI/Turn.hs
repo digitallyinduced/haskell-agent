@@ -1,6 +1,12 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
-    ( applyPendingSessionTitles
+    ( IncompleteTurnCheckpoint(..)
+    , applyPendingSessionTitles
+    , checkpointIncompleteTurn
+    , grokFirstTurnPrefix
+    , grokFrameLastUserInput
+    , grokUserQuery
+    , restorePlanStateAfterIncomplete
     , runOneTurn
     ) where
 
@@ -80,6 +86,7 @@ import Agent.CLI.TurnState
     , turnInputsWithContext
     , turnNewItems
     )
+import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopExecution(..)
@@ -90,8 +97,12 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputsDetailed
     )
+import Agent.Provider (Provider(..))
+import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
+    , PlanCompletion(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , PlanModeState(..)
@@ -102,8 +113,9 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (when)
-import Control.Exception.Safe (onException)
+import Control.Exception.Safe (onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , readIORef
@@ -112,9 +124,21 @@ import Data.IORef
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.LocalTime (getZonedTime, localDay, zonedTimeToLocalTime)
+import System.Environment (lookupEnv)
+import System.Exit (ExitCode(..))
 import System.IO (stderr, stdout)
+import System.Info (os)
 import qualified System.OsPath
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , readCreateProcessWithExitCode
+    )
+import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
@@ -148,8 +172,8 @@ runOneTurn env@SessionEnv
         then id
         else withEscCancel config.loopCancel escPaused) do
     applyPendingSessionTitles env
-    pending <- readIORef planMode.planStateRef
-    when (pending == PlanPending) (activatePlanMode planMode)
+    initialPlanState <- readIORef planMode.planStateRef
+    when (initialPlanState == PlanPending) (activatePlanMode planMode)
     -- Create the session directory before tools run so first-turn subagents
     -- can persist under agents/<id>/ as they complete.
     case persist of
@@ -194,11 +218,27 @@ runOneTurn env@SessionEnv
     planPath <- planFilePath planMode
     let planReminder =
             if planActive
-                then Just (planModeReminder planPath)
+                then Just $
+                    planModeReminder
+                        (case env.sessionProvider of
+                            OpenAIProvider -> CompleteWithProposedPlan
+                            _ -> CompleteWithExitTool)
+                        planPath
                 else Nothing
         turnInputs0 =
             turnInputsWithContext planReminder pendingStartup inputs
-    turnInputs <- stampTurnInputs turnInputs0
+    stampedInputs <- stampTurnInputs turnInputs0
+    turnInputs <-
+        if dialectId env.sessionDialect == GrokBuildDialect
+            then do
+                let framed = grokFrameLastUserInput stampedInputs
+                    firstTurn = null beforeItems && prev == Nothing
+                if firstTurn
+                    then do
+                        prefix <- loadGrokFirstTurnPrefix env.sessionCwd
+                        pure (UserMessage prefix : framed)
+                    else pure framed
+            else pure stampedInputs
     let prepared = PreparedTurn
             { preparedBeforeItems = beforeItems
             , preparedConsumedStartup = pendingStartup
@@ -230,6 +270,7 @@ runOneTurn env@SessionEnv
         `onException`
             ( commitConversationPatch
                 (finishConversation prepared ConversationInterrupted)
+                >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
     let result = execution.executionResult
@@ -277,8 +318,9 @@ runOneTurn env@SessionEnv
                 , pendingPlanState = planState
                 }
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
+            restorePlanStateAfterIncomplete planMode initialPlanState
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 130 "Agent cancelled"
+                terminal wallStarted finishedAt 130 Nothing
             abortSubagentTurn rootTurnId
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
@@ -299,7 +341,7 @@ runOneTurn env@SessionEnv
                     putTextLn stderr
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete (inputOnlyTurnItems prepared) "cancelled"
-            pure TurnSucceeded
+            pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
             case err of
@@ -317,7 +359,7 @@ runOneTurn env@SessionEnv
                                     (UiTurnEnded BlockFailed)
                         finishTerminal (isNothing fullscreen)
                             terminal wallStarted finishedAt 1
-                            "Agent provider unavailable"
+                            (Just "Agent provider unavailable")
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
@@ -326,8 +368,10 @@ runOneTurn env@SessionEnv
                             , pendingPlanState = planState
                             }
                 _ -> do
+                    restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
-                        terminal wallStarted finishedAt 1 "Agent turn failed"
+                        terminal wallStarted finishedAt 1
+                        (Just "Agent turn failed")
                     commitConversationPatch
                         (finishConversation prepared ConversationFailed)
                     model <- readIORef render.renderModelRef
@@ -352,7 +396,7 @@ runOneTurn env@SessionEnv
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 0 "Agent finished"
+                terminal wallStarted finishedAt 0 (Just "Agent finished")
             finishSubagentTurn rootTurnId
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
@@ -433,10 +477,143 @@ runOneTurn env@SessionEnv
                     writeIORef printed False
                     runOneTurn env notes [UserMessage notes]
 
+-- | Wrap the last actual user payload in the Grok Build request envelope.
+-- Synthetic startup, skill, plan, and reminder messages precede it and remain
+-- separately framed.
+grokFrameLastUserInput :: [TurnInput] -> [TurnInput]
+grokFrameLastUserInput = reverse . go . reverse
+  where
+    go [] = []
+    go (UserMessage text : rest) =
+        UserMessage (grokUserQuery text) : rest
+    go (input@UserMultimodal{userText} : rest) =
+        input { userText = grokUserQuery userText } : rest
+    go (input : rest) = input : go rest
+
+grokUserQuery :: Text -> Text
+grokUserQuery text =
+    "<user_query>\n" <> text <> "\n</user_query>"
+
+grokFirstTurnPrefix
+    :: Text
+    -> Text
+    -> System.OsPath.OsPath
+    -> Day
+    -> Maybe Text
+    -> Text
+grokFirstTurnPrefix osName shell cwd today gitStatus =
+    Text.intercalate "\n"
+        [ "<user_info>"
+        , "OS Version: " <> osName
+        , "Shell: " <> shellBaseName shell
+        , "Workspace Path: " <> toText cwd
+        , "Today's date: "
+            <> Text.pack
+                (formatTime defaultTimeLocale "%A %b %-d, %Y" today)
+        , "Note: Prefer using relative paths over absolute paths as tool call args when possible."
+        , "</user_info>"
+        ]
+        <> maybe "" renderGitStatus gitStatus
+  where
+    shellBaseName path =
+        case filter (not . Text.null)
+                (Text.split (\char -> char == '/' || char == '\\') path) of
+            [] -> path
+            parts -> last parts
+    renderGitStatus status =
+        "\n\n<git_status>\n\
+        \This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n"
+            <> status
+            <> "\n</git_status>"
+
+loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
+loadGrokFirstTurnPrefix cwd = do
+    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+    osVersion <- loadOperatingSystem
+    today <- localDay . zonedTimeToLocalTime <$> getZonedTime
+    status <- loadGitStatus cwd
+    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+
+loadOperatingSystem :: IO Text
+loadOperatingSystem = do
+    result <- tryAny $
+        timeout 1000000 $
+            readCreateProcessWithExitCode (proc "uname" ["-sr"]) ""
+    pure $ case result of
+        Right (Just (ExitSuccess, output, _))
+            | kernel : release <- Text.words (Text.strip (Text.pack output))
+            , not (null release) ->
+                Text.toLower kernel <> " " <> Text.unwords release
+        _ -> Text.pack os
+
+loadGitStatus :: System.OsPath.OsPath -> IO (Maybe Text)
+loadGitStatus cwd = do
+    result <- tryAny $
+        timeout 5000000 $
+            readCreateProcessWithExitCode
+                (proc "git"
+                    [ "status"
+                    , "--short"
+                    , "--branch"
+                    , "--untracked-files=normal"
+                    ])
+                    { cwd = Just (unsafeToFilePath cwd) }
+                ""
+    pure $ case result of
+        Right (Just (ExitSuccess, output, _)) ->
+            normalizeGitStatus
+                (collapseStatusSpaces (Text.pack output))
+        _ -> Nothing
+
+collapseStatusSpaces :: Text -> Text
+collapseStatusSpaces = Text.pack . go False . Text.unpack
+  where
+    go _ [] = []
+    go previousSpace (char : rest)
+        | char == ' ' && previousSpace =
+            go True rest
+        | otherwise =
+            char : go (char == ' ') rest
+
+normalizeGitStatus :: Text -> Maybe Text
+normalizeGitStatus raw
+    | Text.null status = Nothing
+    | Text.length status <= maxCharacters = Just status
+    | otherwise =
+        Just
+            (snapToLastNewline (Text.take maxCharacters status)
+                <> "\n\n... (git status truncated)")
+  where
+    status = Text.strip raw
+    maxCharacters = 10000
+    snapToLastNewline prefix =
+        case Text.breakOnEnd "\n" prefix of
+            ("", _) -> prefix
+            (throughNewline, _) -> Text.dropEnd 1 throughNewline
+
 isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
-    PersistencePending _ -> True
+    PersistencePending _ _ _ -> True
     PersistenceActive _ -> False
+
+-- | Pure input-only checkpoint used to persist incomplete turns.
+data IncompleteTurnCheckpoint = IncompleteTurnCheckpoint
+    { checkpointTranscript :: ![ResponseItem]
+    , checkpointTurnItems :: ![ResponseItem]
+    , checkpointPreviousResponseId :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+checkpointIncompleteTurn
+    :: [ResponseItem]
+    -> [TurnInput]
+    -> IncompleteTurnCheckpoint
+checkpointIncompleteTurn beforeItems turnInputs =
+    let retainedItems = turnInputsToItems turnInputs
+    in IncompleteTurnCheckpoint
+        { checkpointTranscript = beforeItems <> retainedItems
+        , checkpointTurnItems = retainedItems
+        , checkpointPreviousResponseId = Nothing
+        }
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
@@ -460,7 +637,7 @@ applyPendingSessionTitles env =
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef ->
                 readIORef slotRef >>= \case
-                    PersistencePending _ -> pure ()
+                    PersistencePending _ _ _ -> pure ()
                     PersistenceActive handle
                         | handle.sessionMeta.metaId /= resultSessionId -> pure ()
                         | handle.sessionMeta.metaTitleIsManual -> pure ()
@@ -474,21 +651,34 @@ applyPendingSessionTitles env =
                                 (cliWindowTitle updated.sessionMeta.metaCwd
                                     (Just updated.sessionMeta.metaTitle))
 
+-- | Roll a cancelled or failed turn back to the interaction mode it started
+-- in. In particular, an agent-initiated enter_plan_mode must not trap the next
+-- user prompt in Plan Mode after the turn is interrupted.
+restorePlanStateAfterIncomplete
+    :: PlanModeEnv
+    -> PlanModeState
+    -> IO ()
+restorePlanStateAfterIncomplete planMode =
+    writeIORef planMode.planStateRef
+
 finishTerminal
     :: Bool
     -> TerminalCapabilities
     -> UTCTime
     -> UTCTime
     -> Int
-    -> Text
+    -> Maybe Text
     -> IO ()
-finishTerminal semanticPrompts terminal started finished exitCode message = do
+finishTerminal semanticPrompts terminal started finished exitCode notification = do
     when (semanticPrompts && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout
             (osc133CommandFinished (Just exitCode))
     let seconds = realToFrac (diffUTCTime finished started) :: Double
-    when (exitCode /= 0 || seconds >= 10) $
-        notifyTerminal terminal stdout message
+    case notification of
+        Just message
+            | exitCode /= 0 || seconds >= 10 ->
+                notifyTerminal terminal stdout message
+        _ -> pure ()
 
 handleProposedPlan
     :: PlanModeEnv

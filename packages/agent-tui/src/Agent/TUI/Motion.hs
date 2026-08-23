@@ -98,64 +98,62 @@ foregroundIndicator
     -> MotionMode
     -> Int
     -> Text
-foregroundIndicator glyphs mode elapsedMillis = case mode of
-    MotionFull ->
-        motionFrameAt
-            foregroundFrameDurationMillis
-            elapsedMillis
-            (foregroundSpinnerFamily glyphs)
-    MotionReduced ->
-        staticForeground glyphs
-    MotionOff ->
-        staticForeground glyphs
+foregroundIndicator =
+    motionIndicator
+        foregroundFrameDurationMillis
+        foregroundSpinnerFamily
+        staticForeground
 
 quietIndicator
     :: MotionGlyphSet
     -> MotionMode
     -> Int
     -> Text
-quietIndicator glyphs mode elapsedMillis = case mode of
-    MotionFull ->
-        motionFrameAt
-            quietFrameDurationMillis
-            elapsedMillis
-            (quietSpinnerFamily glyphs)
-    MotionReduced ->
-        staticQuiet glyphs
-    MotionOff ->
-        staticQuiet glyphs
+quietIndicator =
+    motionIndicator
+        quietFrameDurationMillis
+        quietSpinnerFamily
+        staticQuiet
 
 backgroundIndicator
     :: MotionGlyphSet
     -> MotionMode
     -> Int
     -> Text
-backgroundIndicator glyphs mode elapsedMillis = case mode of
-    MotionFull ->
-        motionFrameAt
-            backgroundFrameDurationMillis
-            elapsedMillis
-            (backgroundPulseFamily glyphs)
-    MotionReduced ->
-        staticBackground glyphs
-    MotionOff ->
-        staticBackground glyphs
+backgroundIndicator =
+    motionIndicator
+        backgroundFrameDurationMillis
+        backgroundPulseFamily
+        staticBackground
 
 waitingIndicator
     :: MotionGlyphSet
     -> MotionMode
     -> Int
     -> Text
-waitingIndicator glyphs mode elapsedMillis = case mode of
-    MotionFull ->
-        motionFrameAt
-            waitingFrameDurationMillis
-            elapsedMillis
-            (waitingPulseFamily glyphs)
-    MotionReduced ->
-        staticWaiting glyphs
-    MotionOff ->
-        staticWaiting glyphs
+waitingIndicator =
+    motionIndicator
+        waitingFrameDurationMillis
+        waitingPulseFamily
+        staticWaiting
+
+motionIndicator
+    :: Int
+    -> (MotionGlyphSet -> NonEmpty Text)
+    -> (MotionGlyphSet -> Text)
+    -> MotionGlyphSet
+    -> MotionMode
+    -> Int
+    -> Text
+motionIndicator frameDurationMillis frameFamily staticFrame glyphs mode elapsedMillis =
+    case mode of
+        MotionFull ->
+            motionFrameAt
+                frameDurationMillis
+                elapsedMillis
+                (frameFamily glyphs)
+        _ ->
+            staticFrame glyphs
 
 motionFrameAt :: Int -> Int -> NonEmpty a -> a
 motionFrameAt frameDurationMillis elapsedMillis frames =
@@ -191,10 +189,7 @@ motionDelayMicros mode demand deadlineMillis =
     cadence = motionIntervalMicros mode demand
 
 nativeProgressAnimationEnabled :: MotionMode -> Bool
-nativeProgressAnimationEnabled = \case
-    MotionFull -> True
-    MotionReduced -> False
-    MotionOff -> False
+nativeProgressAnimationEnabled = (== MotionFull)
 
 completionFlashDurationMillis :: Int
 completionFlashDurationMillis = 400

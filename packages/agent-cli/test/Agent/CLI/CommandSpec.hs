@@ -60,6 +60,12 @@ spec = do
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
+        it "starts a fresh session in a new worktree" do
+            parseReplLine "/worktree" `shouldBe` ReplWorktree
+            parseReplLine "  /Worktree  " `shouldBe` ReplWorktree
+            parseReplLine "/worktree now"
+                `shouldBe` ReplCommandError "usage: /worktree"
+
         it "renames sessions or restores automatic titles" do
             parseReplLine "/rename Fix auth races"
                 `shouldBe` ReplRename "Fix auth races"
@@ -202,6 +208,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "session"
+                    , "worktree"
                     , "rename"
                     , "login"
                     , "resume"
@@ -250,11 +257,19 @@ spec = do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
             slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
             slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
-            slashCompletionCandidates "m/" "grok-4"
+            slashCompletionCandidatesWithModels
+                ["grok-4.6", "grok-4.5", "grok-4.5-mini", "qwen-local"]
+                "m/"
+                "grok-4"
                 `shouldSatisfy` (\xs ->
                     "grok-4.6" `elem` xs
                         && "grok-4.5" `elem` xs
                         && "grok-4.5-mini" `elem` xs)
+            slashCompletionCandidatesWithModels
+                ["grok-4.6", "qwen-local"]
+                "ledom/"
+                "qw"
+                `shouldBe` ["qwen-local"]
             slashCompletionCandidates "emaner/" "-"
                 `shouldBe` ["--auto"]
 
@@ -276,6 +291,12 @@ spec = do
             fmap (.slashMenuReplaceStart) menu `shouldBe` Just 8
             fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions)) menu
                 `shouldBe` Just ["high", "xhigh"]
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithModels
+                    ["grok-4.6", "qwen-local"]
+                    "/model qw"
+                    9)
+                `shouldBe` Just ["qwen-local"]
 
         it "replaces the whole token when completing from the middle" do
             fmap (\menu -> (menu.slashMenuReplaceStart, menu.slashMenuReplaceEnd))
@@ -299,6 +320,7 @@ spec = do
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
             listing `shouldSatisfy` ("/usage" `isInfixOf`)
+            listing `shouldSatisfy` ("/worktree" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
@@ -332,6 +354,21 @@ spec = do
             let help = formatSlashHelpWithSkills False skills (Just "deploy")
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
             Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
+
+        it "combines runtime skills and model ids" do
+            slashCompletionCandidatesWithSkillsAndModels
+                skills
+                ["qwen-local"]
+                "ledom/"
+                "qw"
+                `shouldBe` ["qwen-local"]
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithSkillsAndModels
+                    skills
+                    ["qwen-local"]
+                    "/model qw"
+                    9)
+                `shouldBe` Just ["qwen-local"]
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do

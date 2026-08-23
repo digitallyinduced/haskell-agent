@@ -94,6 +94,22 @@ spec = describe "fullscreen UI reducer" do
                     ]
         state.uiNotice `shouldBe` Just notice
 
+    it "shows provider warnings without replacing live activity" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ActivityUpdated "Writing…")
+                    , UiLoop
+                        (WarningRaised
+                            "Codex usage is low: primary 8% left.")
+                    ]
+        state.uiActivity `shouldBe` "Writing…"
+        state.uiNotice
+            `shouldBe`
+                Just
+                    (warningNotice
+                        "Codex usage is low: primary 8% left.")
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
@@ -123,6 +139,18 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
                 block.blockTitle `shouldBe` "Continued session 3"
+            _ -> expectationFailure "expected one running shell block"
+
+    it "renders the public Grok terminal alias as a shell block" do
+        let call = functionToolCall
+                "c1"
+                "run_terminal_command"
+                "{\"command\":\"git status\"}"
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ git status"
             _ -> expectationFailure "expected one running shell block"
 
     it "applies tool output snapshots only to the matching running block" do

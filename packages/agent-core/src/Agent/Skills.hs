@@ -9,6 +9,7 @@ module Agent.Skills
     , SkillWarning(..)
     , defaultSkillCatalogMaxChars
     , discoverSkills
+    , loadSkillFile
     , buildSkillInvocations
     , modelVisibleSkills
     , formatSkillCatalogContext
@@ -19,16 +20,19 @@ module Agent.Skills
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
     ( FromJSON(..)
+    , Object
     , Value(..)
     , withObject
     , (.:)
     , (.:?)
     , (.!=)
     )
+import Data.Aeson.Key (Key)
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
@@ -64,7 +68,8 @@ data SkillOrigin
     deriving (Eq, Ord, Show)
 
 data SkillScope
-    = UserSkill
+    = BuiltinSkill
+    | UserSkill
     | RepositorySkill
         { skillDepth :: !Int
         , skillAtCwd :: !Bool
@@ -110,6 +115,7 @@ data SkillDiscoverOptions = SkillDiscoverOptions
     , skillsProjectRoot :: !OsPath
     , skillsCwd :: !OsPath
     , skillsMaxDepth :: !Int
+    , skillsBuiltinRoots :: ![(SkillOrigin, OsPath)]
     } deriving (Eq, Show)
 
 data SkillInvocation = SkillInvocation
@@ -176,28 +182,22 @@ instance FromJSON OpenAiMetadata where
     parseJSON = withObject "agents/openai.yaml" \o -> do
         interface <- o .:? "interface"
         policy <- o .:? "policy"
-        shortDescription <- case interface of
-            Just (Object fields) -> fields .:? "short_description"
-            _ -> pure Nothing
-        displayName <- case interface of
-            Just (Object fields) -> fields .:? "display_name"
-            _ -> pure Nothing
-        defaultPrompt <- case interface of
-            Just (Object fields) -> fields .:? "default_prompt"
-            _ -> pure Nothing
-        argumentHint <- case interface of
-            Just (Object fields) -> fields .:? "argument_hint"
-            _ -> pure Nothing
-        allowImplicit <- case policy of
-            Just (Object fields) -> fields .:? "allow_implicit_invocation"
-            _ -> pure Nothing
-        pure OpenAiMetadata
-            { openAiDisplayName = displayName
-            , openAiShortDescription = shortDescription
-            , openAiDefaultPrompt = defaultPrompt
-            , openAiArgumentHint = argumentHint
-            , openAiAllowImplicit = allowImplicit
-            }
+        let interfaceFields = interface >>= valueObject
+            policyFields = policy >>= valueObject
+        OpenAiMetadata
+            <$> optionalField interfaceFields "display_name"
+            <*> optionalField interfaceFields "short_description"
+            <*> optionalField interfaceFields "default_prompt"
+            <*> optionalField interfaceFields "argument_hint"
+            <*> optionalField policyFields "allow_implicit_invocation"
+
+valueObject :: Value -> Maybe Object
+valueObject (Object fields) = Just fields
+valueObject _ = Nothing
+
+optionalField :: FromJSON a => Maybe Object -> Key -> Parser (Maybe a)
+optionalField fields key =
+    maybe (pure Nothing) (\object -> object .:? key) fields
 
 defaultSkillCatalogMaxChars :: Int
 defaultSkillCatalogMaxChars = 8000
@@ -210,7 +210,7 @@ discoverSkills options = do
         if exists
             then do
                 files <- findSkillFiles options.skillsMaxDepth root
-                forM files (loadSkill scope origin)
+                forM files (loadSkillFile scope origin)
             else pure []
     let skills = [skill | Right skill <- results]
         warnings = [warning | Left warning <- results]
@@ -239,7 +239,11 @@ skillRoots options = do
             [ (UserSkill, origin, home </> userRoot origin)
             | origin <- origins
             ]
-    pure (projectRoots <> userRoots)
+        builtinRoots =
+            [ (BuiltinSkill, origin, unsafeToFilePath root)
+            | (origin, root) <- options.skillsBuiltinRoots
+            ]
+    pure (projectRoots <> userRoots <> builtinRoots)
   where
     origins = [AgentSkills, GrokSkills, CodexSkills]
     relativeRoot = \case
@@ -276,12 +280,12 @@ findSkillFiles maxDepth root = go Set.empty 0 root
                                     traverse (go (Set.insert canonical seen) (depth + 1)) children
                                 pure ([skillPath | hasSkill] <> nested)
 
-loadSkill
+loadSkillFile
     :: SkillScope
     -> SkillOrigin
     -> FilePath
     -> IO (Either SkillWarning Skill)
-loadSkill scope origin path = do
+loadSkillFile scope origin path = do
     result <- tryAny (retryOnFileBusy (Text.readFile path))
     case result of
         Left err ->
@@ -394,6 +398,7 @@ skillSortKey skill =
     )
   where
     (scopeRank, depth) = case skill.skillScope of
+        BuiltinSkill -> (-1, 0)
         UserSkill -> (0, 0)
         RepositorySkill d _ -> (1, d)
     originRank = case skill.skillOrigin of
@@ -464,6 +469,7 @@ qualifiedInvocation name siblings index skill =
 
 scopeQualifier :: Skill -> Text
 scopeQualifier skill = case skill.skillScope of
+    BuiltinSkill -> "builtin"
     UserSkill -> "user"
     RepositorySkill _ True -> "local"
     RepositorySkill _ False -> "repo"
@@ -605,9 +611,3 @@ neutralizeSkillTags :: Text -> Text
 neutralizeSkillTags =
     Text.replace "<SKILL_INSTRUCTIONS" "&lt;SKILL_INSTRUCTIONS"
         . Text.replace "</SKILL_INSTRUCTIONS" "&lt;/SKILL_INSTRUCTIONS"
-
-infixr 3 <|>
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-(<|>) left right = case left of
-    Just value -> Just value
-    Nothing -> right
