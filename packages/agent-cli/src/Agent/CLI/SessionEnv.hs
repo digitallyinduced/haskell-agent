@@ -59,6 +59,7 @@ data SessionEnv = SessionEnv
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
     , sessionEscPaused :: !(IORef Bool)
+    , sessionDraft :: !(IORef Text)
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState

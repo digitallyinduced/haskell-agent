@@ -5,15 +5,13 @@ module Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
-    , providerTransitionAttachments
-    , providerTransitionDraft
     , setPendingExitAfter
     ) where
 
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.Error (ApiError)
-import Agent.Loop (ImageAttachment, TurnInput)
+import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
@@ -39,10 +37,6 @@ data ProviderTransition = ProviderTransition
     , transitionAccountId :: !(Maybe Text)
     , transitionSessionId :: !(Maybe Text)
     , transitionPendingTurn :: !(Maybe PendingTurn)
-    , transitionDraft :: !Text
-    -- | Images attached to an idle composer draft during a manual rebuild.
-    -- Automatic fallback carries submitted images in 'transitionPendingTurn'.
-    , transitionAttachments :: ![ImageAttachment]
     , transitionUnavailableProviders :: ![Provider]
     , transitionCause :: !TransitionCause
     -- | Billing class of the session that initiated an automatic fallback.
@@ -71,17 +65,6 @@ applyProviderTransition options transition =
         , optEffort = Nothing
         , optResume = transition.transitionSessionId <|> options.optResume
         }
-
--- | An idle composer draft survives a manual provider rebuild. Automatic
--- fallback resumes a pending turn instead, so its transition draft is empty.
-providerTransitionDraft :: Maybe ProviderTransition -> Text
-providerTransitionDraft = maybe "" (.transitionDraft)
-
--- | Pending composer images survive the same manual rebuild as its draft.
-providerTransitionAttachments
-    :: Maybe ProviderTransition
-    -> [ImageAttachment]
-providerTransitionAttachments = maybe [] (.transitionAttachments)
 
 setPendingExitAfter :: Bool -> PendingTurn -> PendingTurn
 setPendingExitAfter exitAfter pending =
