@@ -15,7 +15,7 @@ module Agent.CLI.Models
 
 import Agent.CLI.Prompt (defaultModelFor)
 import Agent.Provider (Provider(..), providerSlug)
-import Data.List (find, nub)
+import Data.List (findIndex, nub)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -108,8 +108,7 @@ initialPickerState provider current =
         allOpts = ensureCurrentInList provider current
             (concatMap modelsForProvider providerOrder)
         idx = fromMaybe 0 $
-            fmap fst $
-                find (\(_, opt) -> isCurrent provider current opt) (zip [0 ..] allOpts)
+            findIndex (isCurrent provider current) allOpts
     in PickerState
         { pickerProvider = provider
         , pickerCurrent = current
