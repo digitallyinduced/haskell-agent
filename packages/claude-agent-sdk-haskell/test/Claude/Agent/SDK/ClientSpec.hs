@@ -197,12 +197,15 @@ spec = describe "ClaudeSDKClient subprocess transport" do
     it "aborts a blocked subprocess output read promptly" do
         withFakeClaude blockedOutputScript \directory executable -> do
             turnFinished <- newEmptyMVar
-            let options =
+            let readyPath = directory </> "query-read"
+                options =
                     (testOptions executable directory)
                         { streamStartupTimeoutMicros =
                             30 * 1_000_000
                         , turnTimeoutMicros =
                             30 * 1_000_000
+                        , environment =
+                            Just [("FAKE_READY", readyPath)]
                         }
             withClaudeSDKClient options \client -> do
                 _ <-
@@ -223,7 +226,8 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                                     pure ((, pure ()) <$> completed)
                         putMVar turnFinished result
 
-                threadDelay 100_000
+                timeout 4_000_000 (waitForPath readyPath)
+                    `shouldReturn` Just ()
                 timeout 4_000_000 (abort client)
                     `shouldReturn` Just ()
                 timeout 2_000_000 (takeMVar turnFinished)
@@ -1313,6 +1317,7 @@ blockedOutputScript =
     unlines
         [ "#!/bin/sh"
         , "IFS= read -r _query"
+        , "printf 'ready\\n' > \"$FAKE_READY\""
         , "trap '' INT TERM"
         , "while :; do sleep 1; done"
         ]
