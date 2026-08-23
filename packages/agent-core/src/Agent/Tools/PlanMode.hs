@@ -8,6 +8,7 @@
 module Agent.Tools.PlanMode
     ( PlanModeState(..)
     , PlanDecision(..)
+    , PlanCompletion(..)
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , newPlanModeEnv
@@ -23,13 +24,15 @@ module Agent.Tools.PlanMode
     , planModeBlockedEditMessage
     , isPlanFileEditTarget
     , enterPlanModeTool
+    , enterCodexPlanModeTool
+    , writePlanTool
     , exitPlanModeTool
     , askUserQuestionTool
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (toText, unsafeToFilePath)
-import Agent.ToolArgs (objectArgs, optText, reqText)
+import Agent.ToolArgs (objectArgs, optBool, optList, optText, reqText)
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -40,6 +43,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
 import Data.IORef
@@ -55,6 +59,11 @@ data PlanModeState
     | PlanPending
     -- ^ User toggled plan mode; becomes Active on the next prompt.
     | PlanActive
+    deriving (Eq, Show)
+
+data PlanCompletion
+    = CompleteWithExitTool
+    | CompleteWithProposedPlan
     deriving (Eq, Show)
 
 data PlanDecision
@@ -136,17 +145,26 @@ writePlanMarkdown env content = do
         Left err -> Left ("failed to write plan file: " <> Text.pack (show err))
         Right () -> Right ()
 
-planModeReminder :: OsPath -> Text
-planModeReminder path =
+planModeReminder :: PlanCompletion -> OsPath -> Text
+planModeReminder completion path =
     Text.unlines
         [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
         , ""
         , "## Plan File"
-        , "Write your plan to `" <> toText path <> "` using the edit tool."
+        , "Write your plan to `" <> toText path <> "`."
+        , "Use `write_plan` when it is available; otherwise use the provider's dedicated plan-file edit tool."
         , "That is the only file you may create or modify."
+        , "Inspect the repository with dedicated read-only tools such as `read_file`, `grep`, and `list_dir`; shell tools are unavailable in Plan Mode."
         , ""
-        , "When the plan is ready, call `exit_plan_mode` (Grok/OpenRouter) or end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block (OpenAI/Codex) so the user can approve, request changes, or cancel."
+        , completionInstruction completion
         ]
+
+completionInstruction :: PlanCompletion -> Text
+completionInstruction = \case
+    CompleteWithExitTool ->
+        "When the plan is ready, call `exit_plan_mode` so the user can approve, request changes, or cancel."
+    CompleteWithProposedPlan ->
+        "When the plan is ready, end your turn with a complete `<proposed_plan>` … `</proposed_plan>` block so the user can approve, request changes, or cancel."
 
 planApprovedContinuation :: Text
 planApprovedContinuation =
@@ -179,7 +197,16 @@ instance FromJSON EnterPlanArgs where
         <$> optText object "explanation"
 
 enterPlanModeTool :: PlanModeEnv -> AppTool
-enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
+enterPlanModeTool env =
+    enterPlanModeToolWith CompleteWithExitTool env
+
+enterCodexPlanModeTool :: PlanModeEnv -> AppTool
+enterCodexPlanModeTool env =
+    enterPlanModeToolWith CompleteWithProposedPlan env
+
+enterPlanModeToolWith :: PlanCompletion -> PlanModeEnv -> AppTool
+enterPlanModeToolWith completion env = jsonTool "enter_plan_mode"
+    (enterPlanDescription completion)
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional reason this task needs a planning phase before implementation."
     ]
@@ -187,16 +214,24 @@ enterPlanModeTool env = jsonTool "enter_plan_mode" enterPlanDescription
     -- planConfirmEnter, so it must not also trigger generic tool approval.
     True
     TurnSequential
-    (typedTool "enter_plan_mode" (runEnterPlanMode env))
+    (typedTool "enter_plan_mode" (runEnterPlanMode completion env))
 
-enterPlanDescription :: Text
-enterPlanDescription =
+enterPlanDescription :: PlanCompletion -> Text
+enterPlanDescription completion =
     "Enter plan mode when a task has genuine architectural ambiguity.\n\
     \Requires user approval. While active, only the session plan.md file may be edited;\n\
-    \explore the codebase, write the plan, then call exit_plan_mode for approval."
+    \explore the codebase, write the plan, then "
+        <> case completion of
+            CompleteWithExitTool -> "call exit_plan_mode for approval."
+            CompleteWithProposedPlan ->
+                "present it in a complete <proposed_plan> block for approval."
 
-runEnterPlanMode :: PlanModeEnv -> EnterPlanArgs -> IO (Either Text Text)
-runEnterPlanMode env args = do
+runEnterPlanMode
+    :: PlanCompletion
+    -> PlanModeEnv
+    -> EnterPlanArgs
+    -> IO (Either Text Text)
+runEnterPlanMode completion env args = do
     active <- isPlanModeActive env
     if active
         then pure $ Right "Plan mode is already active."
@@ -211,7 +246,43 @@ runEnterPlanMode env args = do
                     pure $ Right $
                         "You have entered plan mode. Explore the codebase and write an implementation plan to "
                             <> toText path
-                            <> ". Call exit_plan_mode when ready for approval."
+                            <> ". "
+                            <> completionInstruction completion
+
+data WritePlanArgs = WritePlanArgs
+    { content :: Text
+    }
+
+instance FromJSON WritePlanArgs where
+    parseJSON = withObject "write_plan" \object ->
+        WritePlanArgs <$> reqText object "content"
+
+writePlanTool :: PlanModeEnv -> AppTool
+writePlanTool env = jsonTool "write_plan" writePlanDescription
+    [ PropertySchema "content" PropertyString True $ Just
+        "Complete Markdown content to store in the session plan.md file."
+    ]
+    True
+    TurnSequential
+    (typedTool "write_plan" (runWritePlan env))
+
+writePlanDescription :: Text
+writePlanDescription =
+    "Write the current implementation plan to the session plan.md file.\n\
+    \This tool is available only while Plan Mode is active and cannot write any other path."
+
+runWritePlan :: PlanModeEnv -> WritePlanArgs -> IO (Either Text Text)
+runWritePlan env args = do
+    active <- isPlanModeActive env
+    if not active
+        then pure (Left "Plan mode is not active.")
+        else writePlanMarkdown env args.content >>= \case
+            Left err -> pure (Left err)
+            Right () -> do
+                path <- planFilePath env
+                pure $ Right $
+                    "Wrote the plan to " <> toText path
+                        <> ". Continue planning or present it for approval when ready."
 
 data ExitPlanArgs = ExitPlanArgs
     { summary :: Maybe Text
@@ -267,23 +338,88 @@ runExitPlanMode env args = do
                     pure $ Right
                         "The user cancelled the plan. Plan mode is off. Do not call exit_plan_mode again unless asked to re-enter plan mode."
 
-data AskUserQuestionArgs = AskUserQuestionArgs
+data AskUserQuestionOption = AskUserQuestionOption
+    { label :: Text
+    , description :: Text
+    , preview :: Maybe Text
+    }
+
+instance FromJSON AskUserQuestionOption where
+    parseJSON = withObject "ask_user_question option" \object ->
+        AskUserQuestionOption
+            <$> reqText object "label"
+            <*> reqText object "description"
+            <*> optText object "preview"
+
+data AskUserQuestion = AskUserQuestion
     { question :: Text
-    , options :: Maybe Text
+    , options :: [AskUserQuestionOption]
+    , multiSelect :: Maybe Bool
+    }
+
+instance FromJSON AskUserQuestion where
+    parseJSON = withObject "ask_user_question question" \object -> do
+        question <- reqText object "question"
+        options <- optList object "options" "Expected array for key: options"
+            >>= maybe (fail "Missing parameter: options") pure
+        multiSelectSnake <- optBool object "multi_select"
+        multiSelectCamel <- optBool object "multiSelect"
+        let multiSelect = multiSelectSnake <|> multiSelectCamel
+        pure AskUserQuestion { question, options, multiSelect }
+
+newtype AskUserQuestionArgs = AskUserQuestionArgs
+    { questions :: [AskUserQuestion]
     }
 
 instance FromJSON AskUserQuestionArgs where
     parseJSON = withObject "ask_user_question" \object -> do
-        question <- reqText object "question"
-        options <- optText object "options"
-        pure AskUserQuestionArgs { question, options }
+        modern <- optList object "questions" "Expected array for key: questions"
+        case modern of
+            Just questions -> pure AskUserQuestionArgs { questions }
+            Nothing -> do
+                -- Compatibility with the original single-question shape.
+                question <- reqText object "question"
+                rawOptions <- optText object "options"
+                let options =
+                        [ AskUserQuestionOption
+                            { label = choice
+                            , description = ""
+                            , preview = Nothing
+                            }
+                        | choice <- parseOptions (fromMaybe "" rawOptions)
+                        ]
+                pure AskUserQuestionArgs
+                    { questions =
+                        [ AskUserQuestion
+                            { question
+                            , options
+                            , multiSelect = Nothing
+                            }
+                        ]
+                    }
 
 askUserQuestionTool :: PlanModeEnv -> AppTool
 askUserQuestionTool env = jsonTool "ask_user_question" askUserDescription
-    [ PropertySchema "question" PropertyString True $ Just
-        "Question to ask the user while planning."
-    , PropertySchema "options" PropertyString False $ Just
-        "Optional newline- or comma-separated choices."
+    [ PropertySchema "questions"
+        (PropertyArray (PropertyObject
+            [ PropertySchema "question" PropertyString True $ Just
+                "The question to ask, phrased as a full question."
+            , PropertySchema "options"
+                (PropertyArray (PropertyObject
+                    [ PropertySchema "label" PropertyString True $ Just
+                        "Option text shown to the user. A few words at most."
+                    , PropertySchema "description" PropertyString True $ Just
+                        "What picking this option means or implies."
+                    , PropertySchema "preview" PropertyString False $ Just
+                        "Optional content shown while the option is focused, such as a mockup or code snippet. Single-select questions only."
+                    ]))
+                True
+                (Just "The choices for this question.")
+            , PropertySchema "multi_select" PropertyBoolean False $ Just
+                "Let the user pick more than one option (default false)."
+            ]))
+        True
+        (Just "The questions to ask, each with its own options.")
     ]
     True
     TurnSequential
@@ -291,16 +427,112 @@ askUserQuestionTool env = jsonTool "ask_user_question" askUserDescription
 
 askUserDescription :: Text
 askUserDescription =
-    "Ask the user a clarifying question during plan mode without leaving plan mode."
+    "Ask the user one or more multiple-choice questions. "
+        <> "This tool works both inside and outside plan mode."
 
 runAskUserQuestion :: PlanModeEnv -> AskUserQuestionArgs -> IO (Either Text Text)
-runAskUserQuestion env args = do
-    let choices = parseOptions (fromMaybe "" args.options)
-    answer <- env.planHooks.planAskQuestion args.question choices
-    pure $ case answer of
-        Nothing -> Left "No answer from user."
-        Just text | Text.null (Text.strip text) -> Left "No answer from user."
-        Just text -> Right text
+runAskUserQuestion env args
+    | null args.questions =
+        pure (Right "No questions provided. Continue with the task.")
+    | otherwise = do
+        answers <- collectAnswers args.questions
+        pure (formatAnswers <$> answers)
+  where
+    collectAnswers
+        :: [AskUserQuestion]
+        -> IO (Either Text [(Text, Text)])
+    collectAnswers [] = pure (Right [])
+    collectAnswers (question : rest) =
+        ask question >>= \case
+            Left err -> pure (Left err)
+            Right answer ->
+                collectAnswers rest >>= \case
+                    Left err -> pure (Left err)
+                    Right answers -> pure (Right (answer : answers))
+
+    ask :: AskUserQuestion -> IO (Either Text (Text, Text))
+    ask question
+        | question.multiSelect == Just True =
+            askMultiple question >>= \case
+                Left err -> pure (Left err)
+                Right answer -> pure (Right (question.question, answer))
+        | otherwise = do
+            let choices = map formatOption question.options
+            answer <- env.planHooks.planAskQuestion question.question choices
+            pure $ case answer of
+                Nothing -> Left "No answer from user."
+                Just text | Text.null (Text.strip text) ->
+                    Left "No answer from user."
+                Just text ->
+                    Right
+                        ( question.question
+                        , fromMaybe text
+                            (lookup text
+                                (zip choices (map (.label) question.options)))
+                        )
+
+    askMultiple :: AskUserQuestion -> IO (Either Text Text)
+    askMultiple question =
+        choose [] question.options
+      where
+        doneChoice = "Done selecting"
+        choose selected remaining = do
+            let displayed = map formatOption remaining
+                choices = displayed <> [doneChoice]
+                prompt
+                    | null selected = question.question
+                    | otherwise =
+                        question.question
+                            <> "\nSelected: "
+                            <> Text.intercalate ", " (reverse selected)
+            answer <- env.planHooks.planAskQuestion prompt choices
+            case answer of
+                Nothing -> noAnswer selected
+                Just raw
+                    | Text.null (Text.strip raw) -> noAnswer selected
+                    | raw == doneChoice ->
+                        if null selected
+                            then pure (Left "No answer from user.")
+                            else pure
+                                (Right (Text.intercalate ", " (reverse selected)))
+                    | Just label <-
+                        lookup raw (zip displayed (map (.label) remaining)) ->
+                            choose
+                                (label : selected)
+                                [ option
+                                | option <- remaining
+                                , option.label /= label
+                                ]
+                    | otherwise ->
+                        -- Non-TUI hooks may return a comma-separated answer
+                        -- directly rather than one displayed choice at a time.
+                        pure (Right (Text.strip raw))
+
+        noAnswer selected
+            | null selected = pure (Left "No answer from user.")
+            | otherwise =
+                pure (Right (Text.intercalate ", " (reverse selected)))
+
+formatOption :: AskUserQuestionOption -> Text
+formatOption option =
+    Text.intercalate " — " $
+        [option.label]
+            <> [option.description | nonBlank option.description]
+            <> [ "Preview: " <> Text.replace "\n" "\\n" preview
+               | Just preview <- [option.preview]
+               , nonBlank preview
+               ]
+  where
+    nonBlank = not . Text.null . Text.strip
+
+formatAnswers :: [(Text, Text)] -> Text
+formatAnswers answers =
+    "User has answered your questions: "
+        <> Text.intercalate ", "
+            [ "\"" <> question <> "\"=\"" <> answer <> "\""
+            | (question, answer) <- answers
+            ]
+        <> ". You can now continue with the user's answers in mind."
 
 parseOptions :: Text -> [Text]
 parseOptions raw =

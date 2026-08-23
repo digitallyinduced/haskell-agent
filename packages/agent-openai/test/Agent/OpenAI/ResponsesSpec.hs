@@ -130,6 +130,26 @@ spec = do
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
+        it "decodes the Codex WebSocket response.done terminal event losslessly" do
+            let original = Aeson.object
+                    [ "type" .= ("response.done" :: Text)
+                    , "sequence_number" .= (5 :: Int)
+                    , "response" .= Aeson.object
+                        [ "id" .= ("resp_done" :: Text)
+                        , "usage" .= Aeson.Null
+                        ]
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseDoneEvent { responseValue } -> do
+                    field "id" responseValue `shouldBe`
+                        Just (Aeson.String "resp_done")
+                    Responses.responseStreamEventType event
+                        `shouldBe` Responses.EventResponseDone
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
         it "decodes response incomplete into its typed terminal constructor" do
             let original = Aeson.object
                     [ "type" .= ("response.incomplete" :: Text)
@@ -171,6 +191,21 @@ spec = do
                 Aeson.Success event -> do
                     Responses.responseStreamEventType event
                         `shouldBe` Responses.StreamEventUnknown "response.future.delta"
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Error err -> expectationFailure err
+
+        it "recognises Codex response metadata and preserves its payload" do
+            let original = Aeson.object
+                    [ "type" .= ("codex.response.metadata" :: Text)
+                    , "sequence_number" .= (10 :: Int)
+                    , "metadata" .= Aeson.object
+                        [ "request_id" .= ("req_1" :: Text)
+                        ]
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event -> do
+                    Responses.responseStreamEventType event
+                        `shouldBe` Responses.EventCodexResponseMetadata
                     Aeson.toJSON event `shouldBe` original
                 Aeson.Error err -> expectationFailure err
 
@@ -333,6 +368,12 @@ assertKnownEvent eventName = do
 
 requiredEventFields :: Text -> [(Key.Key, Aeson.Value)]
 requiredEventFields eventName
+    | eventName == "response.done" =
+        [ ("response", Aeson.object
+            [ "id" .= ("resp_done" :: Text)
+            , "usage" .= Aeson.Null
+            ])
+        ]
     | eventName `elem`
         [ "response.created"
         , "response.in_progress"
@@ -373,7 +414,7 @@ isLeft (Right _) = False
 
 documentedStreamEventTypes :: [Text]
 documentedStreamEventTypes =
-    [ "response.created", "response.in_progress", "response.completed"
+    [ "response.created", "response.in_progress", "response.completed", "response.done"
     , "response.failed", "response.incomplete", "response.output_item.added"
     , "response.output_item.done", "response.content_part.added", "response.content_part.done"
     , "response.output_text.delta", "response.output_text.done", "response.refusal.delta"
@@ -398,5 +439,5 @@ documentedStreamEventTypes =
     , "response.audio.done", "response.audio.transcript.delta", "response.audio.transcript.done"
     , "response.shell_call_command.added", "response.shell_call_command.delta"
     , "response.shell_call_command.done", "response.shell_call_output_content.delta"
-    , "response.shell_call_output_content.done"
+    , "response.shell_call_output_content.done", "codex.response.metadata"
     ]

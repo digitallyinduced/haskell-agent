@@ -9,6 +9,7 @@ module Agent.CLI.ModelPicker
 import Agent.CLI.Models
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import qualified Agent.CLI.Picker as Picker
+import Agent.Dialect (DialectId, dialectSlug)
 import Agent.CLI.Style
     ( glyphOk
     , roleMuted
@@ -39,25 +40,38 @@ toEvent = \case
 -- | Open the picker when stdin is a TTY; otherwise print the catalog.
 -- Returns the provider/model choice on confirm and @Nothing@ on cancel, EOF,
 -- or non-TTY input.
-pickModel :: Bool -> Provider -> Text -> IO (Maybe ModelOption)
-pickModel color provider current = do
+pickModel :: Bool -> Provider -> Text -> DialectId -> IO (Maybe ModelOption)
+pickModel color provider current currentDialect = do
     isTty <- hIsTerminalDevice stdin
+    state0 <- initialPickerStateResolved provider current currentDialect
     if not isTty
         then do
-            Text.hPutStrLn stderr (formatCatalogListing color provider current)
+            Text.hPutStrLn stderr
+                (formatCatalogListingState
+                    color provider current currentDialect state0)
             hFlush stderr
             pure Nothing
         else do
-            let state0 = initialPickerState provider current
             result <- runOverlay (renderPickerFrame color) step state0
             pure (join result)
   where
     step key state = applyPickerEvent (toEvent key) state
 
-formatCatalogListing :: Bool -> Provider -> Text -> Text
-formatCatalogListing color provider current =
-    let state = initialPickerState provider current
-        header =
+formatCatalogListing :: Bool -> Provider -> Text -> DialectId -> IO Text
+formatCatalogListing color provider current currentDialect = do
+    state <- initialPickerStateResolved provider current currentDialect
+    pure (formatCatalogListingState
+        color provider current currentDialect state)
+
+formatCatalogListingState
+    :: Bool
+    -> Provider
+    -> Text
+    -> DialectId
+    -> PickerState
+    -> Text
+formatCatalogListingState color provider current currentDialect state =
+    let header =
             roleMuted color
                 (glyphSessionLike
                     <> "model: "
@@ -69,7 +83,7 @@ formatCatalogListing color provider current =
             map
                 (\opt ->
                     let mark
-                            | isCurrent provider current opt =
+                            | isCurrent provider current currentDialect opt =
                                 roleSuccess color
                                     (glyphOk <> formatOptionName opt)
                             | otherwise =
@@ -105,7 +119,10 @@ renderPickerFrame color state =
             opts ->
                 zipWith
                     (\i opt -> renderRow color (i == idx)
-                        state.pickerProvider state.pickerCurrent opt)
+                        state.pickerProvider
+                        state.pickerCurrent
+                        state.pickerCurrentDialect
+                        opt)
                     [0 ..]
                     opts
         footer =
@@ -113,14 +130,22 @@ renderPickerFrame color state =
                 "↑↓/jk or scroll · click/enter · esc/q · type to filter"
     in Text.intercalate "\n" (header : filterLine : body <> [footer])
 
-renderRow :: Bool -> Bool -> Provider -> Text -> ModelOption -> Text
-renderRow color selected currentProvider current opt =
+renderRow
+    :: Bool
+    -> Bool
+    -> Provider
+    -> Text
+    -> DialectId
+    -> ModelOption
+    -> Text
+renderRow color selected currentProvider current currentDialect opt =
     let cursor = if selected then roleWarn color "› " else "  "
         name
             | selected = roleSuccess color (formatOptionName opt)
             | otherwise = roleMuted color (formatOptionName opt)
         currentMark
-            | isCurrent currentProvider current opt = roleSuccess color " ✓"
+            | isCurrent currentProvider current currentDialect opt =
+                roleSuccess color " ✓"
             | otherwise = ""
         label = case opt.modelLabel of
             Nothing -> ""
@@ -132,8 +157,15 @@ glyphSessionLike :: Text
 glyphSessionLike = "⧉ "
 
 formatOptionName :: ModelOption -> Text
-formatOptionName opt = providerSlug opt.modelProvider <> " · " <> opt.modelId
+formatOptionName opt =
+    providerSlug opt.modelProvider
+        <> " · "
+        <> opt.modelId
+        <> " · "
+        <> dialectSlug opt.modelDialect
 
-isCurrent :: Provider -> Text -> ModelOption -> Bool
-isCurrent provider current opt =
-    opt.modelProvider == provider && opt.modelId == current
+isCurrent :: Provider -> Text -> DialectId -> ModelOption -> Bool
+isCurrent provider current dialect opt =
+    opt.modelProvider == provider
+        && opt.modelId == current
+        && opt.modelDialect == dialect

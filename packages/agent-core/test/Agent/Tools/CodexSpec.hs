@@ -1,11 +1,11 @@
 module Agent.Tools.CodexSpec (spec) where
 
+import Agent.Dialect (codexDialect)
 import Agent.Loop (LoopError(..), defaultLoopDispatch)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents (closeSubagentRegistry, defaultSubagentConfig, newSubagentRegistry)
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
-import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , customToolCall
@@ -22,7 +22,11 @@ import Agent.Tools.Codex.Shell
     , newCodexShellSession
     )
 import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
-import Agent.Tools.PlanMode (isPlanModeActive, newPlanModeEnv)
+import Agent.Tools.PlanMode
+    ( isPlanModeActive
+    , newPlanModeEnv
+    , readPlanMarkdown
+    )
 import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket, finally)
@@ -49,18 +53,21 @@ spec = describe "Agent.Tools.Codex" do
     it "advertises Codex wire names and not Grok names" do
         withTempEnv \env -> do
             -- create a throwaway ghci for schema listing; codingToolsFor owns lifecycle
-            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            coding <- codingToolsFor codexDialect env Nothing Nothing
             let names = map (.appToolName) coding.codingAppTools
             names `shouldBe`
-                [ "shell_command"
+                [ "read_file"
+                , "grep"
+                , "list_dir"
+                , "shell_command"
                 , "write_stdin"
                 , "apply_patch"
                 , "update_plan"
                 , "run_ghci"
                 , "enter_plan_mode"
+                , "write_plan"
                 , "ask_user_question"
                 ]
-            names `shouldNotContain` ["read_file"]
             names `shouldNotContain` ["run_terminal_cmd"]
             names `shouldNotContain` ["search_replace"]
             coding.codingClose
@@ -81,7 +88,7 @@ spec = describe "Agent.Tools.Codex" do
                     , multiPrepareSpawn = Nothing
                     , multiSendToRoot = Nothing
                     }
-            coding <- codingToolsFor OpenAIProvider env Nothing (Just ctx)
+            coding <- codingToolsFor codexDialect env Nothing (Just ctx)
             let names = map (.appToolName) coding.codingAppTools
             names `shouldContain` ["spawn_agent", "wait_agent", "send_message", "followup_task", "list_agents", "interrupt_agent"]
             let parameters name =
@@ -119,7 +126,31 @@ spec = describe "Agent.Tools.Codex" do
                     (functionToolCall "call-enter-plan" "enter_plan_mode"
                         "{\"explanation\":\"The user requested a design plan.\"}")
                 result.output `shouldSatisfy` Text.isInfixOf "entered plan mode"
+                result.output `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
+                result.output `shouldNotSatisfy` Text.isInfixOf "exit_plan_mode"
                 isPlanModeActive plan `shouldReturn` True)
+                `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
+
+    it "writes only the session plan through write_plan" do
+        withTempEnv \env -> do
+            ghci <- newGhciSession env
+            shell <- newCodexShellSession env
+            plan <- newPlanModeEnv env.toolCwd Nothing
+            tools <- codexTools env shell ghci plan Nothing
+            (do
+                inactive <- dispatchToolCall defaultLoopDispatch
+                    (appToolHandlers tools)
+                    (functionToolCall "call-write-inactive" "write_plan"
+                        "{\"content\":\"# Not yet\"}")
+                inactive.output `shouldSatisfy` Text.isInfixOf "not active"
+                _ <- dispatchToolCall defaultLoopDispatch (appToolHandlers tools)
+                    (functionToolCall "call-enter" "enter_plan_mode" "{}")
+                written <- dispatchToolCall defaultLoopDispatch
+                    (appToolHandlers tools)
+                    (functionToolCall "call-write" "write_plan"
+                        "{\"content\":\"# Safe plan\\n\\n- inspect\\n\"}")
+                written.output `shouldSatisfy` Text.isInfixOf "Wrote the plan"
+                readPlanMarkdown plan `shouldReturn` "# Safe plan\n\n- inspect\n")
                 `finally` (closeGhciSession ghci >> closeCodexShellSession shell)
 
     it "adds, updates, and deletes files via apply_patch" do
@@ -338,7 +369,7 @@ spec = describe "Agent.Tools.Codex" do
                 threadDelay 150000
                 finished <- runFnWith tools "write_stdin" $
                     "{\"session_id\":" <> Text.pack (show sessionId)
-                        <> ",\"chars\":\"late\",\"yield_time_ms\":10}"
+                        <> ",\"chars\":\"late\",\"yield_time_ms\":1000}"
                 finished `shouldSatisfy` Text.isInfixOf "Exit code: 0"
                 finished `shouldSatisfy` Text.isInfixOf "done"
 
@@ -398,7 +429,7 @@ spec = describe "Agent.Tools.Codex" do
     it "stops managed shell commands when coding tools close" do
         withTempEnv \env -> do
             let marker = toFilePath env.toolCwd </> "escaped"
-            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            coding <- codingToolsFor codexDialect env Nothing Nothing
             started <- runFnWith coding.codingAppTools "shell_command" $
                 "{\"command\":\"sleep 0.3; printf done > "
                     <> Text.pack marker

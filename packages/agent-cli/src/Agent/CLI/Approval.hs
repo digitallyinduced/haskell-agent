@@ -25,7 +25,10 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal (resolveColor)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
-import Agent.ToolDispatch (ToolCall(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , canonicalToolName
+    )
 import Agent.Tools.Dangerous (shellCommandBlocked)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
@@ -104,30 +107,32 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
+    let toolName = canonicalToolName call.name
     -- Hard deny for catastrophic shell deletes, even under ApproveAll / yolo.
-    case shellCommandBlocked call.name call.arguments of
+    case shellCommandBlocked toolName call.arguments of
         Just msg -> do
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
         Nothing -> do
-            -- Plan mode: reject mutating file edits except plan.md (even under yolo).
-            -- Grok search_replace also enforces this in-tool; this covers apply_patch
-            -- and any other write tool before dispatch.
-            if planModeBlocksCall planActive planPath call
+            readOnly <- case lookupRegisteredTool call.name tools of
+                Nothing -> pure False
+                Just tool -> toolAllowsWithoutPrompt tool call
+            -- Plan mode hard-denies writes even under yolo. The dedicated
+            -- write_plan tool and Grok's path-locked plan.md edit are the only
+            -- mutations allowed. Shell tools are blocked entirely because an
+            -- arbitrary shell script cannot be proven read-only.
+            if planModeBlocksCall planActive planPath readOnly call
                 then do
                     let msg = planModeBlockedEditMessage planPath
                     report (ApprovalWarning msg)
                     pure (Left msg)
                 else do
-                    readOnly <- case lookupRegisteredTool call.name tools of
-                        Nothing -> pure False
-                        Just tool -> toolAllowsWithoutPrompt tool call
                     -- plan.md edits are auto-approved while plan mode is active.
                     if isPlanFileWrite planActive planPath call
                         then pure (Right True)
                         else do
                             allowed <- readIORef allowedToolsRef
-                            if Set.member call.name allowed
+                            if Set.member toolName allowed
                                 then pure (Right True)
                                 else case policy of
                                     ApproveAll -> pure (Right True)
@@ -141,7 +146,7 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                                     pure (Right True)
                                                 Just PermissionAllowTool -> do
                                                     modifyIORef' allowedToolsRef
-                                                        (Set.insert call.name)
+                                                        (Set.insert toolName)
                                                     report $
                                                         ApprovalSuccess
                                                             (glyphOk
@@ -152,24 +157,38 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                                 Just PermissionDeny ->
                                                     pure (Right False)
 
-planModeBlocksCall :: Bool -> OsPath -> ToolCall -> Bool
-planModeBlocksCall active planPath call
+planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
+planModeBlocksCall active planPath readOnly call
     | not active = False
-    | call.name == "apply_patch" = True
-    | call.name == "search_replace" =
+    | name == "apply_patch" = True
+    | name == "write_plan" = False
+    | name == "exit_plan_mode" = False
+    | name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in Text.null target
             || not (isPlanFileEditTarget planPath (fromText target))
-    | otherwise = False
+    | name `elem` ["shell_command", "run_terminal_cmd"] =
+        True
+    | name == "write_stdin" = True
+    | name `elem`
+        [ "spawn_agent", "followup_task", "create_agent_session"
+        , "send_agent_session_message"
+        ] = True
+    | otherwise = not readOnly
+  where
+    name = canonicalToolName call.name
 
 isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
 isPlanFileWrite active planPath call
     | not active = False
-    | call.name == "search_replace" =
+    | name == "write_plan" = True
+    | name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in not (Text.null target)
             && isPlanFileEditTarget planPath (fromText target)
     | otherwise = False
+  where
+    name = canonicalToolName call.name
 
 toggleAlwaysApprove :: IORef ApprovalPolicy -> OsPath -> IO Text
 toggleAlwaysApprove policyRef projectRoot = do

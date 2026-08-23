@@ -13,6 +13,7 @@ module Agent.ToolDispatch
     , functionToolCall
     , customToolCall
     , canonicalToolName
+    , canonicalToolArguments
     , dispatchToolCall
     , dispatchToolHandler
     , handlerName
@@ -21,10 +22,13 @@ module Agent.ToolDispatch
     ) where
 
 import Agent.ToolArgs (stripAesonPrefix)
+import Agent.Dialect (grokBuildCanonicalToolName)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, tryAny)
 import Data.Aeson (FromJSON, Value(..))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
 import Data.List (find)
 import Data.Text (Text)
@@ -130,7 +134,9 @@ dispatchToolHandler
     -> IO ToolCallResult
 dispatchToolHandler config maybeHandler call = do
     let callName = call.name
-        input = toolArgumentsValue call.arguments
+        input =
+            canonicalToolArguments call.name
+                (toolArgumentsValue call.arguments)
         runTool = case maybeHandler of
             Just handler ->
                 runHandler
@@ -144,7 +150,10 @@ dispatchToolHandler config maybeHandler call = do
         Right toolResult ->
             pure (config.toolDispatchFormatResult toolResult)
         Left exception -> do
-            config.toolDispatchOnException callName exception
+            -- Diagnostics must not replace the original tool failure with a
+            -- second exception. 'tryAny' still lets asynchronous cancellation
+            -- propagate.
+            _ <- tryAny (config.toolDispatchOnException callName exception)
             pure (config.toolDispatchFormatException callName exception)
     pure ToolCallResult
         { callId = call.callId
@@ -173,15 +182,42 @@ findHandler name handlers =
 -- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).
 canonicalToolName :: Text -> Text
 canonicalToolName name
-    | Just rest <- Text.stripPrefix "collaboration." name = rest
+    | grokName /= name = grokName
+    | Just rest <- Text.stripPrefix "collaboration." name =
+        canonicalToolName rest
     | Just rest <- Text.stripPrefix "collaboration" name
     , rest `elem` multiAgentBareNames =
-        rest
-    | Just rest <- Text.stripPrefix "multi_agent_v1." name = rest
+        canonicalToolName rest
+    | Just rest <- Text.stripPrefix "multi_agent_v1." name =
+        canonicalToolName rest
     | Just rest <- Text.stripPrefix "multi_agent_v1" name
     , rest `elem` multiAgentBareNames =
-        rest
+        canonicalToolName rest
     | otherwise = name
+  where
+    grokName = grokBuildCanonicalToolName name
+
+-- | Project current public Grok Build parameter names back onto the stable
+-- internal handler contract. Keep this beside 'canonicalToolName' so every
+-- dispatch path applies the same compatibility mapping.
+canonicalToolArguments :: Text -> Value -> Value
+canonicalToolArguments name value
+    | canonicalToolName name == "task" =
+        renameObjectKey "background" "run_in_background" value
+    | otherwise = value
+
+renameObjectKey :: Text -> Text -> Value -> Value
+renameObjectKey source target (Object object)
+    | KeyMap.member targetKey object = Object object
+    | Just field <- KeyMap.lookup sourceKey object =
+        Object $
+            KeyMap.insert targetKey field
+                (KeyMap.delete sourceKey object)
+    | otherwise = Object object
+  where
+    sourceKey = Key.fromText source
+    targetKey = Key.fromText target
+renameObjectKey _ _ value = value
 
 multiAgentBareNames :: [Text]
 multiAgentBareNames =
@@ -210,17 +246,16 @@ runHandler
     -> ToolHandler
     -> IO (Either Text Text)
 runHandler emitOutput call value = \case
-    TypedTool _ run ->
-        case decodeToolArguments value of
-            Right args -> run args
-            Left err -> pure (Left err)
-    TypedToolWithCall _ run ->
-        case decodeToolArguments value of
-            Right args -> run call args
-            Left err -> pure (Left err)
-    TypedStreamingTool _ run ->
-        case decodeToolArguments value of
-            Right args -> run emitOutput args
-            Left err -> pure (Left err)
+    TypedTool _ run -> decodeAndRun value run
+    TypedToolWithCall _ run -> decodeAndRun value (run call)
+    TypedStreamingTool _ run -> decodeAndRun value (run emitOutput)
     NoArgsTool _ run ->
         run
+
+decodeAndRun
+    :: FromJSON args
+    => Value
+    -> (args -> IO (Either Text Text))
+    -> IO (Either Text Text)
+decodeAndRun value run =
+    either (pure . Left) run (decodeToolArguments value)

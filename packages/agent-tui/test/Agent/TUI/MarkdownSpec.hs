@@ -12,9 +12,11 @@ import Brick
     , txt
     , viewport
     )
+import Brick.AttrMap (attrMapLookup)
 import Control.Monad (forM_)
+import Data.Char (isControl)
 import Data.Foldable (toList)
-import Data.List (findIndex, isInfixOf)
+import Data.List (find, findIndex, isInfixOf)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -49,10 +51,75 @@ spec = describe "fullscreen Markdown rendering" do
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
 
+    it "parses links nested inside strong and emphasis spans" do
+        parseInline
+            "**[PR #316](https://example.com/316)** and *[docs](https://example.com)*"
+            `shouldBe`
+                [ InlineSpan
+                    (InlineStrongLink "https://example.com/316")
+                    "PR #316 (https://example.com/316)"
+                , InlineSpan InlinePlain " and "
+                , InlineSpan
+                    (InlineEmphasisLink "https://example.com")
+                    "docs (https://example.com)"
+                ]
+
+    it "renders a strong link with hyperlink metadata and bold styling" do
+        let widget :: Widget ()
+            widget =
+                markdownWidget
+                    "Merged **[PR #316](https://example.com/316)**."
+            spans = concat (renderSpanRows 80
+                "Merged **[PR #316](https://example.com/316)**.")
+            rendered = show (renderWidget Nothing [widget] (80, 3))
+        spans `shouldSatisfy`
+            any (hasUrlWithStyle "https://example.com/316" V.bold)
+        rendered `shouldSatisfy` (not . isInfixOf "[PR #316]")
+
+    it "does not attach terminal hyperlink metadata to unsafe URLs" do
+        let widget :: Widget ()
+            widget = markdownWidget "[docs](https://example.com/\ESC]8;;owned)"
+            rendered = show (renderWidget Nothing [widget] (80, 3))
+        rendered `shouldSatisfy`
+            (not . isInfixOf "attrURL = SetTo")
+
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
         spans `shouldContain` [InlineSpan InlineCode "a ` b"]
+
+    it "lets inline code override surrounding strong text" do
+        let input =
+                "Yes—**for this repository, hardcoding \
+                \`state = [ResponseItem]` would be simpler.**"
+        parseInline input
+            `shouldBe`
+                [ InlineSpan InlinePlain "Yes—"
+                , InlineSpan InlineStrong
+                    "for this repository, hardcoding "
+                , InlineSpan InlineCode "state = [ResponseItem]"
+                , InlineSpan InlineStrong " would be simpler."
+                ]
+
+        let region = (80, 3)
+            widget :: Widget ()
+            widget = markdownWidget input
+            spans =
+                concatMap toList $
+                    toList $
+                        displayOpsForPic
+                            (renderWidget
+                                (Just Theme.solarizedDark)
+                                [widget]
+                                region)
+                            region
+            codeSpan = find (hasText "state = [ResponseItem]") spans
+        fmap spanAttr codeSpan
+            `shouldBe`
+                Just
+                    (attrMapLookup
+                        Theme.inlineCodeAttr
+                        Theme.solarizedDark)
 
     it "leaves unmatched delimiters visible" do
         inlinePlainText (parseInline "unfinished **bold")
@@ -62,6 +129,21 @@ spec = describe "fullscreen Markdown rendering" do
         let input = Text.replicate 10000 "a"
         parseInline input
             `shouldBe` [InlineSpan InlinePlain input]
+
+    it "wraps long fenced-code lines inside the available terminal width" do
+        let code = Text.replicate 100 "a"
+            rows = renderRows 12 ("```\n" <> code <> "\n```")
+        map rowDisplayWidth rows `shouldSatisfy` all (<= 12)
+        Text.filter (/= ' ') (Text.concat rows) `shouldBe` code
+
+    it "renders terminal controls as inert visible glyphs" do
+        let unsafe = "\ESC]0;owned\BEL\t\r"
+            prose = Text.concat (renderRows 40 unsafe)
+            code = Text.concat (renderRows 40 ("```\n" <> unsafe <> "\n```"))
+        prose `shouldSatisfy` Text.isInfixOf "␛]0;owned␇⇥↵"
+        code `shouldSatisfy` Text.isInfixOf "␛]0;owned␇⇥↵"
+        prose `shouldSatisfy` not . Text.any isControl
+        code `shouldSatisfy` not . Text.any isControl
 
     it "renders numbered controls for fenced code block headers" do
         let widget :: Widget ()
@@ -495,6 +577,27 @@ hasUrl :: Text.Text -> SpanOp -> Bool
 hasUrl url = \case
     TextSpan{textSpanAttr} ->
         V.attrURL textSpanAttr == V.SetTo url
+    Skip _ -> False
+    RowEnd _ -> False
+
+hasText :: Text.Text -> SpanOp -> Bool
+hasText expected = \case
+    TextSpan{textSpanText} ->
+        LazyText.toStrict textSpanText == expected
+    Skip _ -> False
+    RowEnd _ -> False
+
+spanAttr :: SpanOp -> V.Attr
+spanAttr = \case
+    TextSpan{textSpanAttr} -> textSpanAttr
+    Skip _ -> V.defAttr
+    RowEnd _ -> V.defAttr
+
+hasUrlWithStyle :: Text.Text -> V.Style -> SpanOp -> Bool
+hasUrlWithStyle url style = \case
+    TextSpan{textSpanAttr} ->
+        V.attrURL textSpanAttr == V.SetTo url
+            && V.attrStyle textSpanAttr == V.SetTo style
     Skip _ -> False
     RowEnd _ -> False
 

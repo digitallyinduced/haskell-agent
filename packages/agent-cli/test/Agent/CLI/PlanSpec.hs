@@ -34,8 +34,14 @@ spec = do
         it "supports shortcuts and selecting request changes" do
             applyPlanExitKey (PickerKeyChar 'a') initialPlanExitState
                 `shouldBe` Left PlanApprove
-            applyPlanExitKey (PickerKeyChar 's') initialPlanExitState
-                `shouldBe` Left (PlanRequestChanges "")
+            applyPlanExitKey (PickerKeyChar 'Y') initialPlanExitState
+                `shouldBe` Left PlanApprove
+            map
+                (`applyPlanExitKey` initialPlanExitState)
+                (map PickerKeyChar "scr")
+                `shouldBe` replicate 3 (Left (PlanRequestChanges ""))
+            applyPlanExitKey (PickerKeyChar 'n') initialPlanExitState
+                `shouldBe` Left PlanCancel
             applyPlanExitKey PickerKeyCancel initialPlanExitState
                 `shouldBe` Left PlanCancel
             case applyPlanExitKey PickerKeyDown initialPlanExitState of
@@ -78,12 +84,12 @@ spec = do
 
     describe "parsePlanDecisionAnswer" do
         it "maps approve / changes / cancel aliases" do
-            parsePlanDecisionAnswer "a" `shouldBe` Just PlanApprove
-            parsePlanDecisionAnswer "approve" `shouldBe` Just PlanApprove
-            parsePlanDecisionAnswer "s" `shouldBe` Just (PlanRequestChanges "")
-            parsePlanDecisionAnswer "changes" `shouldBe` Just (PlanRequestChanges "")
-            parsePlanDecisionAnswer "q" `shouldBe` Just PlanCancel
-            parsePlanDecisionAnswer "cancel" `shouldBe` Just PlanCancel
+            map parsePlanDecisionAnswer ["a", "approve", "y", "yes"]
+                `shouldBe` replicate 4 (Just PlanApprove)
+            map parsePlanDecisionAnswer ["s", "c", "changes", "r"]
+                `shouldBe` replicate 4 (Just (PlanRequestChanges ""))
+            map parsePlanDecisionAnswer ["q", "cancel", "n", "no"]
+                `shouldBe` replicate 4 (Just PlanCancel)
             parsePlanDecisionAnswer "maybe" `shouldBe` Nothing
 
     describe "planDecisionFollowUp" do

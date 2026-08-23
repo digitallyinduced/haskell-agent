@@ -4,6 +4,7 @@ module Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImage
     , readClipboardImages
+    , readClipboardImagesImageFirst
     , nonEmptyClipboardImages
     , loadImagesFromPastedText
     , formatImageSize
@@ -68,6 +69,27 @@ readClipboardImages = do
                 Right images@(_:_) -> pure (Right images)
                 Right [] -> pure (Left "no image found on the clipboard")
                 Left err -> pure (Left err)
+
+-- | Fast path for a terminal bracketed paste. Screenshots and copied browser
+-- images usually expose bitmap data directly; checking Finder file coercions
+-- first is especially expensive on macOS because AppleScript may spend close
+-- to a second attempting to turn the bitmap into a file list.
+readClipboardImagesImageFirst :: IO (Either Text [ImageAttachment])
+readClipboardImagesImageFirst = do
+    bitmap <- readClipboardImageBytes
+    case bitmap of
+        Right image -> pure (Right [image])
+        Left bitmapError -> do
+            paths <- readClipboardPaths
+            imagePaths <- filterM isImageFile paths
+            case imagePaths of
+                [] -> pure (Left bitmapError)
+                ps -> do
+                    loaded <- mapM readImageFile ps
+                    case sequence loaded of
+                        Right images@(_:_) -> pure (Right images)
+                        Right [] -> pure (Left bitmapError)
+                        Left err -> pure (Left err)
 
 -- | Prefer PNG; fall back to JPEG. Back-compat for one-image callers.
 readClipboardImage :: IO (Either Text ImageAttachment)

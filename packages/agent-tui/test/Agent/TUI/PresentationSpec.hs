@@ -22,6 +22,18 @@ spec = describe "tool presentation" do
         summarizeToolCall
             (functionToolCall "continue" "write_stdin" "{\"session_id\":12}")
             `shouldBe` "Continued session 12"
+        toolDetail
+            (functionToolCall
+                "ask"
+                "ask_user_question"
+                "{\"questions\":[{\"question\":\"Choose a backend\",\"options\":[]}]}")
+            `shouldBe` "Choose a backend"
+        summarizeToolCall
+            (functionToolCall
+                "wait"
+                "wait_commands_or_subagents"
+                "{\"task_ids\":[\"t1\"]}")
+            `shouldBe` "Waited"
 
     it "parses and truncates search-replace diffs once for all renderers" do
         let oldText = Text.intercalate "\\n"
@@ -41,8 +53,18 @@ spec = describe "tool presentation" do
         parsed.diffHiddenLines `shouldBe` 10
 
     it "formats structured collaboration output" do
-        formatToolOutput
-            (functionToolCall "agents" "collaboration.list_agents" "{}")
+        let call = functionToolCall
+                "agents" "collaboration.list_agents" "{}"
+        formatToolOutput call
             "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\
             \\"agent_status\":\"running\"}]}"
             `shouldBe` "/root/reviewer · running"
+        formatToolOutput call
+            "{\"agents\":[\
+            \{\"agent_name\":\" /root/worker \",\"agent_status\":\" idle \"},\
+            \{\"agent_name\":\"/root/queued\"},\
+            \{\"agent_name\":\" \",\"agent_status\":\"running\"},42]}"
+            `shouldBe` "/root/worker · idle\n/root/queued"
+        formatToolOutput call
+            "{\"agents\":[{\"agent_status\":\"running\"},null]}"
+            `shouldBe` "(no live agents)"

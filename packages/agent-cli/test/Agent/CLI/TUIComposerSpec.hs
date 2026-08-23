@@ -12,6 +12,16 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen composer" do
+    it "cancels a running turn even when the slash menu is open" do
+        composerEscapeAction False True
+            `shouldBe` EscapeCancelTurn
+
+    it "dismisses slash completion or clears the draft while idle" do
+        composerEscapeAction True True
+            `shouldBe` EscapeDismissSlashMenu
+        composerEscapeAction True False
+            `shouldBe` EscapeClearDraft
+
     it "tracks the multiline cursor location" do
         draftCursorLocation "one\ntwo" 6 `shouldBe` (1, 2)
 
@@ -48,11 +58,15 @@ spec = describe "fullscreen composer" do
             appendFullscreenInput
                 buffer
                 (input (ReplClipboardPaste "draft" Nothing))
+            appendFullscreenInput
+                buffer
+                (input (ReplClipboardPasteOrText "before" "before/path.png"))
             promoteFullscreenInput buffer (input (ReplText "urgent"))
         queued <- atomically (readFullscreenInputs buffer)
         map (.fullscreenInputLine) (toList queued)
             `shouldBe`
                 [ ReplClipboardPaste "draft" Nothing
+                , ReplClipboardPasteOrText "before" "before/path.png"
                 , ReplText "urgent"
                 , ReplText "queued"
                 ]

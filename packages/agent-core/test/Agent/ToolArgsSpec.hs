@@ -8,6 +8,7 @@ import Agent.ToolDispatch
     , functionToolCall
     , typedTool
     )
+import Control.Monad (forM_)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (parseEither)
@@ -27,9 +28,27 @@ spec = describe "ToolArgs" do
         extractTextList (Aeson.object ["ids" .= ("abc" :: Text)]) "ids"
             `shouldBe` Right ["abc"]
 
-    it "accepts string booleans" do
-        extractMaybeBool (Aeson.object ["flag" .= ("true" :: Text)]) "flag"
-            `shouldBe` Just True
+    it "keeps legacy and typed boolean parsing aligned" do
+        let cases :: [(Aeson.Value, Maybe Bool)]
+            cases =
+                [ (Aeson.Bool True, Just True)
+                , (Aeson.Bool False, Just False)
+                , (Aeson.String " TRUE ", Just True)
+                , (Aeson.String "false", Just False)
+                , (Aeson.String "1", Just True)
+                , (Aeson.String "0", Just False)
+                , (Aeson.String "yes", Nothing)
+                , (Aeson.Null, Nothing)
+                , (Aeson.toJSON (1 :: Int), Nothing)
+                ]
+        forM_ cases \(value, expected) -> do
+            let input = Aeson.object ["flag" .= value]
+            extractMaybeBool input "flag" `shouldBe` expected
+            parseEither (objectArgs $ \o -> optBool o "flag") input
+                `shouldBe` Right expected
+        extractMaybeBool (Aeson.object []) "flag" `shouldBe` Nothing
+        parseEither (objectArgs $ \o -> optBool o "flag") (Aeson.object [])
+            `shouldBe` Right Nothing
 
     it "backs typed FromJSON records" do
         Aeson.eitherDecode "{\"query\":\"invoice\",\"limit\":5,\"dry_run\":\"false\"}"

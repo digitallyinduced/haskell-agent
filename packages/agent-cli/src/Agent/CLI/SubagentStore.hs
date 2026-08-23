@@ -16,8 +16,14 @@ module Agent.CLI.SubagentStore
     ) where
 
 import Agent.CLI.Btw (trimDanglingToolSuffix)
+import Agent.Dialect
+    ( DialectId
+    , dialectSlug
+    , parseDialect
+    )
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
@@ -41,6 +47,9 @@ import System.Posix.Files (setFileMode)
 data SubagentDiskMeta = SubagentDiskMeta
     { diskPreviousResponseId :: !(Maybe Text)
     , diskStatus :: !(Maybe SubagentStatus)
+    , diskProvider :: !(Maybe Provider)
+    , diskEffectiveModel :: !(Maybe Text)
+    , diskDialect :: !(Maybe DialectId)
     , diskAgentType :: !(Maybe Text)
     , diskAgentModel :: !(Maybe Text)
     , diskReasoningEffort :: !(Maybe Text)
@@ -54,6 +63,9 @@ instance ToJSON SubagentDiskMeta where
     toJSON meta = object
         [ "previousResponseId" .= meta.diskPreviousResponseId
         , "status" .= fmap encodeDiskStatus meta.diskStatus
+        , "provider" .= fmap providerSlug meta.diskProvider
+        , "effectiveModel" .= meta.diskEffectiveModel
+        , "dialect" .= fmap dialectSlug meta.diskDialect
         , "agentType" .= meta.diskAgentType
         , "agentModel" .= meta.diskAgentModel
         , "reasoningEffort" .= meta.diskReasoningEffort
@@ -67,9 +79,16 @@ instance FromJSON SubagentDiskMeta where
     parseJSON = withObject "SubagentDiskMeta" \o -> do
         statusValue <- o .:? "status"
         diskStatus <- traverse decodeDiskStatus statusValue
+        providerText <- o .:? "provider"
+        diskProvider <- traverse parseDiskProvider providerText
+        dialectText <- o .:? "dialect"
+        diskDialect <- traverse parseDiskDialect dialectText
         SubagentDiskMeta
             <$> o .:? "previousResponseId"
             <*> pure diskStatus
+            <*> pure diskProvider
+            <*> o .:? "effectiveModel"
+            <*> pure diskDialect
             <*> o .:? "agentType"
             <*> o .:? "agentModel"
             <*> o .:? "reasoningEffort"
@@ -77,6 +96,18 @@ instance FromJSON SubagentDiskMeta where
             <*> o .:? "taskPath"
             <*> o .:? "parentId"
             <*> o .:? "depth"
+
+parseDiskDialect :: Text -> Parser DialectId
+parseDiskDialect text =
+    case parseDialect text of
+        Just dialect -> pure dialect
+        Nothing -> fail ("unknown persisted subagent dialect: " <> Text.unpack text)
+
+parseDiskProvider :: Text -> Parser Provider
+parseDiskProvider text =
+    case parseProvider text of
+        Just provider -> pure provider
+        Nothing -> fail ("unknown persisted subagent provider: " <> Text.unpack text)
 
 encodeDiskStatus :: SubagentStatus -> Aeson.Value
 encodeDiskStatus = \case
@@ -157,6 +188,9 @@ saveSubagentState
     -> [ResponseItem]
     -> Maybe Text
     -> SubagentStatus
+    -> Provider
+    -> Text
+    -> DialectId
     -> Maybe Text
     -> Maybe Text
     -> Maybe Text
@@ -164,7 +198,8 @@ saveSubagentState
     -> Maybe SubagentIdentity
     -> IO (Either Text ())
 saveSubagentState
-        sessionDir agentId items previous status agentType agentModel
+        sessionDir agentId items previous status provider effectiveModel dialect
+        agentType agentModel
         reasoningEffort cwd identity =
     case subagentStoreDir sessionDir agentId of
         Left err -> pure (Left err)
@@ -176,6 +211,9 @@ saveSubagentState
             writeLazyFileAtomically metaPath 0o600 $ Aeson.encode SubagentDiskMeta
                 { diskPreviousResponseId = previous
                 , diskStatus = Just status
+                , diskProvider = Just provider
+                , diskEffectiveModel = Just effectiveModel
+                , diskDialect = Just dialect
                 , diskAgentType = agentType
                 , diskAgentModel = agentModel
                 , diskReasoningEffort = reasoningEffort
@@ -205,7 +243,7 @@ loadSubagentState sessionDir agentId =
                     metaResult <- if hasMeta
                         then decodeFile metaPath
                         else pure (Right (SubagentDiskMeta
-                            Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
+                            Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
                     itemsResult <- if hasTranscript
                         then decodeFile transcriptPath
                         else pure (Right [])

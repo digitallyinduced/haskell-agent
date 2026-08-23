@@ -8,10 +8,12 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
     , hasQueuedFullscreenInput
     , motionDemandFor
+    , lambdaArtWidget
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , newFullscreenInputBuffer
@@ -23,6 +25,7 @@ module Agent.CLI.TUI.App
     , readFullscreenLine
     , readFullscreenLineOr
     , repositoryHeaderText
+    , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission
     , requestFullscreenChoice
@@ -46,6 +49,7 @@ import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readReplHistory
+    , terminalTextWidth
     , truncateDisplayText
     )
 import Agent.CLI.AgentViewport
@@ -100,6 +104,7 @@ import Agent.CLI.TUI.ImagePreview
     , TuiImagePreview(..)
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
     )
@@ -136,6 +141,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
+import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -347,8 +353,31 @@ setFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
     -> IO ()
-setFullscreenImagePreviews runtime =
-    enqueueAppEvent runtime . AppSetImagePreviews
+setFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else do
+                let next =
+                        mapMaybe
+                            (\image ->
+                                case prepareTuiImagePreview image of
+                                    Left _ -> Nothing
+                                    Right preview -> Just (image, preview))
+                            images
+                -- ANSI previews force the sampled image during Brick drawing.
+                -- Build that sample here on the model worker instead of
+                -- stalling the Brick event/render thread.
+                unless runtime.runtimeNativeImagePreviews $
+                    mapM_
+                        (\(_, preview) ->
+                            void $
+                                pure $!
+                                    pixelAt preview.previewSample 0 0)
+                        next
+                pure next
+    enqueueAppEvent runtime (AppSetImagePreviews prepared)
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -1222,6 +1251,11 @@ handleChoiceKey = \case
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveChoice False)
     _ -> pure ()
   where
     moveChoice delta =
@@ -1334,6 +1368,11 @@ resolveChoice confirmed = do
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
     V.EvKey V.KEsc [] -> resolveTextPrompt False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
     V.EvKey V.KEnter [V.MShift] -> insert "\n"
     V.EvKey V.KPageUp [] ->
@@ -1487,15 +1526,21 @@ drawImagePreviews native previews =
         context <- getContext
         let maxWidth = viewportPreviewSize context.availWidth
             maxHeight = viewportPreviewSize context.availHeight
-            gaps = max 0 (length previews - 1) * previewGap
+            visible =
+                drop
+                    (max
+                        0
+                        (length previews - previewCountForWidth maxWidth))
+                    previews
+            gaps = max 0 (length visible - 1) * previewGap
             previewWidth =
-                max 1 ((maxWidth - gaps) `div` max 1 (length previews))
+                max 1 ((maxWidth - gaps) `div` max 1 (length visible))
             previewHeight = max 1 (maxHeight - 1)
             content =
                 hBox $
                     intersperse
                         (hLimit previewGap (fill ' '))
-                        (map (drawPreview previewWidth previewHeight) previews)
+                        (map (drawPreview previewWidth previewHeight) visible)
         render $
             hLimit maxWidth $
                 vLimit maxHeight content
@@ -2132,7 +2177,12 @@ lambdaArtWidget frame =
                         ]
                     | y <- [0 .. canvasHeight - 1]
                     ]
-        pure B.emptyResult { B.image = rendered }
+            bounded =
+                V.crop
+                    (max 0 context.availWidth)
+                    (max 0 context.availHeight)
+                    rendered
+        pure B.emptyResult { B.image = bounded }
 
 lambdaComposition :: Int -> Int -> LambdaComposition
 lambdaComposition width height
@@ -2549,9 +2599,13 @@ drawFooter state =
   where
     footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
         (Just _, _, _) ->
-            "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
+                else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
         (Nothing, Just _, _) ->
-            "↑↓ select  │  Enter choose  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
+                else "↑↓ select  │  Enter choose  │  Esc cancel"
         (Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
@@ -2636,12 +2690,18 @@ resumeHeader browser =
             showCursor
                 ResumeSearchCursor
                 (Location
-                    (Text.length prefix + Text.length browser.resumeBrowserQuery, 0))
+                    (resumeSearchCursorColumn
+                        prefix
+                        browser.resumeBrowserQuery, 0))
                 (txt (prefix <> browser.resumeBrowserQuery <> " "))
         | Text.null browser.resumeBrowserQuery =
             withAttr Theme.mutedAttr (txt prefix)
         | otherwise =
             txt (prefix <> browser.resumeBrowserQuery)
+
+resumeSearchCursorColumn :: Text -> Text -> Int
+resumeSearchCursorColumn prefix query =
+    terminalTextWidth prefix + terminalTextWidth query
 
 resumeList :: ResumeBrowser -> Widget Name
 resumeList browser =
@@ -3074,7 +3134,7 @@ applyUiEvent uiEvent state =
                 previousUi
                 nextUi
                 newFlashes
-        nextState =
+        nextState0 =
             state
                 { appUi = nextUi
                 , appCompletionFlashes =
@@ -3086,7 +3146,32 @@ applyUiEvent uiEvent state =
                         then 0
                         else state.appNativeProgressKeepaliveBucket
                 }
+        nextState =
+            case state.appChoice of
+                Just choice
+                    | choiceClosesOnUiTransition
+                        previousUi
+                        nextUi
+                        choice ->
+                        nextState0
+                            { appChoice = Nothing
+                            , appChoiceReply = Nothing
+                            }
+                _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
+
+-- | Turn-scoped choices, such as the live effort selector, become invalid
+-- when their turn stops running. Ordinary idle dialogs remain open, and a
+-- model round that continues into tools keeps the selector visible.
+choiceClosesOnUiTransition
+    :: UiState
+    -> UiState
+    -> ChoiceOverlay
+    -> Bool
+choiceClosesOnUiTransition previous next choice =
+    choice.choiceCloseOnTurnEnd
+        && previous.uiRunning
+        && not next.uiRunning
 
 retainExistingFlashes
     :: UiState
@@ -3280,22 +3365,13 @@ handleEventInner event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
-    AppEvent (AppSetImagePreviews images) ->
+    AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
             previous <-
                 liftIO $
                     readIORef state.appRuntime.runtimeImagePreviews
-            let unchanged = map fst previous == images
-                prepared
-                    | unchanged = previous
-                    | otherwise =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
+            let unchanged = map fst previous == map fst prepared
             liftIO do
                 when (not unchanged) do
                     writeIORef
@@ -3383,6 +3459,7 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
                 , appAgentHover = Nothing

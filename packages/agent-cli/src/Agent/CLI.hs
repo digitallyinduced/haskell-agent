@@ -48,12 +48,11 @@ import Agent.CLI.SessionTitle
     )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
-    , acquireSessionLock
     , agentSessionTools
     , closeSessionProcessManager
     , launchSessionTurn
     , newSessionProcessManager
-    , releaseSessionLock
+    , signalManagedSessionReady
     , sessionProcessStatus
     )
 import Agent.CLI.Approval
@@ -72,8 +71,10 @@ import Agent.CLI.Clipboard
     ( ClipboardContent(..)
     , formatImageSize
     , loadImagesFromPastedText
+    , nonEmptyClipboardImages
     , readClipboard
     , readClipboardImages
+    , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
 import Agent.CLI.Compaction
@@ -130,7 +131,10 @@ import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.Models
     ( ModelOption(..)
     , PickerState(..)
-    , initialPickerState
+    , initialPickerStateResolved
+    , modelTargetRequiresRebuild
+    , resolveModelOptionDialect
+    , resolvePersistedDialect
     )
 import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
@@ -152,7 +156,8 @@ import Agent.CLI.Progress
     , wrapOscForTmux
     )
 import Agent.CLI.Project
-    ( ProjectSettings(..)
+    ( ProjectModel(..)
+    , ProjectSettings(..)
     , loadProjectSettings
     , projectModelFor
     , projectModelProvider
@@ -187,6 +192,13 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionLock
+    ( SessionLock
+    , acquireSessionLock
+    , releaseSessionLock
+    , sessionLockFilePath
+    , sessionLockPath
+    )
 import Agent.CLI.Skills
     ( formatSkillsListing
     , installSkillCatalogWithOmissions
@@ -206,7 +218,8 @@ import Agent.CLI.Subagents.Runtime
     , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
-    , persistSubagentSnapshotWithStatus
+    , lookupOrCreateSubagentSession
+    , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
     , runCodexSubagent
@@ -299,11 +312,20 @@ import Agent.Claude
     )
 import Agent.Loop
 import Agent.Error (ApiError(..))
+import Agent.Dialect
+    ( Dialect
+    , DialectId
+    , dialectForId
+    , dialectId
+    , dialectIdForModel
+    , dialectSlug
+    , providerSupportsDialect
+    )
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
     , discoverProjectInstructions
-    , formatAgentsMdForProvider
+    , formatAgentsMdForDialect
     , globalAgentsHomeDir
     , loadedInstructionFiles
     )
@@ -361,13 +383,16 @@ import Agent.Subagents
     , resetSubagentRegistry
     , defaultSubagentConfig
     , formatCompletionNotice
+    , getStatus
     , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
     , setSubagentOnComplete
+    , setSubagentOnSettled
     , setSubagentRunner
     )
 import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
+import Agent.Tools.Grok.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.Tools.MultiAgents
@@ -389,7 +414,7 @@ import Agent.Tools.Types
     , defaultToolEnv
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
-import qualified Agent.OpenRouter.Options as OpenRouter
+import qualified Agent.OpenRouter as OpenRouter
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
@@ -415,10 +440,11 @@ import Control.Exception.Safe
     , catchAsync
     , finally
     , mask_
+    , onException
     , throwIO
     , try
     )
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
@@ -439,7 +465,8 @@ import Data.Time.Clock
     )
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
-    ( getCurrentDirectory
+    ( doesDirectoryExist
+    , getCurrentDirectory
     , getHomeDirectory
     , makeAbsolute
     , setCurrentDirectory
@@ -468,6 +495,9 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
+    | RunSwitchWorktree OsPath Provider Text Text
+      -- ^ Fresh worktree path. Starts a new session after the current backend
+      -- and fullscreen UI have shut down, retaining provider, model, and effort.
 
 data PreparedAgent = PreparedAgent
     { preparedFullscreen :: !(Maybe FullscreenRuntime)
@@ -642,6 +672,19 @@ runAgentWithRestarts options = do
                         , optPrompt = Nothing
                         , optPromptFile = Nothing
                         , optResume = Just sessionId
+                        }
+                    Nothing
+            RunSwitchWorktree path provider model effort ->
+                go fullscreenInputs
+                    current
+                        { optProvider = Just provider
+                        , optModel = Just model
+                        , optCwd = Just path
+                        , optWorktree = False
+                        , optEffort = Just effort
+                        , optPrompt = Nothing
+                        , optPromptFile = Nothing
+                        , optResume = Nothing
                         }
                     Nothing
             RunSwitchProvider next ->
@@ -854,10 +897,12 @@ prepareAgentIteration
     -> IO PreparedAgent
 prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
+    resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
     let failPreparation message =
-            case activeFullscreen of
-                Nothing -> die message
-                Just _ -> throwIO (StartupFailure message)
+            readIORef resumeLockRef >>= mapM_ releaseSessionLock >>
+                case activeFullscreen of
+                    Nothing -> die message
+                    Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
@@ -865,10 +910,31 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
     let root = sessionsRoot home
     resumed <- case options.optResume of
         Nothing -> pure Nothing
-        Just sessionId ->
-            loadSession root sessionId >>= \case
-                Left err -> failPreparation (Text.unpack err)
-                Right loaded -> pure (Just loaded)
+        Just sessionId -> do
+            dir <- either
+                (\err -> do
+                    signalManagedSessionReady (Left err)
+                    failPreparation (Text.unpack err))
+                pure
+                (sessionDirForId root sessionId)
+            exists <- doesDirectoryExist dir
+            when (not exists) do
+                let err = "session not found: " <> sessionId
+                signalManagedSessionReady (Left err)
+                failPreparation (Text.unpack err)
+            acquireSessionLock dir sessionId >>= \case
+                Left err -> do
+                    signalManagedSessionReady (Left err)
+                    failPreparation (Text.unpack err)
+                Right lock -> do
+                    writeIORef resumeLockRef (Just lock)
+                    loadSession root sessionId >>= \case
+                        Left err -> do
+                            signalManagedSessionReady (Left err)
+                            failPreparation (Text.unpack err)
+                        Right loaded -> do
+                            signalManagedSessionReady (Right ())
+                            pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
     cwd <- case resumed of
@@ -984,9 +1050,10 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
             , startupTimings = startupTimingsRef
             , startupSyntaxLoadDuration = syntaxLoadDurationRef
             }
-        action =
+    resumeLock <- readIORef resumeLockRef
+    let action =
             runAgentInitialized
-                options transition home root resumed cwd startup
+                options transition home root resumed resumeLock cwd startup
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             forM_ fullscreen resetFullscreenSessionActions
@@ -1060,10 +1127,27 @@ runAgentInitialized
     -> OsPath
     -> OsPath
     -> Maybe (SessionMeta, [SessionTurn])
+    -> Maybe SessionLock
     -> OsPath
     -> StartupRuntime
     -> IO RunResult
-runAgentInitialized options transition home root resumed cwd startup = do
+runAgentInitialized options transition home root resumed resumeLock cwd startup =
+    runAgentInitializedWithLock
+        options transition home root resumed resumeLock cwd startup
+        `onException` mapM_ releaseSessionLock resumeLock
+
+runAgentInitializedWithLock
+    :: CliOptions
+    -> Maybe ProviderTransition
+    -> OsPath
+    -> OsPath
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> Maybe SessionLock
+    -> OsPath
+    -> StartupRuntime
+    -> IO RunResult
+runAgentInitializedWithLock
+        options transition home root resumed resumeLock cwd startup = do
     let toolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
         escPaused = startup.startupEscPaused
@@ -1272,6 +1356,7 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                             }
                                     pure (Right label)
 
+    openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
     let basePlanHooks =
             cliPlanHooks interrupt escPaused (resolveColor stderr)
@@ -1288,6 +1373,64 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 (defaultModelFor provider)
                                 (projectModelFor provider projectSettings))
             options.optModel
+        transportModel = case provider of
+            OpenRouterProvider -> OpenRouter.mapModel openRouterOptions
+            _ -> id
+        inferredTarget = ModelOption
+            { modelProvider = provider
+            , modelId = model
+            , modelTransportId = transportModel model
+            , modelDialect =
+                dialectIdForModel provider (transportModel model)
+            , modelLabel = Nothing
+            }
+        persistedTarget = case fst <$> resumed of
+            Just meta ->
+                Just
+                    ( meta.metaDialect
+                    , meta.metaTransportModel
+                    )
+            Nothing -> do
+                remembered <- projectSettings.settingsLastModel
+                if remembered.projectModelProvider == provider
+                    then Just
+                        ( remembered.projectModelDialect
+                        , remembered.projectModelTransportName
+                        )
+                    else Nothing
+        resolvedPersistedTarget =
+            (\(storedDialect, storedTransportModel) ->
+                resolvePersistedDialect
+                    storedDialect
+                    storedTransportModel
+                    inferredTarget)
+                <$> persistedTarget
+        mappedTargetChanged =
+            maybe False snd resolvedPersistedTarget
+        dialectId = case transitionTarget of
+            Just target -> target.modelDialect
+            Nothing -> case options.optModel of
+                Just _ -> inferredTarget.modelDialect
+                Nothing
+                    | mappedTargetChanged -> inferredTarget.modelDialect
+                    | otherwise ->
+                        maybe
+                            inferredTarget.modelDialect
+                            fst
+                            resolvedPersistedTarget
+        dialect = dialectForId dialectId
+        resumeTargetChanged = case fst <$> resumed of
+            Just meta ->
+                provider /= meta.metaProvider
+                    || model /= meta.metaModel
+                    || mappedTargetChanged
+                    || dialectId /= meta.metaDialect
+            Nothing -> False
+        refreshDialectContext = case fst <$> resumed of
+            Just meta -> dialectId /= meta.metaDialect
+            Nothing -> False
+        legacySubagentTarget =
+            sessionLegacySubagentTarget . fst <$> resumed
         effort = fromMaybe
             (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
             options.optEffort
@@ -1299,10 +1442,14 @@ runAgentInitialized options transition home root resumed cwd startup = do
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
-        saveProjectModel projectRoot provider model
+        saveProjectModel
+            projectRoot
+            provider
+            model
+            inferredTarget.modelTransportId
+            dialectId
     sessionProcessManager <- newSessionProcessManager root
-    managedAgentSession <- (== Just "1") <$> lookupEnv "HASKELL_AGENT_MANAGED_SESSION"
-    activeSessionLock <- newIORef (Nothing :: Maybe FilePath)
+    activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
@@ -1325,7 +1472,16 @@ runAgentInitialized options transition home root resumed cwd startup = do
             , multiTaskPath = taskPathRoot
             , multiRootTurnId = readIORef rootTurnRef
             , multiResumeFromDisk = Just
-                (restoreAgentFromDisk subagentStoreRoot registry subagentSessions agentTypesRef)
+                (restoreAgentFromDisk
+                    provider
+                    transportModel
+                    inferredTarget.modelTransportId
+                    dialectId
+                    legacySubagentTarget
+                    subagentStoreRoot
+                    registry
+                    subagentSessions
+                    agentTypesRef)
             , multiCreateWorktree = Just \source ->
                 createWorktree source (worktreeRoot home) >>= \case
                     Left err -> pure (Left err)
@@ -1338,42 +1494,53 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         }
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
+                    provider
+                    transportModel
+                    inferredTarget.modelTransportId
+                    dialectId
+                    legacySubagentTarget
                     subagentSessions subagentStoreRoot agentTypesRef
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
-    coding <- codingToolsForWithTypes provider toolEnv (Just planHooks) multiCtx agentTypesRef
+    coding <-
+        codingToolsForWithTypes
+            dialect toolEnv (Just planHooks) multiCtx agentTypesRef
     case multiCtx of
-        Just ctx ->
+        Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
                 atomicModifyIORef' pendingNotices \xs ->
                     (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
+            setSubagentOnSettled ctx.multiRegistry \agentId status -> do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
-                    Just session ->
-                        persistSubagentSnapshotWithStatus
-                            subagentStoreRoot ctx.multiRegistry agentTypesRef
-                            agentId status session.subSessionTranscript
+                    Just session -> do
+                        _ <-
+                            persistAndEvictSubagentSessionWithStatus
+                                subagentStoreRoot ctx.multiRegistry agentTypesRef
+                                agentId status session
+                        pure ()
                     Nothing -> pure ()
         Nothing -> pure ()
-    let claimCurrentSession handle
-            | managedAgentSession = pure ()
-            | otherwise = do
-                let desired =
-                        unsafeToFilePath
-                            (handle.sessionDir </> unsafeEncodeUtf ".agent-running")
-                readIORef activeSessionLock >>= \case
-                    Just current | current == desired -> pure ()
-                    previous ->
-                        acquireSessionLock handle >>= \case
+    let claimCurrentSession handle = do
+            let desired = sessionLockPath handle.sessionDir
+            readIORef activeSessionLock >>= \case
+                Just current
+                    | sessionLockFilePath current == desired -> pure ()
+                previous ->
+                    acquireSessionLock
+                        handle.sessionDir
+                        handle.sessionMeta.metaId >>= \case
                             Left err -> throwIO (userError (Text.unpack err))
-                            Right lockPath -> do
-                                writeIORef activeSessionLock (Just lockPath)
+                            Right lock -> do
+                                writeIORef activeSessionLock (Just lock)
                                 mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
             { toolsRoot = root
             , toolsProvider = provider
             , toolsModel = model
+            , toolsTransportModel = inferredTarget.modelTransportId
+            , toolsDialect = dialectId
             , toolsCwd = cwd
             , toolsEffort = effort
             , toolsCurrentSessionId =
@@ -1403,14 +1570,17 @@ runAgentInitialized options transition home root resumed cwd startup = do
             coding.codingClose
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let instructions = systemPrompt provider cwd today (isOneShot options)
+        let instructions = systemPrompt dialect cwd today (isOneShot options)
             params = requestParams model instructions
-                (schemasFromAppTools provider tools) effort
+                (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
                 Just _ -> Nothing
-                Nothing -> resumed >>= \(meta, _) -> meta.metaLastResponseId
+                Nothing
+                    | resumeTargetChanged -> Nothing
+                    | otherwise ->
+                        resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
         let subagentRuntime = SubagentRuntime
                 { subagentOptions = options
@@ -1421,6 +1591,8 @@ runAgentInitialized options transition home root resumed cwd startup = do
                 , subagentSessions = subagentSessions
                 , subagentStoreRoot = subagentStoreRoot
                 , subagentTypes = agentTypesRef
+                , subagentLegacyTarget = legacySubagentTarget
+                , subagentMapModel = transportModel
                 }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
@@ -1434,7 +1606,13 @@ runAgentInitialized options transition home root resumed cwd startup = do
         markStartupStage startup "Loading instructions…"
         startupContext <-
             loadAgentsContext
-                fullscreen options provider home cwd initialItems initialPrevious
+                fullscreen
+                options
+                dialect
+                home
+                cwd
+                (if refreshDialectContext then [] else initialItems)
+                (if refreshDialectContext then Nothing else initialPrevious)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -1444,7 +1622,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
 
         persist <-
             preparePersistence
-                fullscreen options root provider model cwd effort prompt resumed
+                fullscreen options root provider model
+                    inferredTarget.modelTransportId dialectId
+                    (isNothing transition) cwd effort prompt resumed
         writeIORef persistSlotRef persist
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
@@ -1740,9 +1920,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -1776,7 +1956,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
                                         subagentRuntime
+                                        dialect
                                         XAIProvider
+                                        ctx.multiSendToRoot
                                         (\childParamsRef childTranscript ->
                                             xaiBackend xaiOptions tokenProvider
                                                 (readIORef childParamsRef) childTranscript)
@@ -1801,9 +1983,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
                         claudeAuth <-
                             loadClaudeCodeAuth
@@ -1852,17 +2034,18 @@ runAgentInitialized options transition home root resumed cwd startup = do
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
-                        openRouterOptions <- OpenRouter.clientOptionsFromEnv
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
                                     runHttpSubagent
                                         subagentRuntime
+                                        dialect
                                         OpenRouterProvider
+                                        ctx.multiSendToRoot
                                         (\childParamsRef childTranscript ->
                                             openRouterBackend openRouterOptions
                                                 tokenProvider
@@ -1888,9 +2071,9 @@ runAgentInitialized options transition home root resumed cwd startup = do
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession options provider policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -1920,23 +2103,67 @@ preparePersistence
     -> OsPath
     -> Provider
     -> Text
+    -> Text
+    -> DialectId
+    -> Bool
     -> OsPath
     -> Text
     -> Maybe Text
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
-preparePersistence fullscreen options root provider model cwd effort prompt resumed =
+preparePersistence
+        fullscreen options root provider model transportModel dialectId
+        retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
+            now <- getCurrentTime
+            let targetChanged =
+                    retargetResumed
+                        && ( provider /= meta.metaProvider
+                            || model /= meta.metaModel
+                            || maybe
+                                False
+                                (/= transportModel)
+                                meta.metaTransportModel
+                            || dialectId /= meta.metaDialect
+                           )
+                metadataChanged =
+                    retargetResumed
+                        && ( targetChanged
+                            || meta.metaTransportModel /= Just transportModel
+                            || isNothing meta.metaLegacySubagentTarget
+                           )
+                activeMeta
+                    | metadataChanged =
+                        meta
+                            { metaProvider = provider
+                            , metaModel = model
+                            , metaTransportModel = Just transportModel
+                            , metaDialect = dialectId
+                            , metaLegacySubagentTarget =
+                                Just (sessionLegacySubagentTarget meta)
+                            , metaLastResponseId =
+                                if targetChanged
+                                    then Nothing
+                                    else meta.metaLastResponseId
+                            , metaUpdatedAt = now
+                            }
+                    | otherwise = meta
             let handle = SessionHandle
-                    { sessionDir = root </> fromText meta.metaId
+                    { sessionDir = root </> fromText activeMeta.metaId
                     , sessionMetaPath =
-                        root </> fromText meta.metaId </> unsafeEncodeUtf "meta.json"
+                        root
+                            </> fromText activeMeta.metaId
+                            </> unsafeEncodeUtf "meta.json"
                     , sessionTranscriptPath =
-                        root </> fromText meta.metaId </> unsafeEncodeUtf "transcript.jsonl"
-                    , sessionMeta = meta
+                        root
+                            </> fromText activeMeta.metaId
+                            </> unsafeEncodeUtf "transcript.jsonl"
+                    , sessionMeta = activeMeta
                     }
-            let message = "session: " <> meta.metaId <> " (resumed)"
+            when metadataChanged $
+                writeSessionMeta handle.sessionMetaPath activeMeta
+            let message = "session: " <> activeMeta.metaId <> " (resumed)"
             case fullscreen of
                 Nothing -> do
                     color <- resolveColor stderr
@@ -1953,6 +2180,8 @@ preparePersistence fullscreen options root provider model cwd effort prompt resu
                     { createRoot = root
                     , createProvider = provider
                     , createModel = model
+                    , createTransportModel = transportModel
+                    , createDialect = dialectId
                     , createCwd = cwd
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
@@ -2023,6 +2252,7 @@ isJustCwd options = case options.optCwd of
 runSession
     :: CliOptions
     -> Provider
+    -> Dialect
     -> ApprovalPolicy
     -> [AppTool]
     -> ToolEnv
@@ -2053,6 +2283,8 @@ runSession
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [TurnInput]
     -> SubagentStoreRoot
+    -> GrokSubagentSpecs
+    -> Maybe LegacySubagentTarget
     -> IORef TokenUsage
     -> IORef Text
     -> IORef Text
@@ -2064,7 +2296,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2210,13 +2442,60 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                     , agentSteps = steps
                     , agentTranscript = transcript
                     }
+        hydrateSelectedAgent agentId = do
+            effectiveModel <- readIORef modelRef
+            lookupOrCreateSubagentSession
+                subagentSessions
+                storeRoot
+                agentTypes
+                provider
+                legacyTarget
+                effectiveModel
+                (dialectId dialect)
+                agentId
+        selectAgent target = do
+            previous <- readIORef selectedAgent
+            when (previous /= target) $
+                releaseSelectedAgent previous
+            case target of
+                AgentRoot -> pure ()
+                AgentChild agentId -> do
+                    session <-
+                        (Just <$>
+                            hydrateSelectedAgent agentId)
+                            `catchAny` \_ -> pure Nothing
+                    forM_ session \selectedSession -> do
+                        withMVar selectedSession.subSessionHydrated \_ ->
+                            writeIORef selectedSession.subSessionPinned True
+                        -- If settlement won the race before the pin was set,
+                        -- refill the same stable object now that it is pinned.
+                        void
+                            (hydrateSelectedAgent agentId)
+                            `catchAny` \_ -> pure ()
+            writeIORef selectedAgent target
+        releaseSelectedAgent = \case
+            AgentRoot -> pure ()
+            AgentChild agentId -> do
+                sessions <- readIORef subagentSessions
+                forM_ (Map.lookup agentId sessions) \session -> do
+                    withMVar session.subSessionHydrated \_ ->
+                        writeIORef session.subSessionPinned False
+                    case multiCtx of
+                        Nothing -> pure ()
+                        Just ctx -> do
+                            status <- getStatus ctx.multiRegistry agentId
+                            void $
+                                persistAndEvictSubagentSessionWithStatus
+                                    storeRoot ctx.multiRegistry agentTypes
+                                    agentId status session
         agentViewport = AgentViewportEnv
             { viewportSelected = selectedAgent
+            , viewportSelect = selectAgent
             , viewportEntries = snd <$> loadAgentSnapshot True
             }
     writeIORef startup.startupAgentSnapshot
         (loadAgentSnapshot False)
-    writeIORef startup.startupAgentSelect (writeIORef selectedAgent)
+    writeIORef startup.startupAgentSelect selectAgent
     let sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -2229,7 +2508,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             freshAgents <-
-                loadAgentsContext fullscreen options provider home cwd [] Nothing
+                loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames True freshAgents
@@ -2396,6 +2675,7 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
             , sessionCompact = compactRunner
             , sessionRender = render
             , sessionProvider = provider
+            , sessionDialect = dialect
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionPrevious = previous
@@ -2672,6 +2952,13 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         if exitAfter
             then pure RunQuit
             else continueAfterTurn env
+    TurnCancelled -> do
+        case env.sessionFullscreen of
+            Nothing -> putTrailingNewline env.sessionPrinted
+            Just _ -> pure ()
+        if exitAfter
+            then pure RunQuit
+            else repl env
     TurnFailed ->
         if exitAfter
             then exitFailure
@@ -2826,6 +3113,7 @@ replWithDraft env@SessionEnv
     , sessionCompact = compactRunner
     , sessionRender = render
     , sessionProvider = provider
+    , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
     , sessionPrevious = previous
     , sessionPrinted = printed
@@ -3013,6 +3301,7 @@ replWithDraft env@SessionEnv
                         (isNothing fullscreen)
                         images
                     syncFullscreenImagePreviews
+                    fullscreenEvent (UiSetNotice Nothing)
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted stdoutColor
@@ -3035,6 +3324,26 @@ replWithDraft env@SessionEnv
                                         (roleMuted stdoutColor
                                             (glyphOk <> message))
             continueWith keptDraft
+        ReplClipboardPasteOrText keptDraft pastedDraft -> do
+            imagesResult <- readClipboardImagesImageFirst
+            case nonEmptyClipboardImages imagesResult of
+                Just images -> do
+                    message <- queueAttachedImages
+                        attachmentsRef
+                        previewIdRef
+                        stdoutColor
+                        (isNothing fullscreen)
+                        images
+                    syncFullscreenImagePreviews
+                    fullscreenEvent (UiSetNotice Nothing)
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted stdoutColor
+                                (glyphOk <> message))
+                    continueWith keptDraft
+                Nothing -> do
+                    fullscreenEvent (UiSetNotice Nothing)
+                    continueWith pastedDraft
         ReplChooseModel keptDraft ->
             chooseModel keptDraft (continueWith keptDraft)
         ReplChooseEffort keptDraft ->
@@ -3279,7 +3588,7 @@ replWithDraft env@SessionEnv
                                     fullscreen color selected entries >>= \case
                                     Nothing -> pure ()
                                     Just target ->
-                                        writeIORef viewport.viewportSelected target
+                                        viewport.viewportSelect target
                                 continue
 
                     ReplCopyLast -> do
@@ -3338,12 +3647,35 @@ replWithDraft env@SessionEnv
                         chooseModel "" continue
                     ReplSetModel name -> do
                         color <- resolveColor stdout
-                        message <- applyModelChange
-                            projectRoot provider name paramsRef render previous persist
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphOk <> message))
-                        continue
+                        choice <-
+                            resolveModelOptionDialect ModelOption
+                                { modelProvider = provider
+                                , modelId = name
+                                , modelTransportId = name
+                                , modelDialect =
+                                    dialectIdForModel provider name
+                                , modelLabel = Nothing
+                                }
+                        if modelTargetRequiresRebuild
+                                provider (dialectId dialect) choice
+                            then
+                                requestModelTargetSwitch
+                                    fullscreen choice "" persist >>= \case
+                                    Left err -> do
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                        continue
+                                    Right result -> pure result
+                            else do
+                                message <- applyModelChange
+                                    projectRoot provider name
+                                    choice.modelTransportId choice.modelDialect
+                                    paramsRef render previous persist
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted color (glyphOk <> message))
+                                continue
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -3541,6 +3873,12 @@ replWithDraft env@SessionEnv
                                                     takeDirectory handle.sessionDir
                                                 , createProvider = provider
                                                 , createModel = model
+                                                , createTransportModel =
+                                                    fromMaybe
+                                                        model
+                                                        handle.sessionMeta.metaTransportModel
+                                                , createDialect =
+                                                    (dialectId dialect)
                                                 , createCwd =
                                                     handle.sessionMeta.metaCwd
                                                 , createEffort = effort
@@ -3606,6 +3944,29 @@ replWithDraft env@SessionEnv
                                                 (roleMuted color
                                                     (glyphSession <> message))
                         continue
+                    ReplWorktree -> do
+                        result <- withReplActivity "Creating worktree…" $
+                            createWorktree cwd (worktreeRoot env.sessionHome)
+                        case result of
+                            Left err -> do
+                                color <- resolveColor stderr
+                                displayError err $
+                                    putTextLn stderr (roleError color err)
+                                continue
+                            Right path -> do
+                                color <- resolveColor stderr
+                                params <- readIORef paramsRef
+                                let message = "worktree: " <> toText path
+                                displayInfo message $
+                                    putTextLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> message))
+                                pure
+                                    (RunSwitchWorktree
+                                        path
+                                        provider
+                                        (currentModel params)
+                                        (currentEffort params))
                     ReplRename title -> do
                         color <- resolveColor stderr
                         case persist of
@@ -3782,11 +4143,15 @@ replWithDraft env@SessionEnv
         color <- resolveColor stderr
         params <- readIORef paramsRef
         let current = currentModel params
-        modelChoice fullscreen color provider current >>= \case
+        modelChoice
+            fullscreen color provider current (dialectId dialect) >>= \case
             Nothing -> next
-            Just choice
-                | choice.modelProvider == provider
-                , choice.modelId == current -> do
+            Just rawChoice -> do
+                choice <- resolveModelOptionDialect rawChoice
+                if choice.modelProvider == provider
+                    && choice.modelId == current
+                    && choice.modelDialect == dialectId dialect
+                  then do
                     let message =
                             "model: "
                                 <> providerSlug provider
@@ -3797,16 +4162,21 @@ replWithDraft env@SessionEnv
                             (roleMuted color
                                 (glyphSession <> message))
                     next
-                | choice.modelProvider == provider -> do
+                  else if not
+                        (modelTargetRequiresRebuild
+                            provider (dialectId dialect) choice)
+                  then do
                     message <- applyModelChange
-                        projectRoot provider choice.modelId paramsRef render previous persist
+                        projectRoot provider choice.modelId
+                        choice.modelTransportId choice.modelDialect
+                        paramsRef render previous persist
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
                                 (glyphOk <> message))
                     next
-                | otherwise ->
-                    requestModelProviderSwitch
+                  else
+                    requestModelTargetSwitch
                         fullscreen choice keptDraft persist >>= \case
                         Left err -> do
                             displayError err $
@@ -3957,6 +4327,7 @@ replWithDraft env@SessionEnv
                                     fullscreen
                                     provider
                                     (currentModel params)
+                                    (dialectId dialect)
                                     selectedProvider
                                     selectedSelectionId
                                     selectedAccountId
@@ -4006,16 +4377,20 @@ modelChoice
     -> Bool
     -> Provider
     -> Text
+    -> DialectId
     -> IO (Maybe ModelOption)
-modelChoice fullscreen color provider current = case fullscreen of
-    Nothing -> pickModel color provider current
+modelChoice fullscreen color provider current currentDialect = case fullscreen of
+    Nothing -> pickModel color provider current currentDialect
     Just runtime -> do
-        let picker = initialPickerState provider current
-            options = picker.pickerAll
+        picker <-
+            initialPickerStateResolved provider current currentDialect
+        let options = picker.pickerAll
             rows =
                 [ ( providerSlug option.modelProvider
                         <> " · "
                         <> option.modelId
+                        <> " · "
+                        <> dialectSlug option.modelDialect
                   , fromMaybe "" option.modelLabel
                   )
                 | option <- options
@@ -4377,15 +4752,19 @@ applyModelChange
     :: OsPath
     -> Provider
     -> Text
+    -> Text
+    -> DialectId
     -> IORef ResponseCreateParams
     -> RenderConfig
     -> IORef (Maybe Text)
     -> Persistence
     -> IO Text
-applyModelChange projectRoot provider name paramsRef render previous persist = do
+applyModelChange
+        projectRoot provider name transportModel dialectId
+        paramsRef render previous persist = do
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
-    saveProjectModel projectRoot provider name
+    saveProjectModel projectRoot provider name transportModel dialectId
     clearedChain <- case provider of
         OpenAIProvider ->
             atomicModifyIORef' previous \prev ->
@@ -4398,9 +4777,17 @@ applyModelChange projectRoot provider name paramsRef render previous persist = d
             case slot of
                 PersistencePending pending ->
                     writeIORef slotRef
-                        (PersistencePending pending { createModel = name })
+                        (PersistencePending pending
+                            { createModel = name
+                            , createTransportModel = transportModel
+                            , createDialect = dialectId
+                            })
                 PersistenceActive handle -> do
-                    let meta = handle.sessionMeta { metaModel = name }
+                    let meta = handle.sessionMeta
+                            { metaModel = name
+                            , metaTransportModel = Just transportModel
+                            , metaDialect = dialectId
+                            }
                     writeSessionMeta handle.sessionMetaPath meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
@@ -4411,13 +4798,13 @@ applyModelChange projectRoot provider name paramsRef render previous persist = d
                 then " (conversation continued locally)"
                 else ""
 
-requestModelProviderSwitch
+requestModelTargetSwitch
     :: Maybe FullscreenRuntime
     -> ModelOption
     -> Text
     -> Persistence
     -> IO (Either Text RunResult)
-requestModelProviderSwitch fullscreen choice draft persist =
+requestModelTargetSwitch fullscreen choice draft persist =
     prepareProviderTransition
         ManualTransition [] Nothing draft choice persist >>= \case
             Left err -> pure (Left err)
@@ -4441,6 +4828,7 @@ requestAccountProviderSwitch
     :: Maybe FullscreenRuntime
     -> Provider
     -> Text
+    -> DialectId
     -> Provider
     -> Text
     -> Text
@@ -4451,16 +4839,25 @@ requestAccountProviderSwitch
     fullscreen
     currentProvider
     currentModelId
+    currentDialect
     selectedProvider
     selectionId
     accountId
     draft
     persist = do
-        let choice =
+        currentTransportModel <-
+            persistenceTransportModel currentModelId persist
+        let rawChoice =
                 accountSwitchTarget
                     currentProvider
                     currentModelId
+                    currentTransportModel
+                    currentDialect
                     selectedProvider
+        choice <-
+            if currentProvider == selectedProvider
+                then pure rawChoice
+                else resolveModelOptionDialect rawChoice
         validateSelectedAccountTarget
             selectedProvider
             selectionId
@@ -4504,16 +4901,49 @@ requestAccountProviderSwitch
                                     ("switching to " <> modelMessage)
                     pure (Right (RunSwitchProvider transition))
 
-accountSwitchTarget :: Provider -> Text -> Provider -> ModelOption
-accountSwitchTarget currentProvider currentModelId selectedProvider =
-    ModelOption
-        { modelProvider = selectedProvider
-        , modelId =
+accountSwitchTarget
+    :: Provider
+    -> Text
+    -> Text
+    -> DialectId
+    -> Provider
+    -> ModelOption
+accountSwitchTarget
+        currentProvider currentModelId currentTransportModel currentDialect
+        selectedProvider =
+    let targetModel =
             if currentProvider == selectedProvider
                 then currentModelId
                 else defaultModelFor selectedProvider
+        targetDialect =
+            if currentProvider == selectedProvider
+                then currentDialect
+                else dialectIdForModel selectedProvider targetModel
+        targetTransportModel =
+            if currentProvider == selectedProvider
+                then currentTransportModel
+                else targetModel
+    in
+    ModelOption
+        { modelProvider = selectedProvider
+        , modelId = targetModel
+        , modelTransportId = targetTransportModel
+        , modelDialect = targetDialect
         , modelLabel = Nothing
         }
+
+persistenceTransportModel :: Text -> Persistence -> IO Text
+persistenceTransportModel fallback = \case
+    PersistenceDisabled -> pure fallback
+    PersistenceEnabled slotRef ->
+        readIORef slotRef >>= \case
+            PersistencePending pending ->
+                pure pending.createTransportModel
+            PersistenceActive handle ->
+                pure $
+                    fromMaybe
+                        fallback
+                        handle.sessionMeta.metaTransportModel
 
 validateSelectedAccountTarget
     :: Provider
@@ -4623,7 +5053,8 @@ chooseAutomaticProviderTransition
 
     tryCandidates unavailable = \case
         [] -> pure Nothing
-        choice : rest ->
+        rawChoice : rest -> do
+            choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget sourceBilling choice >>= \case
                 Left err -> do
                     let message =
@@ -4683,7 +5114,8 @@ chooseStartupProviderTransition
 
     tryCandidates unavailable = \case
         [] -> pure Nothing
-        choice : rest ->
+        rawChoice : rest -> do
+            choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget sourceBilling choice >>= \case
                 Left err -> do
                     let message =
@@ -4725,7 +5157,8 @@ prepareProviderTransition
     -> ModelOption
     -> Persistence
     -> IO (Either Text ProviderTransition)
-prepareProviderTransition cause unavailable pending draft choice persist =
+prepareProviderTransition cause unavailable pending draft rawChoice persist = do
+    choice <- resolveModelOptionDialect rawChoice
     validateProviderTarget choice >>= \case
         Left err -> pure (Left err)
         Right () -> do
@@ -4765,7 +5198,17 @@ validateAutomaticProviderTarget sourceBilling choice =
 
 loadValidatedProviderTarget :: ModelOption -> IO (Either Text LoadedAuth)
 loadValidatedProviderTarget choice =
-    loadAuth (Just choice.modelProvider) >>= \case
+    if not
+        (providerSupportsDialect
+            choice.modelProvider
+            choice.modelDialect)
+    then
+        pure $ Left $
+            "dialect "
+                <> dialectSlug choice.modelDialect
+                <> " is incompatible with provider "
+                <> providerSlug choice.modelProvider
+    else loadAuth (Just choice.modelProvider) >>= \case
         Left err -> pure $ Left $
             "cannot switch to "
                 <> providerSlug choice.modelProvider
@@ -4808,6 +5251,8 @@ commitProviderTransition projectRoot (Just transition) persist = do
         projectRoot
         transition.transitionTarget.modelProvider
         transition.transitionTarget.modelId
+        transition.transitionTarget.modelTransportId
+        transition.transitionTarget.modelDialect
     case persist of
         PersistenceDisabled -> pure ()
         PersistenceEnabled slotRef -> do
@@ -4817,12 +5262,22 @@ commitProviderTransition projectRoot (Just transition) persist = do
                     writeIORef slotRef $ PersistencePending pending
                         { createProvider = transition.transitionTarget.modelProvider
                         , createModel = transition.transitionTarget.modelId
+                        , createTransportModel =
+                            transition.transitionTarget.modelTransportId
+                        , createDialect = transition.transitionTarget.modelDialect
                         }
                 PersistenceActive handle -> do
                     now <- getCurrentTime
-                    let meta = handle.sessionMeta
+                    let previousMeta = handle.sessionMeta
+                        meta = previousMeta
                             { metaProvider = transition.transitionTarget.modelProvider
                             , metaModel = transition.transitionTarget.modelId
+                            , metaTransportModel =
+                                Just transition.transitionTarget.modelTransportId
+                            , metaDialect = transition.transitionTarget.modelDialect
+                            , metaLegacySubagentTarget =
+                                Just
+                                    (sessionLegacySubagentTarget previousMeta)
                             , metaLastResponseId = Nothing
                             , metaUpdatedAt = now
                             }
@@ -5004,24 +5459,24 @@ enterPlanFromSlash env@SessionEnv
 loadAgentsContext
     :: Maybe FullscreenRuntime
     -> CliOptions
-    -> Provider
+    -> Dialect
     -> OsPath
     -> OsPath
     -> [ResponseItem]
     -> Maybe Text
     -> IO (IORef (Maybe Text))
-loadAgentsContext fullscreen options provider home cwd initialItems initialPrevious
+loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevious
     | not options.optAgentsMd = newIORef Nothing
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
     | otherwise = do
         let discoverOptions = DiscoverOptions
                 { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
-                , discoverGlobalDir = Just (globalAgentsHomeDir provider home)
+                , discoverGlobalDir = Just (globalAgentsHomeDir dialect home)
                 , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
                 }
         loaded <- discoverProjectInstructions discoverOptions cwd
         let files = loadedInstructionFiles loaded
-        case formatAgentsMdForProvider provider cwd loaded of
+        case formatAgentsMdForDialect dialect cwd loaded of
             Nothing -> newIORef Nothing
             Just text -> do
                 let message =

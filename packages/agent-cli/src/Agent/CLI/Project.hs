@@ -4,6 +4,7 @@ module Agent.CLI.Project
     , ProjectSettings(..)
     , defaultProjectSettings
     , loadProjectSettings
+    , projectDialectFor
     , projectModelFor
     , projectModelProvider
     , projectSettingsPath
@@ -13,9 +14,17 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.Dialect
+    ( DialectId
+    , dialectSlug
+    , legacyDialectIdForProvider
+    , parseDialect
+    , providerSupportsDialect
+    )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
+import Control.Monad (unless)
 import Data.Aeson
     ( FromJSON(..)
     , ToJSON(..)
@@ -56,6 +65,8 @@ projectSettingsPath projectRoot =
 data ProjectModel = ProjectModel
     { projectModelProvider :: !Provider
     , projectModelName :: !Text
+    , projectModelTransportName :: !(Maybe Text)
+    , projectModelDialect :: !DialectId
     } deriving (Eq, Show)
 
 data ProjectSettings = ProjectSettings
@@ -75,6 +86,8 @@ instance ToJSON ProjectModel where
     toJSON model = object
         [ "provider" .= providerSlug model.projectModelProvider
         , "model" .= model.projectModelName
+        , "transportModel" .= model.projectModelTransportName
+        , "dialect" .= dialectSlug model.projectModelDialect
         ]
 
 instance FromJSON ProjectModel where
@@ -84,11 +97,27 @@ instance FromJSON ProjectModel where
             Just parsed -> pure parsed
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
         model <- o .: "model"
+        transportModel <- o .:? "transportModel"
+        dialectText <- o .:? "dialect"
+        dialect <- case dialectText of
+            Nothing -> pure (legacyDialectIdForProvider provider)
+            Just text -> case parseDialect text of
+                Just parsed -> pure parsed
+                Nothing -> fail ("unknown dialect: " <> Text.unpack text)
+        unless (providerSupportsDialect provider dialect) $
+            fail
+                ( "dialect "
+                    <> Text.unpack (dialectSlug dialect)
+                    <> " is incompatible with provider "
+                    <> Text.unpack (providerSlug provider)
+                )
         if Text.null (Text.strip model)
             then fail "model must not be empty"
             else pure ProjectModel
                 { projectModelProvider = provider
                 , projectModelName = model
+                , projectModelTransportName = transportModel
+                , projectModelDialect = dialect
                 }
 
 instance ToJSON ProjectSettings where
@@ -146,13 +175,15 @@ saveProjectAutoApprove projectRoot autoApprove =
         settings { settingsAutoApprove = autoApprove }
 
 -- | Remember the most recently selected provider/model pair for this project.
-saveProjectModel :: OsPath -> Provider -> Text -> IO ()
-saveProjectModel projectRoot provider model =
+saveProjectModel :: OsPath -> Provider -> Text -> Text -> DialectId -> IO ()
+saveProjectModel projectRoot provider model transportModel dialect =
     updateProjectSettings projectRoot \settings ->
         settings
             { settingsLastModel = Just ProjectModel
                 { projectModelProvider = provider
                 , projectModelName = model
+                , projectModelTransportName = Just transportModel
+                , projectModelDialect = dialect
                 }
             }
 
@@ -166,6 +197,13 @@ projectModelFor provider settings = do
     remembered <- settings.settingsLastModel
     if remembered.projectModelProvider == provider
         then Just remembered.projectModelName
+        else Nothing
+
+projectDialectFor :: Provider -> ProjectSettings -> Maybe DialectId
+projectDialectFor provider settings = do
+    remembered <- settings.settingsLastModel
+    if remembered.projectModelProvider == provider
+        then Just remembered.projectModelDialect
         else Nothing
 
 updateProjectSettings

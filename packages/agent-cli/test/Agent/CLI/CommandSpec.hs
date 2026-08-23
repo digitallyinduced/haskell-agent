@@ -60,6 +60,12 @@ spec = do
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
+        it "starts a fresh session in a new worktree" do
+            parseReplLine "/worktree" `shouldBe` ReplWorktree
+            parseReplLine "  /Worktree  " `shouldBe` ReplWorktree
+            parseReplLine "/worktree now"
+                `shouldBe` ReplCommandError "usage: /worktree"
+
         it "renames sessions or restores automatic titles" do
             parseReplLine "/rename Fix auth races"
                 `shouldBe` ReplRename "Fix auth races"
@@ -202,6 +208,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "session"
+                    , "worktree"
                     , "rename"
                     , "login"
                     , "resume"
@@ -299,6 +306,7 @@ spec = do
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
             listing `shouldSatisfy` ("/usage" `isInfixOf`)
+            listing `shouldSatisfy` ("/worktree" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)

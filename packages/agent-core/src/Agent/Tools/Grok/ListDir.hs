@@ -27,7 +27,7 @@ instance FromJSON ListDirArgs where
 listDirTool :: ToolEnv -> AppTool
 listDirTool env = jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
-        "Path to directory to list contents of, relative to the workspace root or absolute."
+        "Path to a directory within the workspace. It may be relative to the workspace root or an absolute path that resolves within the workspace."
     ]
     True
     ParallelSafe
@@ -36,7 +36,7 @@ listDirTool env = jsonTool "list_dir" listDirDescription
 listDirDescription :: Text
 listDirDescription =
     "Lists files and directories in a given path.\n\
-    \The 'target_directory' parameter can be relative to the workspace root or absolute.\n\
+    \The 'target_directory' parameter can be relative to the workspace root or an absolute path within the workspace; paths outside the workspace are rejected.\n\
     \\n\
     \Other details:\n\
     \    - The result does not display dot-files and dot-directories.\n\

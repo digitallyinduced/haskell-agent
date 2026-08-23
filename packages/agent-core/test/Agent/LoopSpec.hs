@@ -22,6 +22,7 @@ import Control.Concurrent.MVar
     , takeMVar
     , tryReadMVar
     )
+import qualified Control.Exception as Exception
 import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Text (Text)
@@ -387,6 +388,35 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "turns synchronous backend exceptions into a failed turn" do
+        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+            Exception.throwIO (userError "backend exploded")
+        result <- runLoop config Nothing "hello"
+        result `shouldBe`
+            Left (LoopUnexpected "user error (backend exploded)")
+
+    it "turns synchronous approval exceptions into a failed turn" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopApprove = \_ ->
+                    Exception.throwIO (userError "approval exploded")
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe`
+            Left (LoopUnexpected "user error (approval exploded)")
+
+    it "does not turn asynchronous backend cancellation into a failed turn" do
+        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+            Exception.throwIO Exception.ThreadKilled
+        runLoop config Nothing "hello"
+            `shouldThrow` (== Exception.ThreadKilled)
+
     it "emits TurnStarted and TurnFinished around each backend submit" do
         events <- newIORef []
         submissions <- newIORef []
@@ -480,6 +510,56 @@ spec = describe "runLoop" do
             Left (LoopCancelled results) ->
                 results `shouldNotBe` []
             other -> expectationFailure ("expected LoopCancelled, got " <> show other)
+
+    it "does not render a rejected tool when approval cancels the turn" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            config = config0
+                { loopApprove = \_ -> do
+                    requestCancel cancel
+                    pure (Right False)
+                , loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        seen <- reverse <$> readIORef events
+        seen `shouldBe`
+            [ TurnStarted
+            , TurnFinished $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+
+    it "stops preparing a parallel batch after approval cancels" do
+        approvals <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "echo" "{\"message\":\"one\"}"
+                , functionToolCall "c2" "echo" "{\"message\":\"two\"}"
+                ]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            config = config0
+                { loopApprove = \call -> do
+                    modifyIORef' approvals (<> [call.callId])
+                    requestCancel cancel
+                    pure (Right False)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        readIORef approvals `shouldReturn` ["c1"]
 
     it "returns LoopCancelled when cancel arrives during submitTurn" do
         started <- newEmptyMVar

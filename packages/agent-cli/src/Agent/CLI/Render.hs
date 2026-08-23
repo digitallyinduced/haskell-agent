@@ -587,6 +587,7 @@ toolChrome name = case canonicalToolName name of
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
+    "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
     "task" -> ToolChrome "Ran" ToolDetailMuted
     "spawn_agent" -> ToolChrome "Spawned agent" ToolDetailMuted
@@ -686,6 +687,8 @@ formatLoopErrorPersistedAt now = \case
             <> maybe "" ("\n" <>) turn.assistantText
     LoopNoResponseId ->
         "Provider returned an incomplete response.\nRetry the message."
+    LoopUnexpected message ->
+        "Unexpected agent error: " <> message <> "\nRetry the message."
     LoopCancelled _ ->
         "Cancelled."
 
@@ -705,5 +708,11 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
             (glyphErr
                 <> "Provider returned an incomplete response.\n"
                 <> "Retry the message.")
+    LoopUnexpected message ->
+        roleError color
+            (glyphErr
+                <> "Unexpected agent error: "
+                <> message
+                <> "\nRetry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")

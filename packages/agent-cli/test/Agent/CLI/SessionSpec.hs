@@ -1,6 +1,8 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.SessionLock
+import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
@@ -8,6 +10,7 @@ import Agent.Provider (Provider(..))
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -101,6 +104,13 @@ spec = describe "Agent.CLI.Session" do
                         meta.metaId `shouldBe` handle.sessionMeta.metaId
                         meta.metaProvider `shouldBe` XAIProvider
                         meta.metaModel `shouldBe` "grok-4"
+                        meta.metaDialect `shouldBe` GrokBuildDialect
+                        meta.metaLegacySubagentTarget
+                            `shouldBe` Just LegacySubagentTarget
+                                { legacyTargetProvider = XAIProvider
+                                , legacyTargetEffectiveModel = "grok-4"
+                                , legacyTargetDialect = GrokBuildDialect
+                                }
                         meta.metaCwd `shouldBe` fromFilePath "/tmp/work"
                         case turns of
                             [loadedTurn] -> do
@@ -292,6 +302,97 @@ spec = describe "Agent.CLI.Session" do
                             , cachedTokens = 42
                             }
 
+        it "round-trips an explicit OpenRouter dialect" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession $
+                    (testCreate root)
+                        { createProvider = OpenRouterProvider
+                        , createModel = "openai/gpt-5.1"
+                        , createTransportModel = "openai/gpt-5.1"
+                        , createDialect = CodexDialect
+                        }
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, _) -> do
+                        meta.metaDialect `shouldBe` CodexDialect
+                        meta.metaTransportModel
+                            `shouldBe` Just "openai/gpt-5.1"
+
+        it "decodes legacy OpenRouter metadata with the old Grok dialect" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession $
+                    (testCreate root)
+                        { createProvider = OpenRouterProvider
+                        , createModel = "openai/gpt-5.1"
+                        , createTransportModel = "openai/gpt-5.1"
+                        , createDialect = CodexDialect
+                        }
+                rewriteMetaObject handle.sessionMetaPath $
+                    KeyMap.delete "legacySubagentTarget"
+                        . KeyMap.delete "transportModel"
+                        . KeyMap.delete "dialect"
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, _) -> do
+                        meta.metaDialect `shouldBe` GrokBuildDialect
+                        meta.metaTransportModel `shouldBe` Nothing
+                        meta.metaLegacySubagentTarget `shouldBe` Nothing
+                        sessionLegacySubagentTarget meta
+                            `shouldBe` LegacySubagentTarget
+                                { legacyTargetProvider = OpenRouterProvider
+                                , legacyTargetEffectiveModel =
+                                    "openai/gpt-5.1"
+                                , legacyTargetDialect = GrokBuildDialect
+                                }
+
+        it "keeps legacy child provenance after the root target changes" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession $
+                    (testCreate root)
+                        { createProvider = OpenRouterProvider
+                        , createModel = "openai/gpt-5.1"
+                        , createTransportModel = "openai/gpt-5.1"
+                        , createDialect = CodexDialect
+                        }
+                let legacyTarget =
+                        sessionLegacySubagentTarget handle.sessionMeta
+                    retargeted = handle.sessionMeta
+                        { metaModel = "x-ai/grok-4"
+                        , metaTransportModel = Just "x-ai/grok-4"
+                        , metaDialect = GrokBuildDialect
+                        , metaLegacySubagentTarget = Just legacyTarget
+                        }
+                writeSessionMeta handle.sessionMetaPath retargeted
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, _) -> do
+                        meta.metaDialect `shouldBe` GrokBuildDialect
+                        sessionLegacySubagentTarget meta
+                            `shouldBe` legacyTarget
+
+        it "rejects an explicit unknown session dialect" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                rewriteMetaObject handle.sessionMetaPath $
+                    KeyMap.insert "dialect" (Aeson.String "retired")
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err ->
+                        err `shouldSatisfy` Text.isInfixOf "unknown dialect"
+                    Right _ ->
+                        expectationFailure "expected dialect decode failure"
+
+        it "rejects a dialect incompatible with the persisted provider" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                rewriteMetaObject handle.sessionMetaPath $
+                    KeyMap.insert "dialect" (Aeson.String "codex")
+                loadSession root handle.sessionMeta.metaId >>= \case
+                    Left err ->
+                        err `shouldSatisfy` Text.isInfixOf "incompatible"
+                    Right _ ->
+                        expectationFailure
+                            "expected provider/dialect compatibility failure"
+
         it "rejects unsupported schema versions" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)
@@ -325,6 +426,21 @@ spec = describe "Agent.CLI.Session" do
                 doesDirectoryExist handle.sessionDir `shouldReturn` False
                 deleteSession root "../outside"
                     `shouldReturn` Left "invalid session id"
+
+        it "does not delete a session while another process owns its lock" $
+            withTempDir "agent-sessions-" \root -> do
+                handle <- createSession (testCreate root)
+                acquireSessionLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right lock -> do
+                            deleteSession root handle.sessionMeta.metaId
+                                `shouldReturn`
+                                    Left "cannot delete a running session"
+                            releaseSessionLock lock
+                            deleteSession root handle.sessionMeta.metaId
+                                `shouldReturn` Right ()
 
         it "rejects metadata whose id does not match its directory" $
             withTempDir "agent-sessions-" \root -> do
@@ -380,11 +496,29 @@ testCreate root = SessionCreate
     { createRoot = root
     , createProvider = XAIProvider
     , createModel = "grok-4"
+    , createTransportModel = "grok-4"
+    , createDialect = GrokBuildDialect
     , createCwd = fromFilePath "/tmp/work"
     , createEffort = "low"
     , createTitleHint = Nothing
     , createTitleIsManual = False
     }
+
+rewriteMetaObject
+    :: OsPath
+    -> (KeyMap.KeyMap Aeson.Value -> KeyMap.KeyMap Aeson.Value)
+    -> IO ()
+rewriteMetaObject path update = do
+    bytes <- LBS.readFile (toFilePath path)
+    case Aeson.eitherDecode' bytes of
+        Right (Aeson.Object object) ->
+            LBS.writeFile
+                (toFilePath path)
+                (Aeson.encode (Aeson.Object (update object)))
+        Right other ->
+            expectationFailure ("expected metadata object, got " <> show other)
+        Left err ->
+            expectationFailure ("failed to decode metadata: " <> err)
 
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 19) (secondsToDiffTime 0)

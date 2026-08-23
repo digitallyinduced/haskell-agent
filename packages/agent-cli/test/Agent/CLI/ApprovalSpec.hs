@@ -96,6 +96,98 @@ spec = do
                         `Text.isInfixOf` Text.toLower message
                 _ -> False
 
+        it "hard-denies dangerous commands through the public Grok shell alias" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            let call = functionToolCall
+                    "call-grok-shell"
+                    "run_terminal_command"
+                    "{\"command\":\"rm -rf /\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "Blocked dangerous shell command")
+                (const False)
+
+        it "rejects shell inspection in plan mode in favor of dedicated read tools" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let call = functionToolCall "call-shell" "shell_command"
+                    "{\"command\":\"rg -n plan packages | head -20\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
+        it "rejects the public Grok shell alias in plan mode" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let call = functionToolCall
+                    "call-grok-shell"
+                    "run_terminal_command"
+                    "{\"command\":\"git status\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
+        it "rejects shell writes in plan mode even under yolo" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            let call = functionToolCall "call-shell" "shell_command"
+                    "{\"command\":\"printf x > plan.md\"}"
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry []) plan call
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
+        it "auto-approves the path-locked write_plan tool" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            permissionRequests <- newIORef (0 :: Int)
+            let call = functionToolCall "call-write-plan" "write_plan"
+                    "{\"content\":\"# Plan\"}"
+            approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry [writePlanSafeTool]) plan call
+                `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 0
+
+        it "rejects every other mutating tool in plan mode even under yolo" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            result <- approveToolDecisionWithReporter
+                (\_ -> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry [mutatingTool]) plan mutatingCall
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+
         it "reports remembered tool approval through the callback" do
             policy <- newIORef PromptMutating
             allowed <- newIORef Set.empty
@@ -120,6 +212,32 @@ spec = do
             readIORef notices `shouldReturn`
                 [ApprovalSuccess "✓ always allow write this session"]
             readIORef allowed `shouldReturn` Set.singleton "write"
+
+        it "shares remembered approval across public and internal Grok aliases" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowTool)
+                publicCall = functionToolCall
+                    "call-public"
+                    "run_terminal_command"
+                    "{\"command\":\"git status\"}"
+                internalCall = functionToolCall
+                    "call-internal"
+                    "run_terminal_cmd"
+                    "{\"command\":\"git status\"}"
+                tools = registry [tool "run_terminal_cmd" AlwaysPrompt]
+            approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan publicCall
+                `shouldReturn` Right True
+            approveToolDecisionWithReporter
+                request (\_ -> pure ()) policy allowed tools plan internalCall
+                `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 1
+            readIORef allowed `shouldReturn` Set.singleton "run_terminal_cmd"
 
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do
@@ -175,6 +293,9 @@ dynamicTool = tool "dynamic" (ClassifyReadOnly (\call -> pure (call == dynamicRe
 
 namespacedReadOnlyTool :: AppTool
 namespacedReadOnlyTool = tool "list_agents" AlwaysReadOnly
+
+writePlanSafeTool :: AppTool
+writePlanSafeTool = tool "write_plan" AlwaysReadOnly
 
 tool :: Text -> ApprovalRule -> AppTool
 tool name approval =

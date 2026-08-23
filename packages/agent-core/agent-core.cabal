@@ -5,7 +5,7 @@ synopsis:           Provider-neutral infrastructure for the agent harness
 description:        Shared provider credentials, errors,
                     transport utilities, the agent loop, and JSON
                     tool-argument helpers.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
@@ -39,6 +39,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
+                    , Agent.Dialect
                     , Agent.Error
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
@@ -72,6 +73,7 @@ library
                     , Agent.Tools.Grok.Common
                     , Agent.Tools.Grok.Grep
                     , Agent.Tools.Grok.ListDir
+                    , Agent.Tools.Grok.Monitor
                     , Agent.Tools.Grok.Prompt
                     , Agent.Tools.Grok.ReadFile
                     , Agent.Tools.Grok.SearchReplace
@@ -79,6 +81,7 @@ library
                     , Agent.Tools.Grok.Task
                     , Agent.Tools.Grok.TaskControl
                     , Agent.Tools.Grok.Terminal
+                    , Agent.Tools.Grok.Todo
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
@@ -131,6 +134,7 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.DialectSpec
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec

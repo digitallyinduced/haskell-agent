@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Haskell SDK for the Claude Agent SDK stream protocol
 description:        Typed query and client APIs over the official Claude Code
                     CLI, following Anthropic's Claude Agent SDK architecture.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

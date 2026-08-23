@@ -3,8 +3,10 @@ module Agent.CLI.TUIImagePreviewSpec (spec) where
 import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
+    , imageDimensions
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , previewCountForWidth
     , previewCellSize
     , previewImageAt
     )
@@ -19,10 +21,35 @@ import Codec.Picture
     , pixelAt
     )
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import Test.Hspec
 
 spec :: Spec
-spec =
+spec = do
+    describe "imageDimensions" do
+        it "reads PNG dimensions without decoding image data" do
+            let headerOnlyPng = BS.pack
+                    [ 137, 80, 78, 71, 13, 10, 26, 10
+                    , 0, 0, 0, 13
+                    , 73, 72, 68, 82
+                    , 0, 0, 6, 64
+                    , 0, 0, 3, 132
+                    ]
+            imageDimensions "image/png" headerOnlyPng
+                `shouldBe` Right (1600, 900)
+
+        it "reads JPEG dimensions from the first start-of-frame marker" do
+            let jpegHeader = BS.pack
+                    [ 0xff, 0xd8
+                    , 0xff, 0xc0
+                    , 0x00, 0x11
+                    , 0x08
+                    , 0x01, 0x2c
+                    , 0x02, 0x80
+                    ]
+            imageDimensions "image/jpeg" jpegHeader
+                `shouldBe` Right (640, 300)
+
     describe "prepareTuiImagePreview" do
         it "decodes and samples an image into bounded terminal cells" do
             let source =
@@ -87,6 +114,35 @@ spec =
                         , nativePreviewAttachment = attachment
                         }
                     ]
+
+        it "keeps every native placement inside narrow terminal bounds" do
+            let attachment = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = ""
+                    }
+                preview = TuiImagePreview
+                    { previewMime = "image/png"
+                    , previewBytes = 0
+                    , previewSourceWidth = 1
+                    , previewSourceHeight = 1
+                    , previewSample =
+                        error "native preview bounds forced the ANSI sample"
+                    , previewKittyAttachment = attachment
+                    }
+                previews = replicate 3 (attachment, preview)
+            previewCountForWidth 1 `shouldBe` 1
+            previewCountForWidth 4 `shouldBe` 2
+            previewCountForWidth 7 `shouldBe` 3
+            mapM_
+                (\columns ->
+                    nativePreviewPlacements 100 columns 10 previews
+                        `shouldSatisfy` all
+                            (\placement ->
+                                placement.nativePreviewColumn >= 0
+                                    && placement.nativePreviewColumn
+                                        + placement.nativePreviewColumns
+                                        <= columns))
+                [1 .. 12]
 
         it "preserves thin screenshot details while downsampling" do
             let source =

@@ -1,8 +1,10 @@
 -- | Fullscreen prompt composer rendering, editing, and input buffering.
 module Agent.CLI.TUI.Composer
-    ( activateSlashAt
+    ( ComposerEscapeAction(..)
+    , activateSlashAt
     , appendFullscreenInput
     , applyComposerUiEvent
+    , composerEscapeAction
     , controlAttr
     , controlInteractionAttr
     , decodePaste
@@ -24,10 +26,6 @@ module Agent.CLI.TUI.Composer
     , wrapDraft
     ) where
 
-import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
-    , readClipboardImages
-    )
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
@@ -65,7 +63,6 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
-import Data.Foldable (toList)
 import Data.List (elemIndex, intersperse)
 import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq, ViewL(..), ViewR(..))
@@ -141,6 +138,7 @@ isPromptPrelude :: FullscreenInput -> Bool
 isPromptPrelude input =
     case input.fullscreenInputLine of
         ReplClipboardPaste _ _ -> True
+        ReplClipboardPasteOrText _ _ -> True
         _ -> False
 
 takeFullscreenInput
@@ -203,9 +201,9 @@ drawSlashRow selected index suggestion =
 
 drawQueuedInputs :: UiState -> Widget Name
 drawQueuedInputs state =
-    case toList state.uiQueuedInputs of
-        [] -> emptyWidget
-        next : _ ->
+    case Seq.viewl state.uiQueuedInputs of
+        EmptyL -> emptyWidget
+        next :< _ ->
             padLeftRight 2 $
                 vLimit 1 $
                     hBox
@@ -341,12 +339,6 @@ controlInteractionAttr state name
         Just Theme.controlLinkHoverAttr
     | otherwise =
         Nothing
-
-modeAttr :: Text -> AttrName
-modeAttr mode = case Text.toLower mode of
-    "yolo" -> Theme.thinkingAttr
-    "plan" -> Theme.headingAttr
-    _ -> Theme.linkAttr
 
 renderDraft :: Bool -> Int -> UiState -> Widget Name
 renderDraft focused height state =
@@ -493,7 +485,7 @@ draftCursorLocation text cursor =
 drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
     hBox $
-        intersperse (txt " · ") $
+        intersperse (withAttr Theme.mutedAttr (txt " · ")) $
             modelAndEffort
                 <> [ modeControl
                    | not (Text.null mode)
@@ -515,7 +507,7 @@ drawComposerStatus state =
     effortControl =
         clickable ComposerEffort $
             forceAttr
-                (controlAttr state ComposerEffort Theme.assistantAttr)
+                (controlAttr state ComposerEffort Theme.controlLinkAttr)
                 (txt ("(" <> prompt.promptEffort <> ")"))
     modelAndEffort
         | Text.null prompt.promptModel = []
@@ -524,7 +516,7 @@ drawComposerStatus state =
     modeControl =
         clickable ComposerMode $
             forceAttr
-                (controlAttr state ComposerMode (modeAttr mode))
+                (controlAttr state ComposerMode Theme.controlLinkAttr)
                 (txt mode)
     accountControl =
         clickable ComposerAccount $
@@ -594,6 +586,7 @@ handleEffortControlClick applyUiEvent = do
                                 "Changing effort will restart the current turn."
                             , choiceIndex = initial
                             , choiceRows = [(effort, "") | effort <- efforts]
+                            , choiceCloseOnTurnEnd = True
                             }
                         , appChoiceReply = Just choose
                         }
@@ -686,11 +679,16 @@ handleComposerKey
         V.EvKey (V.KChar 'c') [V.MCtrl] ->
             void handleCtrlC
         V.EvKey V.KEsc [] ->
-            case slashMenu of
-                Just _ ->
+            case composerEscapeAction
+                ui.uiAwaitingInput
+                (maybe False (const True) slashMenu) of
+                EscapeCancelTurn ->
+                    cancelOrClear
+                EscapeDismissSlashMenu ->
                     modify' \current ->
                         current { appSlashDismissed = True }
-                Nothing -> cancelOrClear
+                EscapeClearDraft ->
+                    cancelOrClear
         V.EvKey V.KBackTab []
             | ui.uiAwaitingInput ->
                 submitRaw (ReplCycleMode ui.uiDraft)
@@ -710,7 +708,7 @@ handleComposerKey
             case slashMenu of
                 Just menu -> acceptSlash menu
                 Nothing ->
-                    when (not (null (toList ui.uiBlocks))) $
+                    when (not (Seq.null ui.uiBlocks)) $
                         modifyUi (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter [V.MShift] ->
             insertText "\n"
@@ -780,15 +778,15 @@ handleComposerKey
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
-            images <- liftIO $
-                nonEmptyClipboardImages <$> readClipboardImages
-            case images of
-                Just attached ->
-                    submitRaw
-                        (ReplClipboardPaste ui.uiDraft (Just attached))
-                Nothing -> do
-                    insertText (decodePaste bytes)
-                    modify' \current -> current { appPasted = True }
+            let pasted = decodePaste bytes
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            modifyUi
+                (UiSetNotice
+                    (Just (progressNotice "Reading clipboard…")))
+            submitRaw
+                (ReplClipboardPasteOrText ui.uiDraft pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do
@@ -1096,6 +1094,20 @@ currentSlashMenu state
             state.appSkillCommands
             state.appUi.uiDraft
             state.appUi.uiCursor
+
+data ComposerEscapeAction
+    = EscapeCancelTurn
+    | EscapeDismissSlashMenu
+    | EscapeClearDraft
+    deriving (Eq, Show)
+
+-- | During a running turn Esc keeps its advertised cancellation meaning,
+-- even when the next-message draft happens to open the slash menu.
+composerEscapeAction :: Bool -> Bool -> ComposerEscapeAction
+composerEscapeAction awaitingInput hasSlashMenu
+    | not awaitingInput = EscapeCancelTurn
+    | hasSlashMenu = EscapeDismissSlashMenu
+    | otherwise = EscapeClearDraft
 
 selectedSlashSuggestion
     :: AppState

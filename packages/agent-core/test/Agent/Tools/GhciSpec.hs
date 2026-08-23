@@ -1,9 +1,9 @@
 module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Cancel (requestCancel, resetCancel)
+import Agent.Dialect (codexDialect)
 import Agent.Loop (defaultLoopDispatch)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
 import Agent.ToolDispatch (ToolCallResult(..), dispatchToolCall, functionToolCall)
 import Agent.Tools (CodingTools(..), appToolHandlers, codingToolsFor, defaultToolEnv)
 import Agent.Tools.Ghci
@@ -235,7 +235,7 @@ spec = describe "Agent.Tools.Ghci" do
 
     it "is registered for OpenAI via codingToolsFor" do
         withTempEnv \env -> do
-            coding <- codingToolsFor OpenAIProvider env Nothing Nothing
+            coding <- codingToolsFor codexDialect env Nothing Nothing
             map (.appToolName) coding.codingAppTools `shouldContain` ["run_ghci"]
             coding.codingClose
 

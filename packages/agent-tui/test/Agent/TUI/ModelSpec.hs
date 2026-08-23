@@ -73,6 +73,27 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` Just
                 (progressNotice "Restarting current turn…")
 
+    it "clears a cancellation progress notice when the turn ends" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetNotice (Just (progressNotice "Cancelling…"))
+                    , UiTurnEnded BlockCancelled
+                    ]
+        state.uiRunning `shouldBe` False
+        state.uiActivity `shouldBe` "Ready"
+        state.uiNotice `shouldBe` Nothing
+
+    it "preserves a transient notice when the turn ends" do
+        let notice = warningNotice "Connection recovered"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetNotice (Just notice)
+                    , UiTurnEnded BlockFailed
+                    ]
+        state.uiNotice `shouldBe` Just notice
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
@@ -102,6 +123,18 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
                 block.blockTitle `shouldBe` "Continued session 3"
+            _ -> expectationFailure "expected one running shell block"
+
+    it "renders the public Grok terminal alias as a shell block" do
+        let call = functionToolCall
+                "c1"
+                "run_terminal_command"
+                "{\"command\":\"git status\"}"
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ git status"
             _ -> expectationFailure "expected one running shell block"
 
     it "applies tool output snapshots only to the matching running block" do

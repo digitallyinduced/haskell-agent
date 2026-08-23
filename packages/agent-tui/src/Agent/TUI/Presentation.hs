@@ -18,8 +18,8 @@ import Agent.ToolDispatch
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Foldable as Foldable
-import Data.Maybe (fromMaybe)
+import Data.Foldable (toList)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -112,6 +112,7 @@ toolVerb name = case canonicalToolName name of
     "write_stdin" -> "Continued"
     "run_ghci" -> "$"
     "get_task_output" -> "Read"
+    "wait_tasks" -> "Waited"
     "kill_task" -> "Killed"
     "task" -> "Ran"
     "spawn_agent" -> "Spawned agent"
@@ -141,7 +142,7 @@ toolDetail call = case canonicalToolName call.name of
     "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
-    "ask_user_question" -> firstLine (jsonTextFieldDefault "question" call.arguments)
+    "ask_user_question" -> askUserQuestionDetail call.arguments
     "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
     "send_message" -> jsonTextFieldDefault "target" call.arguments
     "followup_task" -> jsonTextFieldDefault "target" call.arguments
@@ -167,21 +168,17 @@ formatAgentList :: Text -> Maybe Text
 formatAgentList output = do
     Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
     Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
-    let rows = foldr agentRow [] (Foldable.toList agents)
+    let rows = mapMaybe formatAgentRow (toList agents)
     pure $ case rows of
         [] -> "(no live agents)"
         _ -> Text.intercalate "\n" rows
-  where
-    agentRow value rest = case value of
-        Aeson.Object agent ->
-            case
-                ( jsonObjectText "agent_name" agent
-                , jsonObjectText "agent_status" agent
-                ) of
-                (Just name, Just status) -> (name <> " · " <> status) : rest
-                (Just name, Nothing) -> name : rest
-                _ -> rest
-        _ -> rest
+
+formatAgentRow :: Aeson.Value -> Maybe Text
+formatAgentRow (Aeson.Object agent) = do
+    name <- jsonObjectText "agent_name" agent
+    pure $ maybe name (\status -> name <> " · " <> status)
+        (jsonObjectText "agent_status" agent)
+formatAgentRow _ = Nothing
 
 jsonObjectText :: Text -> Aeson.Object -> Maybe Text
 jsonObjectText key object =
@@ -203,3 +200,17 @@ firstPatchPath patch =
 
 firstLine :: Text -> Text
 firstLine = Text.takeWhile (/= '\n')
+
+askUserQuestionDetail :: Text -> Text
+askUserQuestionDetail arguments =
+    case firstLine (jsonTextFieldDefault "question" arguments) of
+        legacy | not (Text.null legacy) -> legacy
+        _ -> fromMaybe "" do
+            Aeson.Object object <-
+                Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
+            Aeson.Array questions <- KeyMap.lookup "questions" object
+            Aeson.Object questionObject <- case toList questions of
+                question : _ -> Just question
+                [] -> Nothing
+            Aeson.String question <- KeyMap.lookup "question" questionObject
+            pure (firstLine question)

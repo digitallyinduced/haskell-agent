@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Claude Code subscription adapter for Agent.Loop
 description:        Subscription authentication and Agent.Loop translation
                     built on claude-agent-sdk-haskell.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

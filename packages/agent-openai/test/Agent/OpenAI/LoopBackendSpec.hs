@@ -198,10 +198,32 @@ spec = do
             streamEventToLoopEvent (deltaEvent EventReasoningSummaryTextDelta "sum")
                 `shouldBe` Just (ReasoningDelta "sum")
 
+        it "surfaces unknown provider events as visible activity warnings" do
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown "response.future.done"
+                    , sequenceNumber = Just 42
+                    , eventExtraFields = KeyMap.empty
+                    })
+                `shouldBe`
+                    Just
+                        (ActivityUpdated
+                            "Warning: unsupported provider event response.future.done")
+
         it "ignores empty deltas and unrelated events" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "")
                 `shouldBe` Nothing
             streamEventToLoopEvent (deltaEvent EventOutputTextDone "done")
+                `shouldBe` Nothing
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType = EventCodexResponseMetadata
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.singleton
+                        "metadata"
+                        (Aeson.object ["request_id" Aeson..= ("req-1" :: Text)])
+                    })
                 `shouldBe` Nothing
             streamEventToLoopEvent (ResponseOutputItemDoneEvent
                 { item = assistantItem "x"

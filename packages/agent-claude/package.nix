@@ -17,5 +17,5 @@ mkDerivation {
     directory filepath hspec safe-exceptions text unix
   ];
   description = "Claude Code subscription adapter for Agent.Loop";
-  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }

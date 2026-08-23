@@ -15,5 +15,5 @@ mkDerivation {
     safe-exceptions scientific text unix
   ];
   description = "Haskell SDK for the Claude Agent SDK stream protocol";
-  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }

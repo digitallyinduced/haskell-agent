@@ -81,8 +81,6 @@ grepTool env = jsonTool "grep" grepDescription
         "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries."
     , PropertySchema "multiline" PropertyBoolean False $ Just
         "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall)."
-    , PropertySchema "output_mode" PropertyString False $ Just
-        "content (default), files_with_matches, or count."
     ]
     True
     ParallelSafe
@@ -125,7 +123,7 @@ runRipgrep rgPath path args = do
             GrepCount -> ["--count"]
         rgArgs = concat
             [ modeFlags
-            , ["--color=never", "--max-columns", "1000"]
+            , ["--no-config", "--color=never", "--max-columns", "1000"]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before
             , maybe [] (\n -> ["-A", show n]) args.after

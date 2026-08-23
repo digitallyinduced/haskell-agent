@@ -1399,6 +1399,7 @@ data StreamEventType
     = EventResponseCreated
     | EventResponseInProgress
     | EventResponseCompleted
+    | EventResponseDone
     | EventResponseFailed
     | EventResponseIncomplete
     | EventOutputItemAdded
@@ -1454,6 +1455,7 @@ data StreamEventType
     | EventShellCommandDone
     | EventShellOutputDelta
     | EventShellOutputDone
+    | EventCodexResponseMetadata
     | StreamEventUnknown !Text
     deriving stock (Eq, Show)
 
@@ -1462,6 +1464,7 @@ streamEventTypeText = \case
     EventResponseCreated -> "response.created"
     EventResponseInProgress -> "response.in_progress"
     EventResponseCompleted -> "response.completed"
+    EventResponseDone -> "response.done"
     EventResponseFailed -> "response.failed"
     EventResponseIncomplete -> "response.incomplete"
     EventOutputItemAdded -> "response.output_item.added"
@@ -1517,6 +1520,7 @@ streamEventTypeText = \case
     EventShellCommandDone -> "response.shell_call_command.done"
     EventShellOutputDelta -> "response.shell_call_output_content.delta"
     EventShellOutputDone -> "response.shell_call_output_content.done"
+    EventCodexResponseMetadata -> "codex.response.metadata"
     StreamEventUnknown value -> value
 
 parseStreamEventType :: Text -> StreamEventType
@@ -1524,6 +1528,7 @@ parseStreamEventType value = case value of
     "response.created" -> EventResponseCreated
     "response.in_progress" -> EventResponseInProgress
     "response.completed" -> EventResponseCompleted
+    "response.done" -> EventResponseDone
     "response.failed" -> EventResponseFailed
     "response.incomplete" -> EventResponseIncomplete
     "response.output_item.added" -> EventOutputItemAdded
@@ -1579,6 +1584,7 @@ parseStreamEventType value = case value of
     "response.shell_call_command.done" -> EventShellCommandDone
     "response.shell_call_output_content.delta" -> EventShellOutputDelta
     "response.shell_call_output_content.done" -> EventShellOutputDone
+    "codex.response.metadata" -> EventCodexResponseMetadata
     other -> StreamEventUnknown other
 
 -- | Structured payload used by both the documented top-level @error@ event
@@ -1632,6 +1638,11 @@ data ResponseStreamEvent
         , sequenceNumber   :: !(Maybe Int)
         , eventExtraFields :: !Aeson.Object
         }
+    | ResponseDoneEvent
+        { responseValue    :: !Aeson.Value
+        , sequenceNumber   :: !(Maybe Int)
+        , eventExtraFields :: !Aeson.Object
+        }
     | ResponseFailedEvent
         { response         :: !Response
         , sequenceNumber   :: !(Maybe Int)
@@ -1681,6 +1692,7 @@ responseStreamEventType = \case
     ResponseCreatedEvent{} -> EventResponseCreated
     ResponseInProgressEvent{} -> EventResponseInProgress
     ResponseCompletedEvent{} -> EventResponseCompleted
+    ResponseDoneEvent{} -> EventResponseDone
     ResponseFailedEvent{} -> EventResponseFailed
     ResponseIncompleteEvent{} -> EventResponseIncomplete
     ResponseQueuedEvent{} -> EventResponseQueued
@@ -1701,6 +1713,12 @@ instance ToJSON ResponseStreamEvent where
             lifecycleEvent "response.in_progress" response sequenceNumber eventExtraFields
         ResponseCompletedEvent { response, sequenceNumber, eventExtraFields } ->
             lifecycleEvent "response.completed" response sequenceNumber eventExtraFields
+        ResponseDoneEvent { responseValue, sequenceNumber, eventExtraFields } ->
+            objectWith eventExtraFields
+                [ Just (field "type" ("response.done" :: Text))
+                , optionalField "sequence_number" sequenceNumber
+                , Just (field "response" responseValue)
+                ]
         ResponseFailedEvent { response, sequenceNumber, eventExtraFields } ->
             lifecycleEvent "response.failed" response sequenceNumber eventExtraFields
         ResponseIncompleteEvent { response, sequenceNumber, eventExtraFields } ->
@@ -1754,6 +1772,10 @@ instance FromJSON ResponseStreamEvent where
             EventResponseCreated -> lifecycle ResponseCreatedEvent sequenceNumber o
             EventResponseInProgress -> lifecycle ResponseInProgressEvent sequenceNumber o
             EventResponseCompleted -> lifecycle ResponseCompletedEvent sequenceNumber o
+            EventResponseDone -> ResponseDoneEvent
+                <$> o .: "response"
+                <*> pure sequenceNumber
+                <*> pure (without ["type", "sequence_number", "response"] o)
             EventResponseFailed -> lifecycle ResponseFailedEvent sequenceNumber o
             EventResponseIncomplete -> lifecycle ResponseIncompleteEvent sequenceNumber o
             EventResponseQueued -> lifecycle ResponseQueuedEvent sequenceNumber o

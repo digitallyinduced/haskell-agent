@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Command-line interface for the universal agent harness
 description:        Command-line interface for a model-independent coding and
                     digital-work agent harness.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
@@ -77,6 +77,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
@@ -114,6 +115,7 @@ library
                     , colour >= 2.3
                     , containers
                     , directory
+                    , filelock
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , JuicyPixels
@@ -139,6 +141,20 @@ executable agent-cli
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+
+benchmark subagent-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SubagentRetention.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-responses
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , containers
+                    , text
 
 test-suite agent-cli-test
     import:           common-options
@@ -185,6 +201,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.TextLayoutSpec
+                    , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec
@@ -207,6 +224,7 @@ test-suite agent-cli-test
                     , agent-xai
                     , aeson
                     , ansi-terminal
+                    , async
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , bytestring
@@ -225,3 +243,15 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+
+benchmark image-preview-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ImagePreviewLatency.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-cli
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , JuicyPixels

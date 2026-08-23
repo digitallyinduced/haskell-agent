@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Syntax highlighting for the universal agent harness
 description:        Renderer-independent syntax loading, language resolution,
                     tokenization, and semantic token classes.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

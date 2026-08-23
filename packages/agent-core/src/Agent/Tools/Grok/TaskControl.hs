@@ -1,5 +1,6 @@
 module Agent.Tools.Grok.TaskControl
     ( getTaskOutputTool
+    , waitTasksTool
     , killTaskTool
     ) where
 
@@ -27,6 +28,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     )
 import Control.Applicative ((<|>))
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently)
 import Data.Aeson (FromJSON(..))
 import Data.List (nub)
@@ -34,6 +36,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
 
 data TaskOutputArgs = TaskOutputArgs
     { taskIds :: [Text]
@@ -67,7 +70,7 @@ getTaskOutputDescription :: Text
 getTaskOutputDescription =
     "Get output and status from a background task or subagent.\n\n\
     \Usage notes:\n\
-    \- Pass task_ids with one or more ids from background=true commands or run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
+    \- Pass task_ids with one or more ids from background=true commands or subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
     \- Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at 600000 (~10 min)\n\
     \- Returns current output and status."
 
@@ -187,6 +190,105 @@ formatAgentWait taskId timedOut mstatus = case mstatus of
     Nothing ->
         "Unknown task_id: " <> taskId
 
+data WaitMode
+    = WaitAny
+    | WaitAll
+
+data WaitTasksArgs = WaitTasksArgs
+    { waitTaskIds :: ![Text]
+    , waitMode :: !WaitMode
+    , waitTimeoutMs :: !(Maybe Int)
+    }
+
+instance FromJSON WaitTasksArgs where
+    parseJSON = objectArgs \object -> do
+        waitTaskIds <- reqTextList object "task_ids"
+        mode <- reqText object "mode"
+        waitMode <- case Text.toLower (Text.strip mode) of
+            "wait_any" -> pure WaitAny
+            "wait_all" -> pure WaitAll
+            _ -> fail "mode must be wait_any or wait_all"
+        waitTimeoutMs <- optInt object "timeout_ms"
+        pure WaitTasksArgs{..}
+
+waitTasksTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
+waitTasksTool session multi =
+    jsonTool "wait_tasks" waitTasksDescription
+        [ PropertySchema "task_ids" (PropertyArray PropertyString) True $ Just
+            "Task IDs to wait for."
+        , PropertySchema "mode"
+            (PropertyEnum ["wait_any", "wait_all"])
+            True
+            (Just "Wait mode: wait_any returns when the first task completes; wait_all waits for every task.")
+        , PropertySchema "timeout_ms" PropertyInteger False $ Just
+            "Maximum wait time in milliseconds, capped at 600000."
+        ]
+        True
+        TurnSequential
+        (typedTool "wait_tasks" (runWaitTasks session multi))
+
+waitTasksDescription :: Text
+waitTasksDescription =
+    "Wait for multiple background commands or subagents to complete.\n\n\
+    \Prefer get_command_or_subagent_output with a positive timeout_ms when you also need current output."
+
+runWaitTasks
+    :: GrokSession
+    -> Maybe MultiAgentContext
+    -> WaitTasksArgs
+    -> IO (Either Text Text)
+runWaitTasks session multi args
+    | null taskIds = pure (Left "Provide a non-empty task_ids list.")
+    | length taskIds > maxTaskOutputIds =
+        pure $ Left $
+            "task_ids exceeds maximum of "
+                <> Text.pack (show maxTaskOutputIds)
+                <> " entries."
+    | otherwise = do
+        started <- getCurrentTime
+        waitLoop started
+  where
+    taskIds =
+        nub
+            [ stripped
+            | taskId <- args.waitTaskIds
+            , let stripped = Text.strip taskId
+            , not (Text.null stripped)
+            ]
+    timeoutMs = min maxTaskOutputWaitMs
+        (max 1 (fromMaybe maxTaskOutputWaitMs args.waitTimeoutMs))
+    waitLoop started = do
+        entries <- mapConcurrently
+            (runOneTaskOutput session multi Nothing)
+            taskIds
+        let completed = length (filter (.terminal) entries)
+            satisfied = case args.waitMode of
+                WaitAny -> completed > 0
+                WaitAll -> completed == length entries
+        now <- getCurrentTime
+        let elapsedMs =
+                floor (realToFrac (diffUTCTime now started) * (1000 :: Double))
+        if satisfied || elapsedMs >= timeoutMs
+            then pure $ Right $ formatWaitResult args.waitMode completed entries
+            else threadDelay 50000 >> waitLoop started
+
+formatWaitResult :: WaitMode -> Int -> [TaskOutputEntry] -> Text
+formatWaitResult mode completed entries =
+    Text.intercalate "\n"
+        [ entry.taskOutputId
+            <> ": "
+            <> if entry.terminal then "completed" else "running"
+        | entry <- entries
+        ]
+        <> "\n\n"
+        <> Text.pack (show completed)
+        <> "/"
+        <> Text.pack (show (length entries))
+        <> " tasks completed ("
+        <> case mode of
+            WaitAny -> "wait_any)"
+            WaitAll -> "wait_all)"
+
 newtype KillTaskArgs = KillTaskArgs { taskId :: Text }
 
 instance FromJSON KillTaskArgs where
@@ -195,7 +297,7 @@ instance FromJSON KillTaskArgs where
 killTaskTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
 killTaskTool session multi = jsonTool "kill_task" killTaskDescription
     [ PropertySchema "task_id" PropertyString True $ Just
-        "The task id from a background run_terminal_cmd or the subagent_id from task."
+        "The task ID from a background `run_terminal_cmd` call or the subagent ID from `task`."
     ]
     False
     TurnSequential

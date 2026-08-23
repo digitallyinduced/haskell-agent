@@ -185,6 +185,27 @@ spec = describe "Agent.Tools.MultiAgents" do
         atomically (writeTVar parentGate True)
         closeSubagentRegistry registry
 
+    it "accepts non-object input for optional-only collaboration tools" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "child"))
+            (\_ _ -> pure ())
+        Right _ <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "child"
+                (plainInterAgentContent "child") Nothing
+        let handlers =
+                appToolHandlers (multiAgentTools (rootContext registry Nothing))
+        listed <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "list-empty" "collaboration.list_agents" ""
+                FunctionCallKind False)
+        listed.output `shouldNotSatisfy`
+            Text.isInfixOf "Expected object input"
+        waited <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "wait-array" "collaboration.wait_agent" "[]"
+                FunctionCallKind False)
+        waited.output `shouldNotSatisfy`
+            Text.isInfixOf "Expected object input"
+        closeSubagentRegistry registry
+
     it "propagates restore failures from message tools" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (Left LoopNoResponseId))

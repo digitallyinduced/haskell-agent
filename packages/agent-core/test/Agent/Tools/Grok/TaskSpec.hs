@@ -10,6 +10,7 @@ import Agent.ToolDispatch
     , functionToolCall
     , noArgsTool
     )
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.Grok.Task
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), SubagentWorktree(..))
@@ -18,10 +19,12 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
+    , jsonToolParameters
     )
 import Control.Concurrent.MVar
 import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -30,6 +33,31 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.Grok.Task" do
+    it "advertises the public task contract without contradicting defaults" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) Nothing Nothing Nothing Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+            parameters = fromMaybe [] (jsonToolParameters tool)
+        let isolationTypes =
+                [ property.propertyType
+                | property <- parameters
+                , property.propertyName == "isolation"
+                ]
+        isolationTypes `shouldBe` [PropertyEnum ["none", "worktree"]]
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "get_command_or_subagent_output"
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "prior spawn_subagent call"
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "subagent_type defaults to general-purpose"
+        tool.appToolDescription `shouldNotSatisfy`
+            Text.isInfixOf "must specify a subagent_type"
+        closeSubagentRegistry registry
+
     it "defaults run_in_background and spawns a background agent" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult
@@ -64,6 +92,39 @@ spec = describe "Agent.Tools.Grok.Task" do
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" raceArgs)
         takeMVar observed `shouldReturn` (Just "explore", Just "grok-4.5-mini")
+        closeSubagentRegistry registry
+
+    it "updates an agent type without discarding its overrides" do
+        specsRef <- newIORef Map.empty
+        let agentId = SubagentId "agent-1"
+        recordAgentSpec specsRef agentId GrokSubagentSpec
+            { agentType = "explore"
+            , modelOverride = Just "grok-4.5-mini"
+            , reasoningEffortOverride = Just "high"
+            }
+        recordAgentType specsRef agentId "plan"
+        lookupAgentType specsRef agentId `shouldReturn` Just "plan"
+        lookupAgentModel specsRef agentId
+            `shouldReturn` Just "grok-4.5-mini"
+        lookupAgentReasoningEffort specsRef agentId
+            `shouldReturn` Just "high"
+
+    it "propagates restore failures for resume_from" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        let restore _ =
+                pure (Left "persisted subagent dialect is incompatible")
+            ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+                (pure Nothing) (Just restore) Nothing Nothing Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
+            (functionToolCall "c1" "task"
+                "{\"prompt\":\"continue\",\"description\":\"resume\",\
+                \\"resume_from\":\"agent-old\",\"subagent_type\":\"explore\"}")
+        result.output `shouldSatisfy`
+            Text.isInfixOf "persisted subagent dialect is incompatible"
         closeSubagentRegistry registry
 
     it "filters explore tools to the Grok Build read-only set" do
