@@ -66,6 +66,21 @@ spec = describe "Agent.Tools.Grok.Task" do
         takeMVar observed `shouldReturn` (Just "explore", Just "grok-4.5-mini")
         closeSubagentRegistry registry
 
+    it "updates an agent type without discarding its overrides" do
+        specsRef <- newIORef Map.empty
+        let agentId = SubagentId "agent-1"
+        recordAgentSpec specsRef agentId GrokSubagentSpec
+            { agentType = "explore"
+            , modelOverride = Just "grok-4.5-mini"
+            , reasoningEffortOverride = Just "high"
+            }
+        recordAgentType specsRef agentId "plan"
+        lookupAgentType specsRef agentId `shouldReturn` Just "plan"
+        lookupAgentModel specsRef agentId
+            `shouldReturn` Just "grok-4.5-mini"
+        lookupAgentReasoningEffort specsRef agentId
+            `shouldReturn` Just "high"
+
     it "filters explore tools to the Grok Build read-only set" do
         let tools =
                 [ fake "read_file"
