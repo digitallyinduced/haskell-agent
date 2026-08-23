@@ -70,11 +70,15 @@ data BackgroundTask = BackgroundTask
     , backgroundResource :: !ResourceKey
     }
 
+data BackgroundTaskStore = BackgroundTaskStore
+    { backgroundNextId :: !Int
+    , backgroundTasks :: !(Map Text BackgroundTask)
+    }
+
 data GrokSession = GrokSession
     { grokEnv :: !ToolEnv
     , grokShell :: !(MVar PersistentShell)
-    , grokTasks :: !(MVar (Map Text BackgroundTask))
-    , grokNextId :: !(IORef Int)
+    , grokTasks :: !(MVar BackgroundTaskStore)
     , grokTodos :: !(IORef (Map Text (Text, Text)))
     , grokResources :: !ResourceScope
     }
@@ -88,14 +92,15 @@ newGrokSession env = do
             { shellCwd = env.toolCwd
             , shellEnvFile = envFile
             }
-        tasks <- newMVar Map.empty
-        nextId <- newIORef 0
+        tasks <- newMVar BackgroundTaskStore
+            { backgroundNextId = 0
+            , backgroundTasks = Map.empty
+            }
         todos <- newIORef Map.empty
         pure GrokSession
             { grokEnv = env
             , grokShell = shell
             , grokTasks = tasks
-            , grokNextId = nextId
             , grokTodos = todos
             , grokResources = resources
             }
@@ -123,7 +128,8 @@ newGrokSession env = do
 -- Call this when the CLI/session ends, including after exceptions.
 closeGrokSession :: GrokSession -> IO ()
 closeGrokSession session = do
-    modifyMVar_ session.grokTasks (const (pure Map.empty))
+    modifyMVar_ session.grokTasks \store ->
+        pure store { backgroundTasks = Map.empty }
     closeResourceScope session.grokResources
 
 runForegroundStreaming
@@ -169,14 +175,23 @@ startBackgroundCommand session command = do
         Left exception ->
             pure (Left (Text.pack (show exception)))
         Right (resource, running) -> do
-            taskId <- nextTaskId session
-            let task = BackgroundTask
-                    { backgroundId = taskId
-                    , backgroundRunning = running
-                    , backgroundResource = resource
-                    }
-            modifyMVar_ session.grokTasks
-                (\tasks -> pure (Map.insert taskId task tasks))
+            taskId <-
+                (modifyMVar session.grokTasks \store -> do
+                    let next = store.backgroundNextId + 1
+                        taskId = "t" <> Text.pack (show next)
+                        task = BackgroundTask
+                            { backgroundId = taskId
+                            , backgroundRunning = running
+                            , backgroundResource = resource
+                            }
+                    pure
+                        ( store
+                            { backgroundNextId = next
+                            , backgroundTasks =
+                                Map.insert taskId task store.backgroundTasks
+                            }
+                        , taskId
+                        ))
                 `onException` releaseResource resource
             pure $ Right $
                 "Command moved to background.\n\
@@ -185,8 +200,8 @@ startBackgroundCommand session command = do
 
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
 readTaskOutput session taskId timeoutMs = do
-    tasks <- readMVar session.grokTasks
-    case Map.lookup taskId tasks of
+    store <- readMVar session.grokTasks
+    case Map.lookup taskId store.backgroundTasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
         Just task -> do
             case timeoutMs of
@@ -242,17 +257,13 @@ snapshotTask task =
 
 killTask :: GrokSession -> Text -> IO Text
 killTask session taskId = do
-    tasks <- readMVar session.grokTasks
-    case Map.lookup taskId tasks of
+    store <- readMVar session.grokTasks
+    case Map.lookup taskId store.backgroundTasks of
         Nothing -> pure $ "Unknown task_id: " <> taskId
         Just task -> do
             releaseResource task.backgroundResource
             result <- readMVar task.backgroundRunning.runningResult
             pure $ "killed " <> taskId <> "\n" <> formatCommandResult result
-
-nextTaskId :: GrokSession -> IO Text
-nextTaskId session = atomicModifyIORef' session.grokNextId \n ->
-    (n + 1, "t" <> Text.pack (show (n + 1)))
 
 -- | Run the persist wrapper under bash so `export -p` dumps (`declare -x`)
 -- can be sourced on the next call.
