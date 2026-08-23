@@ -12,6 +12,7 @@ module Agent.ProjectInstructions
     , defaultProjectDocMaxBytes
     , discoverProjectInstructions
     , loadedInstructionFiles
+    , nonEmptyInstructionContent
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
@@ -58,6 +59,11 @@ data LoadedAgentsMd = LoadedAgentsMd
 loadedInstructionFiles :: LoadedAgentsMd -> [InstructionFile]
 loadedInstructionFiles loaded =
     maybe id (:) loaded.loadedGlobal loaded.loadedProject
+
+nonEmptyInstructionContent :: InstructionFile -> Maybe Text
+nonEmptyInstructionContent file
+    | Text.null (Text.strip file.instructionContent) = Nothing
+    | otherwise = Just file.instructionContent
 
 data DiscoverOptions = DiscoverOptions
     { discoverMaxBytes :: !Int
