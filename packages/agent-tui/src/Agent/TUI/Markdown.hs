@@ -609,12 +609,12 @@ parseInline = go Nothing []
     go previous plain text
         | Just (body, rest) <- delimited "**" text =
             flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
+                strongSpans body
+                    <> go (lastChar body) [] rest
         | Just (body, rest) <- delimited "__" text =
             flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
+                strongSpans body
+                    <> go (lastChar body) [] rest
         | Just (body, rest) <- codeSpan text =
             flushPlain plain $
                 InlineSpan InlineCode body
@@ -696,6 +696,16 @@ parseInline = go Nothing []
 
     lastChar value =
         snd <$> Text.unsnoc value
+
+    -- Semantic inline styles such as code and links must override the
+    -- surrounding strong marker. Only otherwise-plain text inherits bold.
+    strongSpans body =
+        map
+            (\span ->
+                case span.inlineStyle of
+                    InlinePlain -> span { inlineStyle = InlineStrong }
+                    _ -> span)
+            (parseInline body)
 
     inlineMarker character =
         character `elem` ("*_`[" :: String)

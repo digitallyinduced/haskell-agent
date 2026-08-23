@@ -12,9 +12,10 @@ import Brick
     , txt
     , viewport
     )
+import Brick.AttrMap (attrMapLookup)
 import Control.Monad (forM_)
 import Data.Foldable (toList)
-import Data.List (findIndex, isInfixOf)
+import Data.List (find, findIndex, isInfixOf)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -53,6 +54,39 @@ spec = describe "fullscreen Markdown rendering" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
         spans `shouldContain` [InlineSpan InlineCode "a ` b"]
+
+    it "lets inline code override surrounding strong text" do
+        let input =
+                "Yes—**for this repository, hardcoding \
+                \`state = [ResponseItem]` would be simpler.**"
+        parseInline input
+            `shouldBe`
+                [ InlineSpan InlinePlain "Yes—"
+                , InlineSpan InlineStrong
+                    "for this repository, hardcoding "
+                , InlineSpan InlineCode "state = [ResponseItem]"
+                , InlineSpan InlineStrong " would be simpler."
+                ]
+
+        let region = (80, 3)
+            widget :: Widget ()
+            widget = markdownWidget input
+            spans =
+                concatMap toList $
+                    toList $
+                        displayOpsForPic
+                            (renderWidget
+                                (Just Theme.solarizedDark)
+                                [widget]
+                                region)
+                            region
+            codeSpan = find (hasText "state = [ResponseItem]") spans
+        fmap spanAttr codeSpan
+            `shouldBe`
+                Just
+                    (attrMapLookup
+                        Theme.inlineCodeAttr
+                        Theme.solarizedDark)
 
     it "leaves unmatched delimiters visible" do
         inlinePlainText (parseInline "unfinished **bold")
@@ -497,6 +531,19 @@ hasUrl url = \case
         V.attrURL textSpanAttr == V.SetTo url
     Skip _ -> False
     RowEnd _ -> False
+
+hasText :: Text.Text -> SpanOp -> Bool
+hasText expected = \case
+    TextSpan{textSpanText} ->
+        LazyText.toStrict textSpanText == expected
+    Skip _ -> False
+    RowEnd _ -> False
+
+spanAttr :: SpanOp -> V.Attr
+spanAttr = \case
+    TextSpan{textSpanAttr} -> textSpanAttr
+    Skip _ -> V.defAttr
+    RowEnd _ -> V.defAttr
 
 expectFirstRow :: [Text.Text] -> (Text.Text -> Expectation) -> Expectation
 expectFirstRow rows assertion =
