@@ -56,6 +56,15 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.State.Strict
+    ( StateT
+    , get
+    , gets
+    , modify'
+    , put
+    , runStateT
+    )
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.IORef
@@ -133,39 +142,45 @@ data GhciSessionState
     | GhciRunning !GhciProcess
     | GhciClosed
 
+data GhciRuntimeState = GhciRuntimeState
+    { runtimeSessionState :: !GhciSessionState
+    , runtimeNextMarker :: !Int
+    , runtimeClassificationCache :: !(Maybe (Text, GhciClass))
+    }
+
 data GhciSession = GhciSession
     { ghciEnv :: !ToolEnv
-    , ghciLock :: !(MVar ())
-    , ghciState :: !(IORef GhciSessionState)
-    , ghciNextMarker :: !(IORef Int)
+    , ghciRuntime :: !(MVar GhciRuntimeState)
     , ghciMarkerSeed :: !Text
-    , ghciClassificationCache :: !(IORef (Maybe (Text, GhciClass)))
     }
+
+type GhciRuntime = StateT GhciRuntimeState IO
 
 newGhciSession :: ToolEnv -> IO GhciSession
 newGhciSession env = do
-    lock <- newMVar ()
-    state <- newIORef GhciNotStarted
-    nextMarkerRef <- newIORef 0
+    runtime <- newMVar GhciRuntimeState
+        { runtimeSessionState = GhciNotStarted
+        , runtimeNextMarker = 0
+        , runtimeClassificationCache = Nothing
+        }
     seed <- Text.pack . show <$> getMonotonicTimeNSec
-    classificationCache <- newIORef Nothing
     pure GhciSession
         { ghciEnv = env
-        , ghciLock = lock
-        , ghciState = state
-        , ghciNextMarker = nextMarkerRef
+        , ghciRuntime = runtime
         , ghciMarkerSeed = seed
-        , ghciClassificationCache = classificationCache
         }
 
 closeGhciSession :: GhciSession -> IO ()
 closeGhciSession session =
-    withGhciLock session do
-        current <- atomicModifyIORef' session.ghciState \state ->
-            (GhciClosed, state)
-        writeIORef session.ghciClassificationCache Nothing
+    withGhciRuntime session do
+        current <- gets (.runtimeSessionState)
+        modify' \runtime -> runtime
+            { runtimeSessionState = GhciClosed
+            , runtimeClassificationCache = Nothing
+            }
         case current of
-            GhciRunning process -> shutdownProcess process
+            GhciRunning process ->
+                liftIO (shutdownProcessBestEffort process)
             GhciNotStarted -> pure ()
             GhciClosed -> pure ()
 
@@ -173,16 +188,17 @@ closeGhciSession session =
 -- The timeout is an overall budget for classification and execution.
 evalGhci :: GhciSession -> Text -> Int -> IO GhciResult
 evalGhci session expression requestedTimeout =
-    withGhciLock session do
+    withGhciRuntime session do
         let timeoutMs = normalizeTimeout requestedTimeout
-        started <- getMonotonicTimeNSec
-        cached <- readIORef session.ghciClassificationCache
+        started <- liftIO getMonotonicTimeNSec
+        cached <- gets (.runtimeClassificationCache)
         classification <- case cached of
             Just (cachedExpression, cls)
                 | cachedExpression == expression -> pure cls
             _ -> classifyGhciLocked session expression (min 15000 timeoutMs)
-        writeIORef session.ghciClassificationCache Nothing
-        remaining <- remainingMillis started timeoutMs
+        modify' \runtime ->
+            runtime { runtimeClassificationCache = Nothing }
+        remaining <- liftIO (remainingMillis started timeoutMs)
         if remaining <= 0
             then pure $ emptyResult GhciTimedOut classification
                 "Timed out while classifying the GHCi input."
@@ -193,17 +209,21 @@ evalGhci session expression requestedTimeout =
 -- | Classify without evaluating. Fail closed on ambiguity.
 classifyGhci :: GhciSession -> Text -> IO GhciClass
 classifyGhci session expression =
-    withGhciLock session do
+    withGhciRuntime session do
         classification <- classifyGhciLocked session expression 15000
-        writeIORef session.ghciClassificationCache
-            (Just (expression, classification))
+        modify' \runtime -> runtime
+            { runtimeClassificationCache =
+                Just (expression, classification)
+            }
         pure classification
 
-withGhciLock :: GhciSession -> IO a -> IO a
-withGhciLock session action =
-    withMVar session.ghciLock (const action)
+withGhciRuntime :: GhciSession -> GhciRuntime a -> IO a
+withGhciRuntime session action =
+    modifyMVar session.ghciRuntime \runtime -> do
+        (result, updated) <- runStateT action runtime
+        pure (updated, result)
 
-classifyGhciLocked :: GhciSession -> Text -> Int -> IO GhciClass
+classifyGhciLocked :: GhciSession -> Text -> Int -> GhciRuntime GhciClass
 classifyGhciLocked session expression timeoutMs =
     case classifyGhciInput expression of
         Just cls -> pure cls
@@ -216,10 +236,10 @@ classifyGhciLocked session expression timeoutMs =
                         then pure GhciEffectful
                         else pure GhciPure
 
-evalRawGhci :: GhciSession -> Text -> Int -> IO GhciResult
+evalRawGhci :: GhciSession -> Text -> Int -> GhciRuntime GhciResult
 evalRawGhci session expression requestedTimeout = do
     let timeoutMs = normalizeTimeout requestedTimeout
-    cancelled <- isCancelled session.ghciEnv.toolCancel
+    cancelled <- liftIO (isCancelled session.ghciEnv.toolCancel)
     if cancelled
         then pure $ emptyResult GhciCancelled GhciEffectful "GHCi evaluation cancelled."
         else prepareProcess session >>= \case
@@ -227,7 +247,7 @@ evalRawGhci session expression requestedTimeout = do
                 pure $ emptyResult GhciProcessFailed GhciEffectful err
             Right (process, restartedBefore) -> do
                 marker <- nextMarker session
-                sent <- try @_ @SomeException do
+                sent <- liftIO $ try @_ @SomeException do
                     sendGhciInput process expression
                     sendMarker process marker
                 case sent of
@@ -239,7 +259,7 @@ evalRawGhci session expression requestedTimeout = do
                                     restartedBefore || restarted
                                 }
                     Right () -> do
-                        awaited <- awaitMarker
+                        awaited <- liftIO $ awaitMarker
                             (Just session.ghciEnv.toolCancel)
                             session.ghciEnv.toolStdoutCap
                             process
@@ -248,13 +268,15 @@ evalRawGhci session expression requestedTimeout = do
                         finishAwaited
                             session process restartedBefore awaited
 
-prepareProcess :: GhciSession -> IO (Either Text (GhciProcess, Bool))
+prepareProcess
+    :: GhciSession
+    -> GhciRuntime (Either Text (GhciProcess, Bool))
 prepareProcess session = do
     ensured <- ensureProcess session
     case ensured of
         Left err -> pure (Left err)
         Right process -> do
-            flushed <- flushEvents process
+            flushed <- liftIO (flushEvents process)
             if flushed
                 then pure (Right (process, False))
                 else do
@@ -274,7 +296,7 @@ finishAwaited
     -> GhciProcess
     -> Bool
     -> Awaited
-    -> IO GhciResult
+    -> GhciRuntime GhciResult
 finishAwaited session process restartedBefore awaited =
     case awaited.awaitReason of
         AwaitMarkers ->
@@ -289,7 +311,7 @@ finishAwaited session process restartedBefore awaited =
                 { ghciOk = False }
   where
     recover outcome = do
-        interruptGhciProcess process
+        liftIO (interruptGhciProcess process)
         recovered <-
             if awaited.awaitOutput.capturedTruncated
                 then pure False
@@ -301,20 +323,23 @@ finishAwaited session process restartedBefore awaited =
             (restartedBefore || restarted))
             { ghciOk = False }
 
-recoverAfterInterrupt :: GhciSession -> GhciProcess -> IO Bool
+recoverAfterInterrupt
+    :: GhciSession
+    -> GhciProcess
+    -> GhciRuntime Bool
 recoverAfterInterrupt session process = do
-    flushed <- flushEvents process
+    flushed <- liftIO (flushEvents process)
     if not flushed
         then pure False
         else do
             marker <- nextMarker session
-            sent <- try @_ @SomeException do
+            sent <- liftIO $ try @_ @SomeException do
                 sendLine process ":type ()"
                 sendMarker process marker
             case sent of
                 Left _ -> pure False
                 Right () -> do
-                    awaited <- awaitMarker Nothing
+                    awaited <- liftIO $ awaitMarker Nothing
                         session.ghciEnv.toolStdoutCap process marker 5000
                     pure (awaited.awaitReason == AwaitMarkers)
 
@@ -374,9 +399,11 @@ isGhciError stderr =
         in "*** Exception:" `Text.isPrefixOf` stripped
             || (": error:" `Text.isInfixOf` stripped)
 
-nextMarker :: GhciSession -> IO Text
+nextMarker :: GhciSession -> GhciRuntime Text
 nextMarker session = do
-    n <- atomicModifyIORef' session.ghciNextMarker \i -> (i + 1, i + 1)
+    runtime <- get
+    let n = runtime.runtimeNextMarker + 1
+    put runtime { runtimeNextMarker = n }
     pure $
         "{- AGENT_GHCI_DONE:"
             <> session.ghciMarkerSeed
@@ -384,77 +411,87 @@ nextMarker session = do
             <> Text.pack (show n)
             <> " -}"
 
-ensureProcess :: GhciSession -> IO (Either Text GhciProcess)
+ensureProcess :: GhciSession -> GhciRuntime (Either Text GhciProcess)
 ensureProcess session =
-    readIORef session.ghciState >>= \case
+    gets (.runtimeSessionState) >>= \case
         GhciClosed -> pure (Left "GHCi session is closed.")
         GhciNotStarted -> startProcess session
         GhciRunning process -> do
-            exited <- getProcessExitCode process.ghciHandle
+            exited <- liftIO (getProcessExitCode process.ghciHandle)
             case exited of
                 Nothing -> pure (Right process)
                 Just _ -> do
-                    shutdownProcess process
-                    writeIORef session.ghciState GhciNotStarted
+                    liftIO (shutdownProcessBestEffort process)
+                    modify' \runtime ->
+                        runtime { runtimeSessionState = GhciNotStarted }
                     startProcess session
 
-startProcess :: GhciSession -> IO (Either Text GhciProcess)
+startProcess :: GhciSession -> GhciRuntime (Either Text GhciProcess)
 startProcess session = mask \restore ->
-    spawnProcess session.ghciEnv >>= \case
+    liftIO (spawnProcess session.ghciEnv) >>= \case
         Left err -> pure (Left err)
         Right process ->
             restore (initialize process)
-                `onException` shutdownProcess process
+                `onException` liftIO (shutdownProcessBestEffort process)
   where
     initialize process = do
-        flushed <- flushEvents process
+        flushed <- liftIO (flushEvents process)
         if not flushed
             then do
-                shutdownProcess process
+                liftIO (shutdownProcessBestEffort process)
                 pure $ Left
                     "GHCi produced excessive output during startup."
             else do
                 marker <- nextMarker session
-                sent <- try @_ @SomeException (sendMarker process marker)
+                sent <- liftIO $
+                    try @_ @SomeException (sendMarker process marker)
                 case sent of
                     Left err -> do
-                        shutdownProcess process
+                        liftIO (shutdownProcessBestEffort process)
                         pure $ Left
                             ("Failed to initialize GHCi: "
                                 <> Text.pack (show err))
                     Right () -> do
-                        awaited <- awaitMarker Nothing
+                        awaited <- liftIO $ awaitMarker Nothing
                             session.ghciEnv.toolStdoutCap process marker 5000
                         if awaited.awaitReason == AwaitMarkers
                             && not
                                 (isGhciError
                                     awaited.awaitOutput.capturedStderr)
                             then do
-                                writeIORef session.ghciState
-                                    (GhciRunning process)
+                                modify' \runtime -> runtime
+                                    { runtimeSessionState =
+                                        GhciRunning process
+                                    }
                                 pure (Right process)
                             else do
-                                shutdownProcess process
+                                liftIO (shutdownProcessBestEffort process)
                                 pure $ Left $
                                     "GHCi failed its startup handshake.\n"
                                         <> combineOutput
                                             awaited.awaitOutput.capturedStdout
                                             awaited.awaitOutput.capturedStderr
 
-restartProcess :: GhciSession -> IO Bool
+restartProcess :: GhciSession -> GhciRuntime Bool
 restartProcess session = do
-    current <- atomicModifyIORef' session.ghciState \state ->
-        (case state of
+    current <- gets (.runtimeSessionState)
+    stopped <- case current of
+        GhciRunning process -> liftIO $
+            either (const False) (const True)
+                <$> try @_ @SomeException (shutdownProcess process)
+        GhciNotStarted -> pure True
+        GhciClosed -> pure False
+    modify' \runtime -> runtime
+        { runtimeSessionState = case current of
             GhciClosed -> GhciClosed
-            _ -> GhciNotStarted, state)
-    case current of
-        GhciRunning process -> shutdownProcess process
-        GhciNotStarted -> pure ()
-        GhciClosed -> pure ()
-    writeIORef session.ghciClassificationCache Nothing
+            _ -> GhciNotStarted
+        , runtimeClassificationCache = Nothing
+        }
     case current of
         GhciClosed -> pure False
-        _ -> either (const False) (const True) <$> startProcess session
+        _ | stopped ->
+            either (const False) (const True) <$> startProcess session
+        _ -> pure False
 
 ghciArgs :: [String]
 ghciArgs =
@@ -553,6 +590,10 @@ shutdownProcess process = do
         , process.ghciStderrHandle
         ]
     stopDrains [process.ghciStdoutDrain, process.ghciStderrDrain]
+
+shutdownProcessBestEffort :: GhciProcess -> IO ()
+shutdownProcessBestEffort process =
+    void $ try @_ @SomeException (shutdownProcess process)
 
 stopDrains :: [Async ()] -> IO ()
 stopDrains drains = do
