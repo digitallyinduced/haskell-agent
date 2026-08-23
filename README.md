@@ -75,6 +75,19 @@ Start an interactive session:
 agent-cli
 ```
 
+`run_ghci` is the primary execution and scripting tool and is enabled by
+default. Enable the provider's explicit shell tool when needed:
+
+```console
+agent-cli --bash
+```
+
+For bash-only operation, disable GHCi explicitly:
+
+```console
+agent-cli --no-ghci --bash
+```
+
 Run a one-shot task:
 
 ```console

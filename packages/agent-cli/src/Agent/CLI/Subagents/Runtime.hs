@@ -26,7 +26,6 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( sessionTempGuidance
-    , systemPrompt
     , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams)
@@ -41,7 +40,9 @@ import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
+    , filterBashTools
     , filterChildGrokTools
+    , filterGhciTools
     )
 import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
@@ -566,10 +567,18 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     coding.codingPlanMode
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
-                    let baseInstructions =
+                    let codingTools =
+                            filterGhciTools runtime.subagentOptions.optGhci $
+                                filterBashTools
+                                    runtime.subagentOptions.optBash
+                                    coding.codingAppTools
+                        tools =
+                            codingTools <> runtime.subagentMcpTools
+                        baseInstructions =
                             fromMaybe
-                                (systemPrompt
+                                (systemPromptForTools
                                     codexDialect
+                                    (map (.appToolName) tools)
                                     env.subCwd
                                     sessionTmp
                                     today
@@ -581,9 +590,6 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
-                        tools =
-                            coding.codingAppTools
-                                <> runtime.subagentMcpTools
                         childParams = requestParams model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -675,22 +681,26 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                     today <- utctDay <$> getCurrentTime
                     shellPath <-
                         Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
-                    let codingTools = case
+                    let childTools = case
                                 dialectChildAgentProtocol childDialect of
-                            CodexCollaborationProtocol ->
-                                coding.codingAppTools
+                            CodexCollaborationProtocol -> coding.codingAppTools
                             GrokTaskProtocol ->
-                                filterChildGrokTools
-                                    agentType coding.codingAppTools
+                                filterChildGrokTools agentType coding.codingAppTools
                             GenericTaskProtocol ->
-                                filterChildGrokTools
-                                    agentType coding.codingAppTools
-                        tools = codingTools <> runtime.subagentMcpTools
+                                filterChildGrokTools agentType coding.codingAppTools
+                        codingTools =
+                            filterGhciTools runtime.subagentOptions.optGhci $
+                                filterBashTools
+                                    runtime.subagentOptions.optBash
+                                    childTools
+                        tools =
+                            codingTools <> runtime.subagentMcpTools
                         baseInstructions =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
-                                    systemPrompt
+                                    systemPromptForTools
                                         childDialect
+                                        (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
                                         today

@@ -163,6 +163,25 @@ executable agent-telegram
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
+executable eval-ghci-vs-bash
+    import:           common-options
+    hs-source-dirs:   eval
+    main-is:          GhciVsBash.hs
+    ghc-options:      -threaded -rtsopts
+    build-depends:    agent-cli
+                    , agent-responses
+                    , aeson >= 2.0
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
+
 benchmark subagent-retention-bench
     import:           common-options
     type:             exitcode-stdio-1.0

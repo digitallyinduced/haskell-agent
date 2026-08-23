@@ -2,7 +2,9 @@ module Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , codingToolsForWithTypes
+    , filterBashTools
     , filterChildGrokTools
+    , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     ) where
@@ -39,7 +41,7 @@ import Agent.Tools.Secret
     , closeSecretStore
     , newSecretStore
     )
-import Agent.Tools.Types (AppTool, ToolEnv)
+import Agent.Tools.Types (AppTool(..), ToolEnv)
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -105,6 +107,16 @@ codingToolsForWithTypes
 
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
 filterChildGrokTools = filterGrokToolsForType
+
+filterBashTools :: Bool -> [AppTool] -> [AppTool]
+filterBashTools True = id
+filterBashTools False = filter \tool ->
+    tool.appToolName `notElem`
+        ["shell_command", "write_stdin", "run_terminal_cmd"]
+
+filterGhciTools :: Bool -> [AppTool] -> [AppTool]
+filterGhciTools True = id
+filterGhciTools False = filter ((/= "run_ghci") . (.appToolName))
 
 formatAgentsMdForDialect :: Dialect -> OsPath -> LoadedAgentsMd -> Maybe Text
 formatAgentsMdForDialect dialect cwd loaded =

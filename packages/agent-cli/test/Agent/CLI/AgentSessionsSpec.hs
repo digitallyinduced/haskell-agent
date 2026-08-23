@@ -136,9 +136,9 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                first <- launchSessionTurn manager True ApproveAll handle "one"
+                first <- launchSessionTurn manager True ApproveAll True False handle "one"
                 first `shouldSatisfy` either (const False) (const True)
-                second <- launchSessionTurn manager True ApproveAll handle "two"
+                second <- launchSessionTurn manager True ApproveAll True False handle "two"
                 second `shouldSatisfy` \case
                     Left err -> "already running" `Text.isInfixOf` err
                     Right _ -> False
@@ -146,6 +146,44 @@ spec = describe "Agent.CLI.AgentSessions" do
                     manager
                     handle.sessionMeta.metaId
                     "completed"
+                closeSessionProcessManager manager
+
+    it "forwards bash enablement to managed session turns" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let argsPath = toFilePath root FilePath.</> "agent-args"
+            script <- writeFakeAgentBody root
+                ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                launched <-
+                    launchSessionTurn manager True ApproveAll True True handle "one"
+                launched `shouldSatisfy` either (const False) (const True)
+                waitForSessionStatus
+                    manager
+                    handle.sessionMeta.metaId
+                    "completed"
+                args <- lines <$> readFile argsPath
+                args `shouldContain` ["--bash"]
+                closeSessionProcessManager manager
+
+    it "forwards ghci disablement to managed session turns" $
+        withTempDir "agent-session-runtime-" \root -> do
+            let argsPath = toFilePath root FilePath.</> "agent-args"
+            script <- writeFakeAgentBody root
+                ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                launched <-
+                    launchSessionTurn manager True ApproveAll False True handle "one"
+                launched `shouldSatisfy` either (const False) (const True)
+                waitForSessionStatus
+                    manager
+                    handle.sessionMeta.metaId
+                    "completed"
+                args <- lines <$> readFile argsPath
+                args `shouldContain` ["--no-ghci", "--bash"]
                 closeSessionProcessManager manager
 
     it "keeps an advisory lock until its owner releases it" $
@@ -216,7 +254,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                launchSessionTurn manager True ApproveAll handle "one"
+                launchSessionTurn manager True ApproveAll True False handle "one"
                     `shouldReturn` Left "could not acquire lock"
                 closeSessionProcessManager manager
 
@@ -241,7 +279,8 @@ spec = describe "Agent.CLI.AgentSessions" do
                     \_ -> do
                         handle <- createSession (testCreateAt root root)
                         manager <- newSessionProcessManager root
-                        launchSessionTurn manager False ApproveAll handle "one"
+                        launchSessionTurn
+                            manager False ApproveAll True False handle "one"
                             `shouldReturn`
                                 Right
                                     ("completed session "
@@ -257,7 +296,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
-                _ <- launchSessionTurn manager True ApproveAll handle "one"
+                _ <- launchSessionTurn manager True ApproveAll True False handle "one"
                 closeSessionProcessManager manager
                 waitForFile marker
 

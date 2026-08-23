@@ -192,7 +192,7 @@ import Agent.CLI.Project
 import Agent.CLI.Prompt
     ( secretInputGuidance
     , subscriptionSubagentModelGuidance
-    , systemPrompt
+    , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
@@ -286,6 +286,8 @@ import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsForWithTypes
+    , filterBashTools
+    , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     )
@@ -1827,12 +1829,14 @@ runAgentInitializedWithLock
             , toolsLaunchTurn =
                 launchSessionTurn sessionProcessManager
                     (not (isOneShot options)) policy
+                    options.optGhci options.optBash
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
         tools =
-            coding.codingAppTools
+            filterGhciTools options.optGhci
+                (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
                 ++ agentSessionTools sessionToolsEnv
         planMode = coding.codingPlanMode
@@ -1865,12 +1869,13 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
         let instructions =
-                Text.intercalate "\n\n" $
-                    filter (not . Text.null)
-                        [ systemPrompt dialect cwd (Just sessionTmp) today
-                            (isOneShot options)
-                        , secretInputGuidance (map (.appToolName) tools)
-                        ]
+                systemPromptForTools
+                    dialect
+                    (map (.appToolName) tools)
+                    cwd
+                    (Just sessionTmp)
+                    today
+                    (isOneShot options)
             params = requestParams model instructions
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
@@ -2966,8 +2971,9 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             today <- utctDay <$> getCurrentTime
             modifyIORef' paramsRef $
                 setRequestInstructions
-                    (systemPrompt
+                    (systemPromptForTools
                         dialect
+                        (map (.appToolName) tools)
                         cwd
                         (Just tempDir)
                         today
