@@ -41,6 +41,7 @@ import System.Process
     , getPid
     , proc
     , readProcess
+    , readProcessWithExitCode
     , waitForProcess
     , withCreateProcess
     )
@@ -229,7 +230,7 @@ usage = unlines
 evalTasks :: [EvalTask]
 evalTasks =
     [ dataSummaryTask
-    , haskellFixTask
+    , cProgramTask
     , treeAuditTask
     ]
 
@@ -258,35 +259,34 @@ dataSummaryTask = EvalTask
             ]
     }
 
-haskellFixTask :: EvalTask
-haskellFixTask = EvalTask
-    { taskName = "haskell-fix"
+cProgramTask :: EvalTask
+cProgramTask = EvalTask
+    { taskName = "c-program"
     , taskPrompt = Text.unlines
         [ "Complete this task in the workspace. Do not only explain the answer."
-        , "Fix src/Discount.hs so finalPrice follows all requirements in SPEC.md."
-        , "Keep the exported API unchanged. Verify the behavior if possible."
+        , "Write src/max_window.c so it implements the command-line program described in SPEC.md."
+        , "Use standard C11 and no third-party libraries. Verify the behavior if possible."
         ]
     , prepareTask = \dir -> do
         createDirectoryIfMissing True (dir </> "src")
         Text.writeFile (dir </> "SPEC.md") $ Text.unlines
-            [ "# finalPrice"
-            , "- Quantities below 1 return 0."
-            , "- The first 4 items cost full unit price."
-            , "- Items 5 through 9 receive 10% off the whole order."
-            , "- Quantities 10 and above receive 20% off the whole order."
-            , "- Round the final result to two decimal places."
-            ]
-        Text.writeFile (dir </> "src" </> "Discount.hs") $ Text.unlines
-            [ "module Discount (finalPrice) where"
+            [ "# max_window"
             , ""
-            , "finalPrice :: Int -> Double -> Double"
-            , "finalPrice quantity unitPrice"
-            , "    | quantity < 1 = unitPrice"
-            , "    | quantity <= 5 = fromIntegral quantity * unitPrice"
-            , "    | quantity < 10 = fromIntegral quantity * unitPrice * 0.8"
-            , "    | otherwise = fromIntegral quantity * unitPrice * 0.9"
+            , "Build a command-line program from `src/max_window.c`."
+            , ""
+            , "Usage: `max_window WINDOW INTEGER...`"
+            , ""
+            , "- `WINDOW` must be positive and no larger than the number of integers."
+            , "- Every `INTEGER` must fit in a signed 32-bit integer."
+            , "- Find the contiguous window of exactly `WINDOW` integers with the greatest sum."
+            , "- If several windows have the same greatest sum, choose the earliest one."
+            , "- Print exactly `start=<zero-based index> sum=<sum>` followed by a newline."
+            , "- Use a signed 64-bit or wider type for sums."
+            , "- Invalid integers or an invalid argument count/window must return a non-zero exit status."
             ]
-    , gradeTask = gradeHaskellFix
+        Text.writeFile (dir </> "src" </> "max_window.c")
+            "/* Implement the program described in ../SPEC.md. */\n"
+    , gradeTask = gradeCProgram
     }
 
 treeAuditTask :: EvalTask
@@ -323,39 +323,80 @@ prepareTreeAudit dir = do
         createDirectoryIfMissing True (takeDirectory path)
         Text.writeFile path (Text.unlines rows)
 
-gradeHaskellFix :: FilePath -> IO (Bool, Text)
-gradeHaskellFix dir = do
-    let expression =
-            "and [finalPrice 0 10 == 0,"
-                <> " finalPrice 4 10 == 40,"
-                <> " finalPrice 5 10 == 45,"
-                <> " finalPrice 9 10 == 81,"
-                <> " finalPrice 10 10 == 80,"
-                <> " finalPrice 3 1.999 == 6.0]"
+gradeCProgram :: FilePath -> IO (Bool, Text)
+gradeCProgram dir = do
+    let binary = dir </> "grader-max-window"
         processSpec =
-            (proc "ghci"
-                [ "-ignore-dot-ghci"
-                , "-v0"
-                , "-isrc"
-                , "src/Discount.hs"
-                , "-e"
-                , expression
+            (proc "cc"
+                [ "-std=c11"
+                , "-Wall"
+                , "-Wextra"
+                , "-Werror"
+                , "-pedantic"
+                , "src/max_window.c"
+                , "-o"
+                , "grader-max-window"
                 ])
                 { cwd = Just dir }
         stdoutPath = dir </> "grader.stdout.log"
         stderrPath = dir </> "grader.stderr.log"
     exitCode <- runProcessWithTimeout 15 processSpec stdoutPath stderrPath
-    stdoutText <- readFileIfExists stdoutPath
-    stderrText <- readFileIfExists stderrPath
-    let passed = exitCode == ExitSuccess && trim stdoutText == "True"
-        detail
-            | passed = "all boundary and rounding checks passed"
-            | otherwise =
-                Text.pack $
-                    "grader exit=" <> show exitCode
-                        <> " stdout=" <> trim stdoutText
-                        <> " stderr=" <> trim stderrText
-    pure (passed, detail)
+    if exitCode /= ExitSuccess
+        then do
+            stderrText <- readFileIfExists stderrPath
+            pure
+                ( False
+                , Text.pack $
+                    "C compilation failed: " <> trim stderrText
+                )
+        else do
+            validResults <- forM validCases \(args, expected) -> do
+                (code, stdoutText, stderrText) <-
+                    readProcessWithExitCode binary args ""
+                pure $
+                    if code == ExitSuccess && stdoutText == expected
+                        then Nothing
+                        else Just $
+                            "args=" <> show args
+                                <> " exit=" <> show code
+                                <> " stdout=" <> show stdoutText
+                                <> " stderr=" <> show stderrText
+            invalidResults <- forM invalidCases \args -> do
+                (code, stdoutText, stderrText) <-
+                    readProcessWithExitCode binary args ""
+                pure $
+                    if code /= ExitSuccess
+                        then Nothing
+                        else Just $
+                            "invalid args=" <> show args
+                                <> " unexpectedly succeeded"
+                                <> " stdout=" <> show stdoutText
+                                <> " stderr=" <> show stderrText
+            let failures = catMaybes (validResults <> invalidResults)
+            pure
+                ( null failures
+                , if null failures
+                    then "compiled cleanly and passed all valid and invalid input cases"
+                    else Text.pack (intercalate "; " failures)
+                )
+  where
+    validCases =
+        [ (["2", "1", "5", "2", "4"], "start=1 sum=7\n")
+        , (["2", "4", "1", "4", "1"], "start=0 sum=5\n")
+        , (["3", "-5", "-2", "-7", "-1"], "start=1 sum=-10\n")
+        , (["4", "2", "-1", "3", "6"], "start=0 sum=10\n")
+        , ( ["2", "2147483647", "2147483647", "-1"]
+          , "start=0 sum=4294967294\n"
+          )
+        ]
+    invalidCases =
+        [ []
+        , ["0", "1"]
+        , ["2", "1"]
+        , ["1", "not-an-integer"]
+        , ["1", "2147483648"]
+        , ["1", "-2147483649"]
+        ]
 
 runOne :: Config -> Int -> EvalTask -> Mode -> IO RunResult
 runOne config trial task mode = do
