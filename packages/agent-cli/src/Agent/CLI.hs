@@ -1771,12 +1771,19 @@ runAgentInitializedWithLock
             , config.mcpEnabled
             ]
     mcpFleet <-
-        try @_ @SomeException (MCP.startMcpFleet mcpServerConfigs) >>= \case
+        try @_ @SomeException
+            (MCP.startMcpFleetWithProgress
+                (\name ->
+                    setStartupNotice startup.startupFullscreen
+                        ("Loading tools: " <> name <> "…"))
+                mcpServerConfigs)
+            >>= \case
             Left exception ->
                 startupDie startup
                     ("Failed to initialize MCP tools: " <> show exception)
             Right fleet -> pure fleet
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
+    setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
         codingToolsForWithTypes
             dialect

@@ -17,6 +17,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
 import Data.Aeson (object, (.=))
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Text as Text
 import System.Directory (getTemporaryDirectory, removeFile)
@@ -73,7 +74,9 @@ spec = describe "Agent.MCP" do
 
     it "initializes a stdio server, exposes only read-only tools, and calls one" $
         withFakeServer \script -> do
-            fleet <- startMcpFleet
+            started <- newIORef []
+            fleet <- startMcpFleetWithProgress
+                (\name -> modifyIORef' started (<> [name]))
                 [ McpServerConfig
                     { mcpServerName = "fake"
                     , mcpServerCommand = script
@@ -85,6 +88,7 @@ spec = describe "Agent.MCP" do
                     }
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
+                readIORef started `shouldReturn` ["fake"]
                 let tools = mcpFleetTools fleet
                 map (.appToolName) tools `shouldBe` ["echo_read"]
                 fleet.mcpFleetWarnings `shouldBe`

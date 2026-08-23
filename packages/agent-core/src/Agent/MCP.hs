@@ -9,6 +9,7 @@ module Agent.MCP
     , McpToolRegistration(..)
     , McpFleet(..)
     , startMcpFleet
+    , startMcpFleetWithProgress
     , closeMcpFleet
     , mcpFleetTools
     , normalizeMcpToolResult
@@ -202,7 +203,13 @@ emptyInputSchema = object
 -- warnings so one unavailable integration does not disable healthy servers.
 -- Duplicate MCP tool names are fatal because dispatch would be ambiguous.
 startMcpFleet :: [McpServerConfig] -> IO McpFleet
-startMcpFleet configs = mask \restore -> do
+startMcpFleet = startMcpFleetWithProgress (const (pure ()))
+
+-- | Start every server while reporting its configured name immediately before
+-- launching it. The callback is intended for startup UI and deliberately
+-- receives no command arguments or environment values.
+startMcpFleetWithProgress :: (Text -> IO ()) -> [McpServerConfig] -> IO McpFleet
+startMcpFleetWithProgress reportStarting configs = mask \restore -> do
     closed <- newMVar False
     (clients, registrations, warnings) <-
         startServers restore [] [] [] configs
@@ -220,6 +227,8 @@ startMcpFleet configs = mask \restore -> do
     startServers _ clients registrations warnings [] =
         pure (reverse clients, registrations, warnings)
     startServers restore clients registrations warnings (config : rest) = do
+        reportStarting config.mcpServerName
+            `onException` mapM_ closeMcpClient clients
         attempt <- tryAny (restore (startServer config))
             `onException` mapM_ closeMcpClient clients
         case attempt of
