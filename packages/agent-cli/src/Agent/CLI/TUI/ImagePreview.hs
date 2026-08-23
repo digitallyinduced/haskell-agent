@@ -5,6 +5,7 @@ module Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
+    , imageDimensions
     , prepareTuiImagePreview
     , previewCellSize
     , previewImageAt
@@ -15,11 +16,13 @@ import Agent.CLI.ImagePreview (kittyCompatibleAttachment)
 import Agent.Loop (ImageAttachment(..))
 import Brick (Widget, raw)
 import Codec.Picture
-    ( Image
+    ( DynamicImage(..)
+    , Image
     , PixelRGB8(..)
-    , PixelRGBA8
+    , PixelRGBA8(..)
     , convertRGBA8
     , decodeImage
+    , dynamicMap
     , generateImage
     , imageData
     , imageHeight
@@ -27,6 +30,7 @@ import Codec.Picture
     , pixelAt
     )
 import qualified Data.ByteString as BS
+import Data.Bits ((.|.), shiftL)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector.Storable as Vector
@@ -84,26 +88,155 @@ instance Show TuiImagePreview where
 
 prepareTuiImagePreview :: ImageAttachment -> Either Text TuiImagePreview
 prepareTuiImagePreview ImageAttachment{imageMime, imageBytes} = do
-    dynamic <- firstText (decodeImage imageBytes)
-    let image = convertRGBA8 dynamic
-        sourceWidth = imageWidth image
-        sourceHeight = imageHeight image
-        (targetWidth, targetHeight) =
-            previewSize sourceWidth sourceHeight
+    (sourceWidth, sourceHeight) <- imageDimensions imageMime imageBytes
+    let (targetWidth, targetHeight) =
+            previewSampleSize sourceWidth sourceHeight
     pure TuiImagePreview
         { previewMime = imageMime
         , previewBytes = BS.length imageBytes
         , previewSourceWidth = sourceWidth
         , previewSourceHeight = sourceHeight
         , previewSample =
-            generateImage
-                (\x y -> samplePixel image targetWidth targetHeight x y)
-                targetWidth
-                targetHeight
+            case decodeImage imageBytes of
+                Left _ ->
+                    generateImage
+                        (\_ _ -> previewBackground)
+                        1
+                        1
+                Right dynamic ->
+                    sampleDynamicImage
+                        dynamic
+                        targetWidth
+                        targetHeight
         , previewKittyAttachment =
             kittyCompatibleAttachment
                 (ImageAttachment{imageMime, imageBytes})
         }
+
+-- | Read common image dimensions without inflating the complete compressed
+-- image. macOS clipboard screenshots arrive as PNG, so native terminal
+-- previews can be placed after inspecting only the 24-byte PNG header.
+-- Formats without a cheap parser retain the full-decoder fallback.
+imageDimensions :: Text -> BS.ByteString -> Either Text (Int, Int)
+imageDimensions mime bytes
+    | normalized == "image/png" =
+        pngDimensions bytes
+    | normalized == "image/jpeg" || normalized == "image/jpg" =
+        jpegDimensions bytes
+    | otherwise = do
+        dynamic <- firstText (decodeImage bytes)
+        pure (dynamicWidth dynamic, dynamicHeight dynamic)
+  where
+    normalized = Text.toLower mime
+
+pngDimensions :: BS.ByteString -> Either Text (Int, Int)
+pngDimensions bytes
+    | BS.length bytes < 24 =
+        Left "invalid PNG header"
+    | BS.take 8 bytes /= pngSignature =
+        Left "invalid PNG signature"
+    | BS.take 4 (BS.drop 12 bytes) /= "IHDR" =
+        Left "PNG has no leading IHDR chunk"
+    | width <= 0 || height <= 0 =
+        Left "invalid PNG dimensions"
+    | otherwise =
+        Right (width, height)
+  where
+    width = word32beAt bytes 16
+    height = word32beAt bytes 20
+
+pngSignature :: BS.ByteString
+pngSignature = BS.pack [137, 80, 78, 71, 13, 10, 26, 10]
+
+jpegDimensions :: BS.ByteString -> Either Text (Int, Int)
+jpegDimensions bytes
+    | BS.length bytes < 4
+        || BS.index bytes 0 /= 0xff
+        || BS.index bytes 1 /= 0xd8 =
+        Left "invalid JPEG header"
+    | otherwise =
+        scan 2
+  where
+    size = BS.length bytes
+
+    scan offset
+        | offset + 1 >= size =
+            Left "JPEG dimensions not found"
+        | BS.index bytes offset /= 0xff =
+            scan (offset + 1)
+        | otherwise =
+            let markerOffset = skipFill (offset + 1)
+            in if markerOffset >= size
+                then Left "truncated JPEG marker"
+                else
+                    let marker = BS.index bytes markerOffset
+                        segment = markerOffset + 1
+                    in if isStartOfFrame marker
+                        then frameDimensions segment
+                        else if marker == 0xd9 || marker == 0xda
+                            then Left "JPEG dimensions not found"
+                            else if isStandaloneMarker marker
+                                then scan segment
+                                else
+                                    if segment + 1 >= size
+                                        then Left "truncated JPEG segment"
+                                        else
+                                            let segmentLength =
+                                                    word16beAt bytes segment
+                                            in if segmentLength < 2
+                                                then Left
+                                                    "invalid JPEG segment length"
+                                                else scan
+                                                    (segment + segmentLength)
+
+    skipFill offset
+        | offset < size && BS.index bytes offset == 0xff =
+            skipFill (offset + 1)
+        | otherwise = offset
+
+    frameDimensions segment
+        | segment + 6 >= size =
+            Left "truncated JPEG frame"
+        | word16beAt bytes segment < 7 =
+            Left "invalid JPEG frame"
+        | width <= 0 || height <= 0 =
+            Left "invalid JPEG dimensions"
+        | otherwise =
+            Right (width, height)
+      where
+        height = word16beAt bytes (segment + 3)
+        width = word16beAt bytes (segment + 5)
+
+isStartOfFrame :: Word8 -> Bool
+isStartOfFrame marker =
+    marker `elem`
+        [ 0xc0, 0xc1, 0xc2, 0xc3
+        , 0xc5, 0xc6, 0xc7
+        , 0xc9, 0xca, 0xcb
+        , 0xcd, 0xce, 0xcf
+        ]
+
+isStandaloneMarker :: Word8 -> Bool
+isStandaloneMarker marker =
+    marker == 0x01 || marker >= 0xd0 && marker <= 0xd8
+
+word16beAt :: BS.ByteString -> Int -> Int
+word16beAt bytes offset =
+    fromIntegral (BS.index bytes offset) `shiftL` 8
+        .|. fromIntegral (BS.index bytes (offset + 1))
+
+word32beAt :: BS.ByteString -> Int -> Int
+word32beAt bytes offset =
+    fromIntegral (BS.index bytes offset) `shiftL` 24
+        .|. fromIntegral (BS.index bytes (offset + 1)) `shiftL` 16
+        .|. fromIntegral (BS.index bytes (offset + 2)) `shiftL` 8
+        .|. fromIntegral (BS.index bytes (offset + 3))
+
+dynamicWidth :: DynamicImage -> Int
+dynamicWidth = dynamicMap imageWidth
+
+dynamicHeight :: DynamicImage -> Int
+dynamicHeight = dynamicMap imageHeight
 
 -- | Size the preview to the supplied terminal-cell bounds while preserving its
 -- aspect ratio. One terminal row represents two sampled pixel rows.
@@ -214,9 +347,9 @@ pixelAttr
                 (V.rgbColor topRed topGreen topBlue))
             (V.rgbColor bottomRed bottomGreen bottomBlue)
 
-previewSize :: Int -> Int -> (Int, Int)
-previewSize =
-    previewSizeWithin maxPreviewColumns maxPreviewPixelRows
+previewSampleSize :: Int -> Int -> (Int, Int)
+previewSampleSize =
+    previewSizeWithin maxPreviewSampleColumns maxPreviewSamplePixelRows
 
 previewSizeWithin :: Int -> Int -> Int -> Int -> (Int, Int)
 previewSizeWithin maxWidth maxHeight width height
@@ -233,15 +366,29 @@ previewSizeWithin maxWidth maxHeight width height
            , max 1 (floor (fromIntegral height * scale))
            )
 
-samplePixel
-    :: Image PixelRGBA8
+sampleDynamicImage
+    :: DynamicImage
     -> Int
     -> Int
-    -> Int
-    -> Int
-    -> PixelRGB8
-samplePixel image targetWidth targetHeight x y =
-    sampleRgbaBox image targetWidth targetHeight x y
+    -> Image PixelRGB8
+sampleDynamicImage dynamic targetWidth targetHeight =
+    case dynamic of
+        ImageRGB8 image ->
+            generateImage
+                (sampleRgbBox image targetWidth targetHeight)
+                targetWidth
+                targetHeight
+        ImageRGBA8 image ->
+            generateImage
+                (sampleRgbaBox image targetWidth targetHeight)
+                targetWidth
+                targetHeight
+        _ ->
+            let image = convertRGBA8 dynamic
+            in generateImage
+                (sampleRgbaBox image targetWidth targetHeight)
+                targetWidth
+                targetHeight
 
 sampleImageBox :: Image PixelRGB8 -> Int -> Int -> Int -> Int -> PixelRGB8
 sampleImageBox image targetWidth targetHeight =
@@ -377,6 +524,15 @@ maxPreviewColumns = 240
 -- Two sampled pixel rows fit in one terminal row via the upper-half block.
 maxPreviewPixelRows :: Int
 maxPreviewPixelRows = 160
+
+-- The ANSI source sample is deliberately smaller than the maximum layout.
+-- It may be upscaled in unusually large terminals, but keeping this bounded
+-- avoids hundreds of thousands of interpreted sampling operations on paste.
+maxPreviewSampleColumns :: Int
+maxPreviewSampleColumns = 96
+
+maxPreviewSamplePixelRows :: Int
+maxPreviewSamplePixelRows = 64
 
 -- Bound work per output pixel so large screenshots remain cheap in the
 -- interpreted development loop while still sampling throughout each source

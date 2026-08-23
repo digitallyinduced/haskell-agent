@@ -130,6 +130,26 @@ spec = do
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
+        it "decodes the Codex WebSocket response.done terminal event losslessly" do
+            let original = Aeson.object
+                    [ "type" .= ("response.done" :: Text)
+                    , "sequence_number" .= (5 :: Int)
+                    , "response" .= Aeson.object
+                        [ "id" .= ("resp_done" :: Text)
+                        , "usage" .= Aeson.Null
+                        ]
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event@Responses.ResponseDoneEvent { responseValue } -> do
+                    field "id" responseValue `shouldBe`
+                        Just (Aeson.String "resp_done")
+                    Responses.responseStreamEventType event
+                        `shouldBe` Responses.EventResponseDone
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
         it "decodes response incomplete into its typed terminal constructor" do
             let original = Aeson.object
                     [ "type" .= ("response.incomplete" :: Text)
@@ -333,6 +353,12 @@ assertKnownEvent eventName = do
 
 requiredEventFields :: Text -> [(Key.Key, Aeson.Value)]
 requiredEventFields eventName
+    | eventName == "response.done" =
+        [ ("response", Aeson.object
+            [ "id" .= ("resp_done" :: Text)
+            , "usage" .= Aeson.Null
+            ])
+        ]
     | eventName `elem`
         [ "response.created"
         , "response.in_progress"
@@ -373,7 +399,7 @@ isLeft (Right _) = False
 
 documentedStreamEventTypes :: [Text]
 documentedStreamEventTypes =
-    [ "response.created", "response.in_progress", "response.completed"
+    [ "response.created", "response.in_progress", "response.completed", "response.done"
     , "response.failed", "response.incomplete", "response.output_item.added"
     , "response.output_item.done", "response.content_part.added", "response.content_part.done"
     , "response.output_text.delta", "response.output_text.done", "response.refusal.delta"

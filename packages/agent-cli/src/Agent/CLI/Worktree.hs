@@ -35,6 +35,7 @@ import System.OsPath
     ( OsPath
     , equalFilePath
     , splitDirectories
+    , takeDirectory
     , takeFileName
     , unsafeEncodeUtf
     , (</>)
@@ -63,9 +64,9 @@ worktreePath root repoName day hex8 =
 createWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
 createWorktree source root = runExceptT do
     repo <- gitToplevel source
+    repoName <- gitRepositoryName repo
     now <- lift getCurrentTime
-    let repoName = takeFileName repo
-        day = utctDay now
+    let day = utctDay now
         start = posixMicros now
     lift (createDirectoryIfMissing True (root </> repoName))
     addUnique repo root repoName day start 0
@@ -126,6 +127,16 @@ gitToplevel source = do
         (\err -> "--worktree requires a git repository (" <> Text.strip err <> ")")
         (ExceptT (git source ["rev-parse", "--show-toplevel"]))
     pure (unsafeEncodeUtf (Text.unpack (Text.strip path)))
+
+gitRepositoryName :: OsPath -> ExceptT Text IO OsPath
+gitRepositoryName repo = do
+    commonDir <- ExceptT $
+        git repo ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+    let path = unsafeEncodeUtf (Text.unpack (Text.strip commonDir))
+    pure $
+        if takeFileName path == unsafeEncodeUtf ".git"
+            then takeFileName (takeDirectory path)
+            else takeFileName path
 
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do

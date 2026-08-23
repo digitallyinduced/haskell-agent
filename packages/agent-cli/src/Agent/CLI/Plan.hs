@@ -222,6 +222,10 @@ readChangeNotes interrupt color = do
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
+        ReplClipboardPasteOrText _ text ->
+            if Text.null (Text.strip text)
+                then readChangeNotes interrupt color
+                else pure (Text.strip text)
         ReplCycleMode _ ->
             -- Shift+Tab is idle-prompt only; keep asking for notes.
             readChangeNotes interrupt color
@@ -259,6 +263,10 @@ askQuestion interrupt resolveColor question options = do
                                 then pure Nothing
                                 else pure (Just (Text.strip text))
                         ReplClipboardPaste text _ ->
+                            if Text.null (Text.strip text)
+                                then askQuestion interrupt resolveColor question []
+                                else pure (Just (Text.strip text))
+                        ReplClipboardPasteOrText _ text ->
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))

@@ -8,6 +8,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
     , hasQueuedFullscreenInput
@@ -136,6 +137,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
+import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
@@ -347,8 +349,31 @@ setFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
     -> IO ()
-setFullscreenImagePreviews runtime =
-    enqueueAppEvent runtime . AppSetImagePreviews
+setFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else do
+                let next =
+                        mapMaybe
+                            (\image ->
+                                case prepareTuiImagePreview image of
+                                    Left _ -> Nothing
+                                    Right preview -> Just (image, preview))
+                            images
+                -- ANSI previews force the sampled image during Brick drawing.
+                -- Build that sample here on the model worker instead of
+                -- stalling the Brick event/render thread.
+                unless runtime.runtimeNativeImagePreviews $
+                    mapM_
+                        (\(_, preview) ->
+                            void $
+                                pure $!
+                                    pixelAt preview.previewSample 0 0)
+                        next
+                pure next
+    enqueueAppEvent runtime (AppSetImagePreviews prepared)
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -1222,6 +1247,11 @@ handleChoiceKey = \case
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> resolveChoice False
     V.EvKey (V.KChar 'q') [] -> resolveChoice False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveChoice False)
     _ -> pure ()
   where
     moveChoice delta =
@@ -1334,6 +1364,11 @@ resolveChoice confirmed = do
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
 handleTextPromptKey = \case
     V.EvKey V.KEsc [] -> resolveTextPrompt False
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers -> do
+            state <- get
+            _ <- handleCtrlC
+            when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
     V.EvKey V.KEnter [V.MShift] -> insert "\n"
     V.EvKey V.KPageUp [] ->
@@ -2549,9 +2584,13 @@ drawFooter state =
   where
     footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
         (Just _, _, _) ->
-            "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
+                else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
         (Nothing, Just _, _) ->
-            "↑↓ select  │  Enter choose  │  Esc cancel"
+            if state.appUi.uiRunning
+                then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
+                else "↑↓ select  │  Enter choose  │  Esc cancel"
         (Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
@@ -3074,7 +3113,7 @@ applyUiEvent uiEvent state =
                 previousUi
                 nextUi
                 newFlashes
-        nextState =
+        nextState0 =
             state
                 { appUi = nextUi
                 , appCompletionFlashes =
@@ -3086,7 +3125,32 @@ applyUiEvent uiEvent state =
                         then 0
                         else state.appNativeProgressKeepaliveBucket
                 }
+        nextState =
+            case state.appChoice of
+                Just choice
+                    | choiceClosesOnUiTransition
+                        previousUi
+                        nextUi
+                        choice ->
+                        nextState0
+                            { appChoice = Nothing
+                            , appChoiceReply = Nothing
+                            }
+                _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
+
+-- | Turn-scoped choices, such as the live effort selector, become invalid
+-- when their turn stops running. Ordinary idle dialogs remain open, and a
+-- model round that continues into tools keeps the selector visible.
+choiceClosesOnUiTransition
+    :: UiState
+    -> UiState
+    -> ChoiceOverlay
+    -> Bool
+choiceClosesOnUiTransition previous next choice =
+    choice.choiceCloseOnTurnEnd
+        && previous.uiRunning
+        && not next.uiRunning
 
 retainExistingFlashes
     :: UiState
@@ -3280,22 +3344,13 @@ handleEventInner event = case event of
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
-    AppEvent (AppSetImagePreviews images) ->
+    AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
             previous <-
                 liftIO $
                     readIORef state.appRuntime.runtimeImagePreviews
-            let unchanged = map fst previous == images
-                prepared
-                    | unchanged = previous
-                    | otherwise =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
+            let unchanged = map fst previous == map fst prepared
             liftIO do
                 when (not unchanged) do
                     writeIORef
@@ -3383,6 +3438,7 @@ handleEventInner event = case event of
                     , choiceIndex =
                         max 0 (min (max 0 (length rows - 1)) initial)
                     , choiceRows = rows
+                    , choiceCloseOnTurnEnd = False
                     }
                 , appChoiceReply = Just (atomically . putTMVar reply)
                 , appAgentHover = Nothing

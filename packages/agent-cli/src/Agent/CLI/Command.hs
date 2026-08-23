@@ -48,6 +48,7 @@ data ReplAction
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
+    | ReplWorktree
     | ReplRename Text
     | ReplRenameAuto
     | ReplLogin
@@ -105,6 +106,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "session" [] "/session" "Print the current session id" False
+    , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
@@ -191,6 +193,10 @@ parseSlash skills line = case Text.words line of
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "worktree" ->
+                if null args
+                    then ReplWorktree
+                    else ReplCommandError "usage: /worktree"
             "rename" ->
                 let title = Text.strip (Text.drop (Text.length command) line)
                 in if title == "--auto"

@@ -395,6 +395,7 @@ openAiResponseSenderWithRetryPolicy retryPolicy observed send
 auxiliaryOutputObserved :: ResponseStreamEvent -> Bool
 auxiliaryOutputObserved = \case
     ResponseCompletedEvent{} -> True
+    ResponseDoneEvent{} -> True
     ResponseFailedEvent{response} -> not (null response.output)
     ResponseIncompleteEvent{} -> True
     ResponseOutputItemAddedEvent{} -> True
