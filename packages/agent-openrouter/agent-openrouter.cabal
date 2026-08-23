@@ -5,7 +5,7 @@ synopsis:           Haskell client for the OpenRouter Responses transport
 description:        Static API-key auth, typed Responses request projection,
                     HTTP SSE transport, and provider-specific errors for
                     OpenRouter's OpenAI-compatible Responses API.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

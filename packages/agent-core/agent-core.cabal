@@ -5,7 +5,7 @@ synopsis:           Provider-neutral infrastructure for the agent harness
 description:        Shared provider credentials, errors,
                     transport utilities, the agent loop, and JSON
                     tool-argument helpers.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

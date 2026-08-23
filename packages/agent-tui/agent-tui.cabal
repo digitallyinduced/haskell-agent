@@ -3,7 +3,7 @@ name:               agent-tui
 version:            0.1.0.0
 synopsis:           Retained terminal UI for the universal agent harness
 description:        Presentation state and Brick widgets for the agent terminal UI.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com

@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Provider-neutral OpenAI Responses protocol types and adapters
 description:        Canonical Responses API types, codecs, stream merging, and
                     loop adapters shared by provider transports.
-license:            BSD-3-Clause
+license:            MIT
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
