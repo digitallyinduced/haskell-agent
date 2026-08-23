@@ -1,5 +1,7 @@
 # haskell-agent
 
+<img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
+
 **An independent agent harness, written in Haskell.**
 
 `haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI, and
