@@ -56,6 +56,7 @@ import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
     , requestSessionTitle
+    , shouldRequestSessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
     )
@@ -202,14 +203,6 @@ runOneTurn env@SessionEnv
                             (roleMuted color
                                 (glyphSession <> "session: "
                                     <> handle.sessionMeta.metaId))
-            titleTurns <- readIORef env.sessionTitleTurnCount
-            when
-                ( titleTurns == 0
-                    && not handle.sessionMeta.metaTitleIsManual
-                    && handle.sessionMeta.metaTitleRefreshIndex == 0
-                )
-                (requestSessionTitle env.sessionTitleManager
-                    handle.sessionMeta.metaId 1 promptText)
         PersistenceDisabled -> pure ()
     prev <- readIORef previous
     beforeItems <- readIORef transcriptRef
@@ -460,10 +453,9 @@ runOneTurn env@SessionEnv
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
                     when
-                        ( titleTurns `elem` [3, 6]
-                            && not countedMeta.metaTitleIsManual
-                            && countedMeta.metaTitleRefreshIndex
-                                < titleRefreshIndex titleTurns
+                        ( not countedMeta.metaTitleIsManual
+                            && shouldRequestSessionTitle titleTurns
+                                countedMeta.metaTitleRefreshIndex
                         )
                         (requestConversationTitle env countedHandle titleTurns)
                     when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do

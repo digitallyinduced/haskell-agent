@@ -7,6 +7,7 @@ module Agent.CLI.SessionTitle
     , cleanGeneratedTitle
     , invalidateSessionTitles
     , requestSessionTitle
+    , shouldRequestSessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
     , waitForSessionTitleResults
@@ -158,6 +159,13 @@ titleRefreshIndex milestone
     | milestone >= 6 = 2
     | milestone >= 3 = 1
     | otherwise = 0
+
+shouldRequestSessionTitle :: Int -> Int -> Bool
+shouldRequestSessionTitle milestone refreshIndex
+    | milestone == 1 = refreshIndex == 0
+    | milestone `elem` [3, 6] =
+        refreshIndex < titleRefreshIndex milestone
+    | otherwise = False
 
 titleWorker :: (SessionTitleEvent -> IO ()) -> SessionTitleManager -> IO ()
 titleWorker onEvent manager = forever do

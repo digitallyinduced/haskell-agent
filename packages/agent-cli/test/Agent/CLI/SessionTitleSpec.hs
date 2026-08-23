@@ -1,7 +1,12 @@
 module Agent.CLI.SessionTitleSpec (spec) where
 
 import Agent.CLI.SessionTitle
-import Agent.Loop (Backend(..), BackendResult(..), emptyTurnOutput)
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , TurnInput(..)
+    , emptyTurnOutput
+    )
 import Agent.Responses.Types
 import Control.Concurrent
     ( newEmptyMVar
@@ -26,8 +31,21 @@ spec = describe "Agent.CLI.SessionTitle" do
             fmap Text.length (cleanGeneratedTitle (Text.replicate 100 "a"))
                 `shouldBe` Just 80
 
+    describe "shouldRequestSessionTitle" do
+        it "requests titles after the complete first, third, and sixth turns" do
+            shouldRequestSessionTitle 1 0 `shouldBe` True
+            shouldRequestSessionTitle 2 0 `shouldBe` False
+            shouldRequestSessionTitle 3 0 `shouldBe` True
+            shouldRequestSessionTitle 6 1 `shouldBe` True
+
+        it "does not repeat completed refresh milestones" do
+            shouldRequestSessionTitle 1 1 `shouldBe` False
+            shouldRequestSessionTitle 3 1 `shouldBe` False
+            shouldRequestSessionTitle 6 2 `shouldBe` False
+
     it "runs a private tool-free title request and returns a tagged result" do
         seenParams <- newIORef Nothing
+        seenInputs <- newIORef []
         notified <- newEmptyMVar
         let sessionReasoning = ReasoningConfig
                 { context = Nothing
@@ -46,8 +64,9 @@ spec = describe "Agent.CLI.SessionTitle" do
                             }
         paramsRef <- newIORef baseParams
         let backendFactory privateParams =
-                Backend \state _ _ _ -> do
+                Backend \state _ inputs _ -> do
                     writeIORef seenParams . Just =<< readIORef privateParams
+                    writeIORef seenInputs inputs
                     pure $ Right BackendResult
                         { backendOutput =
                             emptyTurnOutput "title-response" []
@@ -55,7 +74,8 @@ spec = describe "Agent.CLI.SessionTitle" do
                         , backendState = state
                         }
         withSessionTitleManager backendFactory paramsRef (putMVar notified) \manager -> do
-            requestSessionTitle manager "session-1" 3 "conversation"
+            requestSessionTitle manager "session-1" 3
+                "User:\nFix auth\n\nAssistant:\nI found the race"
             results <- waitForResults manager 100
             let expected = SessionTitleResult
                     { resultSessionId = "session-1"
@@ -70,6 +90,10 @@ spec = describe "Agent.CLI.SessionTitle" do
         sent.parallelToolCalls `shouldBe` Just False
         sent.maxOutputTokens `shouldBe` Nothing
         sent.reasoning `shouldBe` Just sessionReasoning
+        [UserMessage titleInput] <- readIORef seenInputs
+        titleInput `shouldSatisfy` Text.isInfixOf "User:\nFix auth"
+        titleInput `shouldSatisfy`
+            Text.isInfixOf "Assistant:\nI found the race"
 
     it "drops a stale result after a manual rename invalidates generation" do
         started <- newEmptyMVar
