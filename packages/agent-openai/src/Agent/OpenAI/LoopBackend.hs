@@ -120,7 +120,7 @@ openAiResponseSenderReconnecting
     -> IO (Either ApiError Response)
 openAiResponseSenderReconnecting =
     openAiResponseSenderReconnectingWhen
-        (isJust . streamEventToLoopEvent)
+        loopReplayUnsafeEvent
         markLoopReplayUnsafe
 
 -- | Auxiliary Responses requests are not rendered to the loop, so their
@@ -237,8 +237,13 @@ openAiResponseSenderWithConnectionRecovery
     -> IO (Either ApiError Response)
 openAiResponseSenderWithConnectionRecovery =
     openAiResponseSenderWithConnectionRecoveryUsing
-        (isJust . streamEventToLoopEvent)
+        loopReplayUnsafeEvent
         markLoopReplayUnsafe
+
+loopReplayUnsafeEvent :: ResponseStreamEvent -> Bool
+loopReplayUnsafeEvent event =
+    responseStreamEventType event /= EventCodexRateLimits
+        && isJust (streamEventToLoopEvent event)
 
 openAiAuxiliaryResponseSenderWithConnectionRecovery
     :: IORef Bool

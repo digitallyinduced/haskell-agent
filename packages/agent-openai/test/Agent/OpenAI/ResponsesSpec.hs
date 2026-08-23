@@ -209,6 +209,30 @@ spec = do
                     Aeson.toJSON event `shouldBe` original
                 Aeson.Error err -> expectationFailure err
 
+        it "recognises Codex rate limits and preserves evolving payload fields" do
+            let original = Aeson.object
+                    [ "type" .= ("codex.rate_limits" :: Text)
+                    , "sequence_number" .= (11 :: Int)
+                    , "plan_type" .= ("plus" :: Text)
+                    , "rate_limits" .= Aeson.object
+                        [ "allowed" .= True
+                        , "limit_reached" .= False
+                        , "primary" .= Aeson.object
+                            [ "used_percent" .= (91.5 :: Double)
+                            , "window_minutes" .= (300 :: Int)
+                            , "reset_at" .= (1787500000 :: Int)
+                            , "future_window_field" .= ("preserved" :: Text)
+                            ]
+                        ]
+                    , "future_top_level_field" .= ("preserved" :: Text)
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event -> do
+                    Responses.responseStreamEventType event
+                        `shouldBe` Responses.EventCodexRateLimits
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Error err -> expectationFailure err
+
         it "rejects disagreement between the SSE name and JSON type" do
             let value = Aeson.object
                     [ "type" .= ("response.output_text.done" :: Text)
@@ -440,4 +464,5 @@ documentedStreamEventTypes =
     , "response.shell_call_command.added", "response.shell_call_command.delta"
     , "response.shell_call_command.done", "response.shell_call_output_content.delta"
     , "response.shell_call_output_content.done", "codex.response.metadata"
+    , "codex.rate_limits"
     ]

@@ -211,6 +211,53 @@ spec = do
                         (ActivityUpdated
                             "Warning: unsupported provider event response.future.done")
 
+        it "surfaces low Codex usage as a persistent warning" do
+            streamEventToLoopEvent
+                (codexRateLimitsEvent $ Aeson.object
+                    [ "allowed" Aeson..= True
+                    , "limit_reached" Aeson..= False
+                    , "primary" Aeson..= Aeson.object
+                        [ "used_percent" Aeson..= (91.5 :: Double)
+                        , "window_minutes" Aeson..= (300 :: Int)
+                        ]
+                    , "secondary" Aeson..= Aeson.object
+                        [ "used_percent" Aeson..= (93 :: Int)
+                        , "window_minutes" Aeson..= (10080 :: Int)
+                        ]
+                    ])
+                `shouldBe`
+                    Just
+                        (WarningRaised
+                            "Codex usage is low: primary 8.5% left · secondary 7% left. Check /usage for reset details.")
+
+        it "surfaces reached or disallowed Codex usage without ending the stream" do
+            streamEventToLoopEvent
+                (codexRateLimitsEvent $ Aeson.object
+                    [ "allowed" Aeson..= False
+                    , "limit_reached" Aeson..= True
+                    ])
+                `shouldBe`
+                    Just
+                        (WarningRaised
+                            "Codex usage limit reached. Check /usage for reset details.")
+
+        it "silently consumes healthy and malformed Codex usage snapshots" do
+            streamEventToLoopEvent
+                (codexRateLimitsEvent $ Aeson.object
+                    [ "primary" Aeson..= Aeson.object
+                        [ "used_percent" Aeson..= (42 :: Int)
+                        ]
+                    ])
+                `shouldBe` Nothing
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType = EventCodexRateLimits
+                    , sequenceNumber = Nothing
+                    , eventExtraFields =
+                        KeyMap.singleton "rate_limits" (Aeson.String "invalid")
+                    })
+                `shouldBe` Nothing
+
         it "ignores empty deltas and unrelated events" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "")
                 `shouldBe` Nothing
@@ -682,6 +729,35 @@ spec = do
             readIORef currentCalls `shouldReturn` 1
             readIORef freshCalls `shouldReturn` 2
 
+        it "still replays after an informational Codex rate-limit warning" do
+            freshCalls <- newIORef (0 :: Int)
+            healthy <- newIORef True
+            transcript <- newIORef []
+            events <- newIORef []
+            let rateLimitsEvent =
+                    codexRateLimitsEvent $ Aeson.object
+                        [ "primary" Aeson..= Aeson.object
+                            [ "used_percent" Aeson..= (92 :: Int)
+                            ]
+                        ]
+                sendCurrent _request _previous onEvent = do
+                    onEvent rateLimitsEvent
+                    pure $ Left $ ConnectionError "socket closed"
+                sendFresh _failure _request _previous _onEvent = do
+                    modifyIORef' freshCalls (+ 1)
+                    pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
+                backend = openAiBackendWithConnectionRecovery
+                    healthy sendCurrent sendFresh (pure baseParams) transcript
+            result <- backend.submitTurn Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
+            reverse <$> readIORef events `shouldReturn`
+                [ WarningRaised
+                    "Codex usage is low: primary 8% left. Check /usage for reset details."
+                ]
+            readIORef healthy `shouldReturn` False
+            readIORef freshCalls `shouldReturn` 1
+
         it "does not replay after loop-visible output was already streamed" do
             freshCalls <- newIORef (0 :: Int)
             healthy <- newIORef True
@@ -1043,6 +1119,13 @@ deltaEvent otherEventType delta = OtherResponseStreamEvent
     { otherEventType
     , sequenceNumber = Nothing
     , eventExtraFields = KeyMap.fromList [(Key.fromText "delta", Aeson.String delta)]
+    }
+
+codexRateLimitsEvent :: Aeson.Value -> ResponseStreamEvent
+codexRateLimitsEvent rateLimits = OtherResponseStreamEvent
+    { otherEventType = EventCodexRateLimits
+    , sequenceNumber = Nothing
+    , eventExtraFields = KeyMap.singleton "rate_limits" rateLimits
     }
 
 testResponse :: Text -> [ResponseItem] -> Response
