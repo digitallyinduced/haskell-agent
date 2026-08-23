@@ -80,10 +80,10 @@ spec = do
                     ]
 
         it "never automatically enters or leaves the Claude Code provider" do
-            fallbackCandidates [] ClaudeCodeProvider exhausted
+            fallbackCandidates catalog [] ClaudeCodeProvider exhausted
                 `shouldBe` []
-            map (.modelProvider)
-                (fallbackCandidates [] OpenAIProvider exhausted)
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [] OpenAIProvider exhausted)
                 `shouldSatisfy` (ClaudeCodeProvider `notElem`)
 
         it "skips providers already found unavailable" do

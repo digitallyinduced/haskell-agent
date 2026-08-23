@@ -58,7 +58,6 @@ import qualified Control.Exception as Exception
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -407,75 +406,66 @@ receiveWsResponseWithActions
     -> WebSocketReceiveActions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
-receiveWsResponseWithActions modelHint actions onEvent = do
-    assemblyRef <- newIORef emptyStreamAssemblyState
-    framesRef <- newIORef (0 :: Int)
-    bytesRef <- newIORef (0 :: Int64)
-    loop assemblyRef framesRef bytesRef
+receiveWsResponseWithActions modelHint actions onEvent =
+    loop emptyStreamAssemblyState 0 0
   where
-    loop assemblyRef framesRef bytesRef = do
+    loop assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
             Left e -> do
-                logStreamStats "connection_error" framesRef bytesRef
+                logStreamStats "connection_error" frames bytes
                 pure $ Left e
             Right (msgBytes :: LBS.ByteString) -> do
-                recordFrame framesRef bytesRef msgBytes
+                let frames' = frames + 1
+                    bytes' = bytes + LBS.length msgBytes
                 case ResponsesCodec.decodeResponseStreamEvent msgBytes of
                     Left err -> do
                         let msgPreview = Text.decodeUtf8With Text.lenientDecode (LBS.toStrict msgBytes)
-                        logStreamStats "json_decode_error" framesRef bytesRef
+                        logStreamStats "json_decode_error" frames' bytes'
                         actions.invalidateRequest
                             "received a malformed response frame"
                         pure $ Left (JsonDecodeError (Text.pack err) (Text.take 500 msgPreview))
                     Right event -> do
                         onEvent event
-                        modifyIORef' assemblyRef (`applyStreamEvent` event)
+                        let assembly' = applyStreamEvent assembly event
                         case event of
                             ResponseErrorEvent { streamError } -> do
-                                logStreamStats "error_event" framesRef bytesRef
+                                logStreamStats "error_event" frames' bytes'
                                 actions.completeRequest
                                 pure $ Left (parseWsErrorEvent streamError)
 
                             ResponseNestedErrorEvent { streamError } -> do
-                                logStreamStats "error_event" framesRef bytesRef
+                                logStreamStats "error_event" frames' bytes'
                                 actions.completeRequest
                                 pure $ Left (parseWsErrorEvent streamError)
 
                             ResponseCompletedEvent{} ->
-                                finishTerminal "completed" assemblyRef framesRef bytesRef event
+                                finishTerminal "completed" assembly' frames' bytes' event
 
                             ResponseDoneEvent{} ->
-                                finishTerminal "done" assemblyRef framesRef bytesRef event
+                                finishTerminal "done" assembly' frames' bytes' event
 
                             ResponseIncompleteEvent{} ->
-                                finishTerminal "incomplete" assemblyRef framesRef bytesRef event
+                                finishTerminal "incomplete" assembly' frames' bytes' event
 
                             ResponseFailedEvent{} -> do
-                                state <- readIORef assemblyRef
-                                logStreamStats "response_failed" framesRef bytesRef
+                                logStreamStats "response_failed" frames' bytes'
                                 actions.completeRequest
                                 pure $ Left
                                     (failedResponseError
-                                        (responseFailureFromState state))
+                                        (responseFailureFromState assembly'))
 
                             -- Ignore other event variants (added, content
                             -- deltas, and future event types).
-                            _ -> loop assemblyRef framesRef bytesRef
+                            _ -> loop assembly' frames' bytes'
 
-    finishTerminal label assemblyRef framesRef bytesRef event = do
-        state <- readIORef assemblyRef
-        logStreamStats label framesRef bytesRef
+    finishTerminal label assembly frames bytes event = do
+        logStreamStats label frames bytes
         actions.completeRequest
-        pure (finishStreamResponse modelHint state event)
+        pure (finishStreamResponse modelHint assembly event)
 
-    recordFrame :: IORef Int -> IORef Int64 -> LBS.ByteString -> IO ()
-    recordFrame framesRef bytesRef msgBytes = do
-        modifyIORef' framesRef (+ 1)
-        modifyIORef' bytesRef (+ LBS.length msgBytes)
-
-    logStreamStats :: Text -> IORef Int -> IORef Int64 -> IO ()
-    logStreamStats _label _framesRef _bytesRef = pure ()
+    logStreamStats :: Text -> Int -> Int64 -> IO ()
+    logStreamStats _label _frames _bytes = pure ()
 
     failedResponseError failure =
         case failure.failureErrorType

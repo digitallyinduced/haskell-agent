@@ -28,6 +28,18 @@
       "fallback_priority": 0
     },
     {
+      "id": "gpt-5.6-terra",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "balanced"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "fast · low cost"
+    },
+    {
       "id": "grok-4.6",
       "connection": "xai",
       "dialect": "grok-build",

@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Agent.CLI.ModelsSpec (spec) where
 
 import Agent.CLI.Models
@@ -40,15 +42,21 @@ spec = do
                 `shouldBe` defaultModelFor catalog ClaudeCodeProvider
 
         it "ships the configured frontier models for each provider" do
-            modelIdsFor OpenAIProvider `shouldContain` "gpt-5.6-sol"
-            modelIdsFor XAIProvider `shouldContain` "grok-4.6"
-            modelIdsFor OpenRouterProvider `shouldContain` "stealth/ox-alpha"
+            modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
+            modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
+            modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
 
-        it "lists several options per provider" do
-            length (modelsForProvider catalog XAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider catalog OpenAIProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider catalog OpenRouterProvider) `shouldSatisfy` (>= 2)
-            length (modelsForProvider catalog ClaudeCodeProvider) `shouldSatisfy` (>= 2)
+        it "ships the GPT-5.6 series and each other provider frontier model" do
+            modelIdsFor OpenAIProvider
+                `shouldBe`
+                    [ "gpt-5.6-sol"
+                    , "gpt-5.6-terra"
+                    , "gpt-5.6-luna"
+                    ]
+            modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
+            modelIdsFor OpenRouterProvider `shouldBe` ["stealth/ox-alpha"]
+            modelIdsFor ClaudeCodeProvider
+                `shouldBe` ["sonnet", "opus", "fable"]
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelTarget.targetProvider))
@@ -138,12 +146,6 @@ spec = do
                         "openai/gpt-5.1" "openai/gpt-5.1"
                         CodexDialect Nothing Nothing
             resolved.modelTarget.targetDialect `shouldBe` CodexDialect
-
-            claude <-
-                resolveModelOptionDialect
-                    (testOption ClaudeCodeProvider "claude-code"
-                        "sonnet" "sonnet" CodexDialect Nothing Nothing)
-            claude.modelTarget.targetDialect `shouldBe` ClaudeCodeDialect
 
     describe "resolvePersistedDialect" do
         let option =

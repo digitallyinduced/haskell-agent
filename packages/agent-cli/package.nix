@@ -22,8 +22,8 @@ mkDerivation {
     vty-crossplatform
   ];
   executableHaskellDepends = [
-    aeson agent-responses base bytestring containers directory filepath
-    process safe-exceptions text time unix
+    aeson agent-responses agent-responses-types base bytestring containers
+    directory filepath process safe-exceptions text time unix
   ];
   testHaskellDepends = [
     aeson agent-claude agent-codex-dialect agent-core
