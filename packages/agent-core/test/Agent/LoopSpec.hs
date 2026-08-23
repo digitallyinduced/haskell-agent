@@ -511,6 +511,56 @@ spec = describe "runLoop" do
                 results `shouldNotBe` []
             other -> expectationFailure ("expected LoopCancelled, got " <> show other)
 
+    it "does not render a rejected tool when approval cancels the turn" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            config = config0
+                { loopApprove = \_ -> do
+                    requestCancel cancel
+                    pure (Right False)
+                , loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        seen <- reverse <$> readIORef events
+        seen `shouldBe`
+            [ TurnStarted
+            , TurnFinished $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+
+    it "stops preparing a parallel batch after approval cancels" do
+        approvals <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "echo" "{\"message\":\"one\"}"
+                , functionToolCall "c2" "echo" "{\"message\":\"two\"}"
+                ]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let cancel = case config0 of
+                LoopConfig{loopCancel = c} -> c
+            config = config0
+                { loopApprove = \call -> do
+                    modifyIORef' approvals (<> [call.callId])
+                    requestCancel cancel
+                    pure (Right False)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldBe` Left (LoopCancelled [])
+        readIORef approvals `shouldReturn` ["c1"]
+
     it "returns LoopCancelled when cancel arrives during submitTurn" do
         started <- newEmptyMVar
         config0 <- testConfig $ Backend \_prev _inputs _onEvent -> do
