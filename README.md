@@ -6,6 +6,12 @@
 OpenRouter models with first-class GHCi integration and a runtime designed
 around types, pure functions, explicit effects, and composable concurrency.
 
+## Try it out
+
+```console
+nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
+```
+
 ## What is distinctive
 
 Most agent harnesses are effectively untyped imperative programming
@@ -49,12 +55,6 @@ The harness also includes the capabilities expected of a modern coding agent:
 persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
 web search, and interactive terminal interfaces. Those are important product
 features, but not the core differentiation.
-
-## Try it out
-
-```console
-nix run "git+ssh://git@github.com/digitallyinduced/haskell-agent"
-```
 
 ## Install
 
