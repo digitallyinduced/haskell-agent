@@ -490,7 +490,9 @@ spawnSubagentAtWithIdPreparedForTurn
                             case registry.registryConfig.maxDepth of
                                 Just limit | nextDepth > limit ->
                                     pure $ Left
-                                        "Agent depth limit reached. Solve the task yourself."
+                                        ("Agent depth limit reached (maximum depth "
+                                            <> Text.pack (show limit)
+                                            <> "). Solve the task yourself.")
                                 _ -> case joinTaskPath parentPath taskName of
                                     Left err -> pure (Left err)
                                     Right childPath -> do

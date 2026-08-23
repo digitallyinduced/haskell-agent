@@ -1,4 +1,4 @@
--- | Grok-build @task@ tool — spawn one level of subagents.
+-- | Grok-build @task@ tool with bounded nested subagents.
 --
 -- Wire names and defaults follow xai-org/grok-build TaskToolInput /
 -- build_task_description. Runtime reuses 'Agent.Subagents'.
@@ -24,6 +24,7 @@ import Agent.OsPath (fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
+    , defaultMaxDepth
     , defaultWaitTimeoutMs
     , getStatus
     , sendInputMessageForTurn
@@ -140,15 +141,20 @@ taskTool baseCwd ctx specsRef =
         , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
             "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" (isolated git worktree). Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
-        AlwaysPrompt
+        (taskApproval ctx)
         TurnSequential
         (typedTool "task" (runTask baseCwd ctx specsRef))
+
+taskApproval :: MultiAgentContext -> ApprovalRule
+taskApproval ctx = case ctx.multiSelfId of
+    Nothing -> AlwaysPrompt
+    Just _ -> AlwaysReadOnly
 
 taskDescription :: Text
 taskDescription =
     "Start a subagent that works on a task independently and reports back.\n\n\
     \Agent types:\n\n\
-    \- **general-purpose**: General purpose agent for multi-step tasks. Has access to all parent tools except spawn_subagent.\n\
+    \- **general-purpose**: General purpose agent for multi-step tasks. Can delegate further work with spawn_subagent while below the harness nesting limit.\n\
     \- **explore**: Fast, read-only agent specialized for codebase exploration. Read-only — has access to: read_file, list_dir, grep.\n\
     \- **plan**: Software architect for planning implementation strategies. Read-only — has access to: read_file, list_dir, grep, todo_write, web_search, enter_plan_mode, exit_plan_mode, ask_user_question.\n\n\
     \## Usage notes\n\
@@ -156,6 +162,9 @@ taskDescription =
     \- background: Returns immediately with a subagent_id. Use get_command_or_subagent_output to retrieve results. This is set to true by default.\n\
     \- Subagents receive project instructions from AGENTS.md. Include any especially important task-specific conventions directly in the prompt.\n\
     \- subagent_type defaults to general-purpose when omitted.\n\
+    \- Nested delegation is limited to "
+    <> Text.pack (show defaultMaxDepth)
+    <> " levels below the root agent. At the limit, complete the assigned task directly.\n\
     \- When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
     \Resuming a previous agent (resume_from):\n\
     \- Use resume_from to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior spawn_subagent call. A resumed agent keeps its transcript, so only describe what changed since the last run.\n\
@@ -444,7 +453,7 @@ filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]
 filterGrokToolsForType agentType tools = case agentType of
     "explore" -> filter ((`elem` exploreNames) . (.appToolName)) tools
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
-    _ -> filter ((/= "task") . (.appToolName)) tools
+    _ -> tools
   where
     exploreNames :: [Text]
     exploreNames =

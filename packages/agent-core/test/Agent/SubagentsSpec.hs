@@ -231,9 +231,10 @@ spec = describe "Agent.Subagents" do
             `shouldReturn` Right replacement
         closeSubagentRegistry registry
 
-    it "rejects spawn past maxDepth" do
-        let config = defaultSubagentConfig { maxDepth = Just 1 }
-        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+    it "allows four nested levels by default and rejects depth five" do
+        defaultSubagentConfig.maxDepth `shouldBe` Just defaultMaxDepth
+        defaultMaxDepth `shouldBe` 4
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Right LoopResult
                 { finalResponseId = "x"
                 , finalText = Just "ok"
@@ -241,10 +242,18 @@ spec = describe "Agent.Subagents" do
                 , tokenUsage = emptyTokenUsage
                 })
             (\_ _ -> pure ())
-        Right child <- spawnSubagent registry Nothing 0 "one" Nothing
-        _ <- waitSubagents registry [child] 15000
-        result <- spawnSubagent registry (Just child) 1 "two" Nothing
-        result `shouldBe` Left "Agent depth limit reached. Solve the task yourself."
+        Right level1 <- spawnSubagent registry Nothing 0 "one" Nothing
+        _ <- waitSubagents registry [level1] 15000
+        Right level2 <- spawnSubagent registry (Just level1) 1 "two" Nothing
+        _ <- waitSubagents registry [level2] 15000
+        Right level3 <- spawnSubagent registry (Just level2) 2 "three" Nothing
+        _ <- waitSubagents registry [level3] 15000
+        Right level4 <- spawnSubagent registry (Just level3) 3 "four" Nothing
+        _ <- waitSubagents registry [level4] 15000
+        result <- spawnSubagent registry (Just level4) 4 "five" Nothing
+        result `shouldBe`
+            Left
+                "Agent depth limit reached (maximum depth 4). Solve the task yourself."
 
     it "releases maxConcurrent capacity when agents finish" do
         gate <- newTVarIO False

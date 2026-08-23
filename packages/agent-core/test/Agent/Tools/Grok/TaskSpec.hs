@@ -54,8 +54,11 @@ spec = describe "Agent.Tools.Grok.Task" do
             Text.isInfixOf "prior spawn_subagent call"
         tool.appToolDescription `shouldSatisfy`
             Text.isInfixOf "subagent_type defaults to general-purpose"
+        tool.appToolDescription `shouldSatisfy`
+            Text.isInfixOf "limited to 4 levels"
         tool.appToolDescription `shouldNotSatisfy`
             Text.isInfixOf "must specify a subagent_type"
+        expectAlwaysPrompt tool.appToolApproval
         closeSubagentRegistry registry
 
     it "defaults run_in_background and spawns a background agent" do
@@ -140,10 +143,22 @@ spec = describe "Agent.Tools.Grok.Task" do
         names `shouldNotContain` ["search_replace"]
         names `shouldNotContain` ["task"]
 
-    it "filters task out of general-purpose children" do
+    it "keeps task available to general-purpose children" do
         let tools = [fake "read_file", fake "task"]
             names = map (.appToolName) (filterGrokToolsForType "general-purpose" tools)
-        names `shouldBe` ["read_file"]
+        names `shouldBe` ["read_file", "task"]
+
+    it "allows child delegation without an interactive approval prompt" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        typesRef <- newIORef Map.empty
+        let childId = SubagentId "agent-child"
+            ctx = MultiAgentContext registry (Just childId) 1 taskPathRoot
+                (pure Nothing) Nothing Nothing Nothing Nothing
+            tool = taskTool (fromFilePath "/tmp") ctx typesRef
+        expectAlwaysReadOnly tool.appToolApproval
+        closeSubagentRegistry registry
 
     it "keeps an isolated worktree until its child is closed" do
         cleaned <- newIORef False
@@ -180,6 +195,14 @@ spec = describe "Agent.Tools.Grok.Task" do
             (functionToolCall "c1" "task" worktreeArgs)
         result.output `shouldSatisfy` Text.isInfixOf "registry is closed"
         readIORef cleaned `shouldReturn` True
+
+expectAlwaysPrompt :: ApprovalRule -> Expectation
+expectAlwaysPrompt AlwaysPrompt = pure ()
+expectAlwaysPrompt _ = expectationFailure "expected AlwaysPrompt"
+
+expectAlwaysReadOnly :: ApprovalRule -> Expectation
+expectAlwaysReadOnly AlwaysReadOnly = pure ()
+expectAlwaysReadOnly _ = expectationFailure "expected AlwaysReadOnly"
 
 fake :: Text -> AppTool
 fake name = AppTool
