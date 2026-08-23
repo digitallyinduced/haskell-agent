@@ -224,6 +224,14 @@ import Agent.CLI.Render
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionState
+    ( SessionState(..)
+    , addSessionTokenUsage
+    , clearSessionPreviousResponseId
+    , replaceSessionTranscript
+    , resetSessionConversation
+    , setSessionTranscript
+    )
 import Agent.CLI.SessionLock
     ( SessionLock
     , acquireSessionLock
@@ -330,6 +338,7 @@ import Agent.TUI.Model
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
+import Agent.CLI.TurnState (ConversationState(..))
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
@@ -1678,7 +1687,7 @@ runAgentInitializedWithLock
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
-    subagentForkSource <- newIORef (Nothing :: Maybe (IORef [ResponseItem]))
+    subagentForkSource <- newIORef (Nothing :: Maybe (IO [ResponseItem]))
     pendingNotices <- newIORef ([] :: [TurnInput])
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
@@ -1908,10 +1917,7 @@ runAgentInitializedWithLock
                         provider
                         (tokenProviderBillingMode tokenProvider)
                 }
-        transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
-        previousRef <- newIORef initialPrevious
-        writeIORef subagentForkSource (Just transcriptRef)
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
@@ -1933,10 +1939,30 @@ runAgentInitializedWithLock
         skillsRef <- newIORef (SkillCatalog [] [])
         skillInvocationsRef <- newIORef []
 
-        usageRef <- newIORef $ case resumed of
-            Just (meta, turns) -> sessionUsageFromTurns meta turns
-            Nothing -> emptyTokenUsage
-        let recordCompactionUsage usage =
+        let initialUsage = case resumed of
+                Just (meta, turns) -> sessionUsageFromTurns meta turns
+                Nothing -> emptyTokenUsage
+        sessionStateRef <- newIORef SessionState
+            { sessionConversation = ConversationState
+                { conversationPreviousResponseId = initialPrevious
+                , conversationTranscript = initialItems
+                , conversationStartupContext = startupContext
+                , conversationUsage = initialUsage
+                , conversationLastAssistant = Nothing
+                }
+            }
+        writeIORef subagentForkSource $
+            Just
+                ( (.sessionConversation.conversationTranscript)
+                    <$> readIORef sessionStateRef
+                )
+        let readSessionTranscript =
+                (.sessionConversation.conversationTranscript)
+                    <$> readIORef sessionStateRef
+            installCompaction outcome =
+                atomicModifyIORef' sessionStateRef \state ->
+                    (replaceSessionTranscript outcome.compactHistory state, ())
+            recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
                     mask_ do
                         case persist of
@@ -1946,7 +1972,8 @@ runAgentInitializedWithLock
                                 claimCurrentSession handle
                                 updated <- addSessionUsage usage handle
                                 writeIORef slotRef (PersistenceActive updated)
-                        modifyIORef' usageRef (`addTokenUsage` usage)
+                        atomicModifyIORef' sessionStateRef \state ->
+                            (addSessionTokenUsage usage state, ())
         case persist of
             PersistenceEnabled slotRef -> do
                 slot <- readIORef slotRef
@@ -2209,25 +2236,24 @@ runAgentInitializedWithLock
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
-                                                previousRef
-                                                transcriptRef
+                                                installCompaction
                                                 (Just contextTokensRef)
                                                 (runProviderCompactWith
                                                     (Just compactSender)
                                                     recordCompactionUsage
                                                     provider
                                                     (Just tokenProvider)
-                                                    paramsRef
-                                                    transcriptRef)
+                                                    (readIORef paramsRef)
+                                                    readSessionTranscript)
                                                 focus
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                                        previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
+                                        persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -2278,20 +2304,20 @@ runAgentInitializedWithLock
                                 xaiBackend xaiOptions tokenProvider
                                     (readIORef privateParams)
                             compactRunner =
-                                installCompactOutcome previousRef transcriptRef Nothing $
+                                installCompactOutcome installCompaction Nothing $
                                     runProviderCompactWith
                                         Nothing
                                         recordCompactionUsage
                                         provider
                                         (Just tokenProvider)
-                                        paramsRef
-                                        transcriptRef
+                                        (readIORef paramsRef)
+                                        readSessionTranscript
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -2333,7 +2359,7 @@ runAgentInitializedWithLock
                                 makeBackend
                                     (readIORef privateParams)
                             compactRunner =
-                                installCompactOutcome previousRef transcriptRef Nothing $
+                                installCompactOutcome installCompaction Nothing $
                                     case customGenericOptions of
                                         Just genericOptions ->
                                             runResponsesCompactWith
@@ -2348,22 +2374,22 @@ runAgentInitializedWithLock
                                                             }
                                                         request)
                                                 recordCompactionUsage
-                                                paramsRef
-                                                transcriptRef
+                                                (readIORef paramsRef)
+                                                readSessionTranscript
                                         Nothing ->
                                             runProviderCompactWith
                                                 Nothing
                                                 recordCompactionUsage
                                                 provider
                                                 (Just tokenProvider)
-                                                paramsRef
-                                                transcriptRef
+                                                (readIORef paramsRef)
+                                                readSessionTranscript
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns
+                            persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool skillsRef skillInvocationsRef escPaused interrupt
+                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -2559,16 +2585,14 @@ runSession
     -> [Provider]
     -> Maybe (STM ApiError)
     -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> IORef SessionState
     -> [SessionTurn]
-    -> IORef (Maybe Text)
     -> Persistence
     -> OsPath
     -> OsPath
     -> OsPath
     -> Maybe TokenProvider
     -> Maybe OpenAI.Pool
-    -> IORef (Maybe Text)
     -> IORef SkillCatalog
     -> IORef [SkillInvocation]
     -> IORef Bool
@@ -2580,7 +2604,6 @@ runSession
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
     -> Maybe LegacySubagentTarget
-    -> IORef TokenUsage
     -> IORef Text
     -> IORef Text
     -> IORef Text
@@ -2591,8 +2614,10 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
-  initialPrevious <- readIORef previous
+runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef sessionStateRef initialTurns persist projectRoot home cwd tokenProvider openAiPool skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+  initialPrevious <-
+      (.sessionConversation.conversationPreviousResponseId)
+          <$> readIORef sessionStateRef
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
@@ -2653,7 +2678,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
     startedAtRef <- newIORef Nothing
     toolCallsRef <- newIORef Map.empty
     allowedToolsRef <- newIORef Set.empty
-    lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
@@ -2682,7 +2706,9 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                         )
                     pure steps
         loadAgentSnapshot includeSummaries = do
-            rootItems <- readIORef transcriptRef
+            rootItems <-
+                (.sessionConversation.conversationTranscript)
+                    <$> readIORef sessionStateRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
@@ -2816,9 +2842,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
         (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect selectAgent
     let sessionReset = do
-            resetLiveConversation previous transcriptRef attachmentsRef planMode
-            writeIORef usageRef emptyTokenUsage
-            writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
@@ -2828,18 +2851,20 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                 Nothing -> pure ()
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
+            atomicModifyIORef' sessionStateRef \state ->
+                (resetSessionConversation freshAgents state, ())
+            writeIORef attachmentsRef []
+            deactivatePlanMode planMode
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames True freshAgents
+                reservedSlashNames True sessionStateRef
                 skillsRef skillInvocationsRef freshSkills
             reportSkillCatalog True freshSkills omitted
-            fresh <- readIORef freshAgents
-            writeIORef startupContext fresh
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext startupContext
+                reservedSlashNames queueContext sessionStateRef
                 skillsRef skillInvocationsRef refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
@@ -2944,8 +2969,12 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
-                { readBackendState = readIORef transcriptRef
-                , commitBackendState = writeIORef transcriptRef
+                { readBackendState =
+                    (.sessionConversation.conversationTranscript)
+                        <$> readIORef sessionStateRef
+                , commitBackendState = \items ->
+                    atomicModifyIORef' sessionStateRef \state ->
+                        (setSessionTranscript items state, ())
                 }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
@@ -3015,11 +3044,10 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionDialect = dialect
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
-            , sessionPrevious = previous
+            , sessionState = sessionStateRef
             , sessionPrinted = printed
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
-            , sessionTranscript = transcriptRef
             , sessionPersist = persist
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
@@ -3030,7 +3058,6 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
-            , sessionStartupContext = startupContext
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
@@ -3040,13 +3067,11 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
             , sessionStoreRoot = storeRoot
-            , sessionUsage = usageRef
             , sessionAccount = accountRef
             , sessionAccountId = accountIdRef
             , sessionAccountSelectionId = selectionRef
             , sessionAccountLabel = accountLabel
             , sessionSelectAccount = selectAccount
-            , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
             , sessionSetWindowTitle = setWindowTitle
@@ -3068,7 +3093,7 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames
                 (null initialTurns && not (isJust initialPrevious))
-                startupContext skillsRef skillInvocationsRef skills
+                sessionStateRef skillsRef skillInvocationsRef skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
@@ -3233,7 +3258,9 @@ syncFullscreenPrompt env =
         params <- readIORef env.sessionParams
         policy <- readIORef env.sessionPolicy
         account <- readIORef env.sessionAccount
-        usage <- readIORef env.sessionUsage
+        usage <-
+            (.sessionConversation.conversationUsage)
+                <$> readIORef env.sessionState
         attachments <- readIORef env.sessionAttachments
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
@@ -3481,11 +3508,10 @@ replWithDraft env@SessionEnv
     , sessionModelCatalog = catalog
     , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
-    , sessionPrevious = previous
+    , sessionState = sessionStateRef
     , sessionPrinted = printed
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
-    , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
@@ -3500,12 +3526,10 @@ replWithDraft env@SessionEnv
     , sessionInterrupt = interrupt
     , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
-    , sessionUsage = usageRef
     , sessionAccount = accountRef
     , sessionAccountId = accountIdRef
     , sessionAccountSelectionId = selectionRef
     , sessionSelectAccount = selectAccount
-    , sessionLastAssistant = lastAssistantRef
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
     , sessionSetWindowTitle = setWindowTitle
@@ -3514,6 +3538,7 @@ replWithDraft env@SessionEnv
     } draft = do
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
+    conversation <- (.sessionConversation) <$> readIORef sessionStateRef
     let skillCommands =
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
@@ -3525,7 +3550,7 @@ replWithDraft env@SessionEnv
     policy <- readIORef policyRef
     pendingAttachments <- readIORef attachmentsRef
     let idleMode = replModeFromState planState policy
-    usage <- readIORef usageRef
+    let usage = conversation.conversationUsage
     account <- readIORef accountRef
     mlineResult <- case fullscreen of
         Just runtime -> do
@@ -3953,14 +3978,18 @@ replWithDraft env@SessionEnv
                                 continue
 
                     ReplCopyLast -> do
-                        answer <- readIORef lastAssistantRef
+                        answer <-
+                            (.sessionConversation.conversationLastAssistant)
+                                <$> readIORef sessionStateRef
                         copyCommand
                             "last response"
                             "no assistant response to copy"
                             answer
                         continue
                     ReplCopyCode index -> do
-                        answer <- readIORef lastAssistantRef
+                        answer <-
+                            (.sessionConversation.conversationLastAssistant)
+                                <$> readIORef sessionStateRef
                         let label =
                                 "code block " <> Text.pack (show index)
                         copyCommand
@@ -3969,7 +3998,9 @@ replWithDraft env@SessionEnv
                             (answer >>= fencedCodeBlock index)
                         continue
                     ReplCopyDiff -> do
-                        answer <- readIORef lastAssistantRef
+                        answer <-
+                            (.sessionConversation.conversationLastAssistant)
+                                <$> readIORef sessionStateRef
                         copyCommand
                             "diff block"
                             "no diff block was found"
@@ -4036,7 +4067,7 @@ replWithDraft env@SessionEnv
                                     projectRoot provider connectionId name
                                     choice.modelTarget.targetWireModelId
                                     choice.modelTarget.targetDialect
-                                    paramsRef render previous persist
+                                    paramsRef render sessionStateRef persist
                                 displayInfo message $
                                     Text.putStrLn
                                         (roleMuted color (glyphOk <> message))
@@ -4125,7 +4156,9 @@ replWithDraft env@SessionEnv
                                             Just _ -> action)
                                 btwBackend
                                 paramsRef
-                                transcriptRef
+                                ( (.sessionConversation.conversationTranscript)
+                                    <$> readIORef sessionStateRef
+                                )
                                 question
                         case result of
                             Left err -> do
@@ -4544,7 +4577,7 @@ replWithDraft env@SessionEnv
                         choice.modelTarget.targetModelId
                         choice.modelTarget.targetWireModelId
                         choice.modelTarget.targetDialect
-                        paramsRef render previous persist
+                        paramsRef render sessionStateRef persist
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -5120,12 +5153,12 @@ applyModelChange
     -> DialectId
     -> IORef ResponseCreateParams
     -> RenderConfig
-    -> IORef (Maybe Text)
+    -> IORef SessionState
     -> Persistence
     -> IO Text
 applyModelChange
         projectRoot provider connection name transportModel dialectId
-        paramsRef render previous persist = do
+        paramsRef render sessionStateRef persist = do
     modifyIORef' paramsRef (setModel name)
     writeIORef render.renderModelRef name
     saveProjectModel projectRoot ModelTarget
@@ -5137,8 +5170,7 @@ applyModelChange
         }
     clearedChain <- case provider of
         OpenAIProvider ->
-            atomicModifyIORef' previous \prev ->
-                (Nothing, isJust prev)
+            atomicModifyIORef' sessionStateRef clearSessionPreviousResponseId
         _ -> pure False
     case persist of
         PersistenceDisabled -> pure ()
@@ -5844,10 +5876,10 @@ loadAgentsContext
     -> OsPath
     -> [ResponseItem]
     -> Maybe Text
-    -> IO (IORef (Maybe Text))
+    -> IO (Maybe Text)
 loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevious
-    | not options.optAgentsMd = newIORef Nothing
-    | not (null initialItems) || isJust initialPrevious = newIORef Nothing
+    | not options.optAgentsMd = pure Nothing
+    | not (null initialItems) || isJust initialPrevious = pure Nothing
     | otherwise = do
         let discoverOptions = DiscoverOptions
                 { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
@@ -5857,7 +5889,7 @@ loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevio
         loaded <- discoverProjectInstructions discoverOptions cwd
         let files = loadedInstructionFiles loaded
         case formatAgentsMdForDialect dialect cwd loaded of
-            Nothing -> newIORef Nothing
+            Nothing -> pure Nothing
             Just text -> do
                 let message =
                         "agents.md: loaded "
@@ -5870,7 +5902,7 @@ loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevio
                             (roleMuted color (glyphSession <> message))
                     Just runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
-                newIORef (Just text)
+                pure (Just text)
 
 preparePromptSkillInputs
     :: SessionEnv
@@ -6160,19 +6192,6 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
             withMVar wsLock \_ ->
                 compactingBackend.submitTurn state previous inputs onEvent
     in (compactSender, serializedBackend)
-
--- | Drop live conversation state without touching persisted session files.
-resetLiveConversation
-    :: IORef (Maybe Text)
-    -> IORef [ResponseItem]
-    -> IORef [ImageAttachment]
-    -> PlanModeEnv
-    -> IO ()
-resetLiveConversation previous transcriptRef attachmentsRef planMode = do
-    writeIORef previous Nothing
-    writeIORef transcriptRef []
-    writeIORef attachmentsRef []
-    deactivatePlanMode planMode
 
 detectGitBranch :: OsPath -> IO Text
 detectGitBranch cwd = do

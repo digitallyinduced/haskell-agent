@@ -84,7 +84,7 @@ spec = do
                             , backendState = privateTranscript
                             }
             result <- runBtwWithCancel (\_ action -> action)
-                factory mainParams mainTranscript "why?"
+                factory mainParams (readIORef mainTranscript) "why?"
             result `shouldBe` Right "side answer"
             readIORef seenPrevious `shouldReturn` Nothing
             seen <- readIORef seenInputs
@@ -115,7 +115,7 @@ spec = do
                         , backendState = state
                         }
             result <- runBtwWithCancel (\_ action -> action)
-                factory params transcript "do something"
+                factory params (readIORef transcript) "do something"
             result `shouldBe` Left BtwUnexpectedToolCall
             readIORef submissions `shouldReturn` 1
 
@@ -131,10 +131,10 @@ spec = do
                         , backendState = state
                         }
             runBtwWithCancel (\_ action -> action)
-                transport params transcript "why?"
+                transport params (readIORef transcript) "why?"
                 `shouldReturn` Left (BtwTransport (ConnectionError "offline"))
             runBtwWithCancel (\_ action -> action)
-                empty params transcript "why?"
+                empty params (readIORef transcript) "why?"
                 `shouldReturn` Left BtwEmptyResponse
 
     describe "formatBtwError" do

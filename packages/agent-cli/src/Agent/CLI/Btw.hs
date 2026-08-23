@@ -118,12 +118,12 @@ runBtwWithCancel
         -> IO (Either BtwError Text))
     -> BtwBackendFactory
     -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> IO [ResponseItem]
     -> Text
     -> IO (Either BtwError Text)
-runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = do
+runBtwWithCancel withCancelScope makeBackend paramsRef getTranscript question = do
     params <- clearTurnSpecificParams <$> readIORef paramsRef
-    transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
+    transcript <- trimDanglingToolSuffix <$> getTranscript
     privateParams <- newIORef params
     cancel <- newCancelFlag
     let Backend submit = makeBackend privateParams

@@ -218,7 +218,7 @@ prepareCollaborationSpawn
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
-    -> IORef (Maybe (IORef [ResponseItem]))
+    -> IORef (Maybe (IO [ResponseItem]))
     -> SubagentId
     -> CollaborationSpawnOptions
     -> IO ()
@@ -255,7 +255,7 @@ prepareCollaborationSpawn
             childDialect
             agentId
     source <- readIORef sourceRef
-    sourceItems <- maybe (pure []) readIORef source
+    sourceItems <- maybe (pure []) id source
     writeIORef session.subSessionTranscript
         (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
 
@@ -803,7 +803,8 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
             currentEffectiveModel
             currentDialect
             env.subId
-    nestedForkSource <- newIORef (Just session.subSessionTranscript)
+    nestedForkSource <-
+        newIORef (Just (readIORef session.subSessionTranscript))
     let sessionDialect = dialectForId session.subSessionDialect
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
