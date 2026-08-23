@@ -388,8 +388,8 @@ autoCompactOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackend =
     autoCompactOpenAiBackendWithThreshold Nothing
 
@@ -400,8 +400,8 @@ autoCompactOpenAiBackendWithThreshold
     -> TokenProvider
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
         getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithSender
@@ -421,8 +421,8 @@ autoCompactOpenAiBackendWithSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithLimit
@@ -448,8 +448,8 @@ autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
@@ -465,8 +465,8 @@ autoCompactOpenAiBackendWith compactAction =
 autoCompactOpenAiBackendWithApi
     :: IO (Either ApiError CompactOutcome)
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
@@ -478,8 +478,8 @@ autoCompactOpenAiBackendWithLimit
     -> ([ResponseItem] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
     -> IORef (Maybe (Int, Int))
-    -> Backend [ResponseItem]
-    -> Backend [ResponseItem]
+    -> Backend
+    -> Backend
 autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         contextTokensRef
         (Backend submit) =

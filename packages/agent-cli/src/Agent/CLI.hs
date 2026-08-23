@@ -2042,7 +2042,7 @@ runSession
     -> Maybe (Text -> IO (Either ApiError Text))
     -> (SessionHandle -> IO ())
     -> (Maybe Text -> IO (Either Text CompactOutcome))
-    -> Backend [ResponseItem]
+    -> Backend
     -> BtwBackendFactory
     -> IO RunResult
 runSession options provider policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
@@ -4744,8 +4744,8 @@ prepareTransitionBackend
     :: OsPath
     -> Maybe ProviderTransition
     -> Persistence
-    -> Backend state
-    -> IO (Backend state)
+    -> Backend
+    -> IO Backend
 prepareTransitionBackend _ Nothing _ backend = pure backend
 prepareTransitionBackend projectRoot (Just transition) persist backend
     | transition.transitionCause == ManualTransition
@@ -4763,8 +4763,8 @@ commitBackendOnSuccess
     -> IORef Bool
     -> ProviderTransition
     -> Persistence
-    -> Backend state
-    -> Backend state
+    -> Backend
+    -> Backend
 commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
     Backend \state previous inputs onEvent -> do
         result <- submit state previous inputs onEvent
@@ -5177,7 +5177,7 @@ lockedOpenAiSession
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
-    -> (OpenAiCompactionSender, Backend [ResponseItem])
+    -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold wsLock provider activeConnection
         getParams contextTokens
         recordCompactionUsage =

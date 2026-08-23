@@ -918,8 +918,8 @@ spec = do
 --------------------------------------------------------------------------------
 
 submitWithState
-    :: IORef state
-    -> Backend state
+    :: IORef [ResponseItem]
+    -> Backend
     -> Maybe Text
     -> [TurnInput]
     -> (LoopEvent -> IO ())

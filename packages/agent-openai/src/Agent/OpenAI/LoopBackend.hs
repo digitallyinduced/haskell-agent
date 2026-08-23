@@ -82,7 +82,7 @@ import qualified Data.Text as Text
 openAiBackend
     :: CodexConn
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
@@ -94,7 +94,7 @@ openAiBackendReconnecting
     -> IORef Bool
     -> CodexConn
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openAiBackendReconnecting provider currentCredential connectionHealthy conn =
     openAiBackendWith
         (openAiResponseSenderReconnecting
@@ -209,7 +209,7 @@ openAiBackendWithConnectionRecovery
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openAiBackendWithConnectionRecovery connectionHealthy sendCurrent sendFresh =
     openAiBackendWith $
         openAiResponseSenderWithConnectionRecovery
@@ -435,9 +435,9 @@ isReplayUnsafeError = \case
 -- backend is safe while no text or reasoning delta has reached the caller.
 openAiBackendWithTransportFallback
     :: IORef Bool
-    -> Backend state
-    -> Backend state
-    -> Backend state
+    -> Backend
+    -> Backend
+    -> Backend
 openAiBackendWithTransportFallback fallbackActive primary fallback =
     Backend \state previousResponseId inputs onEvent -> do
         active <- readIORef fallbackActive
@@ -480,7 +480,7 @@ openAiBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openAiBackendWith =
     openAiBackendWithRetryPolicy transientStreamingResultPolicy
 
@@ -494,7 +494,7 @@ openAiBackendWithRetryPolicy
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openAiBackendWithRetryPolicy retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
         baseParams <- getParams

@@ -3,6 +3,7 @@ packages:
     packages/agent-core
     packages/agent-syntax
     packages/agent-tui
+    packages/agent-responses-types
     packages/agent-responses
     packages/agent-openai
     packages/agent-xai

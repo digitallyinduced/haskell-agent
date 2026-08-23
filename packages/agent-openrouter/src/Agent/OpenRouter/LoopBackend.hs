@@ -30,7 +30,7 @@ openRouterBackend
     :: ClientOptions
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openRouterBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
@@ -41,5 +41,5 @@ openRouterBackendWith
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 openRouterBackendWith = statelessResponsesBackend

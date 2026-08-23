@@ -427,7 +427,7 @@ spec = do
             result <- try submit
                 :: IO
                     (Either AsyncException
-                        (Either ApiError (BackendResult [ResponseItem])))
+                        (Either ApiError BackendResult))
             result `shouldBe` Left UserInterrupt
             readIORef continuationMasking `shouldReturn` Unmasked
             readIORef contextState `shouldReturn` oldContextState
@@ -597,9 +597,9 @@ spec = do
             readIORef compactCalls `shouldReturn` 1
 
 successful
-    :: state
+    :: [ResponseItem]
     -> TurnOutput
-    -> Either ApiError (BackendResult state)
+    -> Either ApiError BackendResult
 successful state output =
     Right BackendResult
         { backendOutput = output

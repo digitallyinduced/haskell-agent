@@ -38,14 +38,14 @@ spec = describe "withConnectionRecovery" do
                                 , backendState = state
                                 })
             inputs = [UserMessage "continue"]
-        result <- backend.submitTurn () (Just "previous") inputs
+        result <- backend.submitTurn [] (Just "previous") inputs
             (\event -> modifyIORef' events (<> [event]))
 
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = ()
+                , backendState = []
                 }
         readIORef waits `shouldReturn` [1, 2]
         readIORef seen `shouldReturn`
@@ -68,7 +68,7 @@ spec = describe "withConnectionRecovery" do
             backend = withConnectionRecoveryUsing
                 (\attempt -> modifyIORef' waits (<> [attempt]))
                 (Backend \_ _ _ _ -> pure (Left expected))
-        result <- backend.submitTurn () Nothing [] (const (pure ()))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe` Left expected
         readIORef waits `shouldReturn` []
 
@@ -88,12 +88,12 @@ spec = describe "withConnectionRecovery" do
                                         "response" [] (Just "done")
                                 , backendState = state
                                 })
-        result <- backend.submitTurn () Nothing [] (const (pure ()))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = ()
+                , backendState = []
                 }
         readIORef attempts `shouldReturn` 2
 
@@ -106,7 +106,7 @@ spec = describe "withConnectionRecovery" do
                     modifyIORef' attempts (+ 1)
                     onEvent (TextDelta "partial")
                     pure (Left (ConnectionError "dropped")))
-        result <- backend.submitTurn () Nothing [] (const (pure ()))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe` Left (ConnectionError "dropped")
         readIORef attempts `shouldReturn` 1
         readIORef waits `shouldReturn` []
@@ -133,13 +133,13 @@ spec = describe "withConnectionRecovery" do
                                         , backendState = state
                                         })
             expected = [UserMessage "queued", UserMessage "current"]
-        result <- backend.submitTurn () Nothing [UserMessage "current"]
+        result <- backend.submitTurn [] Nothing [UserMessage "current"]
             (const (pure ()))
         result `shouldBe`
             Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "response" [] (Just "done")
-                , backendState = ()
+                , backendState = []
                 }
         readIORef seen `shouldReturn` [expected, expected]
         readIORef pending `shouldReturn` []

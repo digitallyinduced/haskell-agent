@@ -3,6 +3,7 @@ module Agent.LoopSpec (spec) where
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
+import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Types
@@ -394,7 +395,7 @@ spec = describe "runLoop" do
             [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionState `shouldBe` 1
+        length execution.executionState `shouldBe` 1
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionResult `shouldBe` Right LoopResult
             { finalResponseId = "resp-1"
@@ -413,7 +414,7 @@ spec = describe "runLoop" do
             ]
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionState `shouldBe` 1
+        length execution.executionState `shouldBe` 1
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionResult
             `shouldBe` Left (LoopTransport (ConnectionError "down"))
@@ -423,7 +424,7 @@ spec = describe "runLoop" do
         backend <- scriptedBackend submissions [Left (ConnectionError "down")]
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionState `shouldBe` 0
+        execution.executionState `shouldBe` []
         execution.executionProgress `shouldBe` NoResponseCommitted
         execution.executionResult
             `shouldBe` Left (LoopTransport (ConnectionError "down"))
@@ -440,7 +441,7 @@ spec = describe "runLoop" do
                     _ -> pure ()
                 }
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionState `shouldBe` 1
+        length execution.executionState `shouldBe` 1
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
@@ -576,7 +577,7 @@ spec = describe "runLoop" do
             pure $ Right BackendResult
                 { backendOutput =
                     emptyTurnOutput "resp-slow" [] (Just "too late")
-                , backendState = state + 1
+                , backendState = state <> [stateMarker]
                 }
         let cancel = case config0 of
                 LoopConfig{loopCancel = c} -> c
@@ -625,10 +626,10 @@ spec = describe "runLoop" do
 -- Helpers
 --------------------------------------------------------------------------------
 
-testConfig :: Backend Int -> IO (LoopConfig Int)
+testConfig :: Backend -> IO LoopConfig
 testConfig backend = do
     cancel <- newCancelFlag
-    state <- newIORef 0
+    state <- newIORef []
     pure LoopConfig
         { loopBackend = backend
         , loopBackendState = BackendStateStore
@@ -681,7 +682,7 @@ functionResult callId output = ToolCallResult
 scriptedBackend
     :: IORef [(Maybe Text, [TurnInput])]
     -> [Either ApiError TurnOutput]
-    -> IO (Backend Int)
+    -> IO Backend
 scriptedBackend submissions answers = do
     remaining <- newIORef answers
     pure $ Backend \state prev inputs _onEvent -> do
@@ -693,12 +694,12 @@ scriptedBackend submissions answers = do
                 , fmap
                     (\output -> BackendResult
                         { backendOutput = output
-                        , backendState = state + 1
+                        , backendState = state <> [stateMarker]
                         })
                     next
                 )
 
-endlessToolsBackend :: IO (Backend Int)
+endlessToolsBackend :: IO Backend
 endlessToolsBackend = do
     counter <- newIORef (0 :: Int)
     pure $ Backend \state _prev _inputs _onEvent -> do
@@ -708,5 +709,11 @@ endlessToolsBackend = do
             { backendOutput = emptyTurnOutput responseId
                 [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
                 Nothing
-            , backendState = state + 1
+            , backendState = state <> [stateMarker]
             }
+
+stateMarker :: ResponseItem
+stateMarker = UnknownResponseItem TaggedObject
+    { tag = "test_state"
+    , fields = mempty
+    }

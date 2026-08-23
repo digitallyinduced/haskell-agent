@@ -37,7 +37,7 @@ import qualified Data.Text as Text
 
 -- | Construct a provider backend over private request parameters and transcript.
 type BtwBackendFactory =
-    IORef ResponseCreateParams -> Backend [ResponseItem]
+    IORef ResponseCreateParams -> Backend
 
 data BtwError
     = BtwTransport !ApiError

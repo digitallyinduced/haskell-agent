@@ -26,7 +26,7 @@ spec = describe "withPendingInputs" do
                             emptyTurnOutput "response" [] Nothing
                         , backendState = state
                         }
-        _ <- backend.submitTurn () Nothing
+        _ <- backend.submitTurn [] Nothing
             [UserMessage "parent"] (const (pure ()))
         readIORef seen `shouldReturn`
             [UserMessage "child result", UserMessage "parent"]
@@ -37,7 +37,7 @@ spec = describe "withPendingInputs" do
         pending <- newIORef queued
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> pure (Left (ConnectionError "offline"))
-        _ <- backend.submitTurn () Nothing
+        _ <- backend.submitTurn [] Nothing
             [UserMessage "parent"] (const (pure ()))
         readIORef pending `shouldReturn` queued
 
@@ -47,7 +47,7 @@ spec = describe "withPendingInputs" do
         let backend = withPendingInputs pending $ Backend
                 \_ _ _ _ -> ioError (userError "interrupted")
         result <- tryAny $
-            backend.submitTurn () Nothing
+            backend.submitTurn [] Nothing
                 [UserMessage "parent"] (const (pure ()))
         result `shouldSatisfy` isLeft
         readIORef pending `shouldReturn` queued

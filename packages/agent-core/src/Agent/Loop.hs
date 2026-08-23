@@ -30,6 +30,7 @@ module Agent.Loop
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
+import Agent.Responses.Types (ResponseItem)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -128,8 +129,8 @@ data LoopProgress
     | ResponseCommitted
     deriving (Eq, Show)
 
-data LoopExecution state = LoopExecution
-    { executionState :: !state
+data LoopExecution = LoopExecution
+    { executionState :: ![ResponseItem]
     , executionProgress :: !LoopProgress
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
@@ -142,26 +143,26 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , tokenUsage = emptyTokenUsage
     }
 
-data BackendResult state = BackendResult
+data BackendResult = BackendResult
     { backendOutput :: !TurnOutput
-    , backendState :: !state
+    , backendState :: ![ResponseItem]
     } deriving (Eq, Show)
 
-newtype Backend state = Backend
+newtype Backend = Backend
     { submitTurn
-        :: state
+        :: [ResponseItem]
         -> Maybe Text
         -> [TurnInput]
         -> (LoopEvent -> IO ())
-        -> IO (Either ApiError (BackendResult state))
+        -> IO (Either ApiError BackendResult)
     }
 
-data BackendStateStore state = BackendStateStore
-    { readBackendState :: !(IO state)
+data BackendStateStore = BackendStateStore
+    { readBackendState :: !(IO [ResponseItem])
       -- | Publish a completed provider response for live observers and later
       -- tool continuations. Higher-level turn policy may still deliberately
       -- roll this state back after cancellation or terminal failure.
-    , commitBackendState :: !(state -> IO ())
+    , commitBackendState :: !([ResponseItem] -> IO ())
     }
 
 data LoopEvent
@@ -177,9 +178,9 @@ data LoopEvent
     | ToolFinished ToolCallResult
     deriving (Eq, Show)
 
-data LoopConfig state = LoopConfig
-    { loopBackend :: !(Backend state)
-    , loopBackendState :: !(BackendStateStore state)
+data LoopConfig = LoopConfig
+    { loopBackend :: !Backend
+    , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
@@ -232,7 +233,7 @@ defaultLoopDispatch = ToolDispatchConfig
     }
 
 runLoop
-    :: LoopConfig state
+    :: LoopConfig
     -> Maybe Text
     -> Text
     -> IO (Either LoopError LoopResult)
@@ -241,7 +242,7 @@ runLoop config previousResponseId prompt =
 
 -- | Same as 'runLoop', but the first turn may be multimodal.
 runLoopInputs
-    :: LoopConfig state
+    :: LoopConfig
     -> Maybe Text
     -> [TurnInput]
     -> IO (Either LoopError LoopResult)
@@ -251,10 +252,10 @@ runLoopInputs config previousResponseId firstInputs =
 
 -- | Run a loop while retaining the latest explicitly committed backend state.
 runLoopInputsDetailed
-    :: LoopConfig state
+    :: LoopConfig
     -> Maybe Text
     -> [TurnInput]
-    -> IO (LoopExecution state)
+    -> IO LoopExecution
 runLoopInputsDetailed config previousResponseId firstInputs = do
     initialState <- config.loopBackendState.readBackendState
     runLoopInputsUnsafe
@@ -268,11 +269,11 @@ exceptionSummary =
         . displayException
 
 runLoopInputsUnsafe
-    :: LoopConfig state
-    -> state
+    :: LoopConfig
+    -> [ResponseItem]
     -> Maybe Text
     -> [TurnInput]
-    -> IO (LoopExecution state)
+    -> IO LoopExecution
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     -- Parallel-safe tool batches run with mapConcurrently. Serialize onEvent
     -- so a printer (hPutStrLn on String is not atomic) cannot interleave
@@ -371,7 +372,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
 
 -- | Preserve model order around stateful tools while retaining concurrency
 -- for maximal consecutive runs of explicitly parallel-safe calls.
-runToolCalls :: LoopConfig state -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
 runToolCalls config = go
   where
     go [] = pure []
@@ -405,13 +406,13 @@ data ToolApproval
 data PreparedToolCall =
     PreparedToolCall !ToolCall !ToolApproval
 
-runOne :: LoopConfig state -> ToolCall -> IO ToolCallResult
+runOne :: LoopConfig -> ToolCall -> IO ToolCallResult
 runOne config call =
     prepareToolCall config call >>= runPreparedToolCall config
 
 -- | Approval may touch interactive or otherwise order-sensitive state, so it
 -- is prepared serially even when the resulting handlers may run concurrently.
-prepareToolCall :: LoopConfig state -> ToolCall -> IO PreparedToolCall
+prepareToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
 prepareToolCall config call = do
     approval <- config.loopApprove call
     pure (PreparedToolCall call (normalizeApproval approval))
@@ -422,7 +423,7 @@ prepareToolCall config call = do
         Right True -> ToolApprovalGranted
 
 runPreparedToolCall
-    :: LoopConfig state
+    :: LoopConfig
     -> PreparedToolCall
     -> IO ToolCallResult
 runPreparedToolCall config (PreparedToolCall call approval) = do

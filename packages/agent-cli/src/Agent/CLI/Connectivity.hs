@@ -31,7 +31,7 @@ reconnectDelayMicros attempt =
 -- its owner cancels it. 'runLoopInputs' races every backend submission against
 -- the session cancel flag, so the sleep and all retries remain scoped to the
 -- current turn.
-withConnectionRecovery :: Backend state -> Backend state
+withConnectionRecovery :: Backend -> Backend
 withConnectionRecovery =
     withConnectionRecoveryUsing
         (threadDelay . reconnectDelayMicros)
@@ -43,8 +43,8 @@ withConnectionRecovery =
 -- through the existing error path instead.
 withConnectionRecoveryUsing
     :: (Int -> IO ())
-    -> Backend state
-    -> Backend state
+    -> Backend
+    -> Backend
 withConnectionRecoveryUsing waitBeforeRetry (Backend submit) =
     Backend \state previous inputs onEvent ->
         let go attempt = do

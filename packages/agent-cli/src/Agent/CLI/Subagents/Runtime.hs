@@ -317,7 +317,7 @@ restoreAgentFromDisk storeRootRef registry sessionsRef typesRef agentId = do
 freshOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 freshOpenAiBackend provider getParams = Backend \state previous inputs onEvent ->
     withCodexWsRetrying provider \conn _credential ->
         let Backend submit = openAiBackend conn getParams
@@ -396,7 +396,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
 runHttpSubagent
     :: SubagentRuntime
     -> Provider
-    -> (IORef ResponseCreateParams -> Backend [ResponseItem])
+    -> (IORef ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime provider mkBackend =
     \env previous prompt onEvent -> do
@@ -504,9 +504,9 @@ runPreparedChild
     -> SubagentSpawnEnv
     -> SubagentSession
     -> ToolRegistry
-    -> Backend [ResponseItem]
+    -> Backend
     -> (LoopEvent -> IO ())
-    -> (LoopConfig [ResponseItem] -> IO (Either LoopError LoopResult))
+    -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
 runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
     let config = LoopConfig

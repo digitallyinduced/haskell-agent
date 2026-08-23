@@ -7,7 +7,7 @@ import Agent.Loop (Backend(..), TurnInput)
 import Control.Exception.Safe (onException)
 import Data.IORef (IORef, atomicModifyIORef')
 
-withPendingInputs :: IORef [TurnInput] -> Backend state -> Backend state
+withPendingInputs :: IORef [TurnInput] -> Backend -> Backend
 withPendingInputs pending (Backend submit) =
     Backend \state previous inputs onEvent -> do
         queued <- atomicModifyIORef' pending \xs -> ([], xs)

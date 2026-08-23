@@ -27,7 +27,7 @@ import Data.Text (Text)
 import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
-    { sessionLoop :: !(LoopConfig [ResponseItem])
+    { sessionLoop :: !LoopConfig
     , sessionBtwBackend :: !BtwBackendFactory
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))
     , sessionRender :: !RenderConfig

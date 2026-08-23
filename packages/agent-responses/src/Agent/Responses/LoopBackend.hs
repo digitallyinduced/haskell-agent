@@ -56,7 +56,7 @@ statelessResponsesBackend
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 statelessResponsesBackend send getParams =
     Backend \history _previousResponseId inputs onEvent -> do
         baseParams <- getParams
@@ -84,7 +84,7 @@ tokenProviderStatelessResponsesBackend
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
-    -> Backend [ResponseItem]
+    -> Backend
 tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->
         runWithTokenProvider provider \credential ->
