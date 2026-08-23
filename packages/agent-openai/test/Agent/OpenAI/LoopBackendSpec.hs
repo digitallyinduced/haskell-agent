@@ -478,8 +478,8 @@ spec = do
                             onEvent (deltaEvent EventOutputTextDelta "ok")
                             pure $ Right
                                 (testResponse "resp-fresh" [assistantItem "ok"])
-                backend = openAiBackendWith send (pure baseParams) transcript
-            result <- backend.submitTurn (Just "resp-cache")
+                backend = openAiBackendWith send (pure baseParams)
+            result <- submitWithState transcript backend (Just "resp-cache")
                 [CompletedTool (functionResult "c1" "tool output")]
                 (const (pure ()))
             result `shouldBe`
@@ -510,8 +510,8 @@ spec = do
                             pure $ Right
                                 (testResponse "resp-fresh" [assistantItem "ok"])
             transcript <- newIORef seed
-            let backend = openAiBackendWith send (pure params) transcript
-            result <- backend.submitTurn (Just "resp-cache")
+            let backend = openAiBackendWith send (pure params)
+            result <- submitWithState transcript backend (Just "resp-cache")
                 [UserMessage "new"]
                 (const (pure ()))
             result `shouldBe`
@@ -826,8 +826,8 @@ spec = do
                     modifyIORef' freshCalls (+ 1)
                     pure $ Right (testResponse "resp-fresh" [assistantItem "ok"])
                 backend = openAiBackendWithConnectionRecovery
-                    healthy sendCurrent sendFresh (pure baseParams) transcript
-            result <- backend.submitTurn Nothing [UserMessage "one"]
+                    healthy sendCurrent sendFresh (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
                 (modifyIORef' events . (:))
             result `shouldBe` Right (emptyTurnOutput "resp-fresh" [] (Just "ok"))
             reverse <$> readIORef events `shouldReturn`
