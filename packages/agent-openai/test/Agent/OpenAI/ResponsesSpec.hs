@@ -194,6 +194,21 @@ spec = do
                     Aeson.toJSON event `shouldBe` original
                 Aeson.Error err -> expectationFailure err
 
+        it "recognises Codex response metadata and preserves its payload" do
+            let original = Aeson.object
+                    [ "type" .= ("codex.response.metadata" :: Text)
+                    , "sequence_number" .= (10 :: Int)
+                    , "metadata" .= Aeson.object
+                        [ "request_id" .= ("req_1" :: Text)
+                        ]
+                    ]
+            case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success event -> do
+                    Responses.responseStreamEventType event
+                        `shouldBe` Responses.EventCodexResponseMetadata
+                    Aeson.toJSON event `shouldBe` original
+                Aeson.Error err -> expectationFailure err
+
         it "rejects disagreement between the SSE name and JSON type" do
             let value = Aeson.object
                     [ "type" .= ("response.output_text.done" :: Text)
@@ -424,5 +439,5 @@ documentedStreamEventTypes =
     , "response.audio.done", "response.audio.transcript.delta", "response.audio.transcript.done"
     , "response.shell_call_command.added", "response.shell_call_command.delta"
     , "response.shell_call_command.done", "response.shell_call_output_content.delta"
-    , "response.shell_call_output_content.done"
+    , "response.shell_call_output_content.done", "codex.response.metadata"
     ]
