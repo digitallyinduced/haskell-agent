@@ -9,7 +9,7 @@ import Agent.Loop
     )
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Subagents
-import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
+import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot, taskPathText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -24,6 +24,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.STM
 import Control.Monad (unless)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -65,6 +66,29 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , ("list_agents", True)
                 , ("interrupt_agent", True)
                 ]
+        closeSubagentRegistry registry
+
+    it "spawns canonical paths through depth four and rejects depth five" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        level1 <- spawnFrom (rootContext registry Nothing) "level1"
+        level1Context <- childContext registry level1 1
+        level2 <- spawnFrom level1Context "level2"
+        level2Context <- childContext registry level2 2
+        level3 <- spawnFrom level2Context "level3"
+        level3Context <- childContext registry level3 3
+        level4 <- spawnFrom level3Context "level4"
+        level4Path <- fromMaybe taskPathRoot <$> getTaskPath registry level4
+        taskPathText level4Path
+            `shouldBe` "/root/level1/level2/level3/level4"
+        level4Context <- childContext registry level4 4
+        rejected <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers
+                (multiAgentTools level4Context))
+            (spawnCall "level5")
+        rejected.output `shouldSatisfy`
+            Text.isInfixOf "maximum depth 4"
         closeSubagentRegistry registry
 
     it "preserves encrypted spawn payloads" do
@@ -268,6 +292,38 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
+    }
+
+childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext
+childContext registry agentId depth = do
+    path <- fromMaybe taskPathRoot <$> getTaskPath registry agentId
+    pure $ (rootContext registry Nothing)
+        { multiSelfId = Just agentId
+        , multiDepth = depth
+        , multiTaskPath = path
+        }
+
+spawnFrom :: MultiAgentContext -> Text -> IO SubagentId
+spawnFrom context taskName = do
+    result <- dispatchToolCall defaultLoopDispatch
+        (appToolHandlers (multiAgentTools context))
+        (spawnCall taskName)
+    result.output `shouldSatisfy` Text.isInfixOf taskName
+    resolved <-
+        resolveAgentTarget
+            context.multiRegistry context.multiTaskPath taskName
+    case resolved of
+        Left err -> expectationFailure (Text.unpack err) >> fail "unreachable"
+        Right agentId -> pure agentId
+
+spawnCall :: Text -> ToolCall
+spawnCall taskName = ToolCall
+    { callId = "spawn-" <> taskName
+    , name = "collaboration.spawn_agent"
+    , arguments =
+        "{\"task_name\":\"" <> taskName <> "\",\"message\":\"task\"}"
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
     }
 
 encryptedSpawnCall :: ToolCall

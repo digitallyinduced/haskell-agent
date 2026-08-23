@@ -15,6 +15,7 @@ import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
+import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -39,6 +40,7 @@ import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
+import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
@@ -72,6 +74,7 @@ main = hspec do
     CompactionSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
+    DialectsSpec.spec
     ErrorSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
@@ -96,6 +99,7 @@ main = hspec do
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
+    SecretSpec.spec
     StyleSpec.spec
     TimestampSpec.spec
     TurnSpec.spec

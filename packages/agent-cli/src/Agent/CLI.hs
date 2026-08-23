@@ -26,6 +26,10 @@ import Agent.CLI.Auth
     , preferredOpenAiTokenProvider
     , probeLoadedAuthCredential
     )
+import Agent.CLI.Secret
+    ( promptSecretLine
+    , sanitizeSecretPromptText
+    )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentStep
@@ -169,7 +173,11 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectModel
     )
-import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
+import Agent.CLI.Prompt
+    ( defaultModelFor
+    , secretInputGuidance
+    , systemPrompt
+    )
 import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
@@ -258,6 +266,12 @@ import Agent.CLI.Terminal
     , withSynchronizedOutput
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Dialects
+    ( CodingTools(..)
+    , codingToolsForWithTypes
+    , formatAgentsMdForDialect
+    , globalAgentsHomeDir
+    )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
@@ -273,6 +287,7 @@ import Agent.CLI.TUI.App
     , requestFullscreenChoiceWithBody
     , requestFullscreenOnboarding
     , requestFullscreenResume
+    , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
@@ -322,8 +337,6 @@ import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , defaultDiscoverOptions
     , discoverProjectInstructions
-    , formatAgentsMdForDialect
-    , globalAgentsHomeDir
     , loadedInstructionFiles
     )
 import Agent.Skills
@@ -388,8 +401,7 @@ import Agent.Subagents
     , setSubagentOnSettled
     , setSubagentRunner
     )
-import Agent.Tools (CodingTools(..), codingToolsForWithTypes)
-import Agent.Tools.Grok.Task (GrokSubagentSpecs)
+import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.ToolDispatch (canonicalToolName)
@@ -405,6 +417,10 @@ import Agent.Tools.PlanMode
     , activatePlanMode
     , deactivatePlanMode
     , planFilePath
+    )
+import Agent.Tools.Secret
+    ( SecretPrompt(..)
+    , SecretPromptHooks(..)
     )
 import Agent.Tools.Types
     ( AppTool(..)
@@ -1395,6 +1411,15 @@ runAgentInitializedWithLock
     let basePlanHooks =
             cliPlanHooks interrupt escPaused (resolveColor stderr)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
+        baseSecretHooks = SecretPromptHooks \request ->
+            Right <$> promptSecretLine
+                escPaused
+                request.secretPromptMessage
+                request.secretPromptPurpose
+        secretHooks
+            | isOneShot options || not isTty = Nothing
+            | otherwise =
+                Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
         provider = loaded.loadedProvider
         model = fromMaybe
             (case transitionTarget of
@@ -1582,7 +1607,12 @@ runAgentInitializedWithLock
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     coding <-
         codingToolsForWithTypes
-            dialect toolEnv (Just planHooks) multiCtx agentTypesRef
+            dialect
+            toolEnv
+            (Just planHooks)
+            secretHooks
+            multiCtx
+            agentTypesRef
             `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
     case multiCtx of
         Just ctx -> do
@@ -1664,8 +1694,12 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
         let instructions =
-                systemPrompt dialect cwd (Just sessionTmp) today
-                    (isOneShot options)
+                Text.intercalate "\n\n" $
+                    filter (not . Text.null)
+                        [ systemPrompt dialect cwd (Just sessionTmp) today
+                            (isOneShot options)
+                        , secretInputGuidance (map (.appToolName) tools)
+                        ]
             params = requestParams model instructions
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
@@ -4655,6 +4689,34 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
                         [(choice, "") | choice <- choices]
                         >>= pure . (>>= (`atMay` choices))
     }
+
+fullscreenAwareSecretHooks
+    :: IORef (Maybe FullscreenRuntime)
+    -> SecretPromptHooks
+    -> SecretPromptHooks
+fullscreenAwareSecretHooks runtimeRef hooks =
+    SecretPromptHooks \request ->
+        withCurrentFullscreen runtimeRef
+            (hooks.promptSecret request)
+            \runtime ->
+                Right <$> requestFullscreenSecret
+                    runtime
+                    "Secret requested by agent"
+                    (secretRequestBody request)
+
+secretRequestBody :: SecretPrompt -> Text
+secretRequestBody request =
+    Text.intercalate "\n\n" $
+        filter (not . Text.null)
+            [ maybe ""
+                (\purpose ->
+                    "Purpose: "
+                        <> sanitizeSecretPromptText (Text.strip purpose))
+                request.secretPromptPurpose
+            , sanitizeSecretPromptText
+                (Text.strip request.secretPromptMessage)
+            , "Input is hidden and is not added to conversation history."
+            ]
 
 withCurrentFullscreen
     :: IORef (Maybe FullscreenRuntime)

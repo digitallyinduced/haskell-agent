@@ -279,6 +279,20 @@ spec = do
                     Text.isInfixOf
                         "Codex server error; retrying in 5s (attempt 1)…"
 
+        it "prints provider warnings without replacing live activity" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config
+                    (WarningRaised
+                        "Codex usage is low: primary 8% left.")
+                activity <- readIORef config.renderActivityRef
+                activity `shouldBe` "Thinking…"
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy`
+                    Text.isInfixOf
+                        "Codex usage is low: primary 8% left."
+
         it "buffers reasoning summaries and commits one thinking block" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted

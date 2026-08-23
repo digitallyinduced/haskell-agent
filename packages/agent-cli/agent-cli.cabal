@@ -52,6 +52,7 @@ library
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.Duration
+                    , Agent.CLI.Dialects
                     , Agent.CLI.Error
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
@@ -80,6 +81,7 @@ library
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
+                    , Agent.CLI.Secret
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.SubagentStore
@@ -99,6 +101,8 @@ library
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-codex-dialect >= 0.1 && < 0.2
+                    , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-syntax >= 0.1 && < 0.2
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
@@ -174,6 +178,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CompactionSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
+                    , Agent.CLI.DialectsSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -198,6 +203,7 @@ test-suite agent-cli-test
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
+                    , Agent.CLI.SecretSpec
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
@@ -217,6 +223,8 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-codex-dialect
+                    , agent-grok-build-dialect
                     , agent-tui
                     , agent-openai
                     , agent-openrouter

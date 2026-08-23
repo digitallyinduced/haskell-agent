@@ -119,6 +119,20 @@ with subagents. MCP tool names are preserved, so they must not collide with
 built-in or other configured tools. Only tools explicitly annotated
 `readOnlyHint: true` are exposed.
 
+### Secret entry
+
+Interactive root agents can request API keys and tokens with the built-in
+`ask_secret` tool. The harness reads the value through a masked terminal
+prompt, writes it to a private temporary file, and returns only the file path
+to the model. This keeps the secret out of chat history, tool arguments,
+transcripts, and command text.
+
+Secret files are created below the session scratch directory with owner-only
+permissions and removed when the agent's tool runtime closes. Commands should
+delete them sooner after consumption when possible. This protects against
+accidental persistence; it is not an isolation boundary against commands
+running unsandboxed as the same operating-system user.
+
 ## Vision
 
 ### The agent harness is the interface
