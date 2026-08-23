@@ -7,9 +7,10 @@ import Control.Concurrent
     , takeMVar
     , threadDelay
     )
-import Data.Aeson (eitherDecode)
+import Data.Aeson (Value, eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Agent.Provider (Provider(..))
 import qualified System.Timeout as Timeout
@@ -168,8 +169,102 @@ spec = describe "Agent.Telegram" do
             decoded `shouldSatisfy` \case
                 Right state ->
                     state.nextUpdateId == Just 12
-                        && null state.pendingTurns
+                        && Map.null state.pendingQueues
                 Left _ -> False
+
+        it "loads legacy state into keyed bindings and per-chat queues" do
+            let firstKey = TelegramChatKey 123 Nothing
+                secondKey = TelegramChatKey 456 (Just 7)
+                firstTurn =
+                    TelegramPendingTurn 10 77 firstKey "first" Nothing
+                laterTurn =
+                    TelegramPendingTurn 12 79 firstKey "later" Nothing
+                secondTurn =
+                    TelegramPendingTurn 9 76 secondKey "other" Nothing
+                firstReply =
+                    TelegramPendingReply 11 firstKey (Just 77) "reply"
+                secondReply =
+                    TelegramPendingReply 8 secondKey (Just 75) "other reply"
+                decoded = eitherDecode
+                    (LBS.pack
+                        "{\"nextUpdateId\":12,\"bindings\":[{\
+                        \\"chat\":{\"chatId\":123},\"sessionId\":\"session-1\"}],\
+                        \\"pendingTurns\":[{\
+                        \\"updateId\":12,\"messageId\":79,\
+                        \\"chat\":{\"chatId\":123},\"text\":\"later\"},{\
+                        \\"updateId\":9,\"messageId\":76,\
+                        \\"chat\":{\"chatId\":456,\"messageThreadId\":7},\
+                        \\"text\":\"other\"},{\
+                        \\"updateId\":10,\"messageId\":77,\
+                        \\"chat\":{\"chatId\":123},\"text\":\"first\"}],\
+                        \\"pendingReplies\":[{\
+                        \\"updateId\":11,\"chat\":{\"chatId\":123},\
+                        \\"replyToMessageId\":77,\"text\":\"reply\"},{\
+                        \\"updateId\":8,\
+                        \\"chat\":{\"chatId\":456,\"messageThreadId\":7},\
+                        \\"replyToMessageId\":75,\"text\":\"other reply\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "legacy Telegram state should decode"
+            Map.lookup firstKey state.bindings `shouldBe` Just "session-1"
+            Map.keysSet state.pendingQueues
+                `shouldBe` Set.fromList [firstKey, secondKey]
+            nextPendingAction firstKey state
+                `shouldBe` Just (RunPendingTurn firstTurn)
+            nextPendingAction secondKey state
+                `shouldBe` Just (DeliverReply secondReply)
+            Map.lookup firstKey state.pendingQueues `shouldBe`
+                Just
+                    (Map.fromList
+                        [ (10, RunPendingTurn firstTurn)
+                        , (11, DeliverReply firstReply)
+                        , (12, RunPendingTurn laterTurn)
+                        ])
+            Map.lookup secondKey state.pendingQueues `shouldBe`
+                Just
+                    (Map.fromList
+                        [ (8, DeliverReply secondReply)
+                        , (9, RunPendingTurn secondTurn)
+                        ])
+
+        it "preserves first-match semantics for duplicate legacy bindings" do
+            let key = TelegramChatKey 123 Nothing
+                decoded = eitherDecode
+                    (LBS.pack
+                        "{\"bindings\":[{\
+                        \\"chat\":{\"chatId\":123},\"sessionId\":\"current\"},{\
+                        \\"chat\":{\"chatId\":123},\"sessionId\":\"stale\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "legacy Telegram bindings should decode"
+            Map.lookup key state.bindings `shouldBe` Just "current"
+
+        it "writes keyed state using the legacy JSON array fields" do
+            let key = TelegramChatKey 123 Nothing
+                turn = TelegramPendingTurn 10 77 key "hello" Nothing
+                reply = TelegramPendingReply 11 key (Just 77) "reply"
+                state = emptyTelegramState
+                    { nextUpdateId = Just 12
+                    , bindings = Map.singleton key "session-1"
+                    , pendingQueues =
+                        Map.singleton key $ Map.fromList
+                            [ (10, RunPendingTurn turn)
+                            , (11, DeliverReply reply)
+                            ]
+                    }
+                expected = object
+                    [ "nextUpdateId" .= (Just 12 :: Maybe Integer)
+                    , "bindings" .=
+                        [ object
+                            [ "chat" .= key
+                            , "sessionId" .= ("session-1" :: String)
+                            ]
+                        ]
+                    , "pendingTurns" .= [turn]
+                    , "pendingReplies" .= [reply]
+                    ]
+            (eitherDecode (encode state) :: Either String Value)
+                `shouldBe` Right expected
 
         it "persists inbound work and advances the polling offset" do
             let key = TelegramChatKey 123 Nothing
@@ -178,8 +273,10 @@ spec = describe "Agent.Telegram" do
                     (QueueTurn 77 key "hello" Nothing)
                     emptyTelegramState
             state.nextUpdateId `shouldBe` Just 11
-            state.pendingTurns `shouldBe`
-                [TelegramPendingTurn 10 77 key "hello" Nothing]
+            nextPendingAction key state `shouldBe`
+                Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn 10 77 key "hello" Nothing))
 
         it "does not enqueue a delivered update twice" do
             let key = TelegramChatKey 123 Nothing
@@ -191,7 +288,7 @@ spec = describe "Agent.Telegram" do
                     10
                     (QueueTurn 77 key "hello" Nothing)
                     once
-            twice.pendingTurns `shouldBe` once.pendingTurns
+            twice.pendingQueues `shouldBe` once.pendingQueues
 
         it "checkpoints a voice transcript before running the agent" do
             let key = TelegramChatKey 123 Nothing
@@ -202,15 +299,20 @@ spec = describe "Agent.Telegram" do
                 state = checkpointPendingVoiceTranscript
                     10
                     "[Voice message transcript]: hello"
-                    emptyTelegramState { pendingTurns = [pending] }
-            state.pendingTurns `shouldBe`
-                [ TelegramPendingTurn
-                    10
-                    77
-                    key
-                    "[Voice message transcript]: hello"
-                    Nothing
-                ]
+                    emptyTelegramState
+                        { pendingQueues =
+                            Map.singleton key
+                                (Map.singleton 10 (RunPendingTurn pending))
+                        }
+            nextPendingAction key state `shouldBe`
+                Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn
+                            10
+                            77
+                            key
+                            "[Voice message transcript]: hello"
+                            Nothing))
 
         it "selects work in update order within a conversation" do
             let key = TelegramChatKey 123 Nothing
@@ -218,8 +320,12 @@ spec = describe "Agent.Telegram" do
                 olderTurn = TelegramPendingTurn 10 77 key "first" Nothing
                 middleReply = TelegramPendingReply 11 key (Just 77) "reply"
                 state = emptyTelegramState
-                    { pendingTurns = [newerTurn, olderTurn]
-                    , pendingReplies = [middleReply]
+                    { pendingQueues =
+                        Map.singleton key $ Map.fromList
+                            [ (12, RunPendingTurn newerTurn)
+                            , (10, RunPendingTurn olderTurn)
+                            , (11, DeliverReply middleReply)
+                            ]
                     }
             nextPendingAction key state
                 `shouldBe` Just (RunPendingTurn olderTurn)
@@ -229,8 +335,11 @@ spec = describe "Agent.Telegram" do
                 turn = TelegramPendingTurn 12 79 key "later" Nothing
                 reply = TelegramPendingReply 11 key (Just 77) "reply"
                 state = emptyTelegramState
-                    { pendingTurns = [turn]
-                    , pendingReplies = [reply]
+                    { pendingQueues =
+                        Map.singleton key $ Map.fromList
+                            [ (12, RunPendingTurn turn)
+                            , (11, DeliverReply reply)
+                            ]
                     }
             nextPendingAction key state
                 `shouldBe` Just (DeliverReply reply)
@@ -239,3 +348,8 @@ isLeft :: Either a b -> Bool
 isLeft = \case
     Left _ -> True
     Right _ -> False
+
+shouldReturnRight :: Either String a -> String -> IO a
+shouldReturnRight result message = case result of
+    Left err -> expectationFailure (message <> ": " <> err) >> fail message
+    Right value -> pure value

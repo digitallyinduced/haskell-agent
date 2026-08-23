@@ -112,7 +112,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text.Encoding as TextEncoding
-import Data.List (find)
+import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -268,26 +268,58 @@ instance FromJSON TelegramBinding where
 
 data TelegramState = TelegramState
     { nextUpdateId :: !(Maybe Integer)
-    , bindings :: ![TelegramBinding]
-    , pendingTurns :: ![TelegramPendingTurn]
-    , pendingReplies :: ![TelegramPendingReply]
+    , bindings :: !(Map TelegramChatKey Text)
+    , pendingQueues :: !(Map TelegramChatKey (Map Integer PendingChatAction))
     } deriving (Eq, Show)
 
 instance ToJSON TelegramState where
     toJSON state = object
         [ "nextUpdateId" .= state.nextUpdateId
-        , "bindings" .= state.bindings
-        , "pendingTurns" .= state.pendingTurns
-        , "pendingReplies" .= state.pendingReplies
+        , "bindings" .=
+            [ TelegramBinding key sessionId
+            | (key, sessionId) <- Map.toList state.bindings
+            ]
+        , "pendingTurns" .=
+            sortOn (.pendingTurnUpdateId)
+                [ pending
+                | queue <- Map.elems state.pendingQueues
+                , RunPendingTurn pending <- Map.elems queue
+                ]
+        , "pendingReplies" .=
+            sortOn (.pendingUpdateId)
+                [ pending
+                | queue <- Map.elems state.pendingQueues
+                , DeliverReply pending <- Map.elems queue
+                ]
         ]
 
 instance FromJSON TelegramState where
-    parseJSON = withObject "TelegramState" \o ->
-        TelegramState
-            <$> o .:? "nextUpdateId"
-            <*> (o .:? "bindings" .!= [])
-            <*> (o .:? "pendingTurns" .!= [])
-            <*> (o .:? "pendingReplies" .!= [])
+    parseJSON = withObject "TelegramState" \o -> do
+        nextUpdateId <- o .:? "nextUpdateId"
+        storedBindings <-
+            o .:? "bindings" .!= ([] :: [TelegramBinding])
+        pendingTurns <-
+            o .:? "pendingTurns" .!= ([] :: [TelegramPendingTurn])
+        pendingReplies <-
+            o .:? "pendingReplies" .!= ([] :: [TelegramPendingReply])
+        pure TelegramState
+            { nextUpdateId
+            , bindings =
+                foldr
+                    (\binding ->
+                        Map.insert
+                            binding.bindingChat
+                            binding.bindingSessionId)
+                    Map.empty
+                    storedBindings
+            , pendingQueues =
+                foldl'
+                    (flip insertPendingAction)
+                    Map.empty
+                    ( map RunPendingTurn pendingTurns
+                        <> map DeliverReply pendingReplies
+                    )
+            }
 
 data TelegramPendingTurn = TelegramPendingTurn
     { pendingTurnUpdateId :: !Integer
@@ -463,9 +495,8 @@ data TelegramClient = TelegramClient
 emptyTelegramState :: TelegramState
 emptyTelegramState = TelegramState
     { nextUpdateId = Nothing
-    , bindings = []
-    , pendingTurns = []
-    , pendingReplies = []
+    , bindings = Map.empty
+    , pendingQueues = Map.empty
     }
 
 parseAllowedUsers :: Text -> Either Text (Set Integer)
@@ -867,12 +898,11 @@ storeUpdateAction updateId action current
         advanceOffset case action of
             IgnoreUpdate -> current
             QueueTurn messageId key text voice ->
-                current
-                    { pendingTurns =
-                        current.pendingTurns
-                            <> [TelegramPendingTurn
-                                    updateId messageId key text voice]
-                    }
+                enqueuePendingAction
+                    (RunPendingTurn
+                        (TelegramPendingTurn
+                            updateId messageId key text voice))
+                    current
   where
     advanceOffset state =
         state
@@ -941,24 +971,61 @@ reactionMessageText reaction
 
 updateAlreadyStored :: Integer -> TelegramState -> Bool
 updateAlreadyStored updateId state =
-    any ((== updateId) . (.pendingTurnUpdateId)) state.pendingTurns
-        || any ((== updateId) . (.pendingUpdateId)) state.pendingReplies
-        || maybe False (> updateId) state.nextUpdateId
+    maybe False (> updateId) state.nextUpdateId
+        || any (Map.member updateId) state.pendingQueues
 
 data PendingChatAction
     = DeliverReply !TelegramPendingReply
     | RunPendingTurn !TelegramPendingTurn
     deriving (Eq, Show)
 
+pendingActionUpdateId :: PendingChatAction -> Integer
+pendingActionUpdateId = \case
+    DeliverReply pending -> pending.pendingUpdateId
+    RunPendingTurn pending -> pending.pendingTurnUpdateId
+
+pendingActionChat :: PendingChatAction -> TelegramChatKey
+pendingActionChat = \case
+    DeliverReply pending -> pending.pendingChat
+    RunPendingTurn pending -> pending.pendingTurnChat
+
+insertPendingAction
+    :: PendingChatAction
+    -> Map TelegramChatKey (Map Integer PendingChatAction)
+    -> Map TelegramChatKey (Map Integer PendingChatAction)
+insertPendingAction action =
+    Map.alter
+        (Just . Map.insert (pendingActionUpdateId action) action
+            . fromMaybe Map.empty)
+        (pendingActionChat action)
+
+enqueuePendingAction :: PendingChatAction -> TelegramState -> TelegramState
+enqueuePendingAction action state =
+    state
+        { pendingQueues = insertPendingAction action state.pendingQueues
+        }
+
+deletePendingAction :: PendingChatAction -> TelegramState -> TelegramState
+deletePendingAction action state =
+    state
+        { pendingQueues =
+            Map.update
+                (\queue ->
+                    let remaining =
+                            Map.delete (pendingActionUpdateId action) queue
+                    in if Map.null remaining then Nothing else Just remaining)
+                (pendingActionChat action)
+                state.pendingQueues
+        }
+
 dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime = do
     state <- readMVar runtime.runtimeStateVar
     workers <- readMVar runtime.runtimeWorkers
-    let pendingChats = Set.fromList
-            (map (.pendingTurnChat) state.pendingTurns
-                <> map (.pendingChat) state.pendingReplies)
-        inactive =
-            pendingChats `Set.difference` Map.keysSet workers
+    let inactive =
+            Map.keysSet state.pendingQueues
+                `Set.difference`
+                    Map.keysSet workers
     forM_ (Set.toList inactive) (startTelegramWorker runtime)
     threadDelay 250_000
     dispatchForever runtime
@@ -991,14 +1058,8 @@ processChatQueue runtime key =
             result <- tryAny case action of
                 DeliverReply pending -> do
                     reply runtime pending
-                    modifyState runtime \state ->
-                        state
-                            { pendingReplies =
-                                filter
-                                    ((/= pending.pendingUpdateId)
-                                        . (.pendingUpdateId))
-                                    state.pendingReplies
-                            }
+                    modifyState runtime
+                        (deletePendingAction (DeliverReply pending))
                 RunPendingTurn pending -> do
                     response <- case telegramCommand pending.pendingTurnText of
                         Nothing ->
@@ -1008,21 +1069,14 @@ processChatQueue runtime key =
                                 (runQueuedTurn runtime pending)
                         Just _ -> runQueuedTurn runtime pending
                     modifyState runtime \state ->
-                        state
-                            { pendingTurns =
-                                filter
-                                    ((/= pending.pendingTurnUpdateId)
-                                        . (.pendingTurnUpdateId))
-                                    state.pendingTurns
-                            , pendingReplies =
-                                state.pendingReplies
-                                    <> [ TelegramPendingReply
-                                            pending.pendingTurnUpdateId
-                                            pending.pendingTurnChat
-                                            (Just pending.pendingTurnMessageId)
-                                            response
-                                       ]
-                            }
+                        enqueuePendingAction
+                            (DeliverReply
+                                (TelegramPendingReply
+                                    pending.pendingTurnUpdateId
+                                    pending.pendingTurnChat
+                                    (Just pending.pendingTurnMessageId)
+                                    response))
+                            (deletePendingAction (RunPendingTurn pending) state)
             case result of
                 Left err -> do
                     Text.hPutStrLn stderr
@@ -1041,10 +1095,9 @@ runQueuedTurn runtime pending =
         Just "new" -> do
             modifyState runtime \state ->
                 state
-                    { bindings =
-                        filter
-                            ((/= pending.pendingTurnChat) . (.bindingChat))
-                            state.bindings
+                    { bindings = Map.delete
+                        pending.pendingTurnChat
+                        state.bindings
                     }
             pure "Started a new conversation. Send your next prompt."
         Just "session" -> do
@@ -1093,17 +1146,18 @@ checkpointPendingVoiceTranscript
     -> TelegramState
 checkpointPendingVoiceTranscript updateId transcript state =
     state
-        { pendingTurns =
-            map checkpoint state.pendingTurns
+        { pendingQueues =
+            fmap (fmap checkpoint) state.pendingQueues
         }
   where
-    checkpoint current
-        | current.pendingTurnUpdateId == updateId =
-            current
-                { pendingTurnText = transcript
-                , pendingTurnVoice = Nothing
-                }
-        | otherwise = current
+    checkpoint = \case
+        RunPendingTurn current
+            | current.pendingTurnUpdateId == updateId ->
+                RunPendingTurn current
+                    { pendingTurnText = transcript
+                    , pendingTurnVoice = Nothing
+                    }
+        current -> current
 
 transcribeTelegramVoice
     :: TelegramRuntime
@@ -1346,28 +1400,7 @@ nextPendingAction
     -> TelegramState
     -> Maybe PendingChatAction
 nextPendingAction key state =
-    case
-        ( oldestBy (.pendingTurnUpdateId)
-            (filter ((== key) . (.pendingTurnChat)) state.pendingTurns)
-        , oldestBy (.pendingUpdateId)
-            (filter ((== key) . (.pendingChat)) state.pendingReplies)
-        ) of
-        (Nothing, Nothing) -> Nothing
-        (Just turn, Nothing) -> Just (RunPendingTurn turn)
-        (Nothing, Just pending) -> Just (DeliverReply pending)
-        (Just turn, Just pending)
-            | pending.pendingUpdateId <= turn.pendingTurnUpdateId ->
-                Just (DeliverReply pending)
-            | otherwise -> Just (RunPendingTurn turn)
-
-oldestBy :: Ord b => (a -> b) -> [a] -> Maybe a
-oldestBy _ [] = Nothing
-oldestBy getKey (value : values) =
-    Just (foldl choose value values)
-  where
-    choose current candidate
-        | getKey candidate < getKey current = candidate
-        | otherwise = current
+    snd <$> (Map.lookupMin =<< Map.lookup key state.pendingQueues)
 
 telegramCommand :: Text -> Maybe Text
 telegramCommand text = do
@@ -1446,8 +1479,7 @@ sessionForPrompt runtime key prompt = do
             modifyState runtime \current ->
                 current
                     { bindings =
-                        TelegramBinding key handle.sessionMeta.metaId
-                            : filter ((/= key) . (.bindingChat)) current.bindings
+                        Map.insert key handle.sessionMeta.metaId current.bindings
                     }
             pure handle
 
@@ -1461,7 +1493,7 @@ renderLatestTurn turns =
 
 lookupBinding :: TelegramChatKey -> TelegramState -> Maybe Text
 lookupBinding key state =
-    (.bindingSessionId) <$> find ((== key) . (.bindingChat)) state.bindings
+    Map.lookup key state.bindings
 
 modifyState :: TelegramRuntime -> (TelegramState -> TelegramState) -> IO ()
 modifyState runtime update =

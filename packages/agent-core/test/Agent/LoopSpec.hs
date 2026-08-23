@@ -3,6 +3,7 @@ module Agent.LoopSpec (spec) where
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
+import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Types
@@ -388,8 +389,65 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "returns explicit backend state and progress after success" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        length execution.executionState `shouldBe` 1
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult `shouldBe` Right LoopResult
+            { finalResponseId = "resp-1"
+            , finalText = Just "done"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+
+    it "returns the last committed state after a later transport failure" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Left (ConnectionError "down")
+            ]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        length execution.executionState `shouldBe` 1
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+
+    it "does not commit backend state for a transport failure" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions [Left (ConnectionError "down")]
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionState `shouldBe` []
+        execution.executionProgress `shouldBe` NoResponseCommitted
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+
+    it "retains committed state when a later callback throws" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \case
+                    TurnFinished _ ->
+                        Exception.throwIO (userError "renderer exploded")
+                    _ -> pure ()
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        length execution.executionState `shouldBe` 1
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult
+            `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
+
     it "turns synchronous backend exceptions into a failed turn" do
-        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+        config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
             Exception.throwIO (userError "backend exploded")
         result <- runLoop config Nothing "hello"
         result `shouldBe`
@@ -412,7 +470,7 @@ spec = describe "runLoop" do
             Left (LoopUnexpected "user error (approval exploded)")
 
     it "does not turn asynchronous backend cancellation into a failed turn" do
-        config <- testConfig $ Backend \_prev _inputs _onEvent ->
+        config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
             Exception.throwIO Exception.ThreadKilled
         runLoop config Nothing "hello"
             `shouldThrow` (== Exception.ThreadKilled)
@@ -563,10 +621,14 @@ spec = describe "runLoop" do
 
     it "returns LoopCancelled when cancel arrives during submitTurn" do
         started <- newEmptyMVar
-        config0 <- testConfig $ Backend \_prev _inputs _onEvent -> do
+        config0 <- testConfig $ Backend \state _prev _inputs _onEvent -> do
             putMVar started ()
             threadDelay 2000000
-            pure $ Right (emptyTurnOutput "resp-slow" [] (Just "too late"))
+            pure $ Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "resp-slow" [] (Just "too late")
+                , backendState = state <> [stateMarker]
+                }
         let cancel = case config0 of
                 LoopConfig{loopCancel = c} -> c
         _ <- forkIO do
@@ -617,8 +679,13 @@ spec = describe "runLoop" do
 testConfig :: Backend -> IO LoopConfig
 testConfig backend = do
     cancel <- newCancelFlag
+    state <- newIORef []
     pure LoopConfig
         { loopBackend = backend
+        , loopBackendState = BackendStateStore
+            { readBackendState = readIORef state
+            , commitBackendState = writeIORef state
+            }
         , loopTools = registryFromHandlers
             [ typedTool "echo" $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
@@ -668,18 +735,35 @@ scriptedBackend
     -> IO Backend
 scriptedBackend submissions answers = do
     remaining <- newIORef answers
-    pure $ Backend \prev inputs _onEvent -> do
+    pure $ Backend \state prev inputs _onEvent -> do
         modifyIORef' submissions (++ [(prev, inputs)])
         atomicModifyIORef' remaining \case
             [] -> ([], Left (ConnectionError "scripted backend exhausted"))
-            next : rest -> (rest, next)
+            next : rest ->
+                ( rest
+                , fmap
+                    (\output -> BackendResult
+                        { backendOutput = output
+                        , backendState = state <> [stateMarker]
+                        })
+                    next
+                )
 
 endlessToolsBackend :: IO Backend
 endlessToolsBackend = do
     counter <- newIORef (0 :: Int)
-    pure $ Backend \_prev _inputs _onEvent -> do
+    pure $ Backend \state _prev _inputs _onEvent -> do
         n <- atomicModifyIORef' counter \i -> (i + 1, i + 1)
         let responseId = "resp-" <> Text.pack (show n)
-        pure $ Right $ emptyTurnOutput responseId
-            [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
-            Nothing
+        pure $ Right BackendResult
+            { backendOutput = emptyTurnOutput responseId
+                [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
+                Nothing
+            , backendState = state <> [stateMarker]
+            }
+
+stateMarker :: ResponseItem
+stateMarker = UnknownResponseItem TaggedObject
+    { tag = "test_state"
+    , fields = mempty
+    }

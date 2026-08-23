@@ -19,7 +19,6 @@ spec :: Spec
 spec = describe "tokenProviderStatelessResponsesBackend" do
     it "reacquires a credential after an authentication rejection" do
         attempts <- newIORef []
-        transcript <- newIORef []
         let first = credential "first"
             second = credential "second"
             provider = tokenProvider SubscriptionBilled \failed ->
@@ -35,9 +34,9 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
             backend =
                 tokenProviderStatelessResponsesBackend provider send
                     (pure defaultResponseCreateParams)
-                    transcript
 
-        result <- backend.submitTurn Nothing [UserMessage "hello"] (const (pure ()))
+        result <- backend.submitTurn [] Nothing [UserMessage "hello"]
+            (const (pure ()))
 
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
