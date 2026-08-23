@@ -18,6 +18,7 @@ import Agent.TUI.Markdown.Inline
     , inlinePlainText
     , parseInline
     )
+import qualified Agent.TUI.Markdown.Block as Block
 import Agent.Syntax
     ( SyntaxHighlighter
     , SyntaxSpan(..)
@@ -31,9 +32,9 @@ import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
 import Data.Bits ((.|.))
-import Data.Char (isDigit, isSpace)
+import Data.Char (isSpace)
 import qualified Data.List as List
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -105,28 +106,30 @@ renderLines
     -> [Widget n]
 renderLines [] = []
 renderLines lines_
-    | Just (table, rest) <- takeTable lines_ =
-        table : renderLines rest
+    | Just (rows, rest) <- Block.takeTableRows lines_ =
+        tableWidget rows : renderLines rest
 renderLines (line : rest)
-    | Just heading <- stripHeading line =
+    | Just (_, heading) <- Block.headingParts line =
         padTop (Pad 1)
             (inlineWidgetWithAttr Theme.headingAttr (parseInline heading))
             : renderLines rest
-    | Just (indent, item) <- stripBullet line =
+    | Just (indent, item) <- Block.bulletParts line =
         hBox
             [ txt indent
             , withAttr Theme.headingAttr (txt "• ")
             , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just (indent, number, item) <- stripOrdered line =
+    | Just (indent, number, item) <- Block.orderedParts line =
         hBox
             [ txt indent
             , withAttr Theme.headingAttr (txt (number <> ". "))
             , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
             ]
             : renderLines rest
-    | Just quote <- stripBlockQuote line =
+    | Just rawQuote <- Block.blockQuoteRemainder line =
+        let quote = fromMaybe rawQuote (Text.stripPrefix " " rawQuote)
+        in
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
             , inlineWidgetWithAttr Theme.mutedAttr (parseInline quote)
@@ -134,7 +137,7 @@ renderLines (line : rest)
             : renderLines rest
     | Text.null (Text.strip line) =
         txt " " : renderLines rest
-    | isThematicBreak line =
+    | Block.isThematicBreak line =
         withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             : renderLines rest
     | otherwise =
@@ -227,63 +230,6 @@ renderCodeRow paddingAttr horizontalPadding fragments =
         | horizontalPadding <= 0 = V.emptyImage
         | otherwise =
             V.charFill paddingAttr ' ' horizontalPadding 1
-
-stripHeading :: Text -> Maybe Text
-stripHeading line =
-    let stripped = Text.stripStart line
-        (marks, rest) = Text.span (== '#') stripped
-    in if not (Text.null marks)
-        && Text.length marks <= 6
-        && Text.isPrefixOf " " rest
-        then Just (Text.strip rest)
-        else Nothing
-
-stripBullet :: Text -> Maybe (Text, Text)
-stripBullet line =
-    let (indent, stripped) = Text.span isSpace line
-    in (indent,) <$> asumPrefix ["- ", "* ", "+ "] stripped
-
-stripOrdered :: Text -> Maybe (Text, Text, Text)
-stripOrdered line =
-    let
-        (indent, stripped) = Text.span isSpace line
-        (number, rest) = Text.span isDigit stripped
-    in if Text.null number
-        then Nothing
-        else
-            (\item -> (indent, number, Text.strip item))
-                <$> Text.stripPrefix ". " rest
-
-stripBlockQuote :: Text -> Maybe Text
-stripBlockQuote line = do
-    rest <- Text.stripPrefix ">" (Text.stripStart line)
-    pure (fromMaybe rest (Text.stripPrefix " " rest))
-
-isThematicBreak :: Text -> Bool
-isThematicBreak line =
-    let stripped = Text.filter (not . isSpace) (Text.strip line)
-    in Text.length stripped >= 3
-        && (Text.all (== '-') stripped
-            || Text.all (== '*') stripped
-            || Text.all (== '_') stripped)
-
-takeTable :: [Text] -> Maybe (Widget n, [Text])
-takeTable (rawHeader : separator : rest)
-    | Just headerCells <- splitTableRow rawHeader
-    , Just separatorCells <- splitTableRow separator
-    , length separatorCells == length headerCells
-    , all isSeparatorCell separatorCells =
-        let
-            (body, after) = span isTableRow rest
-            rows = headerCells : mapMaybe splitTableRow body
-        in Just (tableWidget rows, after)
-takeTable _ = Nothing
-
-isSeparatorCell :: Text -> Bool
-isSeparatorCell cell =
-    Text.any (== '-') cell
-        && Text.null
-            (Text.filter (`notElem` ['-', ':', ' ']) cell)
 
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
@@ -530,100 +476,6 @@ fragmentsDisplayWidth =
                 0
                 . snd)
 
-isTableRow :: Text -> Bool
-isTableRow = isJust . splitTableRow
-
--- | Split a pipe row on actual column delimiters. Escaped pipes and pipes
--- inside matching backtick spans remain part of their cell.
-splitTableRow :: Text -> Maybe [Text]
-splitTableRow raw =
-    let stripped = Text.strip raw
-        content = fromMaybe stripped (Text.stripPrefix "|" stripped)
-        (cells, delimiterCount) = scan Nothing [] [] 0 False
-            (Text.unpack content)
-    in if delimiterCount >= 1
-        then Just cells
-        else Nothing
-  where
-    scan
-        :: Maybe Int
-        -> String
-        -> [Text]
-        -> Int
-        -> Bool
-        -> String
-        -> ([Text], Int)
-    scan _ current cells delimiterCount trailingDelimiter [] =
-        let allCells =
-                reverse
-                    (finishCell current : cells)
-            withoutOuterBorder
-                | trailingDelimiter = dropLast allCells
-                | otherwise = allCells
-        in (withoutOuterBorder, delimiterCount)
-    scan codeRun current cells delimiterCount _ ('\\' : rest) =
-        let (slashes, afterSlashes) = span (== '\\') rest
-            slashCount = 1 + length slashes
-            literalSlashes = replicate
-                (if startsWithPipe afterSlashes
-                    then slashCount `div` 2
-                    else slashCount)
-                '\\'
-            current' = literalSlashes <> current
-        in case afterSlashes of
-            '|' : afterPipe
-                | odd slashCount ->
-                    scan codeRun ('|' : current') cells
-                        delimiterCount False afterPipe
-                | codeRun == Nothing ->
-                    splitCell codeRun current' cells
-                        delimiterCount afterPipe
-            _ ->
-                scan codeRun current' cells
-                    delimiterCount False afterSlashes
-    scan codeRun current cells delimiterCount _ ('`' : rest) =
-        let (ticks, afterTicks) = span (== '`') rest
-            tickCount = 1 + length ticks
-            marker = replicate tickCount '`'
-            nextCodeRun = case codeRun of
-                Just openCount
-                    | tickCount >= openCount -> Nothing
-                Just openCount -> Just openCount
-                Nothing
-                    | hasClosingRun tickCount afterTicks ->
-                        Just tickCount
-                Nothing -> Nothing
-        in scan nextCodeRun (marker <> current) cells
-            delimiterCount False afterTicks
-    scan Nothing current cells delimiterCount _ ('|' : rest) =
-        splitCell Nothing current cells delimiterCount rest
-    scan codeRun current cells delimiterCount _ (character : rest) =
-        scan codeRun (character : current) cells
-            delimiterCount False rest
-
-    splitCell codeRun current cells delimiterCount rest =
-        scan codeRun [] (finishCell current : cells)
-            (delimiterCount + 1) True rest
-
-    finishCell = Text.strip . Text.pack . reverse
-
-    startsWithPipe ('|' : _) = True
-    startsWithPipe _ = False
-
-    hasClosingRun count =
-        Text.isInfixOf (Text.replicate count "`") . Text.pack
-
-    dropLast values = case reverse values of
-        _ : rest -> reverse rest
-        [] -> []
-
-asumPrefix :: [Text] -> Text -> Maybe Text
-asumPrefix prefixes text = case prefixes of
-    [] -> Nothing
-    prefix : rest -> case Text.stripPrefix prefix text of
-        Just value -> Just value
-        Nothing -> asumPrefix rest text
-
 inlineWidgetWithAttr :: AttrName -> [Inline] -> Widget n
 inlineWidgetWithAttr plainAttr inlines =
     B.Widget B.Greedy B.Fixed do
@@ -693,58 +545,31 @@ resolveInline plainAttr = fmap concat . traverse (go emptyContext)
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =
     finalize $
-        List.foldl' addCell ([[]], 0) cells
+        List.foldl' addCell ([[]], 0) (styledCells spans)
   where
-    cells =
-        [ (attr, character)
-        | (attr, text) <- spans
-        , character <- Text.unpack text
-        ]
-    addCell (rows, used) (attr, cell)
-        | cell == '\n' = ([] : rows, 0)
+    addCell (rows, used) cell@(_, character)
+        | character == '\n' = ([] : rows, 0)
         | used > 0
         , used + cellWidth > width =
-            ([(attr, Builder.singleton cell)] : rows, cellWidth)
+            ([cell] : rows, cellWidth)
         | otherwise =
             case rows of
-                [] ->
-                    ([[(attr, Builder.singleton cell)]], cellWidth)
+                [] -> ([[cell]], cellWidth)
                 row : rest ->
-                    (appendCell attr cell row : rest, used + cellWidth)
+                    ((cell : row) : rest, used + cellWidth)
       where
-        cellWidth = terminalCharWidth cell
-    appendCell attr cell row =
-        case row of
-            (previousAttr, previousText) : prior
-                | previousAttr == attr ->
-                    ( previousAttr
-                    , previousText <> Builder.singleton cell
-                    ) : prior
-            _ -> (attr, Builder.singleton cell) : row
+        cellWidth = terminalCharWidth character
     finalize (rows, _) =
-        let ordered =
-                map
-                    (map
-                        (\(attr, text) ->
-                            ( attr
-                            , LazyText.toStrict (Builder.toLazyText text)
-                            ))
-                        . reverse)
-                    (reverse rows)
+        let ordered = map (groupStyledCells . reverse) (reverse rows)
         in if null ordered then [[]] else ordered
 
 -- | Table cells prefer word boundaries, but still hard-wrap an individual
 -- token that is wider than its column.
 wrapStyledWords :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyledWords width spans =
-    map groupCells (wrapCells cells)
+    map groupStyledCells (wrapCells (styledCells spans))
   where
     width' = max 1 width
-    cells =
-        [ (attr, character)
-        | (attr, text) <- spans
-        , character <- Text.unpack text
-        ]
 
     wrapCells [] = [[]]
     wrapCells remaining =
@@ -784,13 +609,23 @@ wrapStyledWords width spans =
     dropTrailingSpace =
         reverse . dropWhile (isSpace . snd) . reverse
 
-    groupCells =
-        map
-            (\(attr, text) ->
-                (attr, LazyText.toStrict (Builder.toLazyText text)))
-            . reverse
-            . List.foldl' appendCell []
+type StyledCell = (V.Attr, Char)
 
+styledCells :: [(V.Attr, Text)] -> [StyledCell]
+styledCells spans =
+    [ (attr, character)
+    | (attr, text) <- spans
+    , character <- Text.unpack text
+    ]
+
+groupStyledCells :: [StyledCell] -> [(V.Attr, Text)]
+groupStyledCells =
+    map
+        (\(attr, text) ->
+            (attr, LazyText.toStrict (Builder.toLazyText text)))
+        . reverse
+        . List.foldl' appendCell []
+  where
     appendCell grouped (attr, character) =
         case grouped of
             (previousAttr, previousText) : rest

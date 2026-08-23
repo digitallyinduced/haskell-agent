@@ -27,14 +27,14 @@ import Agent.TUI.Markdown.Inline
     , inlinePlainText
     , parseInline
     )
+import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth
     ( displayCharCellWidth
     , displayTerminalText
     )
-import Data.Char (isAlphaNum, isAscii, isDigit, isSpace)
+import Data.Char (isAlphaNum, isAscii, isSpace)
 import Data.Colour (Colour)
 import Data.List (transpose)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
@@ -92,29 +92,31 @@ renderBlocks = go
   where
     go [] = []
     go (line : rest)
-        | Just (styled, after) <- takeTable (line : rest) =
-            styled ++ go after
-        | Just (level, title) <- headingLine line =
+        | Just (rows, after) <- Block.takeTableRows (line : rest) =
+            renderTable rows ++ go after
+        | Just (level, title) <- Block.headingParts line =
             -- Hide the markdown `#` markers (grok pretty mode); color the title.
             renderInlineWith (headingPrefixStyle level) (parseInline title)
                 : go rest
-        | Just (indent, item) <- unorderedItemParts line =
+        | Just (indent, item) <- Block.bulletParts line =
             ( indent
                 <> md listMarkerStyle "• "
                 <> styleInline item
             )
                 : go rest
-        | Just (indent, digits, item) <- orderedItemParts line =
+        | Just (indent, digits, item) <- Block.orderedParts line =
             ( indent
                 <> md listMarkerStyle (digits <> ". ")
                 <> styleInline item
             )
                 : go rest
-        | Just quote <- blockQuote line =
-            let body = renderInlineWith quoteStyle (parseInline quote)
+        | Just quote <- Block.blockQuoteRemainder line =
+            let body =
+                    renderInlineWith quoteStyle
+                        (parseInline (Text.stripStart quote))
             in (md [fg solarizedBase01] "│ " <> body)
                 : go rest
-        | isThematicBreak line =
+        | Block.isThematicBreak line =
             md [fg solarizedBase01] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
@@ -147,74 +149,16 @@ fg = SetRGBColor Foreground
 quoteStyle :: [SGR]
 quoteStyle = [fg solarizedBase01]
 
-headingLine :: Text -> Maybe (Int, Text)
-headingLine line =
-    let stripped = Text.stripStart line
-        (marks, after) = Text.span (== '#') stripped
-        level = Text.length marks
-    in if level >= 1 && level <= 6 && startsWithSpace after
-        then Just (level, Text.strip after)
-        else Nothing
-
-startsWithSpace :: Text -> Bool
-startsWithSpace t = case Text.uncons t of
-    Just (c, _) -> isSpace c
-    Nothing -> False
-
-unorderedItemParts :: Text -> Maybe (Text, Text)
-unorderedItemParts line =
-    let (indent, stripped) = Text.span isSpace line
-    in case Text.uncons stripped of
-        Just (c, rest)
-            | c `elem` ['-', '*', '+']
-            , Just (sp, after) <- Text.uncons rest
-            , isSpace sp ->
-                Just (indent, Text.strip after)
-        _ -> Nothing
-
--- | Ordered list: number marker and item body separately so the marker can
--- be colored without restyling the whole line twice.
-orderedItemParts :: Text -> Maybe (Text, Text, Text)
-orderedItemParts line =
-    let (indent, stripped) = Text.span isSpace line
-        (digits, after) = Text.span isDigit stripped
-    in if not (Text.null digits)
-        then case Text.stripPrefix ". " after of
-            Just item -> Just (indent, digits, Text.strip item)
-            Nothing -> Nothing
-        else Nothing
-
-blockQuote :: Text -> Maybe Text
-blockQuote line = case Text.stripPrefix ">" (Text.stripStart line) of
-    Just rest -> Just (Text.stripStart rest)
-    Nothing -> Nothing
-
-isThematicBreak :: Text -> Bool
-isThematicBreak line =
-    let stripped = Text.filter (not . isSpace) (Text.strip line)
-    in Text.length stripped >= 3
-        && (Text.all (== '-') stripped
-            || Text.all (== '*') stripped
-            || Text.all (== '_') stripped)
-
-takeTable :: [Text] -> Maybe ([Text], [Text])
-takeTable (header : sep : rest)
-    | Just headerCells <- splitTableRow header
-    , Just separatorCells <- splitTableRow sep
-    , length separatorCells == length headerCells
-    , all isSeparatorCell separatorCells =
-        let (body, after) = span isTableRow rest
-            bodyCells = mapMaybe splitTableRow body
-            rows = headerCells : bodyCells
-            widths = columnWidths rows
-            top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
-            mid = md [fg solarizedBase01] (boxLine '├' '┼' '┤' '─' widths)
-            bot = md [fg solarizedBase01] (boxLine '└' '┴' '┘' '─' widths)
-            headerRow = styleTableRow True widths headerCells
-            bodyRows = map (styleTableRow False widths) bodyCells
-            styled = [top, headerRow, mid] ++ bodyRows ++ [bot]
-        in Just (styled, after)
-takeTable _ = Nothing
+renderTable :: [[Text]] -> [Text]
+renderTable [] = []
+renderTable rows@(headerCells : bodyCells) =
+    let widths = columnWidths rows
+        top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
+        mid = md [fg solarizedBase01] (boxLine '├' '┼' '┤' '─' widths)
+        bot = md [fg solarizedBase01] (boxLine '└' '┴' '┘' '─' widths)
+        headerRow = styleTableRow True widths headerCells
+        bodyRows = map (styleTableRow False widths) bodyCells
+    in [top, headerRow, mid] ++ bodyRows ++ [bot]
 
 boxLine :: Char -> Char -> Char -> Char -> [Int] -> Text
 boxLine left mid right fill widths =
@@ -222,90 +166,6 @@ boxLine left mid right fill widths =
         <> Text.intercalate (Text.singleton mid)
             [ Text.replicate (w + 2) (Text.singleton fill) | w <- widths ]
         <> Text.singleton right
-
-isTableRow :: Text -> Bool
-isTableRow = isJust . splitTableRow
-
-isSeparatorCell :: Text -> Bool
-isSeparatorCell cell =
-    Text.any (== '-') cell
-        && Text.null (Text.filter (`notElem` ['-', ':', ' ']) cell)
-
--- | Split on actual table delimiters, preserving escaped pipes and pipes
--- inside matching backtick spans.
-splitTableRow :: Text -> Maybe [Text]
-splitTableRow raw =
-    let stripped = Text.strip raw
-        content = fromMaybe stripped (Text.stripPrefix "|" stripped)
-        (cells, delimiterCount) = scan Nothing [] [] 0 False
-            (Text.unpack content)
-    in if delimiterCount >= 1 then Just cells else Nothing
-  where
-    scan
-        :: Maybe Int
-        -> String
-        -> [Text]
-        -> Int
-        -> Bool
-        -> String
-        -> ([Text], Int)
-    scan _ current cells delimiterCount trailingDelimiter [] =
-        let allCells = reverse (finishCell current : cells)
-            withoutOuterBorder
-                | trailingDelimiter = dropLast allCells
-                | otherwise = allCells
-        in (withoutOuterBorder, delimiterCount)
-    scan codeRun current cells delimiterCount _ ('\\' : rest) =
-        let (slashes, afterSlashes) = span (== '\\') rest
-            slashCount = 1 + length slashes
-            literalSlashes =
-                replicate
-                    (if startsWithPipe afterSlashes
-                        then slashCount `div` 2
-                        else slashCount)
-                    '\\'
-            current' = literalSlashes <> current
-        in case afterSlashes of
-            '|' : afterPipe
-                | odd slashCount ->
-                    scan codeRun ('|' : current') cells
-                        delimiterCount False afterPipe
-                | codeRun == Nothing ->
-                    splitCell codeRun current' cells delimiterCount afterPipe
-            _ ->
-                scan codeRun current' cells
-                    delimiterCount False afterSlashes
-    scan codeRun current cells delimiterCount _ ('`' : rest) =
-        let (ticks, afterTicks) = span (== '`') rest
-            tickCount = 1 + length ticks
-            marker = replicate tickCount '`'
-            nextCodeRun = case codeRun of
-                Just openCount
-                    | tickCount >= openCount -> Nothing
-                Just openCount -> Just openCount
-                Nothing
-                    | hasClosingRun tickCount afterTicks -> Just tickCount
-                Nothing -> Nothing
-        in scan nextCodeRun (marker <> current) cells
-            delimiterCount False afterTicks
-    scan Nothing current cells delimiterCount _ ('|' : rest) =
-        splitCell Nothing current cells delimiterCount rest
-    scan codeRun current cells delimiterCount _ (character : rest) =
-        scan codeRun (character : current) cells
-            delimiterCount False rest
-
-    splitCell codeRun current cells delimiterCount rest =
-        scan codeRun [] (finishCell current : cells)
-            (delimiterCount + 1) True rest
-
-    finishCell = Text.strip . Text.pack . reverse
-    startsWithPipe ('|' : _) = True
-    startsWithPipe _ = False
-    hasClosingRun count =
-        Text.isInfixOf (Text.replicate count "`") . Text.pack
-    dropLast values = case reverse values of
-        _ : rest -> reverse rest
-        [] -> []
 
 columnWidths :: [[Text]] -> [Int]
 columnWidths rows =
