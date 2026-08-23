@@ -22,7 +22,10 @@ mkDerivation {
     safe-exceptions stm text
     time transformers unix vector vty vty-crossplatform
   ];
-  executableHaskellDepends = [ base ];
+  executableHaskellDepends = [
+    aeson agent-responses base bytestring containers directory filepath
+    process safe-exceptions text time unix
+  ];
   testHaskellDepends = [
     aeson agent-codex-dialect agent-core agent-grok-build-dialect
     agent-openai agent-responses agent-tui agent-xai ansi-terminal base

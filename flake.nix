@@ -110,6 +110,7 @@
                     include = [
                         "app"
                         "config"
+                        "eval"
                         "skills"
                         "src"
                         "test"
