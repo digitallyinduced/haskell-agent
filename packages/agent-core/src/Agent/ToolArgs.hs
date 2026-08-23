@@ -86,16 +86,7 @@ extractMaybeInt _ _ = Nothing
 -- emit ("true"/"false"/"1"/"0", case-insensitive, whitespace-tolerant).
 extractMaybeBool :: Value -> Text -> Maybe Bool
 extractMaybeBool (Object obj) key =
-    case KeyMap.lookup (Key.fromText key) obj of
-        Just (Bool b) -> Just b
-        Just (String t) ->
-            case Text.toLower (Text.strip t) of
-                "true"  -> Just True
-                "false" -> Just False
-                "1"     -> Just True
-                "0"     -> Just False
-                _       -> Nothing
-        _ -> Nothing
+    KeyMap.lookup (Key.fromText key) obj >>= boolValue
 extractMaybeBool _ _ = Nothing
 
 look :: Object -> Text -> Maybe Value
@@ -183,16 +174,7 @@ readExactInt value = do
 
 -- | Optional boolean accepting stringy forms.
 optBool :: Object -> Text -> Parser (Maybe Bool)
-optBool obj key = pure $ case look obj key of
-    Just (Bool b) -> Just b
-    Just (String t) ->
-        case Text.toLower (Text.strip t) of
-            "true"  -> Just True
-            "false" -> Just False
-            "1"     -> Just True
-            "0"     -> Just False
-            _       -> Nothing
-    _ -> Nothing
+optBool obj key = pure (look obj key >>= boolValue)
 
 -- | Exact, bounded integer with a default for an absent or null field.
 intOr :: Object -> Text -> Int -> Parser Int
@@ -225,6 +207,17 @@ failText = fail . Text.unpack
 
 exactInt :: Scientific -> Maybe Int
 exactInt = toBoundedInteger
+
+boolValue :: Value -> Maybe Bool
+boolValue = \case
+    Bool value -> Just value
+    String value -> case Text.toLower (Text.strip value) of
+        "true" -> Just True
+        "false" -> Just False
+        "1" -> Just True
+        "0" -> Just False
+        _ -> Nothing
+    _ -> Nothing
 
 parseExactInt :: Text -> Scientific -> Parser Int
 parseExactInt key =
