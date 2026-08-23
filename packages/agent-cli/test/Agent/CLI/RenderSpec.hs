@@ -204,6 +204,15 @@ spec = do
                 `shouldSatisfy`
                     Text.isInfixOf "Provider returned an incomplete response"
 
+        it "renders unexpected synchronous exceptions as retryable turn errors" do
+            let rendered =
+                    formatLoopError
+                        (LoopUnexpected "user error (disk failed)")
+            rendered `shouldSatisfy`
+                Text.isInfixOf
+                    "Unexpected agent error: user error (disk failed)"
+            rendered `shouldSatisfy` Text.isInfixOf "Retry the message."
+
     describe "renderEvent" do
         it "keeps concurrent tool lines intact" do
             withRenderConfig False False \config handle path -> do

@@ -172,7 +172,10 @@ dispatchToolHandler config maybeHandler call = do
         Right toolResult ->
             pure (config.toolDispatchFormatResult toolResult)
         Left exception -> do
-            config.toolDispatchOnException callName exception
+            -- Diagnostics must not replace the original tool failure with a
+            -- second exception. 'tryAny' still lets asynchronous cancellation
+            -- propagate.
+            _ <- tryAny (config.toolDispatchOnException callName exception)
             pure (config.toolDispatchFormatException callName exception)
     pure ToolCallResult
         { callId = call.callId

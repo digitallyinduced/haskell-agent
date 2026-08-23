@@ -78,6 +78,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
@@ -114,6 +115,7 @@ library
                     , colour >= 2.3
                     , containers
                     , directory
+                    , filelock
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , JuicyPixels

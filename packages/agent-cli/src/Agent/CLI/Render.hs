@@ -686,6 +686,8 @@ formatLoopErrorPersistedAt now = \case
             <> maybe "" ("\n" <>) turn.assistantText
     LoopNoResponseId ->
         "Provider returned an incomplete response.\nRetry the message."
+    LoopUnexpected message ->
+        "Unexpected agent error: " <> message <> "\nRetry the message."
     LoopCancelled _ ->
         "Cancelled."
 
@@ -705,5 +707,11 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
             (glyphErr
                 <> "Provider returned an incomplete response.\n"
                 <> "Retry the message.")
+    LoopUnexpected message ->
+        roleError color
+            (glyphErr
+                <> "Unexpected agent error: "
+                <> message
+                <> "\nRetry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")

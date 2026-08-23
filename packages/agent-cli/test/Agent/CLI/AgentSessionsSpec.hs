@@ -3,6 +3,7 @@ module Agent.CLI.AgentSessionsSpec (spec) where
 import Agent.CLI.AgentSessions
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
+import Agent.CLI.SessionLock
 import Agent.Loop (defaultLoopDispatch)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
@@ -17,7 +18,7 @@ import Agent.Tools.Types
     , appToolHandlers
     )
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (SomeException, bracket, finally, try)
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -26,6 +27,8 @@ import qualified System.Directory as Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Process (forkProcess, getProcessStatus)
+import System.Posix.Signals (sigKILL, signalProcess)
 import Test.Hspec
 
 isReadOnly :: ApprovalRule -> Bool
@@ -121,11 +124,83 @@ spec = describe "Agent.CLI.AgentSessions" do
                     "completed"
                 closeSessionProcessManager manager
 
+    it "keeps an advisory lock until its owner releases it" $
+        withTempDir "agent-session-lock-" \root -> do
+            handle <- createSession (testCreateAt root root)
+            acquireSessionLock
+                handle.sessionDir
+                handle.sessionMeta.metaId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right lock -> do
+                        sessionLockIsActive (sessionLockPath handle.sessionDir)
+                            `shouldReturn` True
+                        threadDelay 5100000
+                        acquireSessionLock
+                            handle.sessionDir
+                            handle.sessionMeta.metaId >>= \case
+                                Left err ->
+                                    err `shouldSatisfy`
+                                        Text.isInfixOf "already running"
+                                Right other -> do
+                                    releaseSessionLock other
+                                    expectationFailure
+                                        "acquired an already-held session lock"
+                        releaseSessionLock lock
+                        Directory.doesFileExist
+                            (sessionLockPath handle.sessionDir)
+                            `shouldReturn` True
+                        sessionLockIsActive (sessionLockPath handle.sessionDir)
+                            `shouldReturn` False
+
+    it "releases an advisory lock when its process crashes" $
+        withTempDir "agent-session-lock-crash-" \root -> do
+            handle <- createSession (testCreateAt root root)
+            let marker = toFilePath root FilePath.</> "locked"
+            pid <- forkProcess do
+                acquireSessionLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId >>= \case
+                        Left _ -> pure ()
+                        Right _ -> do
+                            writeFile marker "locked"
+                            threadDelay 30000000
+            let stopChild = do
+                    _ <- try @_ @SomeException (signalProcess sigKILL pid)
+                    pure ()
+            flip finally stopChild do
+                waitForFile marker
+                acquireSessionLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId >>= \case
+                        Left err ->
+                            err `shouldSatisfy` Text.isInfixOf "already running"
+                        Right lock -> do
+                            releaseSessionLock lock
+                            expectationFailure "acquired the child process lock"
+                signalProcess sigKILL pid
+                _ <- getProcessStatus True False pid
+                reacquired <- acquireSessionLock
+                    handle.sessionDir
+                    handle.sessionMeta.metaId
+                case reacquired of
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right lock -> releaseSessionLock lock
+
+    it "reports a managed child readiness failure" $
+        withTempDir "agent-session-runtime-" \root -> do
+            script <- writeFakeAgentError root "could not acquire lock"
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt root root)
+                manager <- newSessionProcessManager root
+                launchSessionTurn manager True ApproveAll handle "one"
+                    `shouldReturn` Left "could not acquire lock"
+                closeSessionProcessManager manager
+
     it "does not terminate background sessions when the manager closes" $
         withTempDir "agent-session-runtime-" \root -> do
             let marker = toFilePath root FilePath.</> "finished"
             script <- writeFakeAgentBody root
-                ("#!/bin/sh\nsleep 0.2\nprintf done > " <> shellQuote marker <> "\n")
+                ("sleep 0.2\nprintf done > " <> shellQuote marker <> "\n")
             withExecutableOverride script do
                 handle <- createSession (testCreateAt root root)
                 manager <- newSessionProcessManager root
@@ -177,12 +252,25 @@ testCreateAt root cwd = (testCreate root) { createCwd = cwd }
 
 writeFakeAgent :: OsPath -> IO FilePath
 writeFakeAgent root = do
-    writeFakeAgentBody root "#!/bin/sh\nsleep 0.2\nexit 0\n"
+    writeFakeAgentBody root "sleep 0.2\nexit 0\n"
 
 writeFakeAgentBody :: OsPath -> String -> IO FilePath
 writeFakeAgentBody root body = do
     let path = toFilePath root FilePath.</> "fake-agent-cli"
-    writeFile path body
+    writeFile path $
+        "#!/bin/sh\nprintf 'ready\\n' > \"$HASKELL_AGENT_MANAGED_SESSION_READY\"\n"
+            <> body
+    permissions <- Directory.getPermissions path
+    Directory.setPermissions path permissions { Directory.executable = True }
+    pure path
+
+writeFakeAgentError :: OsPath -> String -> IO FilePath
+writeFakeAgentError root message = do
+    let path = toFilePath root FilePath.</> "fake-agent-cli-error"
+    writeFile path $
+        "#!/bin/sh\nprintf 'error\\n%s' "
+            <> shellQuote message
+            <> " > \"$HASKELL_AGENT_MANAGED_SESSION_READY\"\nexit 1\n"
     permissions <- Directory.getPermissions path
     Directory.setPermissions path permissions { Directory.executable = True }
     pure path
