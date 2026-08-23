@@ -8,7 +8,10 @@ module Agent.CLI.Session
     , Persistence(..)
     , PersistenceState(..)
     , newPendingPersistence
+    , newPendingPersistenceReserved
     , newActivePersistence
+    , persistenceTempDir
+    , cleanupPendingPersistence
     , createSession
     , appendTurn
     , appendTurnWithMetaUpdate
@@ -19,6 +22,11 @@ module Agent.CLI.Session
     , isValidSessionId
     , listSessions
     , sessionDirForId
+    , sessionTempDirForId
+    , sessionTempsRoot
+    , allocateSessionTemp
+    , ensureSessionTemp
+    , removeSessionTemp
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
@@ -54,7 +62,7 @@ import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (displayException, finally, tryIO)
+import Control.Exception.Safe (displayException, finally, onException, tryIO)
 import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -67,6 +75,7 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
@@ -86,7 +95,7 @@ import System.Directory.OsPath
     , listDirectory
     , removePathForcibly
     )
-import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 
 sessionSchemaVersion :: Int
@@ -96,6 +105,13 @@ sessionSchemaVersion = 1
 sessionsRoot :: OsPath -> OsPath
 sessionsRoot home =
     home </> unsafeEncodeUtf ".haskell-agent" </> unsafeEncodeUtf "sessions"
+
+-- | @~/.haskell-agent/tmp/sessions@ for a corresponding sessions root.
+sessionTempsRoot :: OsPath -> OsPath
+sessionTempsRoot root =
+    takeDirectory root
+        </> unsafeEncodeUtf "tmp"
+        </> unsafeEncodeUtf "sessions"
 
 data SessionMeta = SessionMeta
     { metaVersion :: !Int
@@ -261,6 +277,7 @@ instance FromJSON SessionTurn where
 
 data SessionHandle = SessionHandle
     { sessionDir :: !OsPath
+    , sessionTempDir :: !OsPath
     , sessionMetaPath :: !OsPath
     , sessionTranscriptPath :: !OsPath
     , sessionMeta :: !SessionMeta
@@ -286,23 +303,71 @@ data Persistence
 
 -- | An enabled persistence slot, before or after its first use.
 data PersistenceState
-    = PersistencePending SessionCreate
+    = PersistencePending SessionCreate Text OsPath
     | PersistenceActive SessionHandle
     deriving (Eq, Show)
 
 newPendingPersistence :: SessionCreate -> IO Persistence
-newPendingPersistence spec =
-    PersistenceEnabled <$> newIORef (PersistencePending spec)
+newPendingPersistence spec = do
+    (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
+    newPendingPersistenceReserved spec sessionId tempDir
+
+newPendingPersistenceReserved
+    :: SessionCreate
+    -> Text
+    -> OsPath
+    -> IO Persistence
+newPendingPersistenceReserved spec sessionId tempDir = do
+    expected <- either (fail . Text.unpack) pure
+        (sessionTempDirForId spec.createRoot sessionId)
+    unless (expected == tempDir) $
+        fail "reserved session temp directory does not match session id"
+    ensurePrivateDir tempDir
+    PersistenceEnabled
+        <$> newIORef (PersistencePending spec sessionId tempDir)
 
 newActivePersistence :: SessionHandle -> IO Persistence
-newActivePersistence handle =
+newActivePersistence handle = do
+    ensurePrivateDir handle.sessionTempDir
     PersistenceEnabled <$> newIORef (PersistenceActive handle)
+
+persistenceTempDir :: Persistence -> IO (Maybe OsPath)
+persistenceTempDir = \case
+    PersistenceDisabled -> pure Nothing
+    PersistenceEnabled slotRef ->
+        readIORef slotRef <&> \case
+            PersistencePending _ _ tempDir -> Just tempDir
+            PersistenceActive handle -> Just handle.sessionTempDir
+
+-- | Remove scratch space only when a reserved session never became durable.
+cleanupPendingPersistence :: Persistence -> IO ()
+cleanupPendingPersistence = \case
+    PersistenceDisabled -> pure ()
+    PersistenceEnabled slotRef ->
+        readIORef slotRef >>= \case
+            PersistencePending spec sessionId _ -> do
+                _ <- removeSessionTemp spec.createRoot sessionId
+                pure ()
+            PersistenceActive _ -> pure ()
 
 createSession :: SessionCreate -> IO SessionHandle
 createSession spec = do
+    (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
+    createReservedSession spec sessionId tempDir
+        `onException` removeReservedTemp spec.createRoot sessionId
+
+createReservedSession
+    :: SessionCreate
+    -> Text
+    -> OsPath
+    -> IO SessionHandle
+createReservedSession spec sessionId tempDir = do
     ensurePrivateDir spec.createRoot
+    dir <- either (fail . Text.unpack) pure
+        (sessionDirForId spec.createRoot sessionId)
+    createDirectory dir
+    setFileMode (unsafeToFilePath dir) 0o700
     now <- getCurrentTime
-    (sessionId, dir) <- allocateSessionDir spec.createRoot now
     let title = case spec.createTitleHint of
             Just hint | not (Text.null hint) -> hint
             _ -> "untitled"
@@ -333,6 +398,7 @@ createSession spec = do
             }
         handle = SessionHandle
             { sessionDir = dir
+            , sessionTempDir = tempDir
             , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
             , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
             , sessionMeta = meta
@@ -346,8 +412,8 @@ ensureSession slotRef = do
     slot <- readIORef slotRef
     case slot of
         PersistenceActive handle -> pure handle
-        PersistencePending spec -> do
-            handle <- createSession spec
+        PersistencePending spec sessionId tempDir -> do
+            handle <- createReservedSession spec sessionId tempDir
             writeIORef slotRef (PersistenceActive handle)
             pure handle
 
@@ -456,7 +522,7 @@ sessionTitleTurnCountFromSlot = \case
     PersistenceDisabled -> pure 0
     PersistenceEnabled slotRef ->
         readIORef slotRef >>= \case
-            PersistencePending _ -> pure 0
+            PersistencePending _ _ _ -> pure 0
             PersistenceActive handle -> pure handle.sessionMeta.metaTitleUserTurns
 
 -- | Append a synthetic marker without deriving a title or aggregating usage.
@@ -504,7 +570,9 @@ deleteSession root sessionId = runExceptT do
     case removed of
         Left err ->
             throwE ("could not delete session: " <> Text.pack (displayException err))
-        Right () -> pure ()
+        Right () -> do
+            tempRemoved <- lift (removeSessionTemp root sessionId)
+            except tempRemoved
 
 -- | Session ids are single path components. Keep this deliberately broader
 -- than the current date-plus-hex allocator so older ids remain resumable.
@@ -519,6 +587,14 @@ sessionDirForId :: OsPath -> Text -> Either Text OsPath
 sessionDirForId root sessionId
     | isValidSessionId sessionId =
         Right (root </> unsafeEncodeUtf (Text.unpack sessionId))
+    | otherwise = Left "invalid session id"
+
+sessionTempDirForId :: OsPath -> Text -> Either Text OsPath
+sessionTempDirForId root sessionId
+    | isValidSessionId sessionId =
+        Right
+            (sessionTempsRoot root
+                </> unsafeEncodeUtf (Text.unpack sessionId))
     | otherwise = Left "invalid session id"
 
 listSessions :: OsPath -> IO [SessionMeta]
@@ -597,23 +673,75 @@ shellSingleQuote :: String -> Text
 shellSingleQuote s =
     "'" <> Text.replace "'" "'\\''" (Text.pack s) <> "'"
 
-allocateSessionDir :: OsPath -> UTCTime -> IO (Text, OsPath)
-allocateSessionDir root now = go (0 :: Int)
+-- | Reserve a unique session id by atomically creating its private scratch
+-- directory. The durable session directory remains deferred until first use.
+allocateSessionTemp :: OsPath -> IO (Text, OsPath)
+allocateSessionTemp root = do
+    let tempRoot = sessionTempsRoot root
+    ensurePrivateDir tempRoot
+    now <- getCurrentTime
+    go tempRoot now (0 :: Int)
   where
-    day = formatTime defaultTimeLocale "%Y-%m-%d" now
-    start = floor (nominalDiffTimeToSeconds (utcTimeToPOSIXSeconds now) * 1000000) :: Integer
-    go attempt
-        | attempt >= 32 = fail "could not allocate a unique session id"
+    go tempRoot now attempt
+        | attempt >= 32 = fail "could not allocate a unique session temp directory"
         | otherwise = do
-            let hex = hex8 (start + fromIntegral attempt)
-                sessionId = Text.pack (day <> "-" <> hex)
-                dir = root </> unsafeEncodeUtf (Text.unpack sessionId)
-            result <- tryIO (createDirectory dir)
-            case result of
-                Left _ -> go (attempt + 1)
-                Right () -> do
-                    setFileMode (unsafeToFilePath dir) 0o700
-                    pure (sessionId, dir)
+            let sessionId = sessionIdForAttempt now attempt
+                durableDir =
+                    root </> unsafeEncodeUtf (Text.unpack sessionId)
+                tempDir =
+                    tempRoot </> unsafeEncodeUtf (Text.unpack sessionId)
+            durableExists <- doesDirectoryExist durableDir
+            if durableExists
+                then go tempRoot now (attempt + 1)
+                else tryIO (createDirectory tempDir) >>= \case
+                    Left _ -> go tempRoot now (attempt + 1)
+                    Right () -> do
+                        setFileMode (unsafeToFilePath tempDir) 0o700
+                        pure (sessionId, tempDir)
+
+ensureSessionTemp :: OsPath -> Text -> IO (Either Text OsPath)
+ensureSessionTemp root sessionId =
+    case sessionTempDirForId root sessionId of
+        Left err -> pure (Left err)
+        Right tempDir -> do
+            result <- tryIO (ensurePrivateDir tempDir)
+            pure $ case result of
+                Left err ->
+                    Left
+                        ("could not create session temp directory: "
+                            <> Text.pack (displayException err))
+                Right () -> Right tempDir
+
+sessionIdForAttempt :: UTCTime -> Int -> Text
+sessionIdForAttempt now attempt =
+    let day = formatTime defaultTimeLocale "%Y-%m-%d" now
+        start =
+            floor
+                (nominalDiffTimeToSeconds
+                    (utcTimeToPOSIXSeconds now)
+                    * 1000000) :: Integer
+        hex = hex8 (start + fromIntegral attempt)
+    in Text.pack (day <> "-" <> hex)
+
+removeSessionTemp :: OsPath -> Text -> IO (Either Text ())
+removeSessionTemp root sessionId =
+    case sessionTempDirForId root sessionId of
+        Left err -> pure (Left err)
+        Right tempDir -> do
+            exists <- doesDirectoryExist tempDir
+            if not exists
+                then pure (Right ())
+                else tryIO (removePathForcibly tempDir) >>= \case
+                    Left err ->
+                        pure $ Left
+                            ("could not delete session temp directory: "
+                                <> Text.pack (displayException err))
+                    Right () -> pure (Right ())
+
+removeReservedTemp :: OsPath -> Text -> IO ()
+removeReservedTemp root sessionId = do
+    _ <- removeSessionTemp root sessionId
+    pure ()
 
 hex8 :: Integer -> String
 hex8 n =

@@ -12,6 +12,7 @@ module Agent.Tools
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
+    , setToolSessionTmp
     , jsonTool
     , jsonAppTool
     , jsonAppToolWithExecution

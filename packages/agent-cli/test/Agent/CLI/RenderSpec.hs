@@ -18,6 +18,7 @@ import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
+import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -392,6 +393,55 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` Text.isInfixOf "**unfinished"
 
+        it "renders streamed block Markdown independently of chunk boundaries" do
+            let samples =
+                    [ "# Heading\n"
+                    , "- one\n  - two\n"
+                    , ">compact **quote**\n"
+                    , "[x **important**](https://example.com/a_(b)) \
+                        \and **bold *italic* `code`**\n"
+                    , "```haskell\nmain = pure ()\n```\n"
+                    , "| Key | Value |\n| --- | --- |\n| snake_case | `code` |\n"
+                    ]
+            forM_ samples \source -> do
+                let expected = stripTerminalControls
+                        (renderAssistantText True source)
+                withRenderConfig False True \config handle path -> do
+                    mapM_
+                        (renderEvent config . TextDelta . Text.singleton)
+                        (Text.unpack source)
+                    renderEvent config (TurnFinished TurnOutput
+                        { responseId = "r1"
+                        , toolCalls = []
+                        , assistantText = Nothing
+                        , tokenUsage = emptyTokenUsage
+                        })
+                    hClose handle
+                    actual <- stripTerminalControls <$> Text.readFile path
+                    actual `shouldBe` expected
+
+        it "does not expose fence or table markers while streaming" do
+            withRenderConfig False True \config handle path -> do
+                mapM_ (renderEvent config . TextDelta)
+                    [ "```haskell\nmain = "
+                    , "pure ()\n```\n"
+                    , "| name | value |\n| --- | --- |\n"
+                    , "| snake_case | **bold** |\n"
+                    ]
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                body <- stripTerminalControls <$> Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "main = pure ()"
+                body `shouldSatisfy` Text.isInfixOf "snake_case"
+                body `shouldSatisfy` Text.isInfixOf "bold"
+                body `shouldSatisfy` (not . Text.isInfixOf "```")
+                body `shouldSatisfy` (not . Text.isInfixOf "**bold**")
+
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
                 let call = functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"
@@ -570,3 +620,32 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
                 }
         action config handle path
         clearThinking config
+
+stripTerminalControls :: Text.Text -> Text.Text
+stripTerminalControls = go
+  where
+    go text =
+        case Text.break (== '\ESC') text of
+            (before, rest)
+                | Text.null rest -> before
+                | Just after <- Text.stripPrefix "\ESC[" rest ->
+                    before <> go (dropCsi after)
+                | Just after <- Text.stripPrefix "\ESC]" rest ->
+                    before <> go (dropOsc after)
+                | otherwise ->
+                    before <> go (Text.drop 1 rest)
+
+    dropCsi =
+        Text.drop 1
+            . Text.dropWhile
+                (\character ->
+                    not (character >= '@' && character <= '~'))
+
+    dropOsc text =
+        case Text.break (\character -> character == '\BEL' || character == '\ESC')
+                text of
+            (_, rest)
+                | Text.null rest -> ""
+                | Text.isPrefixOf "\BEL" rest -> Text.drop 1 rest
+                | Text.isPrefixOf "\ESC\\" rest -> Text.drop 2 rest
+                | otherwise -> dropOsc (Text.drop 1 rest)

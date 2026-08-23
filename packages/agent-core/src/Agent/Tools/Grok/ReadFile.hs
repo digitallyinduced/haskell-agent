@@ -36,7 +36,7 @@ instance FromJSON ReadFileArgs where
 readFileTool :: ToolEnv -> AppTool
 readFileTool env = jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
-        "The path of the file to read. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
+        "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
     , PropertySchema "offset" PropertyInteger False $ Just
         "The line number to start reading from. Only provide if the file is too large to read at once."
     , PropertySchema "limit" PropertyInteger False $ Just
@@ -50,7 +50,7 @@ readFileDescription :: Text
 readFileDescription =
     "Read a file.\n\
     \\n\
-    \- The target_file parameter can be a relative path in the workspace or an absolute path within the workspace; paths outside the workspace are rejected\n\
+    \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
 

@@ -31,6 +31,11 @@ import Agent.CLI.Markdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
+import Agent.TUI.FencedCode
+    ( FenceMarker
+    , fenceOpener
+    , isFenceCloser
+    )
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
     , osc9ProgressRemove
@@ -93,6 +98,7 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
+import Data.Char (isDigit, isSpace)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -138,10 +144,317 @@ data RenderConfig = RenderConfig
 data MarkdownStreamState = MarkdownStreamState
     { pending :: !Text
     , context :: !(Maybe Char)
+    , streamMode :: !MarkdownStreamMode
+    , blockPending :: !Text
     }
 
+data MarkdownStreamMode
+    = StreamLineStart
+    | StreamProse
+    | StreamFence !FenceMarker
+    | StreamTableCandidate
+    | StreamTable
+
 emptyMarkdownStreamState :: MarkdownStreamState
-emptyMarkdownStreamState = MarkdownStreamState "" Nothing
+emptyMarkdownStreamState =
+    MarkdownStreamState "" Nothing StreamLineStart ""
+
+feedMarkdownStream
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedMarkdownStream state input = case state.streamMode of
+    StreamLineStart -> feedLineStart state input
+    StreamProse -> feedProse state input
+    StreamFence marker -> feedFence marker state input
+    StreamTableCandidate -> feedTableCandidate state input
+    StreamTable -> feedTable state input
+
+feedLineStart
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedLineStart state input =
+    let buffered = state.blockPending <> input
+    in case takeCompleteLine buffered of
+        Just (line, rest) ->
+            classifyCompleteLine state{blockPending = ""} line rest
+        Nothing
+            | lineNeedsLookahead buffered ->
+                (state{blockPending = buffered}, "")
+            | otherwise ->
+                feedProse
+                    state
+                        { streamMode = StreamProse
+                        , blockPending = ""
+                        }
+                    buffered
+
+classifyCompleteLine
+    :: MarkdownStreamState
+    -> Text
+    -> Text
+    -> (MarkdownStreamState, Text)
+classifyCompleteLine state line rest
+    | Just (marker, _) <- fenceOpener (dropLineEnding line) =
+        feedMarkdownStream
+            state
+                { streamMode = StreamFence marker
+                , blockPending = line
+                }
+            rest
+    | isPossibleTableHeader line =
+        feedMarkdownStream
+            state
+                { streamMode = StreamTableCandidate
+                , blockPending = line
+                }
+            rest
+    | lineIsBlock line =
+        let (nextState, output) =
+                feedMarkdownStream
+                    state
+                        { streamMode = StreamLineStart
+                        , blockPending = ""
+                        }
+                    rest
+        in (nextState, renderMarkdown True line <> output)
+    | otherwise =
+        feedProse
+            state
+                { streamMode = StreamProse
+                , blockPending = ""
+                }
+            (line <> rest)
+
+feedProse
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedProse state input =
+    case Text.breakOn "\n" input of
+        (linePart, rest)
+            | Text.null rest ->
+                let source = state.pending <> linePart
+                    (ready, pending', nextContext) =
+                        splitMarkdownFragment state.context source
+                in ( state
+                        { pending = pending'
+                        , context = nextContext
+                        , streamMode = StreamProse
+                        }
+                   , renderMarkdownFragment True state.context ready
+                   )
+            | otherwise ->
+                let source = state.pending <> linePart <> "\n"
+                    (ready, pending', _) =
+                        splitMarkdownFragment state.context source
+                    rendered =
+                        renderMarkdownFragment True state.context
+                            (ready <> pending')
+                    reset =
+                        state
+                            { pending = ""
+                            , context = Nothing
+                            , streamMode = StreamLineStart
+                            , blockPending = ""
+                            }
+                    (nextState, following) =
+                        feedMarkdownStream reset (Text.drop 1 rest)
+                in (nextState, rendered <> following)
+
+feedFence
+    :: FenceMarker
+    -> MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedFence marker state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+        (beforeCloser, closingAndAfter) =
+            break (isFenceCloser marker . dropLineEnding) (drop 1 lines_)
+    in case closingAndAfter of
+        [] -> (state{blockPending = buffered}, "")
+        closing : after ->
+            let block = Text.concat (take 1 lines_ <> beforeCloser <> [closing])
+                rest = Text.concat after <> partial
+                reset =
+                    state
+                        { streamMode = StreamLineStart
+                        , blockPending = ""
+                        , pending = ""
+                        , context = Nothing
+                        }
+                (nextState, following) = feedMarkdownStream reset rest
+            in (nextState, renderMarkdown True block <> following)
+
+feedTableCandidate
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedTableCandidate state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+    in case lines_ of
+        header : separator : after
+            | isTableSeparator separator ->
+                feedMarkdownStream
+                    state
+                        { streamMode = StreamTable
+                        , blockPending = header <> separator
+                        }
+                    (Text.concat after <> partial)
+            | otherwise ->
+                let reset =
+                        state
+                            { streamMode = StreamLineStart
+                            , blockPending = ""
+                            }
+                    (nextState, following) =
+                        feedMarkdownStream reset
+                            (separator <> Text.concat after <> partial)
+                in (nextState, renderMarkdown True header <> following)
+        _ -> (state{blockPending = buffered}, "")
+
+feedTable
+    :: MarkdownStreamState
+    -> Text
+    -> (MarkdownStreamState, Text)
+feedTable state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+        (tableLines, after) =
+            case lines_ of
+                header : separator : rows ->
+                    let (body, following) =
+                            span isPossibleTableHeader rows
+                    in (header : separator : body, following)
+                _ -> (lines_, [])
+    in case after of
+        [] -> (state{blockPending = buffered}, "")
+        line : rest ->
+                let table = Text.concat tableLines
+                    reset =
+                        state
+                            { streamMode = StreamLineStart
+                            , blockPending = ""
+                            }
+                    (nextState, following) =
+                        feedMarkdownStream reset
+                            (line <> Text.concat rest <> partial)
+                in (nextState, renderMarkdown True table <> following)
+
+flushMarkdownStream :: MarkdownStreamState -> Text
+flushMarkdownStream state = case state.streamMode of
+    StreamProse ->
+        renderMarkdownFragment True state.context state.pending
+    StreamLineStart ->
+        renderMarkdown True state.blockPending
+    StreamFence _ ->
+        renderMarkdown True state.blockPending
+    StreamTableCandidate ->
+        renderMarkdown True state.blockPending
+    StreamTable ->
+        renderMarkdown True state.blockPending
+
+takeCompleteLine :: Text -> Maybe (Text, Text)
+takeCompleteLine text =
+    case Text.breakOn "\n" text of
+        (_, rest) | Text.null rest -> Nothing
+        (line, rest) -> Just (line <> "\n", Text.drop 1 rest)
+
+completeLines :: Text -> ([Text], Text)
+completeLines = go []
+  where
+    go reversed remaining =
+        case takeCompleteLine remaining of
+            Nothing -> (reverse reversed, remaining)
+            Just (line, rest) -> go (line : reversed) rest
+
+dropLineEnding :: Text -> Text
+dropLineEnding = Text.dropWhileEnd (== '\n')
+
+lineNeedsLookahead :: Text -> Bool
+lineNeedsLookahead line =
+    let stripped = Text.dropWhile isSpace line
+        markerRun marker = Text.span (== marker) stripped
+        allMarkerOrSpace marker =
+            Text.all (\character -> character == marker || isSpace character)
+                stripped
+    in case Text.uncons stripped of
+        Nothing -> True
+        Just ('#', _) ->
+            let (marks, after) = markerRun '#'
+            in Text.length marks <= 6
+                && (Text.null after || Text.isPrefixOf " " after)
+        Just ('>', _) -> True
+        Just ('|', _) -> True
+        Just ('`', _) ->
+            let (ticks, after) = markerRun '`'
+            in Text.null after || Text.length ticks >= 3
+        Just ('~', _) ->
+            let (tildes, after) = markerRun '~'
+            in Text.null after || Text.length tildes >= 3
+        Just ('+', after) -> Text.null after || Text.isPrefixOf " " after
+        Just ('*', after) ->
+            Text.null after
+                || Text.isPrefixOf " " after
+                || allMarkerOrSpace '*'
+        Just ('-', after) ->
+            Text.null after
+                || Text.isPrefixOf " " after
+                || allMarkerOrSpace '-'
+        Just ('_', _) -> allMarkerOrSpace '_'
+        Just (character, _)
+            | isDigit character ->
+                let (digits, after) = Text.span isDigit stripped
+                in not (Text.null digits)
+                    && ( Text.null after
+                        || after == "."
+                        || Text.isPrefixOf ". " after
+                       )
+        _ -> False
+
+lineIsBlock :: Text -> Bool
+lineIsBlock line =
+    let stripped = Text.dropWhile isSpace (dropLineEnding line)
+        (marks, afterHeading) = Text.span (== '#') stripped
+        heading =
+            not (Text.null marks)
+                && Text.length marks <= 6
+                && Text.isPrefixOf " " afterHeading
+        quote = Text.isPrefixOf ">" stripped
+        bullet = any (`Text.isPrefixOf` stripped) ["- ", "* ", "+ "]
+        (digits, orderedRest) = Text.span isDigit stripped
+        ordered =
+            not (Text.null digits) && Text.isPrefixOf ". " orderedRest
+        thematic marker =
+            let compact = Text.filter (not . isSpace) stripped
+            in Text.length compact >= 3 && Text.all (== marker) compact
+    in heading
+        || quote
+        || bullet
+        || ordered
+        || thematic '-'
+        || thematic '*'
+        || thematic '_'
+
+isPossibleTableHeader :: Text -> Bool
+isPossibleTableHeader =
+    Text.isPrefixOf "|" . Text.dropWhile isSpace . dropLineEnding
+
+isTableSeparator :: Text -> Bool
+isTableSeparator line =
+    let stripped =
+            Text.dropWhile (== '|')
+                (Text.dropWhileEnd (== '|')
+                    (Text.strip (dropLineEnding line)))
+        cells = map Text.strip (Text.splitOn "|" stripped)
+        valid cell =
+            Text.any (== '-') cell
+                && Text.null
+                    (Text.filter (`notElem` ['-', ':', ' ']) cell)
+    in length cells >= 1 && all valid cells
 
 -- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
 thinkingMaxWidth :: Int
@@ -223,9 +536,10 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
--- | Stream assistant text append-only while buffering incomplete inline
--- markdown constructs. Once a closing delimiter arrives, the whole construct
--- is emitted with styling and neither delimiter reaches the terminal.
+-- | Stream assistant text append-only. Ordinary prose is emitted as soon as
+-- incomplete inline constructs permit, while line prefixes that may introduce
+-- blocks are held until they can be classified. Fences and tables are buffered
+-- until their extent is known, so no raw markers need to be repainted.
 --
 -- Repainting the full accumulated response with DECSC/DECRC looks correct
 -- inside the current viewport, but once a repaint scrolls the terminal the
@@ -236,18 +550,16 @@ streamAssistantDelta config delta
     | Text.null delta = pure ()
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
-        (ready, context) <-
+        ready <-
             atomicModifyIORef' config.renderMarkdownState \state ->
-                let (ready, pending', nextContext) =
-                        splitMarkdownFragment state.context (state.pending <> safe)
-                    state' = MarkdownStreamState pending' nextContext
-                in (state', (ready, state.context))
+                let (state', output) = feedMarkdownStream state safe
+                in (state', output)
         unless (Text.null ready) do
             writeIORef config.renderPrintedText True
             writeIORef config.renderLiveActive True
             Text.hPutStr config.renderStdout
                 ( paintBackgroundLines True agentBackground
-                    (renderMarkdownFragment True context ready)
+                    ready
                 )
             hFlush config.renderStdout
 
@@ -257,30 +569,34 @@ streamAssistantDelta config delta
 -- Returns whether anything was written.
 finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
-    (pending, context) <-
+    pendingOutput <-
         atomicModifyIORef' config.renderMarkdownState \state ->
-            (emptyMarkdownStreamState, (state.pending, state.context))
+            (emptyMarkdownStreamState, flushMarkdownStream state)
     live <- readIORef config.renderLiveActive
     writeIORef config.renderLiveActive False
     if live
         then do
             writeIORef config.renderPrintedText True
-            unless (Text.null pending) do
+            unless (Text.null pendingOutput) do
                 Text.hPutStr config.renderStdout
                     ( paintBackgroundLines True agentBackground
-                        (renderMarkdownFragment True context pending)
+                        pendingOutput
                     )
                 hFlush config.renderStdout
             pure True
         else do
             let raw
-                    | not (Text.null pending) = pending
+                    | not (Text.null pendingOutput) = pendingOutput
                     | otherwise = fromMaybe "" assistantText
             if Text.null raw
                 then pure False
                 else do
                     writeIORef config.renderPrintedText True
-                    Text.hPutStr config.renderStdout (renderAssistantText True raw)
+                    Text.hPutStr config.renderStdout $
+                        if Text.null pendingOutput
+                            then renderAssistantText True raw
+                            else paintBackgroundLines
+                                True agentBackground pendingOutput
                     hFlush config.renderStdout
                     pure True
 

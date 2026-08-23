@@ -48,6 +48,7 @@ data SessionEnv = SessionEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
+    , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
     , sessionStartupContext :: !(IORef (Maybe Text))

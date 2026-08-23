@@ -104,6 +104,38 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "Render.hs"
             out `shouldSatisfy` (not . Text.isInfixOf "`Render.hs`")
 
+        it "composes nested inline styles and formatted link labels" do
+            let out =
+                    renderMarkdown True
+                        "**bold and *italic* with `code` and \
+                        \[docs **important**](https://example.com)**"
+            mapM_
+                (\fragment ->
+                    out `shouldSatisfy` Text.isInfixOf fragment)
+                [ "bold and "
+                , "italic"
+                , "code"
+                , "docs "
+                , "important"
+                , " (https://example.com)"
+                ]
+            out `shouldSatisfy` (not . Text.isInfixOf "**")
+            out `shouldSatisfy` (not . Text.isInfixOf "*italic*")
+
+        it "supports escapes and balanced parentheses in link destinations" do
+            let out =
+                    renderMarkdown True
+                        "\\*literal\\* [x](https://example.com/a_(b))"
+            stripAnsi out `shouldSatisfy` Text.isInfixOf "*literal*"
+            out `shouldSatisfy`
+                Text.isInfixOf "https://example.com/a_(b)"
+
+        it "restores heading styling after nested code" do
+            let out = renderMarkdown True "# before `code` after"
+                afterCode = snd (Text.breakOn "code" out)
+            afterCode `shouldSatisfy` Text.isInfixOf "\ESC["
+            stripAnsi out `shouldBe` "before code after"
+
         it "keeps box borders aligned when cells have inline markers" do
             let mdTable = Text.unlines
                     [ "| a | b |"
@@ -126,6 +158,28 @@ spec = do
                 _ ->
                     expectationFailure
                         ("expected exactly two table rows, got " <> show body)
+
+        it "preserves identifiers and styled links in table cells" do
+            let sample =
+                    "| key | value |\n\
+                    \| --- | --- |\n\
+                    \| snake_case | [docs](https://example.com) |"
+                out = renderMarkdown True sample
+                cleaned = stripAnsi out
+            cleaned `shouldSatisfy` Text.isInfixOf "snake_case"
+            cleaned `shouldSatisfy` Text.isInfixOf "docs"
+            out `shouldSatisfy` Text.isInfixOf "https://example.com"
+
+        it "uses strict shared fence rules" do
+            let overIndented =
+                    renderMarkdown True "    ```haskell\nbody\n    ```"
+                invalidInfo =
+                    renderMarkdown True "```bad`info\nbody\n```"
+            overIndented `shouldSatisfy` Text.isInfixOf "```haskell"
+            invalidInfo `shouldSatisfy` Text.isPrefixOf "``"
+            invalidInfo `shouldSatisfy` Text.isInfixOf "bad"
+            invalidInfo `shouldSatisfy` Text.isInfixOf "info"
+            invalidInfo `shouldSatisfy` Text.isInfixOf "body"
 
         it "renders a basic pipe table" do
             let sample = "| file | status |\n| --- | --- |\n| a.hs | ok |"

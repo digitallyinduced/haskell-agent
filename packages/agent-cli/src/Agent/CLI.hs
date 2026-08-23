@@ -165,7 +165,7 @@ import Agent.CLI.Project
     , saveProjectModel
     )
 import Agent.CLI.Prompt (defaultModelFor, systemPrompt)
-import Agent.CLI.Request (requestParams)
+import Agent.CLI.Request (requestParams, setRequestInstructions)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
@@ -412,6 +412,7 @@ import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
     , defaultToolEnv
+    , setToolSessionTmp
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter as OpenRouter
@@ -1148,7 +1149,7 @@ runAgentInitializedWithLock
     -> IO RunResult
 runAgentInitializedWithLock
         options transition home root resumed resumeLock cwd startup = do
-    let toolEnv = startup.startupToolEnv
+    let baseToolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
         escPaused = startup.startupEscPaused
         uiRuntimeRef = startup.startupUiRuntimeRef
@@ -1503,9 +1504,30 @@ runAgentInitializedWithLock
                     subagentForkSource)
             , multiSendToRoot = Just sendToRoot
             }
+    prompt <- loadPrompt options
+    persist <-
+        preparePersistence
+            fullscreen options root provider model
+                inferredTarget.modelTransportId dialectId
+                (isNothing transition) cwd effort prompt resumed
+    writeIORef persistSlotRef persist
+    (sessionTmp, ephemeralSessionId) <-
+        persistenceTempDir persist >>= \case
+            Just tempDir -> pure (tempDir, Nothing)
+            Nothing -> do
+                (sessionId, tempDir) <- allocateSessionTemp root
+                pure (tempDir, Just sessionId)
+    setToolSessionTmp baseToolEnv (Just sessionTmp)
+    let cleanupScratch = do
+            cleanupPendingPersistence persist
+            forM_ ephemeralSessionId \sessionId -> do
+                _ <- removeSessionTemp root sessionId
+                pure ()
+        toolEnv = baseToolEnv
     coding <-
         codingToolsForWithTypes
             dialect toolEnv (Just planHooks) multiCtx agentTypesRef
+            `onException` cleanupScratch
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1568,9 +1590,12 @@ runAgentInitializedWithLock
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
             coding.codingClose
+            cleanupScratch
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let instructions = systemPrompt dialect cwd today (isOneShot options)
+        let instructions =
+                systemPrompt dialect cwd (Just sessionTmp) today
+                    (isOneShot options)
             params = requestParams model instructions
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
@@ -1593,12 +1618,12 @@ runAgentInitializedWithLock
                 , subagentTypes = agentTypesRef
                 , subagentLegacyTarget = legacySubagentTarget
                 , subagentMapModel = transportModel
+                , subagentSessionTmp = toolEnv.toolSessionTmp
                 }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
         previousRef <- newIORef initialPrevious
         writeIORef subagentForkSource (Just transcriptRef)
-        prompt <- loadPrompt options
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing -> sessionTitleFromPrompt <$> prompt
@@ -1620,12 +1645,6 @@ runAgentInitializedWithLock
         skillsRef <- newIORef (SkillCatalog [] [])
         skillInvocationsRef <- newIORef []
 
-        persist <-
-            preparePersistence
-                fullscreen options root provider model
-                    inferredTarget.modelTransportId dialectId
-                    (isNothing transition) cwd effort prompt resumed
-        writeIORef persistSlotRef persist
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
@@ -1647,7 +1666,7 @@ runAgentInitializedWithLock
                     PersistenceActive handle -> do
                         claimCurrentSession handle
                         noteSessionDir handle.sessionDir
-                    PersistencePending _ -> pure ()
+                    PersistencePending _ _ _ -> pure ()
             PersistenceDisabled -> pure ()
         progName <- getProgName
         markStartupStage startup "Connecting to provider…"
@@ -2151,6 +2170,11 @@ preparePersistence
                     | otherwise = meta
             let handle = SessionHandle
                     { sessionDir = root </> fromText activeMeta.metaId
+                    , sessionTempDir =
+                        either
+                            (error . Text.unpack)
+                            id
+                            (sessionTempDirForId root activeMeta.metaId)
                     , sessionMetaPath =
                         root
                             </> fromText activeMeta.metaId
@@ -2231,7 +2255,7 @@ printResumeHint progName = \case
     PersistenceEnabled slotRef -> do
         slot <- readIORef slotRef
         case slot of
-            PersistencePending _ -> pure ()
+            PersistencePending _ _ _ -> pure ()
             PersistenceActive handle -> do
                 -- Drop an in-place "Thinking…" status so the hint is its own line.
                 Text.hPutStr stderr "\r\ESC[K"
@@ -2669,6 +2693,17 @@ runSession options provider dialect policy tools toolEnv planMode startup prompt
                     Nothing -> pure ()
                 Nothing -> pure ()
             finishSubagentTurn rootTurnId
+        setSessionTempDir tempDir = do
+            setToolSessionTmp toolEnv (Just tempDir)
+            today <- utctDay <$> getCurrentTime
+            modifyIORef' paramsRef $
+                setRequestInstructions
+                    (systemPrompt
+                        dialect
+                        cwd
+                        (Just tempDir)
+                        today
+                        (isOneShot options))
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -2690,6 +2725,7 @@ runSession options provider dialect policy tools toolEnv planMode startup prompt
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
             , sessionHome = home
+            , sessionSetTempDir = setSessionTempDir
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
             , sessionStartupContext = startupContext
@@ -3095,9 +3131,12 @@ setSessionEffort env level = do
         PersistenceEnabled slotRef -> do
             slot <- readIORef slotRef
             case slot of
-                PersistencePending pending ->
+                PersistencePending pending sessionId tempDir ->
                     writeIORef slotRef
-                        (PersistencePending pending { createEffort = level })
+                        (PersistencePending
+                            pending { createEffort = level }
+                            sessionId
+                            tempDir)
                 PersistenceActive handle -> do
                     let meta = handle.sessionMeta { metaEffort = level }
                     writeSessionMeta handle.sessionMetaPath meta
@@ -3809,7 +3848,7 @@ replWithDraft env@SessionEnv
                                 now <- getCurrentTime
                                 slot <- readIORef slotRef
                                 case slot of
-                                    PersistencePending _ ->
+                                    PersistencePending _ _ _ ->
                                         pure "conversation cleared"
                                     PersistenceActive handle -> do
                                         let turn = SessionTurn
@@ -3860,7 +3899,7 @@ replWithDraft env@SessionEnv
                                 let model = currentModel params
                                     effort = currentEffort params
                                     create = case slot of
-                                        PersistencePending pending ->
+                                        PersistencePending pending _ _ ->
                                             pending
                                                 { createModel = model
                                                 , createEffort = effort
@@ -3886,6 +3925,13 @@ replWithDraft env@SessionEnv
                                                 , createTitleIsManual = False
                                                 }
                                 handle <- createSession create
+                                case slot of
+                                    PersistencePending pending sessionId _ -> do
+                                        _ <- removeSessionTemp
+                                            pending.createRoot
+                                            sessionId
+                                        pure ()
+                                    PersistenceActive _ -> pure ()
                                 let turn = SessionTurn
                                         { turnAt = now
                                         , turnUserText = newSessionUserText
@@ -3903,6 +3949,7 @@ replWithDraft env@SessionEnv
                                         }
                                 writeSessionMeta handle'.sessionMetaPath meta
                                 env.sessionOnPersisted handle'
+                                env.sessionSetTempDir handle'.sessionTempDir
                                 writeIORef slotRef
                                     (PersistenceActive handle'{sessionMeta = meta})
                                 writeIORef env.sessionTitleTurnCount 0
@@ -3929,7 +3976,7 @@ replWithDraft env@SessionEnv
                             PersistenceEnabled slotRef -> do
                                 slot <- readIORef slotRef
                                 case slot of
-                                    PersistencePending _ ->
+                                    PersistencePending _ _ _ ->
                                         displayInfo
                                             "session: (pending until first turn)" $
                                             Text.putStrLn
@@ -3978,11 +4025,15 @@ replWithDraft env@SessionEnv
                                             "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
                                 readIORef slotRef >>= \case
-                                    PersistencePending pending -> do
-                                        writeIORef slotRef (PersistencePending pending
-                                            { createTitleHint = Just title
-                                            , createTitleIsManual = True
-                                            })
+                                    PersistencePending pending sessionId tempDir -> do
+                                        writeIORef slotRef
+                                            (PersistencePending
+                                                pending
+                                                    { createTitleHint = Just title
+                                                    , createTitleIsManual = True
+                                                    }
+                                                sessionId
+                                                tempDir)
                                         setWindowTitle
                                             (cliWindowTitle pending.createCwd
                                                 (Just title))
@@ -4019,11 +4070,15 @@ replWithDraft env@SessionEnv
                                             "cannot rename a session that is not persisted")
                             PersistenceEnabled slotRef ->
                                 readIORef slotRef >>= \case
-                                    PersistencePending pending -> do
-                                        writeIORef slotRef (PersistencePending pending
-                                            { createTitleHint = Nothing
-                                            , createTitleIsManual = False
-                                            })
+                                    PersistencePending pending sessionId tempDir -> do
+                                        writeIORef slotRef
+                                            (PersistencePending
+                                                pending
+                                                    { createTitleHint = Nothing
+                                                    , createTitleIsManual = False
+                                                    }
+                                                sessionId
+                                                tempDir)
                                         setWindowTitle
                                             (cliWindowTitle pending.createCwd Nothing)
                                         displayInfo
@@ -4775,13 +4830,16 @@ applyModelChange
         PersistenceEnabled slotRef -> do
             slot <- readIORef slotRef
             case slot of
-                PersistencePending pending ->
+                PersistencePending pending sessionId tempDir ->
                     writeIORef slotRef
-                        (PersistencePending pending
-                            { createModel = name
-                            , createTransportModel = transportModel
-                            , createDialect = dialectId
-                            })
+                        (PersistencePending
+                            pending
+                                { createModel = name
+                                , createTransportModel = transportModel
+                                , createDialect = dialectId
+                                }
+                            sessionId
+                            tempDir)
                 PersistenceActive handle -> do
                     let meta = handle.sessionMeta
                             { metaModel = name
@@ -4937,7 +4995,7 @@ persistenceTransportModel fallback = \case
     PersistenceDisabled -> pure fallback
     PersistenceEnabled slotRef ->
         readIORef slotRef >>= \case
-            PersistencePending pending ->
+            PersistencePending pending _ _ ->
                 pure pending.createTransportModel
             PersistenceActive handle ->
                 pure $
@@ -5258,14 +5316,19 @@ commitProviderTransition projectRoot (Just transition) persist = do
         PersistenceEnabled slotRef -> do
             slot <- readIORef slotRef
             case slot of
-                PersistencePending pending ->
-                    writeIORef slotRef $ PersistencePending pending
-                        { createProvider = transition.transitionTarget.modelProvider
-                        , createModel = transition.transitionTarget.modelId
-                        , createTransportModel =
-                            transition.transitionTarget.modelTransportId
-                        , createDialect = transition.transitionTarget.modelDialect
-                        }
+                PersistencePending pending sessionId tempDir ->
+                    writeIORef slotRef $ PersistencePending
+                        pending
+                            { createProvider =
+                                transition.transitionTarget.modelProvider
+                            , createModel = transition.transitionTarget.modelId
+                            , createTransportModel =
+                                transition.transitionTarget.modelTransportId
+                            , createDialect =
+                                transition.transitionTarget.modelDialect
+                            }
+                        sessionId
+                        tempDir
                 PersistenceActive handle -> do
                     now <- getCurrentTime
                     let previousMeta = handle.sessionMeta
@@ -5715,7 +5778,7 @@ currentSessionId = \case
     PersistenceEnabled slotRef -> do
         slot <- readIORef slotRef
         pure $ case slot of
-            PersistencePending _ -> Nothing
+            PersistencePending _ _ _ -> Nothing
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
 -- | Build a root OpenAI backend plus an unlocked sender for manual compaction.
