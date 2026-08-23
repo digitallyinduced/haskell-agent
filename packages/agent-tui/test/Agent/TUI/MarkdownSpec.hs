@@ -88,6 +88,12 @@ spec = describe "fullscreen Markdown rendering" do
         parseInline input
             `shouldBe` [InlineSpan InlinePlain input]
 
+    it "wraps long fenced-code lines inside the available terminal width" do
+        let code = Text.replicate 100 "a"
+            rows = renderRows 12 ("```\n" <> code <> "\n```")
+        map rowDisplayWidth rows `shouldSatisfy` all (<= 12)
+        Text.filter (/= ' ') (Text.concat rows) `shouldBe` code
+
     it "renders numbered controls for fenced code block headers" do
         let widget :: Widget ()
             widget =
