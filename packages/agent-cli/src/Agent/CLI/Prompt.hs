@@ -33,7 +33,8 @@ defaultModelFor = \case
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Dialect -> OsPath -> Day -> Bool -> Text
 systemPrompt dialect cwd today isNonInteractive =
-    base <> "\n\n" <> ghciGuidance <> "\n" <> timeContextGuidance
+    base <> "\n\n" <> ghciGuidanceForDialect dialect
+        <> "\n" <> timeContextGuidance
   where
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
@@ -49,7 +50,7 @@ systemPromptForTools dialect toolNames cwd today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
-            , ghciGuidanceForTools available
+            , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
   where
@@ -84,8 +85,16 @@ ghciGuidance =
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
 
-ghciGuidanceForTools :: [Text] -> Text
-ghciGuidanceForTools available
+ghciGuidanceForDialect :: Dialect -> Text
+ghciGuidanceForDialect dialect =
+    case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            Text.replace "run_terminal_cmd" "run_terminal_command"
+                ghciGuidance
+        _ -> ghciGuidance
+
+ghciGuidanceForTools :: Dialect -> [Text] -> Text
+ghciGuidanceForTools dialect available
     | "run_ghci" `notElem` available = ""
     | otherwise =
         Text.unlines $
@@ -99,8 +108,13 @@ ghciGuidanceForTools available
                 <> [ "Drive GHCi with complete expressions; do not expect interactive human input."
                    ]
   where
-    shellNames =
-        filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+    shellNames = case dialectPromptStyle dialect of
+        GrokBuildPromptStyle ->
+            [ "run_terminal_command"
+            | "run_terminal_cmd" `elem` available
+                || "run_terminal_command" `elem` available
+            ]
+        _ -> filter (`elem` available) ["run_terminal_cmd", "shell_command"]
     shellGuidance = case shellNames of
         [] -> []
         names ->

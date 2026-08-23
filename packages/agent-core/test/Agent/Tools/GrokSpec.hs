@@ -42,7 +42,7 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.Tools.Grok" do
-    it "advertises grok-build wire names and not Codex names" do
+    it "registers the Grok handlers that are projected to public wire names" do
         withTempSession \(session, ghci) -> do
             plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
             typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
@@ -54,8 +54,11 @@ spec = describe "Agent.Tools.Grok" do
                 , "search_replace"
                 , "run_terminal_cmd"
                 , "run_ghci"
+                , "todo_write"
                 , "get_task_output"
+                , "wait_tasks"
                 , "kill_task"
+                , "monitor"
                 , "enter_plan_mode"
                 , "exit_plan_mode"
                 , "ask_user_question"
@@ -78,6 +81,55 @@ spec = describe "Agent.Tools.Grok" do
                 map (.appToolName) generic.codingAppTools `shouldBe` names)
                 `finally` (grok.codingClose >> generic.codingClose)
 
+    it "advertises only supported, workspace-confined file inputs" do
+        withTempSession \(session, ghci) -> do
+            plan <- newPlanModeEnv session.grokEnv.toolCwd Nothing
+            typesRef <- newIORef (Map.empty :: Map SubagentId GrokSubagentSpec)
+            let tools = grokTools session ghci plan Nothing typesRef
+                parameters name =
+                    concat
+                        [ fromMaybe [] (jsonToolParameters tool)
+                        | tool <- tools
+                        , tool.appToolName == name
+                        ]
+                descriptions name =
+                    [ description
+                    | property <- parameters name
+                    , Just description <- [property.description]
+                    ]
+            map (.propertyName) (parameters "read_file")
+                `shouldBe` ["target_file", "offset", "limit"]
+            map (.propertyName) (parameters "grep")
+                `shouldNotContain` ["output_mode"]
+            descriptions "read_file" `shouldSatisfy`
+                any (Text.isInfixOf
+                    "Absolute paths are accepted only when they resolve within the workspace")
+            descriptions "list_dir" `shouldSatisfy`
+                any (Text.isInfixOf
+                    "absolute path that resolves within the workspace")
+            descriptions "search_replace" `shouldSatisfy`
+                any (Text.isInfixOf
+                    "Absolute paths are accepted only when they resolve within the workspace")
+            let searchReplaceDescriptions =
+                    [ tool.appToolDescription
+                    | tool <- tools
+                    , tool.appToolName == "search_replace"
+                    ]
+            searchReplaceDescriptions `shouldSatisfy`
+                any (Text.isInfixOf
+                    "create a new file or fill an existing empty file")
+
+    it "creates and merges a structured todo list" do
+        withTempSession \(session, ghci) -> do
+            created <- runTool session ghci "todo_write"
+                "{\"merge\":false,\"todos\":[{\"id\":\"inspect\",\"content\":\"Inspect code\",\"status\":\"in_progress\"},{\"id\":\"test\",\"content\":\"Run tests\",\"status\":\"pending\"}]}"
+            created `shouldSatisfy` Text.isInfixOf "inspect: Inspect code"
+            created `shouldSatisfy` Text.isInfixOf "test: Run tests"
+            updated <- runTool session ghci "todo_write"
+                "{\"todos\":[{\"id\":\"inspect\",\"status\":\"completed\"}]}"
+            updated `shouldSatisfy` Text.isInfixOf
+                "[completed] inspect: Inspect code"
+
 
     it "registers task when a multi-agent context is provided" do
         withTempSession \(session, ghci) -> do
@@ -99,6 +151,14 @@ spec = describe "Agent.Tools.Grok" do
             output <- runTool session ghci "read_file" "{\"target_file\":\"sample.txt\"}"
             output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
             output `shouldSatisfy` Text.isInfixOf "bravo"
+
+    it "still accepts legacy read_file PDF fields without advertising them" do
+        withTempSession \(session, ghci) -> do
+            let path = toFilePath session.grokEnv.toolCwd </> "sample.txt"
+            Text.writeFile path "alpha\n"
+            output <- runTool session ghci "read_file"
+                "{\"target_file\":\"sample.txt\",\"pages\":\"1\",\"format\":\"text\"}"
+            output `shouldSatisfy` Text.isPrefixOf "1\8594alpha"
 
     it "rejects a path that escapes cwd" do
         withTempSession \(session, ghci) -> do
@@ -152,6 +212,15 @@ spec = describe "Agent.Tools.Grok" do
             output `shouldSatisfy` Text.isInfixOf "multiple times"
             Text.readFile path `shouldReturn` "aaa bbb aaa\n"
 
+    it "does not overwrite a non-empty file with an empty old_string" do
+        withTempSession \(session, ghci) -> do
+            let path = toFilePath session.grokEnv.toolCwd </> "existing.txt"
+            Text.writeFile path "keep\n"
+            output <- runTool session ghci "search_replace"
+                "{\"file_path\":\"existing.txt\",\"old_string\":\"\",\"new_string\":\"replace\\n\"}"
+            output `shouldSatisfy` Text.isInfixOf "cannot overwrite"
+            Text.readFile path `shouldReturn` "keep\n"
+
     it "grep finds a literal match" do
         withTempSession \(session, ghci) -> do
             Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt") "needle in haystack\n"
@@ -167,6 +236,14 @@ spec = describe "Agent.Tools.Grok" do
             output `shouldSatisfy` Text.isInfixOf "hit.txt"
             output `shouldNotSatisfy` Text.isInfixOf "hit.md"
             output `shouldNotSatisfy` Text.isInfixOf "No such file or directory"
+
+    it "still accepts the legacy grep output_mode input" do
+        withTempSession \(session, ghci) -> do
+            Text.writeFile (toFilePath session.grokEnv.toolCwd </> "hit.txt")
+                "needle\nneedle\n"
+            output <- runTool session ghci "grep"
+                "{\"pattern\":\"needle\",\"output_mode\":\"count\"}"
+            output `shouldSatisfy` Text.isInfixOf "hit.txt:2"
 
     it "rejects rm -rf via run_terminal_cmd even before execution" do
         withTempSession \(session, ghci) -> do
@@ -276,6 +353,33 @@ spec = describe "Agent.Tools.Grok" do
             killed <- runTool session ghci "kill_task"
                 ("{\"task_id\":\"" <> killId <> "\"}")
             killed `shouldSatisfy` Text.isInfixOf killId
+
+    it "waits for any background command through the public Grok alias" do
+        withTempSession \(session, ghci) -> do
+            first <- runTool session ghci "run_terminal_command"
+                "{\"command\":\"sleep 0.1\",\"description\":\"first wait\",\"background\":true}"
+            second <- runTool session ghci "run_terminal_command"
+                "{\"command\":\"sleep 2\",\"description\":\"second wait\",\"background\":true}"
+            let firstId = taskIdFrom first
+                secondId = taskIdFrom second
+            waited <- runTool session ghci "wait_commands_or_subagents"
+                ("{\"task_ids\":[\"" <> firstId <> "\",\"" <> secondId
+                    <> "\"],\"mode\":\"wait_any\",\"timeout_ms\":3000}")
+            waited `shouldSatisfy` Text.isInfixOf "1/2 tasks completed (wait_any)"
+            _ <- runTool session ghci "kill_command_or_subagent"
+                ("{\"task_id\":\"" <> secondId <> "\"}")
+            pure ()
+
+    it "runs a monitor with a bounded lifetime" do
+        withTempSession \(session, ghci) -> do
+            started <- runTool session ghci "monitor"
+                "{\"command\":\"while true; do echo tick; sleep 0.05; done\",\"description\":\"watch ticks\",\"timeout_ms\":200}"
+            started `shouldSatisfy` Text.isInfixOf "description: watch ticks"
+            let taskId = taskIdFrom started
+            finished <- runTool session ghci "get_command_or_subagent_output"
+                ("{\"task_ids\":[\"" <> taskId <> "\"],\"timeout_ms\":3000}")
+            finished `shouldSatisfy` Text.isPrefixOf "exit:"
+            finished `shouldSatisfy` Text.isInfixOf "tick"
 
     it "does not let a background command overwrite later foreground env" do
         withTempSession \(session, ghci) -> do

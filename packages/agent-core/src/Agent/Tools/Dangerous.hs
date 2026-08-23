@@ -17,7 +17,8 @@ import qualified Data.Text as Text
 -- command, return a rejection message for the model. Otherwise 'Nothing'.
 shellCommandBlocked :: Text -> Text -> Maybe Text
 shellCommandBlocked toolName argumentsJson
-    | toolName `elem` ["run_terminal_cmd", "shell_command"] =
+    | toolName `elem`
+        ["run_terminal_cmd", "run_terminal_command", "shell_command"] =
         case jsonTextField "command" argumentsJson of
             Nothing -> Nothing
             Just command

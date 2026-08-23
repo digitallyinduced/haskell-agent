@@ -52,7 +52,7 @@ instance FromJSON SearchReplaceArgs where
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
 searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
-        "The path to the file to modify. You can use either a relative path in the workspace or an absolute path."
+        "The path to the file to modify. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
     , PropertySchema "old_string" PropertyString True $ Just
         "The text to replace"
     , PropertySchema "new_string" PropertyString True $ Just
@@ -70,7 +70,7 @@ searchReplaceDescription =
     \\n\
     \- read_file prefixes each line with \"LINE_NUMBER\8594\". That prefix is not part of the file: match only what comes after the \8594, with its exact indentation.\n\
     \- old_string must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set replace_all to change every occurrence (handy for renaming an identifier).\n\
-    \- To create a new file, set old_string to an empty string. An empty old_string cannot overwrite an existing non-empty file."
+    \- To create a new file or fill an existing empty file, set old_string to an empty string. An empty old_string cannot overwrite an existing non-empty file."
 
 runSearchReplace :: ToolEnv -> PlanModeEnv -> SearchReplaceArgs -> IO (Either Text Text)
 runSearchReplace env planMode args = runExceptT do

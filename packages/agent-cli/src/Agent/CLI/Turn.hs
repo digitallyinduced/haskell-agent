@@ -3,6 +3,9 @@ module Agent.CLI.Turn
     ( IncompleteTurnCheckpoint(..)
     , applyPendingSessionTitles
     , checkpointIncompleteTurn
+    , grokFirstTurnPrefix
+    , grokFrameLastUserInput
+    , grokUserQuery
     , restorePlanStateAfterIncomplete
     , runOneTurn
     ) where
@@ -71,6 +74,7 @@ import Agent.CLI.Terminal
     , resolveColor
     )
 import Agent.CLI.Timestamp (stampTurnInputs, stripBracketedTimestamps)
+import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopError(..)
@@ -95,8 +99,9 @@ import Agent.Tools.PlanMode
     , planModeReminder
     , writePlanMarkdown
     )
+import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (when)
-import Control.Exception.Safe (onException)
+import Control.Exception.Safe (onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , modifyIORef'
@@ -107,9 +112,21 @@ import Data.List (isPrefixOf)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (Day)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.LocalTime (getZonedTime, localDay, zonedTimeToLocalTime)
+import System.Environment (lookupEnv)
+import System.Exit (ExitCode(..))
 import System.IO (stderr, stdout)
+import System.Info (os)
 import qualified System.OsPath
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , readCreateProcessWithExitCode
+    )
+import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
@@ -209,7 +226,18 @@ runOneTurn env@SessionEnv
         turnInputs0 = case planReminder of
             Just reminder -> UserMessage reminder : baseInputs
             Nothing -> baseInputs
-    turnInputs <- stampTurnInputs turnInputs0
+    stampedInputs <- stampTurnInputs turnInputs0
+    turnInputs <-
+        if dialectId env.sessionDialect == GrokBuildDialect
+            then do
+                let framed = grokFrameLastUserInput stampedInputs
+                    firstTurn = null beforeItems && prev == Nothing
+                if firstTurn
+                    then do
+                        prefix <- loadGrokFirstTurnPrefix env.sessionCwd
+                        pure (UserMessage prefix : framed)
+                    else pure framed
+            else pure stampedInputs
     startedAt <- readIORef render.renderStartedAt
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
@@ -424,6 +452,120 @@ runOneTurn env@SessionEnv
                 Just notes -> do
                     writeIORef printed False
                     runOneTurn env notes [UserMessage notes]
+
+-- | Wrap the last actual user payload in the Grok Build request envelope.
+-- Synthetic startup, skill, plan, and reminder messages precede it and remain
+-- separately framed.
+grokFrameLastUserInput :: [TurnInput] -> [TurnInput]
+grokFrameLastUserInput = reverse . go . reverse
+  where
+    go [] = []
+    go (UserMessage text : rest) =
+        UserMessage (grokUserQuery text) : rest
+    go (input@UserMultimodal{userText} : rest) =
+        input { userText = grokUserQuery userText } : rest
+    go (input : rest) = input : go rest
+
+grokUserQuery :: Text -> Text
+grokUserQuery text =
+    "<user_query>\n" <> text <> "\n</user_query>"
+
+grokFirstTurnPrefix
+    :: Text
+    -> Text
+    -> System.OsPath.OsPath
+    -> Day
+    -> Maybe Text
+    -> Text
+grokFirstTurnPrefix osName shell cwd today gitStatus =
+    Text.intercalate "\n"
+        [ "<user_info>"
+        , "OS Version: " <> osName
+        , "Shell: " <> shellBaseName shell
+        , "Workspace Path: " <> toText cwd
+        , "Today's date: "
+            <> Text.pack
+                (formatTime defaultTimeLocale "%A %b %-d, %Y" today)
+        , "Note: Prefer using relative paths over absolute paths as tool call args when possible."
+        , "</user_info>"
+        ]
+        <> maybe "" renderGitStatus gitStatus
+  where
+    shellBaseName path =
+        case filter (not . Text.null)
+                (Text.split (\char -> char == '/' || char == '\\') path) of
+            [] -> path
+            parts -> last parts
+    renderGitStatus status =
+        "\n\n<git_status>\n\
+        \This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n"
+            <> status
+            <> "\n</git_status>"
+
+loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
+loadGrokFirstTurnPrefix cwd = do
+    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+    osVersion <- loadOperatingSystem
+    today <- localDay . zonedTimeToLocalTime <$> getZonedTime
+    status <- loadGitStatus cwd
+    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+
+loadOperatingSystem :: IO Text
+loadOperatingSystem = do
+    result <- tryAny $
+        timeout 1000000 $
+            readCreateProcessWithExitCode (proc "uname" ["-sr"]) ""
+    pure $ case result of
+        Right (Just (ExitSuccess, output, _))
+            | kernel : release <- Text.words (Text.strip (Text.pack output))
+            , not (null release) ->
+                Text.toLower kernel <> " " <> Text.unwords release
+        _ -> Text.pack os
+
+loadGitStatus :: System.OsPath.OsPath -> IO (Maybe Text)
+loadGitStatus cwd = do
+    result <- tryAny $
+        timeout 5000000 $
+            readCreateProcessWithExitCode
+                (proc "git"
+                    [ "status"
+                    , "--short"
+                    , "--branch"
+                    , "--untracked-files=normal"
+                    ])
+                    { cwd = Just (unsafeToFilePath cwd) }
+                ""
+    pure $ case result of
+        Right (Just (ExitSuccess, output, _)) ->
+            normalizeGitStatus
+                (collapseStatusSpaces (Text.pack output))
+        _ -> Nothing
+
+collapseStatusSpaces :: Text -> Text
+collapseStatusSpaces = Text.pack . go False . Text.unpack
+  where
+    go _ [] = []
+    go previousSpace (char : rest)
+        | char == ' ' && previousSpace =
+            go True rest
+        | otherwise =
+            char : go (char == ' ') rest
+
+normalizeGitStatus :: Text -> Maybe Text
+normalizeGitStatus raw
+    | Text.null status = Nothing
+    | Text.length status <= maxCharacters = Just status
+    | otherwise =
+        Just
+            (snapToLastNewline (Text.take maxCharacters status)
+                <> "\n\n... (git status truncated)")
+  where
+    status = Text.strip raw
+    maxCharacters = 10000
+    snapToLastNewline prefix =
+        case Text.breakOnEnd "\n" prefix of
+            ("", _) -> prefix
+            (throughNewline, _) -> Text.dropEnd 1 throughNewline
 
 isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case

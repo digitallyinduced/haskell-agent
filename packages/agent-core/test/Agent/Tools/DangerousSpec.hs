@@ -56,6 +56,7 @@ spec = do
     describe "shellCommandBlocked" do
         it "blocks shell tools with a clear reason" do
             shouldBlock "run_terminal_cmd" "{\"command\":\"rm -rf /tmp/x\"}"
+            shouldBlock "run_terminal_command" "{\"command\":\"rm -rf /tmp/x\"}"
             shouldBlock "shell_command" "{\"command\":\"rm -fr ./build\"}"
             shouldBlock "run_terminal_cmd" "{\"command\":\"ls && rm -rf tmp\"}"
 
