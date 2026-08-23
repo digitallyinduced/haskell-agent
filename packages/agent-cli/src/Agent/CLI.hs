@@ -209,6 +209,7 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
+    , providerTransitionAttachments
     , providerTransitionDraft
     , setPendingExitAfter
     )
@@ -1241,6 +1242,7 @@ runAgentInitializedWithLock
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         transitionDraft = providerTransitionDraft transition
+        transitionAttachments = providerTransitionAttachments transition
         unavailableProviders =
             maybe [] (.transitionUnavailableProviders) transition
         configuredOptionTarget =
@@ -2225,7 +2227,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft transitionAttachments unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2289,7 +2291,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft transitionAttachments unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2362,7 +2364,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn transitionDraft transitionAttachments unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2557,6 +2559,7 @@ runSession
     -> Maybe Text
     -> Maybe PendingTurn
     -> Text
+    -> [ImageAttachment]
     -> [Provider]
     -> Maybe (STM ApiError)
     -> IORef ResponseCreateParams
@@ -2592,7 +2595,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn initialDraft initialAttachments unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2620,7 +2623,7 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
   withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
     toolRegistry <- requireToolRegistry tools
     printed <- newIORef False
-    attachmentsRef <- newIORef []
+    attachmentsRef <- newIORef initialAttachments
     previewIdRef <- newIORef (1 :: Int)
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
@@ -3997,8 +4000,9 @@ replWithDraft env@SessionEnv
                         if modelTargetRequiresRebuild
                                 connectionId provider (dialectId dialect) choice
                             then
-                                requestModelTargetSwitch
-                                    fullscreen choice "" persist >>= \case
+                                readIORef attachmentsRef >>= \attachments ->
+                                    requestModelTargetSwitch
+                                        fullscreen choice "" attachments persist >>= \case
                                     Left err -> do
                                         displayError err $
                                             Text.hPutStrLn stderr
@@ -4525,14 +4529,16 @@ replWithDraft env@SessionEnv
                                 (glyphOk <> message))
                     next
                   else
-                    requestModelTargetSwitch
-                        fullscreen choice keptDraft persist >>= \case
-                        Left err -> do
-                            displayError err $
-                                Text.hPutStrLn stderr
-                                    (roleError color err)
-                            next
-                        Right result -> pure result
+                    readIORef attachmentsRef >>= \attachments ->
+                        requestModelTargetSwitch
+                            fullscreen choice keptDraft attachments persist
+                            >>= \case
+                                Left err -> do
+                                    displayError err $
+                                        Text.hPutStrLn stderr
+                                            (roleError color err)
+                                    next
+                                Right result -> pure result
     chooseAccount keptDraft next =
         case fullscreen of
             Just runtime -> do
@@ -4666,31 +4672,26 @@ replWithDraft env@SessionEnv
                                     next
                         | otherwise =
                             readIORef paramsRef >>= \params ->
-                                requestAccountProviderSwitch
-                                    catalog
-                                    fullscreen
-                                    provider
-                                    connectionId
-                                    (currentModel params)
-                                    (dialectId dialect)
-                                    selectedProvider
-                                    selectedSelectionId
-                                    selectedAccountId
-                                    keptDraft
-                                    persist >>= \case
-                                        Left err -> do
-                                            displayError err (pure ())
-                                            next
-                                        Right result -> do
-                                            displayInfo
-                                                ("switching to "
-                                                    <> selectedLabel
-                                                    <> " ("
-                                                    <> providerSlug
-                                                        selectedProvider
-                                                    <> ")")
-                                                (pure ())
-                                            pure result
+                                readIORef attachmentsRef >>= \attachments ->
+                                    requestAccountProviderSwitch
+                                        catalog fullscreen provider connectionId
+                                        (currentModel params) (dialectId dialect)
+                                        selectedProvider selectedSelectionId
+                                        selectedAccountId keptDraft attachments
+                                        persist >>= \case
+                                            Left err -> do
+                                                displayError err (pure ())
+                                                next
+                                            Right result -> do
+                                                displayInfo
+                                                    ("switching to "
+                                                        <> selectedLabel
+                                                        <> " ("
+                                                        <> providerSlug
+                                                            selectedProvider
+                                                        <> ")")
+                                                    (pure ())
+                                                pure result
             Nothing -> do
                 displayError
                     "Account switching is unavailable for this session."
@@ -5154,11 +5155,12 @@ requestModelTargetSwitch
     :: Maybe FullscreenRuntime
     -> ModelOption
     -> Text
+    -> [ImageAttachment]
     -> Persistence
     -> IO (Either Text RunResult)
-requestModelTargetSwitch fullscreen choice draft persist =
+requestModelTargetSwitch fullscreen choice draft attachments persist =
     prepareProviderTransition
-        ManualTransition [] Nothing draft choice persist >>= \case
+        ManualTransition [] Nothing draft attachments choice persist >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
@@ -5187,6 +5189,7 @@ requestAccountProviderSwitch
     -> Text
     -> Text
     -> Text
+    -> [ImageAttachment]
     -> Persistence
     -> IO (Either Text RunResult)
 requestAccountProviderSwitch
@@ -5200,6 +5203,7 @@ requestAccountProviderSwitch
     selectionId
     accountId
     draft
+    attachments
     persist = do
         currentTransportModel <-
             persistenceTransportModel currentModelId persist
@@ -5231,6 +5235,7 @@ requestAccountProviderSwitch
                             , transitionSessionId = sessionId
                             , transitionPendingTurn = Nothing
                             , transitionDraft = draft
+                            , transitionAttachments = attachments
                             , transitionUnavailableProviders = []
                             , transitionCause = ManualTransition
                             , transitionAutomaticBilling = Nothing
@@ -5455,6 +5460,7 @@ chooseAutomaticProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionDraft = ""
+                        , transitionAttachments = []
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
@@ -5508,6 +5514,7 @@ chooseStartupProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionDraft = ""
+                        , transitionAttachments = []
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
@@ -5518,10 +5525,11 @@ prepareProviderTransition
     -> [Provider]
     -> Maybe PendingTurn
     -> Text
+    -> [ImageAttachment]
     -> ModelOption
     -> Persistence
     -> IO (Either Text ProviderTransition)
-prepareProviderTransition cause unavailable pending draft rawChoice persist = do
+prepareProviderTransition cause unavailable pending draft attachments rawChoice persist = do
     choice <- resolveModelOptionDialect rawChoice
     validateProviderTarget choice >>= \case
         Left err -> pure (Left err)
@@ -5534,6 +5542,7 @@ prepareProviderTransition cause unavailable pending draft rawChoice persist = do
                 , transitionSessionId = sessionId
                 , transitionPendingTurn = pending
                 , transitionDraft = draft
+                , transitionAttachments = attachments
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
                 , transitionAutomaticBilling = Nothing

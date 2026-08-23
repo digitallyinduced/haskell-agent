@@ -4,6 +4,7 @@ import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
+import Agent.Loop (ImageAttachment(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
 import Data.Text (Text)
@@ -40,6 +41,17 @@ spec = do
                 `shouldBe` "unfinished prompt"
             providerTransitionDraft Nothing `shouldBe` ""
 
+        it "retains image attachments across a provider rebuild" do
+            let image = ImageAttachment "image/png" "png-bytes"
+                switched =
+                    (transition Nothing Nothing)
+                        { transitionCause = ManualTransition
+                        , transitionAttachments = [image]
+                        }
+            providerTransitionAttachments (Just switched)
+                `shouldBe` [image]
+            providerTransitionAttachments Nothing `shouldBe` []
+
     describe "setPendingExitAfter" do
         it "preserves the plan state while changing exit behavior" do
             let pending = PendingTurn
@@ -69,6 +81,7 @@ transition sessionId pending = ProviderTransition
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
     , transitionDraft = ""
+    , transitionAttachments = []
     , transitionUnavailableProviders = [XAIProvider]
     , transitionCause = AutomaticFallback
     , transitionAutomaticBilling = Just SubscriptionBilled
