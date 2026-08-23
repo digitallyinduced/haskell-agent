@@ -24,8 +24,8 @@ mkDerivation {
     time transformers unix vector vty vty-crossplatform
   ];
   executableHaskellDepends = [
-    aeson agent-responses agent-store base bytestring containers directory
-    filepath process safe-exceptions text time unix
+    aeson agent-responses agent-responses-types agent-store base bytestring
+    containers directory filepath process safe-exceptions text time unix
   ];
   testHaskellDepends = [
     aeson agent-codex-dialect agent-core agent-grok-build-dialect
