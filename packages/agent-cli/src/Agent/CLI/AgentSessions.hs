@@ -90,6 +90,7 @@ import System.Process
 data AgentSessionToolsEnv = AgentSessionToolsEnv
     { toolsRoot :: !OsPath
     , toolsProvider :: !Provider
+    , toolsConnection :: !Text
     , toolsModel :: !Text
     , toolsTransportModel :: !Text
     , toolsDialect :: !DialectId
@@ -365,20 +366,24 @@ runCreateAgentSession env args
         target <- case args.model of
             Nothing ->
                 pure ModelOption
-                    { modelProvider = env.toolsProvider
+                    { modelConnectionId = env.toolsConnection
+                    , modelProvider = env.toolsProvider
                     , modelId = model
                     , modelTransportId = env.toolsTransportModel
                     , modelDialect = env.toolsDialect
                     , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
                     }
             Just _ ->
                 resolveModelOptionDialect ModelOption
-                    { modelProvider = env.toolsProvider
+                    { modelConnectionId = env.toolsConnection
+                    , modelProvider = env.toolsProvider
                     , modelId = model
                     , modelTransportId = model
                     , modelDialect =
                         dialectIdForModel env.toolsProvider model
                     , modelLabel = Nothing
+                    , modelFallbackPriority = Nothing
                     }
         let title = case Text.strip <$> args.title of
                 Just value | not (Text.null value) -> value
@@ -386,6 +391,7 @@ runCreateAgentSession env args
             spec = SessionCreate
                 { createRoot = env.toolsRoot
                 , createProvider = env.toolsProvider
+                , createConnection = target.modelConnectionId
                 , createModel = model
                 , createTransportModel = target.modelTransportId
                 , createDialect = target.modelDialect
@@ -520,6 +526,7 @@ sessionJson meta status = object
     , "status" .= status
     , "title" .= meta.metaTitle
     , "provider" .= providerSlug meta.metaProvider
+    , "connection" .= meta.metaConnection
     , "model" .= meta.metaModel
     , "dialect" .= dialectSlug meta.metaDialect
     , "reasoning_effort" .= meta.metaEffort

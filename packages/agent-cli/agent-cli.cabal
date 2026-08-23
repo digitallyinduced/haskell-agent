@@ -11,6 +11,7 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+data-files:         config/models.default.json
 
 common common-options
     default-language: GHC2021
@@ -37,6 +38,8 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
+    autogen-modules:  Paths_agent_cli
+    other-modules:    Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
@@ -58,6 +61,7 @@ library
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
@@ -179,6 +183,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.ModelPickerSpec
+                    , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec

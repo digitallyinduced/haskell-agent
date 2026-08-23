@@ -64,6 +64,7 @@ projectSettingsPath projectRoot =
 
 data ProjectModel = ProjectModel
     { projectModelProvider :: !Provider
+    , projectModelConnection :: !Text
     , projectModelName :: !Text
     , projectModelTransportName :: !(Maybe Text)
     , projectModelDialect :: !DialectId
@@ -85,6 +86,7 @@ defaultProjectSettings = ProjectSettings
 instance ToJSON ProjectModel where
     toJSON model = object
         [ "provider" .= providerSlug model.projectModelProvider
+        , "connection" .= model.projectModelConnection
         , "model" .= model.projectModelName
         , "transportModel" .= model.projectModelTransportName
         , "dialect" .= dialectSlug model.projectModelDialect
@@ -97,6 +99,7 @@ instance FromJSON ProjectModel where
             Just parsed -> pure parsed
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
         model <- o .: "model"
+        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
         transportModel <- o .:? "transportModel"
         dialectText <- o .:? "dialect"
         dialect <- case dialectText of
@@ -111,10 +114,13 @@ instance FromJSON ProjectModel where
                     <> " is incompatible with provider "
                     <> Text.unpack (providerSlug provider)
                 )
-        if Text.null (Text.strip model)
-            then fail "model must not be empty"
-            else pure ProjectModel
+        if Text.null (Text.strip connection)
+            then fail "connection must not be empty"
+            else if Text.null (Text.strip model)
+                then fail "model must not be empty"
+                else pure ProjectModel
                 { projectModelProvider = provider
+                , projectModelConnection = connection
                 , projectModelName = model
                 , projectModelTransportName = transportModel
                 , projectModelDialect = dialect
@@ -175,12 +181,21 @@ saveProjectAutoApprove projectRoot autoApprove =
         settings { settingsAutoApprove = autoApprove }
 
 -- | Remember the most recently selected provider/model pair for this project.
-saveProjectModel :: OsPath -> Provider -> Text -> Text -> DialectId -> IO ()
-saveProjectModel projectRoot provider model transportModel dialect =
+saveProjectModel
+    :: OsPath
+    -> Provider
+    -> Text
+    -> Text
+    -> Text
+    -> DialectId
+    -> IO ()
+saveProjectModel
+        projectRoot provider connection model transportModel dialect =
     updateProjectSettings projectRoot \settings ->
         settings
             { settingsLastModel = Just ProjectModel
                 { projectModelProvider = provider
+                , projectModelConnection = connection
                 , projectModelName = model
                 , projectModelTransportName = Just transportModel
                 , projectModelDialect = dialect

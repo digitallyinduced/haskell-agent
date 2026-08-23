@@ -64,7 +64,7 @@ spec = describe "Agent.CLI.SubagentStore" do
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
             let identity = SubagentIdentity (Just parentId) 2 taskPath
             saveSubagentState dir agentId [item] (Just "resp-1")
-                (Completed (Just "done")) XAIProvider "grok-4.5-mini"
+                (Completed (Just "done")) XAIProvider "xai" "grok-4.5-mini"
                 GrokBuildDialect (Just "explore")
                 (Just "grok-4.5-mini") (Just "high")
                 (Just (fromFilePath "/tmp/work"))
@@ -77,6 +77,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     meta.diskPreviousResponseId `shouldBe` Just "resp-1"
                     meta.diskStatus `shouldBe` Just (Completed (Just "done"))
                     meta.diskProvider `shouldBe` Just XAIProvider
+                    meta.diskConnection `shouldBe` Just "xai"
                     meta.diskEffectiveModel `shouldBe` Just "grok-4.5-mini"
                     meta.diskDialect `shouldBe` Just GrokBuildDialect
                     meta.diskAgentType `shouldBe` Just "explore"
@@ -104,7 +105,7 @@ spec = describe "Agent.CLI.SubagentStore" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-legacy-1"
             saveSubagentState dir agentId [] (Just "legacy") Interrupted
-                XAIProvider "grok-4.6" GrokBuildDialect
+                XAIProvider "xai" "grok-4.6" GrokBuildDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
@@ -119,15 +120,32 @@ spec = describe "Agent.CLI.SubagentStore" do
                     meta.diskDepth `shouldBe` Nothing
                     meta.diskStatus `shouldBe` Nothing
                     meta.diskProvider `shouldBe` Nothing
+                    meta.diskConnection `shouldBe` Nothing
                     meta.diskEffectiveModel `shouldBe` Nothing
                     meta.diskDialect `shouldBe` Nothing
+                other -> expectationFailure ("unexpected load: " <> show other)
+
+    it "derives a missing legacy connection from the persisted provider" do
+        withTempDir \dir -> do
+            let agentId = SubagentId "agent-legacy-connection"
+            saveSubagentState dir agentId [] Nothing Interrupted
+                XAIProvider "xai" "grok-4.6" GrokBuildDialect
+                Nothing Nothing Nothing Nothing Nothing
+                `shouldReturn` Right ()
+            Right path <- pure (subagentStoreDir dir agentId)
+            LBS.writeFile
+                (toFilePath (path </> fromFilePath "meta.json"))
+                "{\"provider\":\"xai\",\"effectiveModel\":\"grok-4.6\",\"dialect\":\"grok-build\"}"
+            loadSubagentState dir agentId >>= \case
+                Right (Just (_, meta)) ->
+                    meta.diskConnection `shouldBe` Just "xai"
                 other -> expectationFailure ("unexpected load: " <> show other)
 
     it "fails closed on corrupt transcript JSON" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-corrupt-1"
             saveSubagentState dir agentId [] (Just "r") Interrupted
-                OpenAIProvider "gpt-5.6-luna" CodexDialect
+                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             Right path <- pure (subagentStoreDir dir agentId)
@@ -156,17 +174,30 @@ spec = describe "Agent.CLI.SubagentStore" do
         it "accepts a matching provider, effective model, and dialect" do
             validatePersistedSubagentTarget
                 OpenRouterProvider
+                "openrouter"
                 "openai/gpt-5.1"
                 CodexDialect
                 Nothing
                 persistedMeta
-                `shouldBe` Right ("openai/gpt-5.1", CodexDialect)
+                `shouldBe`
+                    Right ("openrouter", "openai/gpt-5.1", CodexDialect)
 
         it "rejects an inherited child after the parent target changes" do
             validatePersistedSubagentTarget
                 OpenRouterProvider
+                "openrouter"
                 "anthropic/claude-sonnet-4"
                 GenericResponsesDialect
+                Nothing
+                persistedMeta
+                `shouldSatisfy` isLeft
+
+        it "rejects a matching model served by a different connection" do
+            validatePersistedSubagentTarget
+                OpenRouterProvider
+                "local-responses"
+                "openai/gpt-5.1"
+                CodexDialect
                 Nothing
                 persistedMeta
                 `shouldSatisfy` isLeft
@@ -174,6 +205,7 @@ spec = describe "Agent.CLI.SubagentStore" do
         it "rejects transport-specific child models after a provider change" do
             validatePersistedSubagentTarget
                 OpenAIProvider
+                "openai"
                 "openai/gpt-5.1"
                 CodexDialect
                 Nothing
@@ -183,13 +215,16 @@ spec = describe "Agent.CLI.SubagentStore" do
         it "accepts missing target metadata only in legacy-compatible sessions" do
             validatePersistedSubagentTarget
                 OpenRouterProvider
+                "openrouter"
                 "openai/gpt-5.1"
                 GrokBuildDialect
                 (Just legacyTarget)
                 legacyMeta
-                `shouldBe` Right ("openai/gpt-5.1", GrokBuildDialect)
+                `shouldBe`
+                    Right ("openrouter", "openai/gpt-5.1", GrokBuildDialect)
             validatePersistedSubagentTarget
                 OpenRouterProvider
+                "openrouter"
                 "openai/gpt-5.1"
                 GrokBuildDialect
                 Nothing
@@ -199,6 +234,7 @@ spec = describe "Agent.CLI.SubagentStore" do
         it "rejects legacy metadata after a durable root target change" do
             validatePersistedSubagentTarget
                 OpenRouterProvider
+                "openrouter"
                 "anthropic/claude-sonnet-4"
                 GenericResponsesDialect
                 (Just legacyTarget)
@@ -212,7 +248,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 workerCount = 16
             saveSubagentState dir agentId persistedItems Nothing
                 (Completed Nothing)
-                OpenAIProvider "gpt-5.6-luna" CodexDialect
+                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             sessionsRef <- newIORef Map.empty
@@ -248,7 +284,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 workerCount = 8
             saveSubagentState dir agentId persisted Nothing
                 (Completed Nothing)
-                OpenAIProvider "gpt-5.6-luna" CodexDialect
+                OpenAIProvider "openai" "gpt-5.6-luna" CodexDialect
                 Nothing Nothing Nothing Nothing Nothing
                 `shouldReturn` Right ()
             sessionsRef <- newIORef Map.empty
@@ -398,6 +434,7 @@ lookupTestSession sessionsRef storeRootRef typesRef agentId =
         storeRootRef
         typesRef
         OpenAIProvider
+        "openai"
         Nothing
         "gpt-5.6-luna"
         CodexDialect
@@ -406,6 +443,7 @@ lookupTestSession sessionsRef storeRootRef typesRef agentId =
 restoreTestAgent storeRootRef registry sessionsRef typesRef agentId =
     restoreAgentFromDisk
         OpenAIProvider
+        "openai"
         id
         "gpt-5.6-luna"
         CodexDialect
@@ -419,6 +457,7 @@ restoreTestAgent storeRootRef registry sessionsRef typesRef agentId =
 legacyTarget :: LegacySubagentTarget
 legacyTarget = LegacySubagentTarget
     { legacyTargetProvider = OpenRouterProvider
+    , legacyTargetConnection = "openrouter"
     , legacyTargetEffectiveModel = "openai/gpt-5.1"
     , legacyTargetDialect = GrokBuildDialect
     }
@@ -426,6 +465,7 @@ legacyTarget = LegacySubagentTarget
 persistedMeta :: SubagentDiskMeta
 persistedMeta = legacyMeta
     { diskProvider = Just OpenRouterProvider
+    , diskConnection = Just "openrouter"
     , diskEffectiveModel = Just "openai/gpt-5.1"
     , diskDialect = Just CodexDialect
     }
@@ -435,6 +475,7 @@ legacyMeta = SubagentDiskMeta
     { diskPreviousResponseId = Nothing
     , diskStatus = Nothing
     , diskProvider = Nothing
+    , diskConnection = Nothing
     , diskEffectiveModel = Nothing
     , diskDialect = Nothing
     , diskAgentType = Nothing

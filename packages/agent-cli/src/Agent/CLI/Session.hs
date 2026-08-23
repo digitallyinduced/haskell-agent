@@ -63,7 +63,7 @@ import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, finally, onException, tryIO)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -119,6 +119,7 @@ data SessionMeta = SessionMeta
     , metaCreatedAt :: !UTCTime
     , metaUpdatedAt :: !UTCTime
     , metaProvider :: !Provider
+    , metaConnection :: !Text
     , metaModel :: !Text
     , metaTransportModel :: !(Maybe Text)
     , metaDialect :: !DialectId
@@ -141,6 +142,7 @@ data SessionMeta = SessionMeta
 -- compatible merely because the root metadata has already been retargeted.
 data LegacySubagentTarget = LegacySubagentTarget
     { legacyTargetProvider :: !Provider
+    , legacyTargetConnection :: !Text
     , legacyTargetEffectiveModel :: !Text
     , legacyTargetDialect :: !DialectId
     } deriving (Eq, Show)
@@ -148,6 +150,7 @@ data LegacySubagentTarget = LegacySubagentTarget
 instance ToJSON LegacySubagentTarget where
     toJSON target = object
         [ "provider" .= providerSlug target.legacyTargetProvider
+        , "connection" .= target.legacyTargetConnection
         , "effectiveModel" .= target.legacyTargetEffectiveModel
         , "dialect" .= dialectSlug target.legacyTargetDialect
         ]
@@ -175,7 +178,10 @@ instance FromJSON LegacySubagentTarget where
                     <> " is incompatible with provider "
                     <> Text.unpack (providerSlug provider)
                 )
-        LegacySubagentTarget provider
+        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        when (Text.null (Text.strip connection)) $
+            fail "legacy subagent connection must not be empty"
+        LegacySubagentTarget provider connection
             <$> o .: "effectiveModel"
             <*> pure dialect
 
@@ -186,6 +192,7 @@ instance ToJSON SessionMeta where
         , "createdAt" .= meta.metaCreatedAt
         , "updatedAt" .= meta.metaUpdatedAt
         , "provider" .= providerSlug meta.metaProvider
+        , "connection" .= meta.metaConnection
         , "model" .= meta.metaModel
         , "transportModel" .= meta.metaTransportModel
         , "dialect" .= dialectSlug meta.metaDialect
@@ -210,6 +217,9 @@ instance FromJSON SessionMeta where
             Just p -> pure p
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
         model <- o .: "model"
+        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        when (Text.null (Text.strip connection)) $
+            fail "session connection must not be empty"
         dialectText <- o .:? "dialect"
         dialect <- case dialectText of
             Nothing -> pure (legacyDialectIdForProvider provider)
@@ -228,6 +238,7 @@ instance FromJSON SessionMeta where
             <*> o .: "createdAt"
             <*> o .: "updatedAt"
             <*> pure provider
+            <*> pure connection
             <*> pure model
             <*> o .:? "transportModel"
             <*> pure dialect
@@ -287,6 +298,7 @@ data SessionHandle = SessionHandle
 data SessionCreate = SessionCreate
     { createRoot :: !OsPath
     , createProvider :: !Provider
+    , createConnection :: !Text
     , createModel :: !Text
     , createTransportModel :: !Text
     , createDialect :: !DialectId
@@ -377,11 +389,13 @@ createReservedSession spec sessionId tempDir = do
             , metaCreatedAt = now
             , metaUpdatedAt = now
             , metaProvider = spec.createProvider
+            , metaConnection = spec.createConnection
             , metaModel = spec.createModel
             , metaTransportModel = Just spec.createTransportModel
             , metaDialect = spec.createDialect
             , metaLegacySubagentTarget = Just LegacySubagentTarget
                 { legacyTargetProvider = spec.createProvider
+                , legacyTargetConnection = spec.createConnection
                 , legacyTargetEffectiveModel = spec.createTransportModel
                 , legacyTargetDialect = spec.createDialect
                 }
@@ -498,6 +512,7 @@ sessionLegacySubagentTarget meta =
     fromMaybe
         LegacySubagentTarget
             { legacyTargetProvider = meta.metaProvider
+            , legacyTargetConnection = meta.metaConnection
             , legacyTargetEffectiveModel =
                 fromMaybe meta.metaModel meta.metaTransportModel
             , legacyTargetDialect = meta.metaDialect

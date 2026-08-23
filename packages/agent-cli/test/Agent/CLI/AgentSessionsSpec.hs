@@ -70,6 +70,7 @@ spec = describe "Agent.CLI.AgentSessions" do
         withTempEnv \env launched -> do
             let openRouterEnv = env
                     { toolsProvider = OpenRouterProvider
+                    , toolsConnection = "openrouter"
                     , toolsModel = "openai/gpt-5.1"
                     , toolsTransportModel = "openai/gpt-5.1"
                     , toolsDialect = GrokBuildDialect
@@ -249,6 +250,7 @@ withTempEnv action =
             env = AgentSessionToolsEnv
                 { toolsRoot = root
                 , toolsProvider = XAIProvider
+                , toolsConnection = "xai"
                 , toolsModel = "model-1"
                 , toolsTransportModel = "model-1"
                 , toolsDialect = GrokBuildDialect
@@ -264,6 +266,7 @@ testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
     , createProvider = XAIProvider
+    , createConnection = "xai"
     , createModel = "model-1"
     , createTransportModel = "model-1"
     , createDialect = GrokBuildDialect

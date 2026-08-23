@@ -17,6 +17,11 @@ import Agent.CLI
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Models (ModelOption(..))
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , decodeModelConfig
+    , packagedModelCatalogPath
+    )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Project (ProjectSettings(..), loadProjectSettings)
 import Agent.CLI.ReplMode
@@ -38,6 +43,8 @@ import Agent.TUI.Model
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeState(..), newPlanModeEnv)
 import Control.Exception.Safe (bracket, throwIO)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as Text
 import Data.IORef (newIORef, readIORef)
 import System.Directory
     ( getCurrentDirectory
@@ -52,11 +59,14 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    catalog <- runIO readPackagedCatalog
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
             let target =
                     accountSwitchTarget
+                        catalog
                         OpenAIProvider
+                        "openai"
                         "gpt-5.6-sol"
                         "gpt-5.6-sol"
                         CodexDialect
@@ -68,7 +78,9 @@ spec = do
         it "keeps the current model when only the account backend restarts" do
             let target =
                     accountSwitchTarget
+                        catalog
                         OpenAIProvider
+                        "openai"
                         "gpt-5.6-sol"
                         "gpt-5.6-sol"
                         CodexDialect
@@ -80,7 +92,9 @@ spec = do
         it "preserves a legacy OpenRouter dialect on an account restart" do
             let target =
                     accountSwitchTarget
+                        catalog
                         OpenRouterProvider
+                        "openrouter"
                         "openai/gpt-5.1"
                         "openai/gpt-5.1"
                         GrokBuildDialect
@@ -301,3 +315,11 @@ withTempDir :: String -> (FilePath -> IO a) -> IO a
 withTempDir prefix action = do
     tmp <- getTemporaryDirectory
     bracket (mkdtemp (tmp <> "/" <> prefix)) removeDirectoryRecursive action
+
+readPackagedCatalog :: IO ModelCatalog
+readPackagedCatalog = do
+    path <- packagedModelCatalogPath
+    bytes <- LBS.readFile path
+    case decodeModelConfig "models.default.json" bytes of
+        Left err -> fail (Text.unpack err)
+        Right catalog -> pure catalog

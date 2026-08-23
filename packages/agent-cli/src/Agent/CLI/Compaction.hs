@@ -12,6 +12,7 @@ module Agent.CLI.Compaction
     , installCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
+    , runResponsesCompactWith
     ) where
 
 import Agent.CLI.Error (formatApiError)
@@ -182,6 +183,31 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
                     history
                     (estimateItemsTokens history)
                     focus
+
+-- | Run local-summary compaction through any stateless Responses-compatible
+-- sender, including user-configured local endpoints.
+runResponsesCompactWith
+    :: (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runResponsesCompactWith sender recordUsage paramsRef transcriptRef focus = do
+    params <- readIORef paramsRef
+    history <- readIORef transcriptRef
+    attempt <- runAttemptAndRecord recordUsage $
+        if null history
+            then pure (compactTextFailure "nothing to compact")
+            else
+                mapCompactAttemptError formatApiError
+                    <$> summarizeLocalAttempt
+                        sender
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        focus
+    pure attempt.compactAttemptResult
 
 compactTextFailure :: Text -> CompactAttempt Text
 compactTextFailure message =

@@ -58,7 +58,8 @@ spec = describe "Agent.CLI.Project" do
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
                 saveProjectModel
-                    root OpenAIProvider "gpt-project" "gpt-project" CodexDialect
+                    root OpenAIProvider "openai"
+                    "gpt-project" "gpt-project" CodexDialect
 
                 let path = projectSettingsPath root
                 modeOf path `shouldReturn` 0o600
@@ -66,6 +67,7 @@ spec = describe "Agent.CLI.Project" do
                 settings.settingsAutoApprove `shouldBe` True
                 settings.settingsLastModel `shouldBe` Just ProjectModel
                     { projectModelProvider = OpenAIProvider
+                    , projectModelConnection = "openai"
                     , projectModelName = "gpt-project"
                     , projectModelTransportName = Just "gpt-project"
                     , projectModelDialect = CodexDialect
@@ -88,9 +90,11 @@ spec = describe "Agent.CLI.Project" do
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True
                 saveProjectModel
-                    root OpenAIProvider "gpt-old" "gpt-old" CodexDialect
+                    root OpenAIProvider "openai"
+                    "gpt-old" "gpt-old" CodexDialect
                 saveProjectModel
-                    root XAIProvider "grok-new" "grok-new" GrokBuildDialect
+                    root XAIProvider "xai"
+                    "grok-new" "grok-new" GrokBuildDialect
 
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
@@ -117,6 +121,8 @@ spec = describe "Agent.CLI.Project" do
                     `shouldBe` Just GrokBuildDialect
                 fmap (.projectModelTransportName) settings.settingsLastModel
                     `shouldBe` Just Nothing
+                fmap (.projectModelConnection) settings.settingsLastModel
+                    `shouldBe` Just "openrouter"
 
         it "loads legacy settings without a remembered model" $
             withTempDir "agent-project-" \root -> do

@@ -154,6 +154,7 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                 { subSessionTranscript = transcript
                 , subSessionContextTokens = contextTokens
                 , subSessionProvider = OpenAIProvider
+                , subSessionConnection = "openai"
                 , subSessionEffectiveModel = "gpt-5.6-luna"
                 , subSessionDialect = CodexDialect
                 , subSessionPinned = pinned

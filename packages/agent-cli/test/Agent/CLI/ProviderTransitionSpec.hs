@@ -58,11 +58,13 @@ transition
     -> ProviderTransition
 transition sessionId pending = ProviderTransition
     { transitionTarget = ModelOption
-        { modelProvider = OpenAIProvider
+        { modelConnectionId = "openai"
+        , modelProvider = OpenAIProvider
         , modelId = "gpt-5.6-sol"
         , modelTransportId = "gpt-5.6-sol"
         , modelDialect = CodexDialect
         , modelLabel = Nothing
+        , modelFallbackPriority = Just 1
         }
     , transitionAccountSelectionId = Nothing
     , transitionAccountId = Nothing

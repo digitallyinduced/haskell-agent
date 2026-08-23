@@ -7,7 +7,6 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import System.OsPath (unsafeEncodeUtf)
-import Agent.Provider (Provider(..))
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -188,8 +187,3 @@ spec = describe "systemPrompt" do
             "relative paths still resolve against the workspace"
         rootPrompt `shouldSatisfy` Text.isInfixOf "HASKELL_AGENT_TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf "TMPDIR"
-
-    it "picks the documented default models" do
-        defaultModelFor XAIProvider `shouldBe` "grok-4.6"
-        defaultModelFor OpenAIProvider `shouldBe` "gpt-5.6-luna"
-        defaultModelFor OpenRouterProvider `shouldBe` "openai/gpt-5.1"

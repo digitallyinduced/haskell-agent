@@ -23,7 +23,9 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineWithModels
     , readFullscreenLineOr
+    , readFullscreenLineOrWithModels
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
@@ -398,7 +400,22 @@ readFullscreenLine
     -> Text
     -> IO ReplLine
 readFullscreenLine runtime skills prompt initial = do
-    result <- readFullscreenLineOr runtime skills prompt initial retry
+    result <- readFullscreenLineOrWithModels
+        runtime skills [] prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
+readFullscreenLineWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> IO ReplLine
+readFullscreenLineWithModels runtime skills modelIds prompt initial = do
+    result <- readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial retry
     case result of
         Left impossible -> pure impossible
         Right line -> pure line
@@ -415,7 +432,20 @@ readFullscreenLineOr
     -> STM wake
     -> IO (Either wake ReplLine)
 readFullscreenLineOr runtime skills prompt initial wake = do
+    readFullscreenLineOrWithModels runtime skills [] prompt initial wake
+
+readFullscreenLineOrWithModels
+    :: FullscreenRuntime
+    -> [SkillCommand]
+    -> [Text]
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOrWithModels
+        runtime skills modelIds prompt initial wake = do
     enqueueAppEvent runtime (AppSetSkillCommands skills)
+    enqueueAppEvent runtime (AppSetModelIds modelIds)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -568,6 +598,7 @@ runFullscreen runtime workerAction = do
             , appHistoryDraft = ""
             , appKillBuffer = ""
             , appSkillCommands = []
+            , appModelIds = []
             , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
@@ -3362,6 +3393,15 @@ handleEventInner event = case event of
             then pure ()
             else modify' \current -> current
                 { appSkillCommands = skills
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
+    AppEvent (AppSetModelIds modelIds) -> do
+        state <- get
+        if state.appModelIds == modelIds
+            then pure ()
+            else modify' \current -> current
+                { appModelIds = modelIds
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }

@@ -1,7 +1,6 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( defaultModelFor
-    , sessionTempGuidance
+    ( sessionTempGuidance
     , systemPrompt
     , systemPromptForTools
     ) where
@@ -13,7 +12,6 @@ import Agent.Dialect
     , dialectPromptStyle
     )
 import Agent.OsPath (toText)
-import Agent.Provider (Provider(..))
 import Agent.Tools.Grok.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -24,12 +22,6 @@ import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.OsPath (OsPath)
-
-defaultModelFor :: Provider -> Text
-defaultModelFor = \case
-    XAIProvider -> "grok-4.6"
-    OpenAIProvider -> "gpt-5.6-luna"
-    OpenRouterProvider -> "openai/gpt-5.1"
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
 systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text

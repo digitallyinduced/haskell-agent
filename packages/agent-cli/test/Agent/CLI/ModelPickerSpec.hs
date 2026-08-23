@@ -2,16 +2,22 @@ module Agent.CLI.ModelPickerSpec (spec) where
 
 import Agent.CLI.ModelPicker
 import Agent.CLI.Models
-import Agent.CLI.Prompt (defaultModelFor)
+import Agent.CLI.ModelConfig
+    ( ModelCatalog
+    , decodeModelConfig
+    , packagedModelCatalogPath
+    )
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    catalog <- runIO readPackagedCatalog
     describe "decodePickerKey" do
         it "maps arrows and vim keys" do
             decodePickerKey "\ESC[A" `shouldBe` Just PickerUp
@@ -34,13 +40,15 @@ spec = do
             let frame =
                     renderPickerFrame False $
                         initialPickerState
+                            catalog
+                            "xai"
                             XAIProvider
-                            (defaultModelFor XAIProvider)
+                            "grok-4.6"
                             GrokBuildDialect
             frame `shouldSatisfy` Text.isInfixOf "xai"
             frame `shouldSatisfy` Text.isInfixOf "openai"
             frame `shouldSatisfy` Text.isInfixOf "openrouter"
-            frame `shouldSatisfy` Text.isInfixOf (defaultModelFor XAIProvider)
+            frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
             frame `shouldSatisfy` Text.isInfixOf "enter"
             frame `shouldSatisfy` Text.isInfixOf "filter"
 
@@ -48,7 +56,9 @@ spec = do
         it "lists the current model and entries from every provider" do
             listing <-
                 formatCatalogListing
+                    catalog
                     False
+                    "openai"
                     OpenAIProvider
                     "gpt-5.6-luna"
                     CodexDialect
@@ -65,7 +75,9 @@ spec = do
                 (Just "openai/gpt-5.1=x-ai/grok-4") do
                     listing <-
                         formatCatalogListing
+                            catalog
                             False
+                            "openrouter"
                             OpenRouterProvider
                             "openai/gpt-5.1"
                             GrokBuildDialect
@@ -83,3 +95,11 @@ withEnv name value action =
     restore = \case
         Nothing -> unsetEnv name
         Just x -> setEnv name x
+
+readPackagedCatalog :: IO ModelCatalog
+readPackagedCatalog = do
+    path <- packagedModelCatalogPath
+    bytes <- LBS.readFile path
+    case decodeModelConfig "models.default.json" bytes of
+        Left err -> fail (Text.unpack err)
+        Right catalog -> pure catalog

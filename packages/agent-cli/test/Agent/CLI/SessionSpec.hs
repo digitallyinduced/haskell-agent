@@ -111,11 +111,13 @@ spec = describe "Agent.CLI.Session" do
                     Right (meta, turns) -> do
                         meta.metaId `shouldBe` handle.sessionMeta.metaId
                         meta.metaProvider `shouldBe` XAIProvider
+                        meta.metaConnection `shouldBe` "xai"
                         meta.metaModel `shouldBe` "grok-4"
                         meta.metaDialect `shouldBe` GrokBuildDialect
                         meta.metaLegacySubagentTarget
                             `shouldBe` Just LegacySubagentTarget
                                 { legacyTargetProvider = XAIProvider
+                                , legacyTargetConnection = "xai"
                                 , legacyTargetEffectiveModel = "grok-4"
                                 , legacyTargetDialect = GrokBuildDialect
                                 }
@@ -315,6 +317,7 @@ spec = describe "Agent.CLI.Session" do
                 handle <- createSession $
                     (testCreate root)
                         { createProvider = OpenRouterProvider
+                        , createConnection = "openrouter"
                         , createModel = "openai/gpt-5.1"
                         , createTransportModel = "openai/gpt-5.1"
                         , createDialect = CodexDialect
@@ -331,23 +334,27 @@ spec = describe "Agent.CLI.Session" do
                 handle <- createSession $
                     (testCreate root)
                         { createProvider = OpenRouterProvider
+                        , createConnection = "openrouter"
                         , createModel = "openai/gpt-5.1"
                         , createTransportModel = "openai/gpt-5.1"
                         , createDialect = CodexDialect
                         }
                 rewriteMetaObject handle.sessionMetaPath $
                     KeyMap.delete "legacySubagentTarget"
+                        . KeyMap.delete "connection"
                         . KeyMap.delete "transportModel"
                         . KeyMap.delete "dialect"
                 loadSession root handle.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
                     Right (meta, _) -> do
                         meta.metaDialect `shouldBe` GrokBuildDialect
+                        meta.metaConnection `shouldBe` "openrouter"
                         meta.metaTransportModel `shouldBe` Nothing
                         meta.metaLegacySubagentTarget `shouldBe` Nothing
                         sessionLegacySubagentTarget meta
                             `shouldBe` LegacySubagentTarget
                                 { legacyTargetProvider = OpenRouterProvider
+                                , legacyTargetConnection = "openrouter"
                                 , legacyTargetEffectiveModel =
                                     "openai/gpt-5.1"
                                 , legacyTargetDialect = GrokBuildDialect
@@ -358,6 +365,7 @@ spec = describe "Agent.CLI.Session" do
                 handle <- createSession $
                     (testCreate root)
                         { createProvider = OpenRouterProvider
+                        , createConnection = "openrouter"
                         , createModel = "openai/gpt-5.1"
                         , createTransportModel = "openai/gpt-5.1"
                         , createDialect = CodexDialect
@@ -527,6 +535,7 @@ testCreate :: OsPath -> SessionCreate
 testCreate root = SessionCreate
     { createRoot = root
     , createProvider = XAIProvider
+    , createConnection = "xai"
     , createModel = "grok-4"
     , createTransportModel = "grok-4"
     , createDialect = GrokBuildDialect

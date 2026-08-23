@@ -1,11 +1,16 @@
--- | Curated model catalogs and pure picker navigation helpers.
+-- | Configured model catalogs and pure picker navigation helpers.
 module Agent.CLI.Models
     ( ModelOption(..)
     , PickerState(..)
     , PickerEvent(..)
+    , modelOptionFromCatalog
     , modelsForProvider
     , modelCatalog
     , catalogModelIds
+    , defaultModelFor
+    , defaultModelOptionFor
+    , resolveConfiguredModel
+    , rawModelOption
     , ensureCurrentInList
     , initialPickerState
     , initialPickerStateResolved
@@ -17,31 +22,43 @@ module Agent.CLI.Models
     , resolveModelOptionDialect
     ) where
 
-import Agent.CLI.Prompt (defaultModelFor)
+import Agent.CLI.ModelConfig
+    ( CatalogModel(..)
+    , ConnectionKind(..)
+    , ModelCatalog(..)
+    , ModelConnection(..)
+    , builtinConnectionId
+    , catalogConnection
+    , catalogDefaultForProvider
+    , catalogModelById
+    )
 import Agent.Dialect
     ( DialectId(..)
     , dialectIdForModel
     )
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Agent.OpenRouter.Request as OpenRouter
-import Agent.Provider (Provider(..), providerSlug)
+import Agent.Provider (Provider(..))
 import Data.List (findIndex, nub)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 data ModelOption = ModelOption
-    { modelProvider :: !Provider
+    { modelConnectionId :: !Text
+    , modelProvider :: !Provider
     , modelId :: !Text
     , modelTransportId :: !Text
     , modelDialect :: !DialectId
     , modelLabel :: !(Maybe Text)
+    , modelFallbackPriority :: !(Maybe Int)
     }
     deriving (Eq, Show)
 
 -- | Interactive picker state. @pickerIndex@ indexes into 'visibleOptions'.
 data PickerState = PickerState
-    { pickerProvider :: !Provider
+    { pickerConnectionId :: !Text
+    , pickerProvider :: !Provider
     , pickerCurrent :: !Text
     , pickerCurrentDialect :: !DialectId
     , pickerAll :: ![ModelOption]
@@ -59,112 +76,144 @@ data PickerEvent
     | PickerType Char
     deriving (Eq, Show)
 
-modelsForProvider :: Provider -> [ModelOption]
-modelsForProvider provider =
-    let opts = case provider of
-            XAIProvider ->
-                [ opt "grok-4.6" GrokBuildDialect (Just "default")
-                , opt "grok-4.5" GrokBuildDialect Nothing
-                , opt "grok-4.5-mini" GrokBuildDialect (Just "faster")
-                , opt "grok-3" GrokBuildDialect Nothing
-                ]
-            OpenAIProvider ->
-                [ opt "gpt-5.6-luna" CodexDialect (Just "default · fast")
-                , opt "gpt-5.6-terra" CodexDialect (Just "balanced")
-                , opt "gpt-5.6-sol" CodexDialect (Just "frontier")
-                ]
-            OpenRouterProvider ->
-                [ opt "openai/gpt-5.1" CodexDialect (Just "default")
-                , opt "stealth/ox-alpha" GenericResponsesDialect
-                    (Just "free · coding · 1M context")
-                , opt "anthropic/claude-sonnet-4" GenericResponsesDialect Nothing
-                , opt "x-ai/grok-4" GrokBuildDialect Nothing
-                , opt "google/gemini-2.5-pro" GenericResponsesDialect Nothing
-                ]
-        -- Keep the provider default first even if the table drifts.
-        def = defaultModelFor provider
-    in ensureCurrentInList provider def (dialectIdForModel provider def) opts
-  where
-    opt mid dialect label = ModelOption
-        { modelProvider = provider
-        , modelId = mid
-        , modelTransportId = mid
-        , modelDialect = dialect
-        , modelLabel = label
+modelOptionFromCatalog :: ModelCatalog -> CatalogModel -> Maybe ModelOption
+modelOptionFromCatalog catalog model = do
+    connection <- catalogConnection catalog model.catalogModelConnectionId
+    let provider = case connection.connectionKind of
+            BuiltinConnection value -> value
+            -- Provider remains the internal transport/auth family in existing
+            -- persistence and tool code. Custom endpoints use the generic
+            -- Responses backend and never OpenRouter auth/account behavior.
+            CustomResponsesConnection _ -> OpenRouterProvider
+    pure ModelOption
+        { modelConnectionId = model.catalogModelConnectionId
+        , modelProvider = provider
+        , modelId = model.catalogModelId
+        , modelTransportId = model.catalogModelWireId
+        , modelDialect = model.catalogModelDialect
+        , modelLabel = model.catalogModelLabel
+        , modelFallbackPriority = model.catalogModelFallbackPriority
         }
 
-allProviders :: [Provider]
-allProviders = [OpenAIProvider, XAIProvider, OpenRouterProvider]
+modelCatalog :: ModelCatalog -> [ModelOption]
+modelCatalog catalog =
+    mapMaybe (modelOptionFromCatalog catalog) catalog.catalogModels
 
--- | Every curated model, grouped by provider.
-modelCatalog :: [ModelOption]
-modelCatalog = concatMap modelsForProvider allProviders
+modelsForProvider :: ModelCatalog -> Provider -> [ModelOption]
+modelsForProvider catalog provider =
+    filter
+        ((== builtinConnectionId provider) . (.modelConnectionId))
+        (modelCatalog catalog)
 
--- | Every curated catalog id across providers, de-duplicated, for completion.
-catalogModelIds :: [Text]
+catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
-    nub (map (\opt -> opt.modelId) modelCatalog)
+    nub . map (.modelId) . modelCatalog
+
+defaultModelOptionFor :: ModelCatalog -> Provider -> Maybe ModelOption
+defaultModelOptionFor catalog provider =
+    catalogDefaultForProvider catalog provider
+        >>= modelOptionFromCatalog catalog
+
+defaultModelFor :: ModelCatalog -> Provider -> Maybe Text
+defaultModelFor catalog provider =
+    (.modelId) <$> defaultModelOptionFor catalog provider
+
+resolveConfiguredModel :: ModelCatalog -> Text -> Maybe ModelOption
+resolveConfiguredModel catalog modelId =
+    catalogModelById catalog modelId >>= modelOptionFromCatalog catalog
+
+rawModelOption :: Provider -> Text -> ModelOption
+rawModelOption provider model =
+    ModelOption
+        { modelConnectionId = builtinConnectionId provider
+        , modelProvider = provider
+        , modelId = model
+        , modelTransportId = model
+        , modelDialect = dialectIdForModel provider model
+        , modelLabel = Nothing
+        , modelFallbackPriority = Nothing
+        }
 
 -- | Prepend @current@ when it is missing so the active model stays visible.
 ensureCurrentInList
-    :: Provider
+    :: Text
+    -> Provider
     -> Text
     -> DialectId
     -> [ModelOption]
     -> [ModelOption]
-ensureCurrentInList provider current currentDialect options
+ensureCurrentInList connectionId provider current currentDialect options
     | Text.null current || current == "(unset)" = options
-    | any (isCurrent provider current currentDialect) options = options
+    | any (isCurrent connectionId current currentDialect) options = options
     | otherwise =
         ModelOption
-            { modelProvider = provider
+            { modelConnectionId = connectionId
+            , modelProvider = provider
             , modelId = current
             , modelTransportId = current
             , modelDialect = currentDialect
             , modelLabel = Just "current"
+            , modelFallbackPriority = Nothing
             }
             : options
 
-initialPickerState :: Provider -> Text -> DialectId -> PickerState
-initialPickerState provider current currentDialect =
+initialPickerState
+    :: ModelCatalog
+    -> Text
+    -> Provider
+    -> Text
+    -> DialectId
+    -> PickerState
+initialPickerState catalog connectionId provider current currentDialect =
     pickerStateFromOptions
+        connectionId
         provider
         current
         currentDialect
-        (concatMap modelsForProvider providerOrder)
-  where
-    providerOrder = provider : filter (/= provider) allProviders
+        (prioritizeCurrentConnection connectionId (modelCatalog catalog))
 
--- | Resolve transport rewrites before displaying model dialects. This keeps
--- OpenRouter picker labels and current-target identity aligned with the model
--- that will actually be sent.
+-- | Resolve built-in OpenRouter environment rewrites before displaying
+-- dialects. Configured custom endpoints already carry an exact wire target and
+-- explicit dialect.
 initialPickerStateResolved
-    :: Provider
+    :: ModelCatalog
+    -> Text
+    -> Provider
     -> Text
     -> DialectId
     -> IO PickerState
-initialPickerStateResolved provider current currentDialect = do
+initialPickerStateResolved
+        catalog connectionId provider current currentDialect = do
     resolved <- traverse resolveModelOptionDialect
-        (concatMap modelsForProvider providerOrder)
-    pure (pickerStateFromOptions provider current currentDialect resolved)
-  where
-    providerOrder = provider : filter (/= provider) allProviders
+        (prioritizeCurrentConnection connectionId (modelCatalog catalog))
+    pure $
+        pickerStateFromOptions
+            connectionId provider current currentDialect resolved
+
+prioritizeCurrentConnection :: Text -> [ModelOption] -> [ModelOption]
+prioritizeCurrentConnection current options =
+    filter ((== current) . (.modelConnectionId)) options
+        <> filter ((/= current) . (.modelConnectionId)) options
 
 pickerStateFromOptions
-    :: Provider
+    :: Text
+    -> Provider
     -> Text
     -> DialectId
     -> [ModelOption]
     -> PickerState
-pickerStateFromOptions provider current currentDialect options =
+pickerStateFromOptions
+        connectionId provider current currentDialect options =
     let allOpts =
-            ensureCurrentInList provider current currentDialect options
+            ensureCurrentInList
+                connectionId provider current currentDialect options
         idx = fromMaybe 0 $
             findIndex
-                (isCurrent provider current currentDialect)
+                (isCurrent connectionId current currentDialect)
                 allOpts
     in PickerState
-        { pickerProvider = provider
+        { pickerConnectionId = connectionId
+        , pickerProvider = provider
         , pickerCurrent = current
         , pickerCurrentDialect = currentDialect
         , pickerAll = allOpts
@@ -177,12 +226,15 @@ visibleOptions state
     | Text.null needle = state.pickerAll
     | otherwise =
         filter
-            (\opt -> needle `Text.isInfixOf` Text.toLower opt.modelId
-                || needle `Text.isInfixOf` Text.toLower (providerSlug opt.modelProvider)
-                || maybe
-                    False
-                    ((needle `Text.isInfixOf`) . Text.toLower)
-                    opt.modelLabel)
+            (\opt ->
+                needle `Text.isInfixOf` Text.toLower opt.modelId
+                    || needle
+                        `Text.isInfixOf`
+                            Text.toLower opt.modelConnectionId
+                    || maybe
+                        False
+                        ((needle `Text.isInfixOf`) . Text.toLower)
+                        opt.modelLabel)
             state.pickerAll
   where
     needle = Text.toLower state.pickerFilter
@@ -214,22 +266,22 @@ applyPickerEvent event state = case event of
                 }
         | otherwise -> Right state
 
--- | Changing providers or model-facing dialects requires rebuilding tools,
--- prompts, and the transport backend. A model change within the current
--- provider and dialect can update request parameters in place.
+-- | Changing connections, providers, or model-facing dialects requires
+-- rebuilding tools, prompts, auth, and the transport backend.
 modelTargetRequiresRebuild
-    :: Provider
+    :: Text
+    -> Provider
     -> DialectId
     -> ModelOption
     -> Bool
-modelTargetRequiresRebuild provider dialect option =
-    option.modelProvider /= provider
+modelTargetRequiresRebuild connectionId provider dialect option =
+    option.modelConnectionId /= connectionId
+        || option.modelProvider /= provider
         || option.modelDialect /= dialect
 
 -- | Keep an explicitly persisted dialect while the effective transport model
 -- is unchanged. When a recorded alias/default now resolves elsewhere, use the
--- newly inferred dialect and report that the target changed. Legacy records
--- without an effective model retain their old dialect for compatibility.
+-- newly inferred dialect and report that the target changed.
 resolvePersistedDialect
     :: DialectId
     -> Maybe Text
@@ -242,21 +294,21 @@ resolvePersistedDialect storedDialect storedTransportModel inferred =
                 (inferred.modelDialect, True)
         _ -> (storedDialect, False)
 
--- | Resolve the dialect from the model that the provider transport will
--- actually receive. OpenRouter may rewrite friendly aliases and exact model
--- overrides before sending a request.
 resolveModelOptionDialect :: ModelOption -> IO ModelOption
-resolveModelOptionDialect option = do
-    transportedModel <- case option.modelProvider of
-        OpenRouterProvider -> do
-            options <- OpenRouter.clientOptionsFromEnv
-            pure (OpenRouter.mapModel options option.modelId)
-        _ -> pure option.modelId
-    pure option
-        { modelTransportId = transportedModel
-        , modelDialect =
-            dialectIdForModel option.modelProvider transportedModel
-        }
+resolveModelOptionDialect option
+    | option.modelConnectionId == builtinConnectionId OpenRouterProvider = do
+        options <- OpenRouter.clientOptionsFromEnv
+        let transportedModel
+                | option.modelTransportId /= option.modelId =
+                    option.modelTransportId
+                | otherwise =
+                    OpenRouter.mapModel options option.modelId
+        pure option
+            { modelTransportId = transportedModel
+            , modelDialect =
+                dialectIdForModel option.modelProvider transportedModel
+            }
+    | otherwise = pure option
 
 move :: Int -> PickerState -> PickerState
 move delta state =
@@ -287,8 +339,8 @@ isFilterChar c =
         || (c >= 'A' && c <= 'Z')
         || (c >= '0' && c <= '9')
 
-isCurrent :: Provider -> Text -> DialectId -> ModelOption -> Bool
-isCurrent provider current dialect option =
-    option.modelProvider == provider
+isCurrent :: Text -> Text -> DialectId -> ModelOption -> Bool
+isCurrent connectionId current dialect option =
+    option.modelConnectionId == connectionId
         && option.modelId == current
         && option.modelDialect == dialect
