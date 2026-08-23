@@ -86,6 +86,14 @@ spec = describe "Agent.CLI.Worktree" do
                 doesDirectoryExist first `shouldReturn` True
                 doesDirectoryExist second `shouldReturn` True
 
+        it "keeps linked worktrees grouped under the original repository name" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                first <- expectRight =<< createWorktree repo (worktreeRoot home)
+                second <- expectRight =<< createWorktree first (worktreeRoot home)
+                let parent = worktreeRoot home </> takeFileName repo
+                isUnderWorktreeRoot parent second `shouldBe` True
+
         it "removes the worktree and its generated branch" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
