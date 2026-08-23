@@ -111,21 +111,22 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
             report (ApprovalWarning (glyphWarn <> msg))
             pure (Left msg)
         Nothing -> do
-            -- Plan mode: reject mutating file edits except plan.md (even under yolo).
-            -- Grok search_replace also enforces this in-tool; this covers apply_patch
-            -- and any other write tool before dispatch.
-            if planModeBlocksCall planActive planPath call
+            let registeredTool = lookupRegisteredTool call.name tools
+                perCallApproval =
+                    maybe False toolRequiresPerCallApproval registeredTool
+            readOnly <- case registeredTool of
+                Nothing -> pure False
+                Just tool -> toolAllowsWithoutPrompt tool call
+            -- Plan mode hard-denies writes even under yolo. The dedicated
+            -- write_plan tool and Grok's path-locked plan.md edit are the only
+            -- mutations allowed. Shell tools are blocked entirely because an
+            -- arbitrary shell script cannot be proven read-only.
+            if planModeBlocksCall planActive planPath readOnly call
                 then do
                     let msg = planModeBlockedEditMessage planPath
                     report (ApprovalWarning msg)
                     pure (Left msg)
                 else do
-                    let registeredTool = lookupRegisteredTool call.name tools
-                        perCallApproval =
-                            maybe False toolRequiresPerCallApproval registeredTool
-                    readOnly <- case registeredTool of
-                        Nothing -> pure False
-                        Just tool -> toolAllowsWithoutPrompt tool call
                     -- plan.md edits are auto-approved while plan mode is active.
                     if isPlanFileWrite planActive planPath call
                         then pure (Right True)
@@ -165,19 +166,29 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                                 Just PermissionDeny ->
                                                     pure (Right False)
 
-planModeBlocksCall :: Bool -> OsPath -> ToolCall -> Bool
-planModeBlocksCall active planPath call
+planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool
+planModeBlocksCall active planPath readOnly call
     | not active = False
     | call.name == "apply_patch" = True
+    | call.name == "write_plan" = False
+    | call.name == "exit_plan_mode" = False
     | call.name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in Text.null target
             || not (isPlanFileEditTarget planPath (fromText target))
-    | otherwise = False
+    | call.name `elem` ["shell_command", "run_terminal_cmd"] =
+        True
+    | call.name == "write_stdin" = True
+    | call.name `elem`
+        [ "spawn_agent", "followup_task", "create_agent_session"
+        , "send_agent_session_message"
+        ] = True
+    | otherwise = not readOnly
 
 isPlanFileWrite :: Bool -> OsPath -> ToolCall -> Bool
 isPlanFileWrite active planPath call
     | not active = False
+    | call.name == "write_plan" = True
     | call.name == "search_replace" =
         let target = jsonTextFieldDefault "file_path" call.arguments
         in not (Text.null target)

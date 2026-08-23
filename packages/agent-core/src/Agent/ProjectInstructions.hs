@@ -171,22 +171,25 @@ formatCodexAgentsMd cwd loaded =
                 , "\n</INSTRUCTIONS>"
                 ]
   where
-    bodies = case (loaded.loadedGlobal >>= stripFile, mapMaybe stripFile loaded.loadedProject) of
+    bodies = case
+        ( loaded.loadedGlobal >>= nonEmptyInstructionContent
+        , mapMaybe nonEmptyInstructionContent loaded.loadedProject
+        ) of
         (Nothing, []) -> Nothing
         (Nothing, project) -> Just (Text.intercalate "\n\n" project)
         (Just global, []) -> Just global
         (Just global, project) ->
             Just $ global <> "\n\n--- project-doc ---\n\n" <> Text.intercalate "\n\n" project
 
-stripFile :: InstructionFile -> Maybe Text
-stripFile file =
+nonEmptyInstructionContent :: InstructionFile -> Maybe Text
+nonEmptyInstructionContent file =
     let text = file.instructionContent
     in if Text.null (Text.strip text) then Nothing else Just text
 
 -- | Grok-style system-reminder block with per-file provenance.
 formatGrokAgentsMd :: LoadedAgentsMd -> Maybe Text
 formatGrokAgentsMd loaded =
-    case filter nonempty (loadedInstructionFiles loaded) of
+    case mapMaybe withContent (loadedInstructionFiles loaded) of
         [] -> Nothing
         kept ->
             Just $ Text.concat $
@@ -201,14 +204,14 @@ formatGrokAgentsMd loaded =
                 , "\n</system-reminder>"
                 ]
   where
-    nonempty :: InstructionFile -> Bool
-    nonempty file = not (Text.null (Text.strip file.instructionContent))
-    renderFile :: InstructionFile -> [Text]
-    renderFile file =
+    withContent file =
+        (\content -> (file, content)) <$> nonEmptyInstructionContent file
+    renderFile :: (InstructionFile, Text) -> [Text]
+    renderFile (file, content) =
         [ "\n## From: "
         , neutralizeReminderTags (toText file.instructionPath)
         , "\n"
-        , neutralizeReminderTags file.instructionContent
+        , neutralizeReminderTags content
         , "\n"
         ]
 

@@ -403,26 +403,30 @@ recordAgentSpec specsRef agentId spec =
 recordAgentType :: GrokSubagentSpecs -> SubagentId -> Text -> IO ()
 recordAgentType specsRef agentId agentType = do
     specs <- readIORef specsRef
-    let model = maybe Nothing (\spec -> spec.modelOverride) (Map.lookup agentId specs)
-        effort =
-            maybe Nothing (\spec -> spec.reasoningEffortOverride)
-                (Map.lookup agentId specs)
+    let existing = Map.lookup agentId specs
+        model = existing >>= \spec -> spec.modelOverride
+        effort = existing >>= \spec -> spec.reasoningEffortOverride
     recordAgentSpec specsRef agentId (GrokSubagentSpec agentType model effort)
 
 lookupAgentType :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
-lookupAgentType specsRef agentId = do
-    specs <- readIORef specsRef
-    pure ((\spec -> spec.agentType) <$> Map.lookup agentId specs)
+lookupAgentType specsRef agentId =
+    fmap (\spec -> spec.agentType) <$> lookupAgentSpec specsRef agentId
 
 lookupAgentModel :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
-lookupAgentModel specsRef agentId = do
-    specs <- readIORef specsRef
-    pure (Map.lookup agentId specs >>= \spec -> spec.modelOverride)
+lookupAgentModel specsRef agentId =
+    (>>= \spec -> spec.modelOverride) <$> lookupAgentSpec specsRef agentId
 
 lookupAgentReasoningEffort :: GrokSubagentSpecs -> SubagentId -> IO (Maybe Text)
-lookupAgentReasoningEffort specsRef agentId = do
-    specs <- readIORef specsRef
-    pure (Map.lookup agentId specs >>= \spec -> spec.reasoningEffortOverride)
+lookupAgentReasoningEffort specsRef agentId =
+    (>>= \spec -> spec.reasoningEffortOverride)
+        <$> lookupAgentSpec specsRef agentId
+
+lookupAgentSpec
+    :: GrokSubagentSpecs
+    -> SubagentId
+    -> IO (Maybe GrokSubagentSpec)
+lookupAgentSpec specsRef agentId =
+    Map.lookup agentId <$> readIORef specsRef
 
 -- | Restrict the child tool surface by subagent type.
 filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]

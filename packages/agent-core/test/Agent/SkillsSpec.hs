@@ -40,14 +40,18 @@ spec = describe "Agent.Skills" do
                 skillDir = repo </> ".agents" </> "skills" </> "deploy"
             writeSkill skillDir "deploy" "Deploy the service"
                 [ "when-to-use: Use for production deploys"
-                , "argument-hint: <environment>"
                 , "user-invocable: false"
                 , "allowed-tools: shell_command, apply_patch"
                 ]
             createDirectoryIfMissing True (skillDir </> "agents")
             writeFile (skillDir </> "agents" </> "openai.yaml") $
                 unlines
-                    [ "policy:"
+                    [ "interface:"
+                    , "  display_name: Production deploy"
+                    , "  short_description: Deploy safely"
+                    , "  default_prompt: Deploy the service"
+                    , "  argument_hint: <environment>"
+                    , "policy:"
                     , "  allow_implicit_invocation: false"
                     ]
             catalog <- discoverSkills (options home repo repo)
@@ -55,6 +59,9 @@ spec = describe "Agent.Skills" do
                 [skill] -> do
                     skill.skillWhenToUse `shouldBe` Just "Use for production deploys"
                     skill.skillArgumentHint `shouldBe` Just "<environment>"
+                    skill.skillDisplayName `shouldBe` Just "Production deploy"
+                    skill.skillShortDescription `shouldBe` Just "Deploy safely"
+                    skill.skillDefaultPrompt `shouldBe` Just "Deploy the service"
                     skill.skillUserInvocable `shouldBe` False
                     skill.skillModelInvocable `shouldBe` False
                     skill.skillAllowedTools

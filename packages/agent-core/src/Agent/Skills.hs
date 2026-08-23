@@ -19,16 +19,19 @@ module Agent.Skills
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (filterM, forM)
 import Data.Aeson
     ( FromJSON(..)
+    , Object
     , Value(..)
     , withObject
     , (.:)
     , (.:?)
     , (.!=)
     )
+import Data.Aeson.Key (Key)
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
@@ -176,28 +179,22 @@ instance FromJSON OpenAiMetadata where
     parseJSON = withObject "agents/openai.yaml" \o -> do
         interface <- o .:? "interface"
         policy <- o .:? "policy"
-        shortDescription <- case interface of
-            Just (Object fields) -> fields .:? "short_description"
-            _ -> pure Nothing
-        displayName <- case interface of
-            Just (Object fields) -> fields .:? "display_name"
-            _ -> pure Nothing
-        defaultPrompt <- case interface of
-            Just (Object fields) -> fields .:? "default_prompt"
-            _ -> pure Nothing
-        argumentHint <- case interface of
-            Just (Object fields) -> fields .:? "argument_hint"
-            _ -> pure Nothing
-        allowImplicit <- case policy of
-            Just (Object fields) -> fields .:? "allow_implicit_invocation"
-            _ -> pure Nothing
-        pure OpenAiMetadata
-            { openAiDisplayName = displayName
-            , openAiShortDescription = shortDescription
-            , openAiDefaultPrompt = defaultPrompt
-            , openAiArgumentHint = argumentHint
-            , openAiAllowImplicit = allowImplicit
-            }
+        let interfaceFields = interface >>= valueObject
+            policyFields = policy >>= valueObject
+        OpenAiMetadata
+            <$> optionalField interfaceFields "display_name"
+            <*> optionalField interfaceFields "short_description"
+            <*> optionalField interfaceFields "default_prompt"
+            <*> optionalField interfaceFields "argument_hint"
+            <*> optionalField policyFields "allow_implicit_invocation"
+
+valueObject :: Value -> Maybe Object
+valueObject (Object fields) = Just fields
+valueObject _ = Nothing
+
+optionalField :: FromJSON a => Maybe Object -> Key -> Parser (Maybe a)
+optionalField fields key =
+    maybe (pure Nothing) (\object -> object .:? key) fields
 
 defaultSkillCatalogMaxChars :: Int
 defaultSkillCatalogMaxChars = 8000
@@ -605,9 +602,3 @@ neutralizeSkillTags :: Text -> Text
 neutralizeSkillTags =
     Text.replace "<SKILL_INSTRUCTIONS" "&lt;SKILL_INSTRUCTIONS"
         . Text.replace "</SKILL_INSTRUCTIONS" "&lt;/SKILL_INSTRUCTIONS"
-
-infixr 3 <|>
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-(<|>) left right = case left of
-    Just value -> Just value
-    Nothing -> right

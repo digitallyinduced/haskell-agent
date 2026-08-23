@@ -101,28 +101,29 @@ codexSystemPrompt directShellEnabled cwd today =
         <> Text.unlines
             (if directShellEnabled
                 then
-                    [ "- Inspect the repo with shell_command (rg, cat, ls). Always set workdir."
+                    [ "- Inspect files with read_file, grep, and list_dir. Outside Plan Mode, shell_command is also available; always set workdir."
                     ]
                 else
-                    [ "- Inspect files and run OS commands through `callTool \"shell_command\"` inside run_haskell_program. Pass an object with `command` and `workdir`; optional fields are `timeout_ms` or `yield_time_ms`."
+                    [ "- Inspect files with read_file, grep, and list_dir. Run OS commands through `callTool \"shell_command\"` inside run_haskell_program. Pass an object with `command` and `workdir`; optional fields are `timeout_ms` or `yield_time_ms`."
                     ])
         <> Text.unlines
         [ "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- Track multi-step work with update_plan (progress checklist; unavailable in Plan Mode)."
         , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
         , "- Look up current public information with web_search."
-        , "- Enter Plan Mode with enter_plan_mode; ask planning questions with ask_user_question."
+        , "- Enter Plan Mode with enter_plan_mode; write its plan with write_plan; ask planning questions with ask_user_question."
         , ""
         , "Web search citation references such as turn2search5 are internal."
         , "Use them only when interacting with web_search; never expose internal reference IDs"
         , "or citation-marker syntax such as <cite|...> in user-visible output."
         , "Cite web sources using descriptive Markdown links instead."
         , ""
-        , "Plan Mode: when the user asks you to make, produce, or design a plan without"
-        , "implementing it, call enter_plan_mode before planning. You may also enter it for"
-        , "tasks with genuine architectural ambiguity. The transition requires user approval."
+        , "Plan Mode: use it for software implementation or architectural planning when code"
+        , "changes are expected after approval, or when the user explicitly requests Plan Mode."
+        , "Do not enter it for conversational plans such as business, writing, or travel plans."
+        , "The transition requires user approval."
         , "When a developer reminder says plan mode is active, explore read-only,"
-        , "write the design to plan.md only, and present the final plan in a <proposed_plan>"
+        , "write the design with write_plan only, and present the final plan in a <proposed_plan>"
         , "block (opening and closing tags on their own lines). Do not implement until plan"
         , "mode ends. update_plan is not Plan Mode."
         , "Be concise. Do not mention tools this session does not register."

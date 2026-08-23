@@ -41,8 +41,18 @@ spec = describe "tool presentation" do
         parsed.diffHiddenLines `shouldBe` 10
 
     it "formats structured collaboration output" do
-        formatToolOutput
-            (functionToolCall "agents" "collaboration.list_agents" "{}")
+        let call = functionToolCall
+                "agents" "collaboration.list_agents" "{}"
+        formatToolOutput call
             "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\
             \\"agent_status\":\"running\"}]}"
             `shouldBe` "/root/reviewer · running"
+        formatToolOutput call
+            "{\"agents\":[\
+            \{\"agent_name\":\" /root/worker \",\"agent_status\":\" idle \"},\
+            \{\"agent_name\":\"/root/queued\"},\
+            \{\"agent_name\":\" \",\"agent_status\":\"running\"},42]}"
+            `shouldBe` "/root/worker · idle\n/root/queued"
+        formatToolOutput call
+            "{\"agents\":[{\"agent_status\":\"running\"},null]}"
+            `shouldBe` "(no live agents)"

@@ -18,8 +18,8 @@ import Agent.ToolDispatch
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Foldable as Foldable
-import Data.Maybe (fromMaybe)
+import Data.Foldable (toList)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -170,21 +170,17 @@ formatAgentList :: Text -> Maybe Text
 formatAgentList output = do
     Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
     Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
-    let rows = foldr agentRow [] (Foldable.toList agents)
+    let rows = mapMaybe formatAgentRow (toList agents)
     pure $ case rows of
         [] -> "(no live agents)"
         _ -> Text.intercalate "\n" rows
-  where
-    agentRow value rest = case value of
-        Aeson.Object agent ->
-            case
-                ( jsonObjectText "agent_name" agent
-                , jsonObjectText "agent_status" agent
-                ) of
-                (Just name, Just status) -> (name <> " · " <> status) : rest
-                (Just name, Nothing) -> name : rest
-                _ -> rest
-        _ -> rest
+
+formatAgentRow :: Aeson.Value -> Maybe Text
+formatAgentRow (Aeson.Object agent) = do
+    name <- jsonObjectText "agent_name" agent
+    pure $ maybe name (\status -> name <> " · " <> status)
+        (jsonObjectText "agent_status" agent)
+formatAgentRow _ = Nothing
 
 jsonObjectText :: Text -> Aeson.Object -> Maybe Text
 jsonObjectText key object =

@@ -43,6 +43,7 @@ import Agent.InterAgentMessage
 import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
+    , objectArgsLenient
     , optInt
     , optText
     , readExactInt
@@ -237,7 +238,7 @@ data WaitAgentArgs = WaitAgentArgs
     }
 
 instance FromJSON WaitAgentArgs where
-    parseJSON = objectArgs \object_ -> do
+    parseJSON = objectArgsLenient \object_ -> do
         targets <- case KeyMap.lookup (Key.fromText "targets") object_ of
             Nothing -> pure Nothing
             Just _ -> Just <$> reqTextList object_ "targets"
@@ -451,7 +452,7 @@ data ListAgentsArgs = ListAgentsArgs
     }
 
 instance FromJSON ListAgentsArgs where
-    parseJSON = objectArgs \object_ -> ListAgentsArgs
+    parseJSON = objectArgsLenient \object_ -> ListAgentsArgs
         <$> optText object_ "path_prefix"
 
 listAgentsTool :: MultiAgentContext -> AppTool
