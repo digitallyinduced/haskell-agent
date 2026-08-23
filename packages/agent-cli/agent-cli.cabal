@@ -186,6 +186,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.TextLayoutSpec
+                    , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec

@@ -1,6 +1,7 @@
 -- | Execute one model turn and commit its observable session state.
 module Agent.CLI.Turn
     ( applyPendingSessionTitles
+    , retainTurnInputs
     , runOneTurn
     ) where
 
@@ -39,7 +40,6 @@ import Agent.CLI.Session
     , SessionTurn(..)
     , Persistence(..)
     , PersistenceState(..)
-    , appendTurn
     , appendTurnWithMetaUpdate
     , ensureSession
     , loadSession
@@ -77,6 +77,8 @@ import Agent.Loop
     , addTokenUsage
     , runLoopInputs
     )
+import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeEnv(..)
@@ -215,7 +217,7 @@ runOneTurn env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete errorText = case persist of
+        persistIncomplete retainedItems errorText = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -228,10 +230,11 @@ runOneTurn env@SessionEnv
                         , turnAssistantText = Nothing
                         , turnError = Just errorText
                         , turnResponseId = Nothing
-                        , turnItems = []
+                        , turnItems = retainedItems
                         , turnUsage = Nothing
                         }
-                handle' <- appendTurn handle turn
+                handle' <- appendTurnWithMetaUpdate handle turn \meta ->
+                    meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
     case (restartEffort, result) of
         (Just level, _) -> do
@@ -250,11 +253,16 @@ runOneTurn env@SessionEnv
                 , pendingPlanState = planState
                 }
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
-            restoreStartupContext
             finishTerminal (isNothing fullscreen)
                 terminal wallStarted finishedAt 130 "Agent cancelled"
             abortSubagentTurn rootTurnId
-            writeIORef transcriptRef beforeItems
+            -- turnInputs already contains any startup context consumed above.
+            -- Checkpoint it instead of restoring it separately, which would
+            -- duplicate the instructions on the next full-history request.
+            let (retainedTranscript, retainedItems) =
+                    retainTurnInputs beforeItems turnInputs
+            writeIORef transcriptRef retainedTranscript
+            writeIORef previous Nothing
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -268,16 +276,16 @@ runOneTurn env@SessionEnv
                     putTextLn stderr (formatLoopErrorColored color cancelled)
                     putTextLn stderr
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete "cancelled"
+            persistIncomplete retainedItems "cancelled"
             pure TurnSucceeded
         (Nothing, Left err) -> do
-            restoreStartupContext
             abortSubagentTurn rootTurnId
             afterItems <- readIORef transcriptRef
             case err of
                 LoopTransport apiError
                     | length afterItems == length beforeItems
                     , isProviderUnavailable apiError -> do
+                        restoreStartupContext
                         case fullscreen of
                             Nothing -> pure ()
                             Just runtime ->
@@ -296,7 +304,10 @@ runOneTurn env@SessionEnv
                 _ -> do
                     finishTerminal (isNothing fullscreen)
                         terminal wallStarted finishedAt 1 "Agent turn failed"
-                    writeIORef transcriptRef beforeItems
+                    let (retainedTranscript, retainedItems) =
+                            retainTurnInputs beforeItems turnInputs
+                    writeIORef transcriptRef retainedTranscript
+                    writeIORef previous Nothing
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -314,7 +325,8 @@ runOneTurn env@SessionEnv
                                 (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderr
                                 (formatTurnStatus color "error" (elapsedDetail model))
-                    persistIncomplete (formatLoopErrorPersistedAt finishedAt err)
+                    persistIncomplete retainedItems
+                        (formatLoopErrorPersistedAt finishedAt err)
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
@@ -403,6 +415,18 @@ isPendingPersistence :: PersistenceState -> Bool
 isPendingPersistence = \case
     PersistencePending _ -> True
     PersistenceActive _ -> False
+
+-- | Keep inputs from a cancelled or failed logical turn while discarding any
+-- partial assistant output, tool calls, and tool results produced after the
+-- turn began. Returning the retained suffix separately lets persistence store
+-- the same model-visible checkpoint used by the live transcript.
+retainTurnInputs
+    :: [ResponseItem]
+    -> [TurnInput]
+    -> ([ResponseItem], [ResponseItem])
+retainTurnInputs beforeItems turnInputs =
+    let retainedItems = turnInputsToItems turnInputs
+    in (beforeItems <> retainedItems, retainedItems)
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
