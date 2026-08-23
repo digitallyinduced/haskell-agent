@@ -7,15 +7,11 @@
 -- seed history and the CLI can persist it.
 module Agent.OpenRouter.LoopBackend
     ( openRouterBackend
-    , openRouterBackendWith
     ) where
 
-import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
-    ( statelessResponsesBackend
-    , tokenProviderStatelessResponsesBackend
-    )
+    ( tokenProviderStatelessResponsesBackend )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.OpenRouter.Client (createResponseWithEvents)
@@ -36,13 +32,3 @@ openRouterBackend
 openRouterBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
-
--- | Same mapping as 'openRouterBackend', with an injectable transport for tests.
-openRouterBackendWith
-    :: (ResponseCreateParams
-        -> (ResponseStreamEvent -> IO ())
-        -> IO (Either ApiError Response))
-    -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> Backend
-openRouterBackendWith = statelessResponsesBackend

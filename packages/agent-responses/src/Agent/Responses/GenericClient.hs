@@ -18,11 +18,20 @@ import Agent.Error
     , errorTypeFromText
     , isInlineRetryableProviderError
     )
+import Agent.Responses.Client
+    ( ResponsesClientConfig(..)
+    , performResponsesRequest
+    , retryStreamingResultWithPolicy
+    )
 import Agent.Responses.Error
     ( classifyHttpFailure
     , mkOpenAIError
     )
 import qualified Agent.Responses.HttpSSE as HttpSSE
+import Agent.Responses.Request
+    ( forceStatelessStreaming
+    , setResponseModel
+    )
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , buildStreamResponse
@@ -33,10 +42,7 @@ import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
     , limitRetries
-    , retrying
     )
-import qualified Data.Aeson as Aeson
-import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -58,12 +64,8 @@ data GenericClientOptions = GenericClientOptions
 -- Stateless endpoints receive the complete local transcript on every request,
 -- so remote storage and continuation identifiers must stay disabled.
 buildRequest :: GenericClientOptions -> ResponseCreateParams -> ResponseCreateParams
-buildRequest options request = request
-    { model = Just options.model
-    , store = Just False
-    , stream = Just True
-    , previousResponseId = Nothing
-    }
+buildRequest options request =
+    setResponseModel options.model (forceStatelessStreaming request)
 
 createResponseWith
     :: GenericClientOptions
@@ -92,15 +94,15 @@ createResponseWithEventsPolicy policy options request onEvent =
     retryTransientResultWithPolicy policy performOnce onEvent
   where
     performOnce =
-        HttpSSE.performResponsesHttpSse
-            HttpSSE.HttpSseConfig
-                { exceptionPrefix = "Responses request failed"
-                , classifyFailure
-                , buildResponse
+        performResponsesRequest
+            ResponsesClientConfig
+                { clientExceptionPrefix = "Responses request failed"
+                , clientBaseUrl = options.baseUrl
+                , clientTimeoutSeconds = options.requestTimeoutSeconds
+                , clientClassifyFailure = classifyFailure
+                , clientBuildResponse = buildResponse
                 }
-            options.baseUrl
-            options.requestTimeoutSeconds
-            (Aeson.encode (buildRequest options request))
+            (buildRequest options request)
             configureRequest
 
     configureRequest =
@@ -119,21 +121,11 @@ retryTransientResultWithPolicy
     -> (event -> IO ())
     -> IO (Either ApiError value)
 retryTransientResultWithPolicy policy request onEvent =
-    snd <$> retrying policy shouldRetry runAttempt
-  where
-    runAttempt _status = do
-        emitted <- newIORef False
-        result <- request \event -> do
-            writeIORef emitted True
-            onEvent event
-        didEmit <- readIORef emitted
-        pure (didEmit, result)
-
-    shouldRetry _status (emitted, result) = pure $
-        not emitted
-            && case result of
-                Left apiError -> isInlineRetryableProviderError apiError
-                Right _ -> False
+    retryStreamingResultWithPolicy
+        policy
+        isInlineRetryableProviderError
+        request
+        (Just onEvent)
 
 -- | Decode standard OpenAI-shaped error bodies while preserving Retry-After
 -- from the HTTP response when the body omitted it.

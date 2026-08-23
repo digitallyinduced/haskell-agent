@@ -1,22 +1,10 @@
 -- | Typed decoding and terminal-response assembly for xAI Responses SSE.
 module Agent.XAI.Stream
-    ( SseDecoder
-    , newSseDecoder
-    , feedSseDecoder
-    , finishSseDecoder
-    , parseSseEvents
-    , buildResponse
+    ( buildResponse
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.Responses.Error (mkOpenAIError)
-import Agent.Responses.SSE
-    ( SseDecoder
-    , feedSseDecoder
-    , finishSseDecoder
-    , newSseDecoder
-    , parseSseEvents
-    )
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , StreamAssemblyConfig(..)

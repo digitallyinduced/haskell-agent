@@ -10,6 +10,7 @@ import Agent.XAI.Error
 import Agent.XAI.Options
 import Agent.XAI.Request
 import Agent.XAI.Stream
+import Agent.Responses.SSE (parseSseEvents)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
