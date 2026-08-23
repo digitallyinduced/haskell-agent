@@ -17,10 +17,24 @@ import Agent.CLI.Style
     , solarizedYellow
     , styleBase
     )
-import Control.Applicative ((<|>))
-import Data.Char (isAlphaNum, isDigit, isSpace)
+import Agent.TUI.FencedCode
+    ( FenceChunk(..)
+    , FencedBlock(..)
+    , fenceChunks
+    )
+import Agent.TUI.Markdown.Inline
+    ( Inline(..)
+    , inlinePlainText
+    , parseInline
+    )
+import Agent.TUI.TextWidth
+    ( displayCharCellWidth
+    , displayTerminalText
+    )
+import Data.Char (isAlphaNum, isAscii, isDigit, isSpace)
 import Data.Colour (Colour)
 import Data.List (transpose)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
@@ -36,15 +50,38 @@ import System.Console.ANSI
 renderMarkdown :: Bool -> Text -> Text
 renderMarkdown color text
     | not color = text
-    | otherwise =
-        let cleaned = Text.filter (/= '\ESC') text
-            endsWithNewline = Text.isSuffixOf "\n" cleaned
-            lines_ = Text.splitOn "\n" cleaned
-            linesForParse
-                | endsWithNewline && not (null lines_) = init lines_
-                | otherwise = lines_
-            rendered = Text.intercalate "\n" (renderBlocks linesForParse)
-        in if endsWithNewline then rendered <> "\n" else rendered
+    | otherwise = Text.concat (map renderChunk (fenceChunks cleaned))
+  where
+    cleaned = displayTerminalText text
+    renderChunk (FenceText prose) = renderProse prose
+    renderChunk (FenceBlock block) =
+        let header
+                | Text.null block.fencedInfo = ""
+                | otherwise = md [fg solarizedCyan] block.fencedInfo <> "\n"
+            body = renderFenceBody block.fencedBody
+        in header <> body
+
+renderProse :: Text -> Text
+renderProse text =
+    let endsWithNewline = Text.isSuffixOf "\n" text
+        lines_ = Text.splitOn "\n" text
+        linesForParse
+            | endsWithNewline && not (null lines_) = init lines_
+            | otherwise = lines_
+        rendered = Text.intercalate "\n" (renderBlocks linesForParse)
+    in if endsWithNewline then rendered <> "\n" else rendered
+
+renderFenceBody :: Text -> Text
+renderFenceBody body =
+    let endsWithNewline = Text.isSuffixOf "\n" body
+        lines_ = Text.splitOn "\n" body
+        actualLines
+            | endsWithNewline && not (null lines_) = init lines_
+            | otherwise = lines_
+        rendered =
+            Text.intercalate "\n"
+                (map (md [fg solarizedBase01]) actualLines)
+    in if endsWithNewline then rendered <> "\n" else rendered
 
 -- | Style helper that keeps the agent line wash across nested SGR.
 md :: [SGR] -> Text -> Text
@@ -55,20 +92,12 @@ renderBlocks = go
   where
     go [] = []
     go (line : rest)
-        | Just (marker, info) <- fenceOpen line =
-            let (body, after) = takeFenceBody marker rest
-                header =
-                    if Text.null info
-                        then []
-                        else
-                            [ md [fg solarizedCyan] info ]
-                styledBody = map (md [fg solarizedBase01]) body
-            in header ++ styledBody ++ go after
         | Just (styled, after) <- takeTable (line : rest) =
             styled ++ go after
         | Just (level, title) <- headingLine line =
             -- Hide the markdown `#` markers (grok pretty mode); color the title.
-            md (headingPrefixStyle level) (styleInline title) : go rest
+            renderInlineWith (headingPrefixStyle level) (parseInline title)
+                : go rest
         | Just (indent, item) <- unorderedItemParts line =
             ( indent
                 <> md listMarkerStyle "• "
@@ -82,9 +111,7 @@ renderBlocks = go
             )
                 : go rest
         | Just quote <- blockQuote line =
-            let body
-                    | Text.any (`elem` ['`', '*', '_', '[']) quote = styleInline quote
-                    | otherwise = md quoteStyle quote
+            let body = renderInlineWith quoteStyle (parseInline quote)
             in (md [fg solarizedBase01] "│ " <> body)
                 : go rest
         | isThematicBreak line =
@@ -119,38 +146,6 @@ fg = SetRGBColor Foreground
 -- | Blockquote body: muted so it sits behind surrounding prose.
 quoteStyle :: [SGR]
 quoteStyle = [fg solarizedBase01]
-
-data FenceMarker = BacktickFence !Int | TildeFence !Int
-
-fenceOpen :: Text -> Maybe (FenceMarker, Text)
-fenceOpen line =
-    let stripped = Text.stripStart line
-        tryFence char ctor =
-            let (run, after) = Text.span (== char) stripped
-                n = Text.length run
-            in if n >= 3
-                then Just (ctor n, Text.strip after)
-                else Nothing
-    in tryFence '`' BacktickFence <|> tryFence '~' TildeFence
-
-takeFenceBody :: FenceMarker -> [Text] -> ([Text], [Text])
-takeFenceBody marker = go
-  where
-    go [] = ([], [])
-    go (line : rest)
-        | isFenceClose marker line = ([], rest)
-        | otherwise =
-            let (body, after) = go rest
-            in (line : body, after)
-
-isFenceClose :: FenceMarker -> Text -> Bool
-isFenceClose marker line =
-    let stripped = Text.strip line
-        (char, need) = case marker of
-            BacktickFence n -> ('`', n)
-            TildeFence n -> ('~', n)
-        (run, after) = Text.span (== char) stripped
-    in Text.length run >= need && Text.null (Text.strip after)
 
 headingLine :: Text -> Maybe (Int, Text)
 headingLine line =
@@ -204,11 +199,12 @@ isThematicBreak line =
 
 takeTable :: [Text] -> Maybe ([Text], [Text])
 takeTable (header : sep : rest)
-    | isTableRow header
-    , isSeparatorRow sep =
+    | Just headerCells <- splitTableRow header
+    , Just separatorCells <- splitTableRow sep
+    , length separatorCells == length headerCells
+    , all isSeparatorCell separatorCells =
         let (body, after) = span isTableRow rest
-            headerCells = splitRow header
-            bodyCells = map splitRow body
+            bodyCells = mapMaybe splitTableRow body
             rows = headerCells : bodyCells
             widths = columnWidths rows
             top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
@@ -228,95 +224,173 @@ boxLine left mid right fill widths =
         <> Text.singleton right
 
 isTableRow :: Text -> Bool
-isTableRow line =
-    let stripped = Text.strip line
-    in Text.isPrefixOf "|" stripped && Text.count "|" stripped >= 2
+isTableRow = isJust . splitTableRow
 
-isSeparatorRow :: Text -> Bool
-isSeparatorRow line =
-    isTableRow line && all isSepCell (splitRow line)
+isSeparatorCell :: Text -> Bool
+isSeparatorCell cell =
+    Text.any (== '-') cell
+        && Text.null (Text.filter (`notElem` ['-', ':', ' ']) cell)
+
+-- | Split on actual table delimiters, preserving escaped pipes and pipes
+-- inside matching backtick spans.
+splitTableRow :: Text -> Maybe [Text]
+splitTableRow raw =
+    let stripped = Text.strip raw
+        content = fromMaybe stripped (Text.stripPrefix "|" stripped)
+        (cells, delimiterCount) = scan Nothing [] [] 0 False
+            (Text.unpack content)
+    in if delimiterCount >= 1 then Just cells else Nothing
   where
-    isSepCell cell =
-        let t = Text.filter (`notElem` ['-', ':', ' ']) cell
-        in Text.null t && Text.any (== '-') cell
+    scan
+        :: Maybe Int
+        -> String
+        -> [Text]
+        -> Int
+        -> Bool
+        -> String
+        -> ([Text], Int)
+    scan _ current cells delimiterCount trailingDelimiter [] =
+        let allCells = reverse (finishCell current : cells)
+            withoutOuterBorder
+                | trailingDelimiter = dropLast allCells
+                | otherwise = allCells
+        in (withoutOuterBorder, delimiterCount)
+    scan codeRun current cells delimiterCount _ ('\\' : rest) =
+        let (slashes, afterSlashes) = span (== '\\') rest
+            slashCount = 1 + length slashes
+            literalSlashes =
+                replicate
+                    (if startsWithPipe afterSlashes
+                        then slashCount `div` 2
+                        else slashCount)
+                    '\\'
+            current' = literalSlashes <> current
+        in case afterSlashes of
+            '|' : afterPipe
+                | odd slashCount ->
+                    scan codeRun ('|' : current') cells
+                        delimiterCount False afterPipe
+                | codeRun == Nothing ->
+                    splitCell codeRun current' cells delimiterCount afterPipe
+            _ ->
+                scan codeRun current' cells
+                    delimiterCount False afterSlashes
+    scan codeRun current cells delimiterCount _ ('`' : rest) =
+        let (ticks, afterTicks) = span (== '`') rest
+            tickCount = 1 + length ticks
+            marker = replicate tickCount '`'
+            nextCodeRun = case codeRun of
+                Just openCount
+                    | tickCount >= openCount -> Nothing
+                Just openCount -> Just openCount
+                Nothing
+                    | hasClosingRun tickCount afterTicks -> Just tickCount
+                Nothing -> Nothing
+        in scan nextCodeRun (marker <> current) cells
+            delimiterCount False afterTicks
+    scan Nothing current cells delimiterCount _ ('|' : rest) =
+        splitCell Nothing current cells delimiterCount rest
+    scan codeRun current cells delimiterCount _ (character : rest) =
+        scan codeRun (character : current) cells
+            delimiterCount False rest
 
-splitRow :: Text -> [Text]
-splitRow line =
-    let stripped = Text.strip line
-        trimmed =
-            Text.dropWhile (== '|')
-                (Text.dropWhileEnd (== '|') stripped)
-    in map Text.strip (Text.splitOn "|" trimmed)
+    splitCell codeRun current cells delimiterCount rest =
+        scan codeRun [] (finishCell current : cells)
+            (delimiterCount + 1) True rest
+
+    finishCell = Text.strip . Text.pack . reverse
+    startsWithPipe ('|' : _) = True
+    startsWithPipe _ = False
+    hasClosingRun count =
+        Text.isInfixOf (Text.replicate count "`") . Text.pack
+    dropLast values = case reverse values of
+        _ : rest -> reverse rest
+        [] -> []
 
 columnWidths :: [[Text]] -> [Int]
 columnWidths rows =
     let cols = transpose rows
-    in map (maximum . (0 :) . map (Text.length . visibleCellText)) cols
-
--- | Approximate rendered cell text width by stripping common inline markers
--- before padding, so borders align when body cells contain ``code`` / emphasis.
-visibleCellText :: Text -> Text
-visibleCellText = Text.replace "`" "" . Text.replace "**" "" . Text.replace "__" ""
-    . Text.replace "*" "" . Text.replace "_" ""
+    in map (maximum . (0 :) . map renderedWidth) cols
+  where
+    renderedWidth =
+        Text.foldl'
+            (\width character -> width + displayCharCellWidth character)
+            0
+            . inlinePlainText
+            . parseInline
 
 styleTableRow :: Bool -> [Int] -> [Text] -> Text
 styleTableRow isHeader widths cells =
     let cellText w c =
-            let visible = visibleCellText c
-                pad = max 0 (w - Text.length visible)
-                body = " " <> visible <> Text.replicate pad " " <> " "
-            in if isHeader
-                then md [SetConsoleIntensity BoldIntensity] body
-                else
-                    -- Markers were stripped for width; re-apply inline styling
-                    -- only for bare visible text (no markers left to parse).
-                    md [] body
+            let inlines = parseInline c
+                visible = inlinePlainText inlines
+                width' =
+                    Text.foldl'
+                        (\total character ->
+                            total + displayCharCellWidth character)
+                        0
+                        visible
+                padding = max 0 (w - width')
+                base
+                    | isHeader = [SetConsoleIntensity BoldIntensity]
+                    | otherwise = []
+            in " "
+                <> renderInlineWith base inlines
+                <> Text.replicate padding " "
+                <> " "
         parts = zipWith cellText widths (cells ++ repeat "")
         bar = md [fg solarizedBase01] "│"
     in bar <> Text.intercalate bar (take (length widths) parts) <> bar
 
 styleInline :: Text -> Text
-styleInline = renderMarkdownFragment True Nothing
+styleInline = renderInlineWith [] . parseInline
 
 -- | Render an inline markdown fragment whose first character may continue
 -- prose emitted by an earlier streaming chunk.
 renderMarkdownFragment :: Bool -> Maybe Char -> Text -> Text
 renderMarkdownFragment color prevChar text
     | not color = text
-    | otherwise = Text.concat (go prevChar (Text.filter (/= '\ESC') text))
+    | otherwise =
+        renderInlineWith [] $
+            parseInline $
+                protectLeadingUnderscore prevChar (displayTerminalText text)
   where
-    go :: Maybe Char -> Text -> [Text]
-    go prev t
-        | Text.null t = []
-        | Just (code, rest) <- takeInlineCode t =
-            md codeStyle code : go (Text.unsnoc code >>= Just . snd) rest
-        | Just (linkText, url, rest) <- takeLink t =
-            let label = md linkStyle (styleInline linkText)
-            in osc8Link True url label
-                : md urlStyle (" (" <> url <> ")")
-                : go (Just ')') rest
-        | Just (inner, rest) <- takeEmphasis prev "**" t =
-            md [SetConsoleIntensity BoldIntensity] (styleInline inner)
-                : go (Text.unsnoc inner >>= Just . snd) rest
-        | Just (inner, rest) <- takeEmphasis prev "__" t =
-            md [SetConsoleIntensity BoldIntensity] (styleInline inner)
-                : go (Text.unsnoc inner >>= Just . snd) rest
-        | Just (inner, rest) <- takeEmphasis prev "*" t =
-            md [SetItalicized True] (styleInline inner)
-                : go (Text.unsnoc inner >>= Just . snd) rest
-        | Just (inner, rest) <- takeEmphasis prev "_" t =
-            md [SetItalicized True] (styleInline inner)
-                : go (Text.unsnoc inner >>= Just . snd) rest
-        | otherwise =
-            let (plain, rest) = Text.break (`elem` ['`', '[', '*', '_']) t
-            in if Text.null plain
-                then
-                    let c = Text.take 1 t
-                        rest' = Text.drop 1 t
-                    in c : go (Text.uncons c >>= Just . fst) rest'
-                else
-                    plain
-                        : go (Text.unsnoc plain >>= Just . snd) rest
+    protectLeadingUnderscore previous input
+        | maybe False isWordChar previous
+        , Text.isPrefixOf "_" input =
+            "\\" <> input
+        | otherwise = input
+
+renderInlineWith :: [SGR] -> [Inline] -> Text
+renderInlineWith base = Text.concat . map (go base)
+  where
+    go context = \case
+        InlineText text -> styled context text
+        InlineCode text -> styled (context <> codeStyle) text
+        InlineStrong children ->
+            renderInlineWith
+                (context <> [SetConsoleIntensity BoldIntensity])
+                children
+        InlineEmphasis children ->
+            renderInlineWith (context <> [SetItalicized True]) children
+        InlineLink url children ->
+            let label =
+                    renderInlineWith (context <> linkStyle) children
+                linked
+                    | safeUrl url = osc8Link True url label
+                    | otherwise = label
+                suffix
+                    | Text.null url || inlinePlainText children == url = ""
+                    | otherwise =
+                        styled (context <> urlStyle) (" (" <> url <> ")")
+            in linked <> suffix
+
+    styled [] value = value
+    styled styles value = md styles value
+
+    safeUrl url =
+        not (Text.null url)
+            && displayTerminalText url == url
 
     codeStyle =
         [ SetConsoleIntensity BoldIntensity
@@ -340,6 +414,8 @@ splitMarkdownFragment initialPrev = go initialPrev []
   where
     go prev chunks t
         | Text.null t = (Text.concat (reverse chunks), "", prev)
+        | Just (escaped, rest) <- takeEscapedPunctuation t =
+            consume (Just escaped) rest
         | Just (code, rest) <- takeInlineCode t =
             consume (lastChar code) rest
         | Just (_linkText, _url, rest) <- takeLink t =
@@ -355,7 +431,8 @@ splitMarkdownFragment initialPrev = go initialPrev []
         | shouldWait prev t =
             (Text.concat (reverse chunks), t, prev)
         | otherwise =
-            let (plain, rest) = Text.break (`elem` ['`', '[', '*', '_']) t
+            let (plain, rest) =
+                    Text.break (`elem` ['\\', '`', '[', '*', '_']) t
             in if Text.null plain
                 then
                     let literal = Text.take 1 t
@@ -369,6 +446,7 @@ splitMarkdownFragment initialPrev = go initialPrev []
 
     shouldWait prev t
         | Text.any (== '\n') t = False
+        | t == "\\" = True
         | Text.isPrefixOf "`" t = True
         | Text.isPrefixOf "[" t = incompleteLink t
         | Text.isPrefixOf "**" t = potentialEmphasis prev "**" t
@@ -378,13 +456,13 @@ splitMarkdownFragment initialPrev = go initialPrev []
         | otherwise = False
 
     incompleteLink t =
-        case Text.breakOn "]" (Text.drop 1 t) of
-            (_, rest) | Text.null rest -> True
-            (_, rest) ->
-                let afterBracket = Text.drop 1 rest
-                in Text.null afterBracket
-                    || (Text.isPrefixOf "(" afterBracket
-                        && not (")" `Text.isInfixOf` Text.drop 1 afterBracket))
+        case linkLabelEnd (Text.drop 1 t) of
+            Nothing -> True
+            Just afterBracket ->
+                Text.null afterBracket
+                    || case Text.stripPrefix "(" afterBracket of
+                        Nothing -> False
+                        Just destination -> destinationEnd destination == Nothing
 
     potentialEmphasis prev delim t =
         let after = Text.drop (Text.length delim) t
@@ -397,6 +475,17 @@ splitMarkdownFragment initialPrev = go initialPrev []
                 | otherwise -> True
 
     lastChar value = snd <$> Text.unsnoc value
+
+takeEscapedPunctuation :: Text -> Maybe (Char, Text)
+takeEscapedPunctuation text = do
+    afterSlash <- Text.stripPrefix "\\" text
+    (character, rest) <- Text.uncons afterSlash
+    if isAscii character
+        && character >= '!'
+        && character <= '~'
+        && not (isAlphaNum character)
+        then Just (character, rest)
+        else Nothing
 
 takeInlineCode :: Text -> Maybe (Text, Text)
 takeInlineCode t =
@@ -419,18 +508,66 @@ takeInlineCode t =
 takeLink :: Text -> Maybe (Text, Text, Text)
 takeLink t = do
     afterBracket <- Text.stripPrefix "[" t
-    case Text.breakOn "]" afterBracket of
-        (linkText, rest0)
-            | not (Text.null linkText)
-            , Just afterBracketClose <- Text.stripPrefix "]" rest0
-            , Just afterParen <- Text.stripPrefix "(" afterBracketClose ->
-                case Text.breakOn ")" afterParen of
-                    (url, rest1)
-                        | not (Text.null url)
-                        , Just rest <- Text.stripPrefix ")" rest1 ->
-                            Just (linkText, url, rest)
-                    _ -> Nothing
-            | otherwise -> Nothing
+    (linkText, afterBracketClose) <- takeLinkLabel afterBracket
+    afterParen <- Text.stripPrefix "(" afterBracketClose
+    (url, rest) <- takeLinkDestination afterParen
+    if Text.null linkText || Text.null url
+        then Nothing
+        else Just (linkText, url, rest)
+
+linkLabelEnd :: Text -> Maybe Text
+linkLabelEnd = fmap snd . takeLinkLabel
+
+takeLinkLabel :: Text -> Maybe (Text, Text)
+takeLinkLabel = go 0 ""
+  where
+    go :: Int -> Text -> Text -> Maybe (Text, Text)
+    go depth consumed remaining =
+        case Text.uncons remaining of
+            Nothing -> Nothing
+            Just ('\n', _) -> Nothing
+            Just ('\\', afterSlash) ->
+                case Text.uncons afterSlash of
+                    Nothing -> Nothing
+                    Just (escaped, rest) ->
+                        go depth
+                            (consumed <> Text.pack ['\\', escaped])
+                            rest
+            Just ('[', rest) ->
+                go (depth + 1) (consumed <> "[") rest
+            Just (']', rest)
+                | depth == 0 -> Just (consumed, rest)
+                | otherwise ->
+                    go (depth - 1) (consumed <> "]") rest
+            Just (character, rest) ->
+                go depth (consumed <> Text.singleton character) rest
+
+destinationEnd :: Text -> Maybe Text
+destinationEnd = fmap snd . takeLinkDestination
+
+takeLinkDestination :: Text -> Maybe (Text, Text)
+takeLinkDestination = go 0 ""
+  where
+    go :: Int -> Text -> Text -> Maybe (Text, Text)
+    go depth consumed remaining =
+        case Text.uncons remaining of
+            Nothing -> Nothing
+            Just ('\n', _) -> Nothing
+            Just ('\\', afterSlash) ->
+                case Text.uncons afterSlash of
+                    Nothing -> Nothing
+                    Just (escaped, rest) ->
+                        go depth
+                            (consumed <> Text.pack ['\\', escaped])
+                            rest
+            Just ('(', rest) ->
+                go (depth + 1) (consumed <> "(") rest
+            Just (')', rest)
+                | depth == 0 -> Just (consumed, rest)
+                | otherwise ->
+                    go (depth - 1) (consumed <> ")") rest
+            Just (character, rest) ->
+                go depth (consumed <> Text.singleton character) rest
 
 takeEmphasis :: Maybe Char -> Text -> Text -> Maybe (Text, Text)
 takeEmphasis prevChar delim t
