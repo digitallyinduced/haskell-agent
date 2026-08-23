@@ -43,6 +43,7 @@ import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -150,13 +151,21 @@ data LoopEvent
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
+      -- | Tools callable directly by the parent model.
     , loopTools :: !ToolRegistry
+      -- | Optional broader registry for calls made from inside tools such as
+      -- run_haskell_program. This lets a harness hide direct shell access
+      -- while retaining shell_command behind the programmatic boundary.
+    , loopNestedTools :: !(Maybe ToolRegistry)
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+      -- | Optional approval callback paired with 'loopNestedTools'.
+    , loopNestedApprove
+        :: !(Maybe (ToolCall -> IO (Either Text Bool)))
       -- | Soft-cancel latch. The caller owns resetting it before publishing
       -- the turn to input/interrupt handlers. When set, the loop stops after
       -- the current tool batch instead of asking the model for another step.
@@ -353,6 +362,14 @@ runPreparedToolCall
     -> IO ToolCallResult
 runPreparedToolCall config (PreparedToolCall call approval) = do
     config.loopOnEvent (ToolStarted call)
+    let nestedConfig = config
+            { loopTools =
+                fromMaybe config.loopTools config.loopNestedTools
+            , loopNestedTools = Nothing
+            , loopApprove =
+                fromMaybe config.loopApprove config.loopNestedApprove
+            , loopNestedApprove = Nothing
+            }
     result <- case approval of
         ToolApprovalDenied denial ->
             pure ToolCallResult
@@ -374,8 +391,8 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                             >> config.loopOnEvent
                                 (ToolOutputUpdated progressCall.callId output)
                     , toolDispatchRuntime = Just ToolRuntime
-                        { invokeNestedTool = runOne config
-                        , invokeNestedTools = runToolCalls config
+                        { invokeNestedTool = runOne nestedConfig
+                        , invokeNestedTools = runToolCalls nestedConfig
                         , invokeNestedResponses =
                             case config.loopDispatch.toolDispatchCallResponses of
                                 Just invoke -> invoke

@@ -161,6 +161,28 @@ spec = do
                     , optHaskellProgram = True
                     })
 
+        it "parses --no-direct-shell and rejects it without Haskell programs" do
+            parseArgs ["--no-direct-shell", "-p", "hi"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optNoDirectShell = True
+                    })
+            parseArgs
+                [ "--no-direct-shell"
+                , "--direct-shell"
+                , "-p", "hi"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optNoDirectShell = False
+                    })
+            parseArgs
+                [ "--no-direct-shell"
+                , "--no-haskell-program"
+                , "-p", "hi"
+                ]
+                `shouldSatisfy` isLeft
+
         it "parses --tool-event-log" do
             parseArgs ["--tool-event-log", "/tmp/tool-events.jsonl", "-p", "hi"]
                 `shouldBe` Right (RunAgent defaultCliOptions

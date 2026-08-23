@@ -303,7 +303,7 @@ spec = describe "Agent.Tools.HaskellProgram" do
             result.ghciOutput `shouldNotSatisfy` Text.isInfixOf "FORGED"
             readIORef invoked `shouldReturn` True
 
-    it "routes nested calls through the active loop without adding child results to history" do
+    it "routes nested calls through a broader private registry" do
         withTempProgramGhci \(ghci, planMode) -> do
             submissions <- newIORef []
             approvals <- newIORef []
@@ -316,11 +316,14 @@ spec = describe "Agent.Tools.HaskellProgram" do
                         , "description" Aeson..=
                             ("filter a nested tool result" :: Text)
                         ]))
+                hiddenDirectCall =
+                    functionToolCall "hidden-direct" "echo" "{}"
                 backend = Backend \previous inputs _onEvent -> do
                     modifyIORef' submissions (<> [(previous, inputs)])
                     turn <- atomicModifyIORef' turns \n -> (n + 1, n)
                     pure $ Right $ case turn of
-                        0 -> emptyTurnOutput "response-1" [outerCall] Nothing
+                        0 -> emptyTurnOutput
+                            "response-1" [hiddenDirectCall, outerCall] Nothing
                         _ -> emptyTurnOutput "response-2" [] (Just "done")
                 echoTool = jsonAppTool
                     "echo"
@@ -329,7 +332,11 @@ spec = describe "Agent.Tools.HaskellProgram" do
                     AlwaysReadOnly
                     (noArgsTool "echo"
                         (pure (Right "TOP_SECRET_INTERMEDIATE_RESULT")))
-                tools =
+                parentTools =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry
+                            [haskellProgramTool ghci planMode]
+                nestedTools =
                     either (error . Text.unpack) id $
                         mkToolRegistry
                             [ haskellProgramTool ghci planMode
@@ -338,11 +345,15 @@ spec = describe "Agent.Tools.HaskellProgram" do
             cancel <- newCancelFlag
             let config = LoopConfig
                     { loopBackend = backend
-                    , loopTools = tools
+                    , loopTools = parentTools
+                    , loopNestedTools = Just nestedTools
                     , loopDispatch = defaultLoopDispatch
                     , loopMaxTurns = 3
                     , loopOnEvent = \_ -> pure ()
                     , loopApprove = \call -> do
+                        modifyIORef' approvals (<> [call.name])
+                        pure (Right True)
+                    , loopNestedApprove = Just \call -> do
                         modifyIORef' approvals (<> [call.name])
                         pure (Right True)
                     , loopCancel = cancel
@@ -354,12 +365,18 @@ spec = describe "Agent.Tools.HaskellProgram" do
                 , tokenUsage = emptyTokenUsage
                 }
             readIORef approvals
-                `shouldReturn` [haskellProgramToolName, "echo"]
+                `shouldReturn` ["echo", haskellProgramToolName, "echo"]
             seen <- readIORef submissions
             case seen of
                 [ (_, [UserMessage "go"])
-                    , (Just "response-1", [CompletedTool outerResult])
+                    , ( Just "response-1"
+                      , [ CompletedTool directResult
+                        , CompletedTool outerResult
+                        ]
+                      )
                     ] -> do
+                        directResult.output
+                            `shouldBe` "Error: Unknown tool: echo"
                         outerResult.callId `shouldBe` "outer-call"
                         outerResult.output
                             `shouldSatisfy` Text.isInfixOf "selected output"
@@ -414,10 +431,12 @@ spec = describe "Agent.Tools.HaskellProgram" do
             let config = LoopConfig
                     { loopBackend = backend
                     , loopTools = tools
+                    , loopNestedTools = Nothing
                     , loopDispatch = defaultLoopDispatch
                     , loopMaxTurns = 3
                     , loopOnEvent = \_ -> pure ()
                     , loopApprove = \_ -> pure (Right True)
+                    , loopNestedApprove = Nothing
                     , loopCancel = cancel
                     }
             withAsync (runLoop config Nothing "go") \running -> do

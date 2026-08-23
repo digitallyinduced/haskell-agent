@@ -2,6 +2,7 @@
 module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
+    , withoutDirectShellTools
     , schemasFromAppTools
     , webSearchTool
     ) where
@@ -34,6 +35,23 @@ requireToolRegistry tools =
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name =
     find (\tool -> tool.appToolName == canonicalToolName name)
+
+-- | Hide parent-facing shell entry points while retaining the full list for
+-- nested programmatic dispatch. Background process controls are hidden with
+-- their launcher because they are otherwise unusable and provide an escape
+-- hatch back to direct terminal interaction.
+withoutDirectShellTools :: [AppTool] -> [AppTool]
+withoutDirectShellTools =
+    filter
+        (\tool ->
+            canonicalToolName tool.appToolName
+                `notElem`
+                    [ "shell_command"
+                    , "write_stdin"
+                    , "run_terminal_cmd"
+                    , "get_task_output"
+                    , "kill_task"
+                    ])
 
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.

@@ -63,6 +63,7 @@ data BenchmarkArm
     | DisabledHaskell
     | OptionalHaskell
     | ForcedHaskell
+    | HaskellOnly
     | ForcedShell
     deriving (Eq, Ord, Show)
 
@@ -72,6 +73,7 @@ armName = \case
     DisabledHaskell -> "disabled-haskell"
     OptionalHaskell -> "optional-haskell"
     ForcedHaskell -> "forced-haskell"
+    HaskellOnly -> "haskell-only"
     ForcedShell -> "forced-shell"
 
 parseArm :: String -> Either String BenchmarkArm
@@ -80,6 +82,7 @@ parseArm = \case
     "disabled-haskell" -> Right DisabledHaskell
     "optional-haskell" -> Right OptionalHaskell
     "forced-haskell" -> Right ForcedHaskell
+    "haskell-only" -> Right HaskellOnly
     "forced-shell" -> Right ForcedShell
     other -> Left ("unknown benchmark arm: " <> other)
 
@@ -167,7 +170,7 @@ benchmarkUsage = unlines
     , "  --effort LEVEL"
     , "  --repetitions N"
     , "  --output DIR"
-    , "  --arms direct,disabled-haskell,optional-haskell,forced-haskell,forced-shell"
+    , "  --arms direct,disabled-haskell,optional-haskell,forced-haskell,haskell-only,forced-shell"
     , "  --tasks privacy-canary,fanout-reduce,incident-triage,simple-control"
     ]
 
@@ -452,6 +455,7 @@ armFlags = \case
     DisabledHaskell -> ["--no-haskell-program"]
     OptionalHaskell -> []
     ForcedHaskell -> []
+    HaskellOnly -> ["--no-direct-shell"]
     ForcedShell -> ["--no-haskell-program"]
 
 promptForArm :: Maybe String -> BenchmarkArm -> BenchmarkTask -> Text
@@ -462,7 +466,7 @@ promptForArm benchmarkModel arm task =
             then "\n" <> task.taskForcedHaskellGuidance
             else "")
         <> "\n\n"
-        <> (if arm `elem` [OptionalHaskell, ForcedHaskell]
+        <> (if arm `elem` [OptionalHaskell, ForcedHaskell, HaskellOnly]
             && task.taskRequiresCallLlm
             then case benchmarkModel of
                 Just model ->
@@ -475,6 +479,14 @@ promptForArm benchmarkModel arm task =
         <> (if arm == ForcedShell
             then task.taskForcedShellPrompt
             else task.taskPrompt)
+        <> (if arm == HaskellOnly
+            then
+                "\n\nDirect shell tools are unavailable in this arm. Use \
+                \run_haskell_program for the pipeline. If an invocation fails \
+                \to compile or run, inspect its error and retry with a corrected \
+                \complete program until it succeeds; never switch to parent-level \
+                \data-access tools."
+            else "")
 
 armInstruction :: BenchmarkArm -> Text
 armInstruction = \case
@@ -489,6 +501,10 @@ armInstruction = \case
         \Inside it, use callTool with the advertised provider tools, compute the \
         \answer in Haskell, and emit only the BENCH_RESULT line. Do not make \
         \data-access tool calls directly."
+    HaskellOnly ->
+        "Use run_haskell_program for all data access and aggregation. Parent-level \
+        \shell tools are disabled. Repair and retry the Haskell program after \
+        \compiler or runtime errors instead of changing execution strategies."
     ForcedShell ->
         "Use exactly one shell_command or run_terminal_cmd and perform all \
         \filtering and aggregation inside that shell command. Haskell \
@@ -512,6 +528,13 @@ armAdhered arm task calls events = case arm of
             && all (`notElem` directDataTools) calls
             && noForbiddenTopLevelTools
             && nestedShellCommands == expectedNestedCommands
+            && (not task.taskRequiresCallLlm || any eventUsesCallLlm events)
+    HaskellOnly ->
+        not (null (filter (== "run_haskell_program") calls))
+            && all (`notElem` directDataTools) calls
+            && noForbiddenTopLevelTools
+            && Set.fromList nestedShellCommands
+                == Set.fromList expectedNestedCommands
             && (not task.taskRequiresCallLlm || any eventUsesCallLlm events)
     ForcedShell ->
         "run_haskell_program" `notElem` calls
@@ -989,7 +1012,7 @@ benchmarkTasks fixtureRoot = do
 incidentTriagePrompt :: Text
 incidentTriagePrompt = Text.unlines
     [ "Triage eight production incident reports according to the rubric below."
-    , "Execution rule: if `run_haskell_program` is available, use exactly one invocation, read the reports through eight nested `callTool` calls, classify them through eight nested `callLLM` calls, and aggregate inside Haskell. If it is unavailable, use direct shell tools and classify in the parent agent."
+    , "Execution rule: if `run_haskell_program` is available, use it to read the reports through eight nested `callTool` calls, classify them through eight nested `callLLM` calls, and aggregate inside Haskell. Prefer one successful invocation, but if a program fails to compile or run, repair the complete program and retry instead of switching to direct tools. If run_haskell_program is unavailable, use direct shell tools and classify in the parent agent."
     , "Read every report with its own exact shell-tool command:"
     , "`cat .bench/incident-241.txt` through `cat .bench/incident-248.txt`."
     , "For every shell call, set `workdir` to exactly `.` and do not set `yield_time_ms`."

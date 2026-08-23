@@ -160,7 +160,7 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Prompt
     ( defaultModelFor
-    , systemPromptWithHaskellProgram
+    , systemPromptWithToolAccess
     )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
@@ -248,7 +248,11 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( requireToolRegistry
+    , schemasFromAppTools
+    , withoutDirectShellTools
+    )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
@@ -1445,6 +1449,10 @@ runAgentInitializedWithLock
                 sessionProcessStatus sessionProcessManager
             }
         tools = coding.codingAppTools ++ agentSessionTools sessionToolsEnv
+        parentTools
+            | options.optNoDirectShell =
+                withoutDirectShellTools tools
+            | otherwise = tools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1463,14 +1471,15 @@ runAgentInitializedWithLock
             coding.codingClose
     flip finally closeAll do
         today <- utctDay <$> getCurrentTime
-        let instructions = systemPromptWithHaskellProgram
+        let instructions = systemPromptWithToolAccess
                 options.optHaskellProgram
+                (not options.optNoDirectShell)
                 provider
                 cwd
                 today
                 (isOneShot options)
             params = requestParams model instructions
-                (schemasFromAppTools provider tools) effort
+                (schemasFromAppTools provider parentTools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
@@ -2219,7 +2228,15 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                                           (Just resultTitle))
                       _ -> pure ()
   withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
-    toolRegistry <- requireToolRegistry tools
+    let parentTools
+            | options.optNoDirectShell =
+                withoutDirectShellTools tools
+            | otherwise = tools
+    toolRegistry <- requireToolRegistry parentTools
+    nestedToolRegistry <-
+        if options.optNoDirectShell
+            then Just <$> requireToolRegistry tools
+            else pure Nothing
     printed <- newIORef False
     attachmentsRef <- newIORef []
     previewIdRef <- newIORef (1 :: Int)
@@ -2479,35 +2496,38 @@ runSession options provider policy tools toolEnv planMode startup prompt pending
                 options.optToolEventLog
                 (length requests)
             programResponseCaller requests
+        approveWith registry call =
+            withMVar ioLock \_ ->
+                case fullscreen of
+                    Nothing ->
+                        withStdinPaused escPaused $
+                            approveToolDecision
+                                policyRef allowedToolsRef registry planMode call
+                    Just runtime ->
+                        approveToolDecisionWithReporter
+                            (requestFullscreenPermission runtime)
+                            (\case
+                                ApprovalWarning _ -> pure ()
+                                ApprovalSuccess message ->
+                                    emitUiEvent runtime
+                                        (UiSetNotice
+                                            (Just
+                                                (successNotice message))))
+                            policyRef
+                            allowedToolsRef
+                            registry
+                            planMode
+                            call
         config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
+            , loopNestedTools = nestedToolRegistry
             , loopDispatch = defaultLoopDispatch
                 { toolDispatchCallResponses = Just loggedProgramResponseCaller }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
-            , loopApprove = \call ->
-                withMVar ioLock \_ ->
-                    case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode call
-                        Just runtime ->
-                            approveToolDecisionWithReporter
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+            , loopApprove = approveWith toolRegistry
+            , loopNestedApprove = approveWith <$> nestedToolRegistry
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do

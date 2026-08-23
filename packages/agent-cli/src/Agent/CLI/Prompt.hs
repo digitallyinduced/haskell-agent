@@ -3,6 +3,7 @@ module Agent.CLI.Prompt
     ( defaultModelFor
     , systemPrompt
     , systemPromptWithHaskellProgram
+    , systemPromptWithToolAccess
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
@@ -35,21 +36,33 @@ systemPromptWithHaskellProgram
     -> Bool
     -> Text
 systemPromptWithHaskellProgram
-        haskellProgramEnabled provider cwd today isNonInteractive =
+        haskellProgramEnabled =
+    systemPromptWithToolAccess haskellProgramEnabled True
+
+systemPromptWithToolAccess
+    :: Bool
+    -> Bool
+    -> Provider
+    -> OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptWithToolAccess
+        haskellProgramEnabled directShellEnabled provider cwd today isNonInteractive =
     base
         <> "\n\n"
-        <> ghciGuidance haskellProgramEnabled
+        <> ghciGuidance haskellProgramEnabled directShellEnabled
         <> "\n"
         <> timeContextGuidance
   where
     base = case provider of
         XAIProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
         OpenRouterProvider -> grokSystemPrompt codingGrokPromptTools cwd today isNonInteractive
-        OpenAIProvider -> codexSystemPrompt cwd today
+        OpenAIProvider -> codexSystemPrompt directShellEnabled cwd today
 
 -- | Prefer GHCI as the general-purpose scripting environment.
-ghciGuidance :: Bool -> Text
-ghciGuidance haskellProgramEnabled =
+ghciGuidance :: Bool -> Bool -> Text
+ghciGuidance haskellProgramEnabled directShellEnabled =
     Text.unlines
         ( [ "Prefer ghci for scripting."
           , "When you need a short program, calculation, or one-off script, use the run_ghci tool rather than Python, Node, bash, or compiling a binary."
@@ -57,27 +70,43 @@ ghciGuidance haskellProgramEnabled =
           ]
             <> (if haskellProgramEnabled
                 then
-                    [ "For multi-tool orchestration or filtering large intermediate results, use run_haskell_program. Its callTool helper accepts the current provider's advertised tools and schemas, returns their formatted Text results, and routes nested calls through normal approvals while only the Haskell program's selected output returns to the model."
+                    [ "For multi-tool orchestration or filtering large intermediate results, use run_haskell_program. Its callTool helper accepts registered nested tools, returns their formatted Text results, and routes nested calls through normal approvals while only the Haskell program's selected output returns to the model."
                     , "For independent nested calls, run_haskell_program preimports Concurrently(..) and runConcurrently. Applicative Concurrently callTool actions overlap only when their registered tools are parallel-safe; stateful tools remain serialized."
                     , "run_haskell_program uses a fresh dedicated GHCi process for each call and is not OS-sandboxed, so the outer program always requires approval."
                     ]
                 else [])
+            <> (if directShellEnabled
+                then
+                    [ "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
+                    ]
+                else
+                    [ "Direct shell tools are unavailable to the parent agent. Use callTool from run_haskell_program for OS commands and file reads."
+                    , "If a Haskell program fails to compile or run, inspect the returned error, repair the complete program, and call run_haskell_program again. Do not fall back to a direct shell tool."
+                    ])
             <> [ "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
                , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
-               , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
                , "Drive GHCi with complete expressions; do not expect interactive human input."
                ]
         )
 
-codexSystemPrompt :: OsPath -> Day -> Text
-codexSystemPrompt cwd today =
+codexSystemPrompt :: Bool -> OsPath -> Day -> Text
+codexSystemPrompt directShellEnabled cwd today =
     Text.unlines
         [ "You are a coding agent working in " <> toText cwd <> "."
         , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
         , ""
         , "Use these tools:"
-        , "- Inspect the repo with shell_command (rg, cat, ls). Always set workdir."
-        , "- Edit files with apply_patch. Never call applypatch or apply-patch."
+        ]
+        <> Text.unlines
+            (if directShellEnabled
+                then
+                    [ "- Inspect the repo with shell_command (rg, cat, ls). Always set workdir."
+                    ]
+                else
+                    [ "- Inspect files and run OS commands through `callTool \"shell_command\"` inside run_haskell_program. Pass an object with `command` and `workdir`; optional fields are `timeout_ms` or `yield_time_ms`."
+                    ])
+        <> Text.unlines
+        [ "- Edit files with apply_patch. Never call applypatch or apply-patch."
         , "- Track multi-step work with update_plan (progress checklist; unavailable in Plan Mode)."
         , "- Evaluate Haskell with run_ghci (persistent GHCi; pure expressions auto-approve)."
         , "- Look up current public information with web_search."

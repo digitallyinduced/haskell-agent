@@ -15,7 +15,7 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
@@ -33,6 +33,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "can hide direct shell tools without removing other tools" do
+        let tool name = jsonAppTool name "" [] AlwaysReadOnly
+                (noArgsTool name (pure (Right "ok")))
+            names = map (.appToolName) $ withoutDirectShellTools
+                [ tool "shell_command"
+                , tool "write_stdin"
+                , tool "run_terminal_cmd"
+                , tool "get_task_output"
+                , tool "kill_task"
+                , tool "run_haskell_program"
+                , tool "apply_patch"
+                ]
+        names `shouldBe` ["run_haskell_program", "apply_patch"]
+
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools OpenAIProvider [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do

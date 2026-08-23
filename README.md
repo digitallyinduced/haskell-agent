@@ -233,10 +233,14 @@ requests.
 
 The GHCi process is not OS-sandboxed, so every outer program requires approval
 and the tool is unavailable in Plan Mode. Use `--no-haskell-program` to disable
-it, including for subagents.
+it, including for subagents. Use `--no-direct-shell` to hide the parent
+`shell_command` / `run_terminal_cmd` surface while retaining shell access
+through nested `callTool` calls. In that mode the agent is instructed to repair
+and retry failed Haskell programs rather than falling back to a direct shell.
 
 `agent-benchmark` compares direct tools, optional or forced Haskell
-orchestration, and a forced-shell control against generated real-model tasks.
+orchestration, a retry-capable `haskell-only` arm, and a forced-shell control
+against generated real-model tasks.
 
 ## Development
 

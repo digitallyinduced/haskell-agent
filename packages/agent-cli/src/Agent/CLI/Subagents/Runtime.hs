@@ -24,7 +24,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( defaultModelFor
-    , systemPromptWithHaskellProgram
+    , systemPromptWithToolAccess
     )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.SubagentStore
@@ -33,7 +33,11 @@ import Agent.CLI.SubagentStore
     , loadSubagentState
     , saveSubagentState
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( requireToolRegistry
+    , schemasFromAppTools
+    , withoutDirectShellTools
+    )
 import Agent.InterAgentMessage
     ( InterAgentMessage
     , interAgentMessagePayload
@@ -365,8 +369,9 @@ runCodexSubagent runtime tokenProvider recordUsage sendToRoot =
                         childEffort
                 baseInstructions =
                     fromMaybe
-                        (systemPromptWithHaskellProgram
+                        (systemPromptWithToolAccess
                             runtime.subagentOptions.optHaskellProgram
+                            (not runtime.subagentOptions.optNoDirectShell)
                             OpenAIProvider
                             env.subCwd
                             today
@@ -379,9 +384,17 @@ runCodexSubagent runtime tokenProvider recordUsage sendToRoot =
                         <> env.subId.unSubagentId
                         <> "."
                 tools = coding.codingAppTools
+                parentTools
+                    | runtime.subagentOptions.optNoDirectShell =
+                        withoutDirectShellTools tools
+                    | otherwise = tools
                 childParams = requestParams model instructions
-                    (schemasFromAppTools OpenAIProvider tools) effort
-            toolRegistry <- requireToolRegistry tools
+                    (schemasFromAppTools OpenAIProvider parentTools) effort
+            toolRegistry <- requireToolRegistry parentTools
+            nestedToolRegistry <-
+                if runtime.subagentOptions.optNoDirectShell
+                    then Just <$> requireToolRegistry tools
+                    else pure Nothing
             childParamsRef <- newIORef childParams
             httpFallbackActive <- newIORef False
             let websocketBackend =
@@ -418,6 +431,7 @@ runCodexSubagent runtime tokenProvider recordUsage sendToRoot =
                                 request { store = Just False })
             runPreparedChild
                 runtime env prepared.preparedSession toolRegistry
+                nestedToolRegistry
                 programResponseCaller backend onEvent
                 (\config ->
                     runLoopInputs config previous [AgentMessage prompt])
@@ -454,8 +468,9 @@ runHttpSubagent runtime provider mkBackend rawResponseCaller recordUsage =
                         prepared.preparedParentParams
                         childModel
                         childEffort
-                baseInstructions = systemPromptWithHaskellProgram
+                baseInstructions = systemPromptWithToolAccess
                     runtime.subagentOptions.optHaskellProgram
+                    (not runtime.subagentOptions.optNoDirectShell)
                     provider
                     env.subCwd
                     today
@@ -465,9 +480,17 @@ runHttpSubagent runtime provider mkBackend rawResponseCaller recordUsage =
                         <> "\n\n"
                         <> grokSubagentSuffix agentType env.subId
                 tools = filterChildGrokTools agentType coding.codingAppTools
+                parentTools
+                    | runtime.subagentOptions.optNoDirectShell =
+                        withoutDirectShellTools tools
+                    | otherwise = tools
                 childParams = requestParams model instructions
-                    (schemasFromAppTools provider tools) effort
-            toolRegistry <- requireToolRegistry tools
+                    (schemasFromAppTools provider parentTools) effort
+            toolRegistry <- requireToolRegistry parentTools
+            nestedToolRegistry <-
+                if runtime.subagentOptions.optNoDirectShell
+                    then Just <$> requireToolRegistry tools
+                    else pure Nothing
             childParamsRef <- newIORef childParams
             let backend =
                     withConnectionRecovery $
@@ -481,6 +504,7 @@ runHttpSubagent runtime provider mkBackend rawResponseCaller recordUsage =
                         rawResponseCaller
             runPreparedChild
                 runtime env prepared.preparedSession toolRegistry
+                nestedToolRegistry
                 programResponseCaller backend onEvent
                 (\config ->
                     runLoop config previous (interAgentMessagePayload prompt))
@@ -550,16 +574,19 @@ runPreparedChild
     -> SubagentSpawnEnv
     -> SubagentSession
     -> ToolRegistry
+    -> Maybe ToolRegistry
     -> ([ResponseCreateParams] -> IO [Either Text Response])
     -> Backend
     -> (LoopEvent -> IO ())
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
-runPreparedChild runtime env session toolRegistry programResponseCaller
+runPreparedChild runtime env session toolRegistry nestedToolRegistry
+        programResponseCaller
         backend onEvent runChild = do
     let config = LoopConfig
             { loopBackend = backend
             , loopTools = toolRegistry
+            , loopNestedTools = nestedToolRegistry
             , loopDispatch = defaultLoopDispatch
                 { toolDispatchCallResponses = Just programResponseCaller }
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
@@ -567,6 +594,10 @@ runPreparedChild runtime env session toolRegistry programResponseCaller
             , loopApprove =
                 \call ->
                     childApprove runtime.subagentPolicy toolRegistry call
+            , loopNestedApprove =
+                (\registry call ->
+                    childApprove runtime.subagentPolicy registry call)
+                    <$> nestedToolRegistry
             , loopCancel = env.subCancel
             }
     result <- runChild config
