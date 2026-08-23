@@ -33,6 +33,36 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
 
+    it "selects and expands a clicked reasoning block in one action" do
+        let before =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "one\ntwo\nthree\nfour")
+                    ]
+        case Foldable.find
+            ((== BlockThinking) . (.blockKind))
+            before.uiBlocks of
+            Nothing -> expectationFailure "expected a reasoning block"
+            Just reasoning -> do
+                let expanded =
+                        reduceUi (UiActivateBlock reasoning.blockId) before
+                    collapsed =
+                        reduceUi
+                            (UiActivateBlock reasoning.blockId)
+                            expanded
+                    selectedBlock :: UiState -> Maybe UiBlock
+                    selectedBlock state =
+                        Foldable.find
+                            ((== reasoning.blockId) . (.blockId))
+                            state.uiBlocks
+                fmap (.blockExpanded) (selectedBlock before)
+                    `shouldBe` Just False
+                expanded.uiSelectedBlock `shouldBe` Just reasoning.blockId
+                fmap (.blockExpanded) (selectedBlock expanded)
+                    `shouldBe` Just True
+                fmap (.blockExpanded) (selectedBlock collapsed)
+                    `shouldBe` Just False
+
     it "retains a draft composed while a turn is running" do
         let state =
                 apply

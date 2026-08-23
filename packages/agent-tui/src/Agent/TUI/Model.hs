@@ -186,6 +186,7 @@ data UiEvent
     | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
+    | UiActivateBlock !BlockId
     | UiToggleSelected
     | UiFocusChanged !Focus
     | UiPermissionShown !Text
@@ -322,6 +323,8 @@ reduceUi event state = case event of
         moveSelection delta state
     UiSelectBlock ident ->
         selectBlock ident state
+    UiActivateBlock ident ->
+        toggleSelected (selectBlock ident state)
     UiToggleSelected ->
         toggleSelected state
     UiFocusChanged focus ->

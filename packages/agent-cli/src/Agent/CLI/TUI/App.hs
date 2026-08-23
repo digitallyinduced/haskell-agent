@@ -3942,7 +3942,7 @@ handleMouseDown name button =
         V.BLeft -> case name of
             ConversationBlock ident ->
                 applyLocalUiEventWith
-                    (UiSelectBlock ident)
+                    (UiActivateBlock ident)
                     (applyUiEvent (UiFocusChanged FocusScrollback))
             ComposerArea ->
                 applyLocalUiEvent (UiFocusChanged FocusComposer)
