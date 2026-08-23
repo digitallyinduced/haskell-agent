@@ -5,12 +5,6 @@ import Agent.Responses.Types
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request
 import Agent.OpenRouter.Stream
-import Agent.Responses.SSE
-    ( feedSseDecoder
-    , finishSseDecoder
-    , newSseDecoder
-    , parseSseEvents
-    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap

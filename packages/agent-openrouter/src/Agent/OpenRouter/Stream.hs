@@ -1,9 +1,21 @@
 -- | Typed decoding and terminal-response assembly for OpenRouter Responses SSE.
 module Agent.OpenRouter.Stream
-    ( buildResponse
+    ( SseDecoder
+    , newSseDecoder
+    , feedSseDecoder
+    , finishSseDecoder
+    , parseSseEvents
+    , buildResponse
     ) where
 
 import Agent.Error (ApiError(..))
+import Agent.Responses.SSE
+    ( SseDecoder
+    , feedSseDecoder
+    , finishSseDecoder
+    , newSseDecoder
+    , parseSseEvents
+    )
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , buildStreamResponse

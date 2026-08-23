@@ -3,7 +3,6 @@ module Agent.OpenRouter.ErrorSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenRouter.Error
 import Agent.OpenRouter.Stream
-import Agent.Responses.SSE (parseSseEvents)
 import Data.Text (Text)
 import Test.Hspec
 

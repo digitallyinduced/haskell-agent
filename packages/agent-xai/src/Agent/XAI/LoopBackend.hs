@@ -7,11 +7,15 @@
 -- seed history and the CLI can persist it.
 module Agent.XAI.LoopBackend
     ( xaiBackend
+    , xaiBackendWith
     ) where
 
+import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
-    ( tokenProviderStatelessResponsesBackend )
+    ( statelessResponsesBackend
+    , tokenProviderStatelessResponsesBackend
+    )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.XAI.Client (createResponseWithEvents)
@@ -32,3 +36,14 @@ xaiBackend
 xaiBackend options provider =
     tokenProviderStatelessResponsesBackend provider
         (createResponseWithEvents options)
+
+-- | Same mapping as 'xaiBackend', with an injectable transport for tests and
+-- downstream integrations.
+xaiBackendWith
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Backend
+xaiBackendWith = statelessResponsesBackend
