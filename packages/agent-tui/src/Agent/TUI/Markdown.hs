@@ -45,6 +45,8 @@ data InlineStyle
     | InlineEmphasis
     | InlineCode
     | InlineLink !Text
+    | InlineStrongLink !Text
+    | InlineEmphasisLink !Text
     deriving (Eq, Show)
 
 data InlineSpan = InlineSpan
@@ -609,12 +611,12 @@ parseInline = go Nothing []
     go previous plain text
         | Just (body, rest) <- delimited "**" text =
             flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
+                strongSpans body
+                    <> go (lastChar body) [] rest
         | Just (body, rest) <- delimited "__" text =
             flushPlain plain $
-                InlineSpan InlineStrong body
-                    : go (lastChar body) [] rest
+                strongSpans body
+                    <> go (lastChar body) [] rest
         | Just (body, rest) <- codeSpan text =
             flushPlain plain $
                 InlineSpan InlineCode body
@@ -629,12 +631,12 @@ parseInline = go Nothing []
                     : go (lastChar label) [] rest
         | Just (body, rest) <- emphasis previous '*' text =
             flushPlain plain $
-                InlineSpan InlineEmphasis body
-                    : go (lastChar body) [] rest
+                emphasisSpans body
+                    <> go (lastChar body) [] rest
         | Just (body, rest) <- emphasis previous '_' text =
             flushPlain plain $
-                InlineSpan InlineEmphasis body
-                    : go (lastChar body) [] rest
+                emphasisSpans body
+                    <> go (lastChar body) [] rest
         | otherwise =
             case Text.uncons text of
                 Nothing -> flushPlain plain []
@@ -700,6 +702,28 @@ parseInline = go Nothing []
     inlineMarker character =
         character `elem` ("*_`[" :: String)
 
+    strongSpans = nestedLinkSpans InlineStrong InlineStrongLink
+
+    emphasisSpans = nestedLinkSpans InlineEmphasis InlineEmphasisLink
+
+    nestedLinkSpans plainStyle linkStyle body =
+        let spans = parseInline body
+        in if any isLinkSpan spans
+            then map (applyNestedStyle plainStyle linkStyle) spans
+            else [InlineSpan plainStyle body]
+
+    isLinkSpan InlineSpan{inlineStyle = InlineLink _} = True
+    isLinkSpan _ = False
+
+    applyNestedStyle plainStyle linkStyle span_ =
+        span_
+            { inlineStyle =
+                case span_.inlineStyle of
+                    InlinePlain -> plainStyle
+                    InlineLink url -> linkStyle url
+                    other -> other
+            }
+
     flushPlain [] rest = rest
     flushPlain chunks rest =
         InlineSpan InlinePlain (Text.concat (reverse chunks))
@@ -730,14 +754,22 @@ resolveInlineSpan
     -> InlineSpan
     -> B.RenderM n (V.Attr, Text)
 resolveInlineSpan plainAttr InlineSpan{inlineStyle, inlineText} = do
-    attr <-
+    baseAttr <-
         B.lookupAttrName $
             case inlineStyle of
                 InlinePlain -> plainAttr
                 _ -> styleAttr inlineStyle
+    let attr = case inlineStyle of
+            InlineStrongLink _ -> baseAttr `V.withStyle` V.bold
+            InlineEmphasisLink _ -> baseAttr `V.withStyle` V.italic
+            _ -> baseAttr
     pure
         ( case inlineStyle of
             InlineLink url
+                | not (Text.null url) -> attr `V.withURL` url
+            InlineStrongLink url
+                | not (Text.null url) -> attr `V.withURL` url
+            InlineEmphasisLink url
                 | not (Text.null url) -> attr `V.withURL` url
             _ -> attr
         , inlineText
@@ -750,6 +782,8 @@ styleAttr = \case
     InlineEmphasis -> Theme.emphasisAttr
     InlineCode -> Theme.inlineCodeAttr
     InlineLink _ -> Theme.linkAttr
+    InlineStrongLink _ -> Theme.linkAttr
+    InlineEmphasisLink _ -> Theme.linkAttr
 
 wrapStyled :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
 wrapStyled width spans =

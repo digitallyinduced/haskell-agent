@@ -49,6 +49,31 @@ spec = describe "fullscreen Markdown rendering" do
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
 
+    it "parses links nested inside strong and emphasis spans" do
+        parseInline
+            "**[PR #316](https://example.com/316)** and *[docs](https://example.com)*"
+            `shouldBe`
+                [ InlineSpan
+                    (InlineStrongLink "https://example.com/316")
+                    "PR #316 (https://example.com/316)"
+                , InlineSpan InlinePlain " and "
+                , InlineSpan
+                    (InlineEmphasisLink "https://example.com")
+                    "docs (https://example.com)"
+                ]
+
+    it "renders a strong link with hyperlink metadata and bold styling" do
+        let widget :: Widget ()
+            widget =
+                markdownWidget
+                    "Merged **[PR #316](https://example.com/316)**."
+            spans = concat (renderSpanRows 80
+                "Merged **[PR #316](https://example.com/316)**.")
+            rendered = show (renderWidget Nothing [widget] (80, 3))
+        spans `shouldSatisfy`
+            any (hasUrlWithStyle "https://example.com/316" V.bold)
+        rendered `shouldSatisfy` (not . isInfixOf "[PR #316]")
+
     it "supports multi-backtick code and avoids snake_case emphasis" do
         let spans = parseInline "``a ` b`` and snake_case"
         inlinePlainText spans `shouldBe` "a ` b and snake_case"
@@ -495,6 +520,14 @@ hasUrl :: Text.Text -> SpanOp -> Bool
 hasUrl url = \case
     TextSpan{textSpanAttr} ->
         V.attrURL textSpanAttr == V.SetTo url
+    Skip _ -> False
+    RowEnd _ -> False
+
+hasUrlWithStyle :: Text.Text -> V.Style -> SpanOp -> Bool
+hasUrlWithStyle url style = \case
+    TextSpan{textSpanAttr} ->
+        V.attrURL textSpanAttr == V.SetTo url
+            && V.attrStyle textSpanAttr == V.SetTo style
     Skip _ -> False
     RowEnd _ -> False
 
