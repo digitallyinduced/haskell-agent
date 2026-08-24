@@ -26,16 +26,6 @@ import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Transaction
 
 import Agent.Store.Postgres.Hasql (mkStatement)
-import Agent.Store.Postgres.Codec
-    ( boolColumn
-    , boolParam
-    , int32Param
-    , nullableTextColumn
-    , nullableTextParam
-    , textColumn
-    , textParam
-    , textSingleResult
-    )
 import Agent.Store.SessionItem
 
 sessionItemSchemaStatements :: [ByteString.ByteString]
@@ -839,13 +829,13 @@ insertBaseStatement = mkStatement
     \ (turn_id, item_index, storage_kind, item_type, representation)\
     \ VALUES ($1::uuid, $2, $3, $4, $5)\
     \ RETURNING response_item_id::text"
-    ( fieldParam (.baseTurnId) textParam
-        <> fieldParam (.baseIndex) int32Param
-        <> fieldParam (.baseStorageKind) textParam
-        <> fieldParam (.baseItemType) textParam
-        <> fieldParam (.baseRepresentation) textParam
+    ( fieldParam (.baseTurnId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.baseIndex) (Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> fieldParam (.baseStorageKind) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.baseItemType) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.baseRepresentation) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
-    textSingleResult
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 insertMessageStatement :: Statement MessageParams ()
@@ -854,14 +844,14 @@ insertMessageStatement = mkStatement
     \ (response_item_id, provider_item_id, role_name, status_name, phase,\
     \ content_kind, content_text, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)"
-    ( fieldParam (.messageResponseItemId) textParam
-        <> fieldParam (.messageProviderItemId) nullableTextParam
-        <> fieldParam (.messageRole) textParam
-        <> fieldParam (.messageStatus) nullableTextParam
-        <> fieldParam (.messagePhase) nullableTextParam
-        <> fieldParam (.messageContentKind) textParam
-        <> fieldParam (.messageContentText) nullableTextParam
-        <> fieldParam (.messageExtraFields) textParam
+    ( fieldParam (.messageResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.messageProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.messageRole) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.messageStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.messagePhase) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.messageContentKind) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.messageContentText) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.messageExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -872,13 +862,13 @@ insertFunctionCallStatement = mkStatement
     \ (response_item_id, provider_item_id, call_id, function_name,\
     \ arguments, status_name, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    ( fieldParam (.functionCallResponseItemId) textParam
-        <> fieldParam (.functionCallProviderItemId) nullableTextParam
-        <> fieldParam (.functionCallCallId) textParam
-        <> fieldParam (.functionCallName) textParam
-        <> fieldParam (.functionCallArguments) textParam
-        <> fieldParam (.functionCallStatus) nullableTextParam
-        <> fieldParam (.functionCallExtraFields) textParam
+    ( fieldParam (.functionCallResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionCallProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.functionCallCallId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionCallName) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionCallArguments) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionCallStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.functionCallExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -889,13 +879,13 @@ insertFunctionOutputStatement = mkStatement
     \ (response_item_id, provider_item_id, call_id, output_kind, output_text,\
     \ status_name, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    ( fieldParam (.functionOutputResponseItemId) textParam
-        <> fieldParam (.functionOutputProviderItemId) nullableTextParam
-        <> fieldParam (.functionOutputCallId) textParam
-        <> fieldParam (.functionOutputKind) textParam
-        <> fieldParam (.functionOutputText) textParam
-        <> fieldParam (.functionOutputStatus) nullableTextParam
-        <> fieldParam (.functionOutputExtraFields) textParam
+    ( fieldParam (.functionOutputResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionOutputProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.functionOutputCallId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionOutputKind) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionOutputText) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.functionOutputStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.functionOutputExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -906,13 +896,13 @@ insertCustomCallStatement = mkStatement
     \ (response_item_id, provider_item_id, call_id, tool_name, input_text,\
     \ status_name, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    ( fieldParam (.customCallResponseItemId) textParam
-        <> fieldParam (.customCallProviderItemId) nullableTextParam
-        <> fieldParam (.customCallCallId) textParam
-        <> fieldParam (.customCallName) textParam
-        <> fieldParam (.customCallInput) textParam
-        <> fieldParam (.customCallStatus) nullableTextParam
-        <> fieldParam (.customCallExtraFields) textParam
+    ( fieldParam (.customCallResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customCallProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.customCallCallId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customCallName) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customCallInput) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customCallStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.customCallExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -923,14 +913,14 @@ insertCustomOutputStatement = mkStatement
     \ (response_item_id, provider_item_id, call_id, tool_name, output_kind,\
     \ output_text, status_name, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)"
-    ( fieldParam (.customOutputResponseItemId) textParam
-        <> fieldParam (.customOutputProviderItemId) nullableTextParam
-        <> fieldParam (.customOutputCallId) textParam
-        <> fieldParam (.customOutputName) nullableTextParam
-        <> fieldParam (.customOutputKind) textParam
-        <> fieldParam (.customOutputText) textParam
-        <> fieldParam (.customOutputStatus) nullableTextParam
-        <> fieldParam (.customOutputExtraFields) textParam
+    ( fieldParam (.customOutputResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customOutputProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.customOutputCallId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customOutputName) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.customOutputKind) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customOutputText) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.customOutputStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.customOutputExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -941,12 +931,12 @@ insertReasoningStatement = mkStatement
     \ (response_item_id, provider_item_id, has_content, encrypted_content,\
     \ status_name, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
-    ( fieldParam (.reasoningResponseItemId) textParam
-        <> fieldParam (.reasoningProviderItemId) nullableTextParam
-        <> fieldParam (.reasoningHasContent) boolParam
-        <> fieldParam (.reasoningEncryptedContent) nullableTextParam
-        <> fieldParam (.reasoningStatus) nullableTextParam
-        <> fieldParam (.reasoningExtraFields) textParam
+    ( fieldParam (.reasoningResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.reasoningProviderItemId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.reasoningHasContent) (Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> fieldParam (.reasoningEncryptedContent) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.reasoningStatus) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.reasoningExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -957,11 +947,11 @@ insertSummaryStatement = mkStatement
     \ (response_item_id, part_index, part_type, text_value,\
     \ extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5)"
-    ( fieldParam (.summaryResponseItemId) textParam
-        <> fieldParam (.summaryIndex) int32Param
-        <> fieldParam (.summaryType) textParam
-        <> fieldParam (.summaryText) nullableTextParam
-        <> fieldParam (.summaryExtraFields) textParam
+    ( fieldParam (.summaryResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.summaryIndex) (Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> fieldParam (.summaryType) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.summaryText) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.summaryExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -971,9 +961,9 @@ insertReferenceStatement = mkStatement
     "INSERT INTO harness.session_item_references\
     \ (response_item_id, provider_item_id, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3)"
-    ( fieldParam (.referenceResponseItemId) textParam
-        <> fieldParam (.referenceProviderItemId) textParam
-        <> fieldParam (.referenceExtraFields) textParam
+    ( fieldParam (.referenceResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.referenceProviderItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.referenceExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -983,9 +973,9 @@ insertTaggedStatement = mkStatement
     "INSERT INTO harness.session_tagged_items\
     \ (response_item_id, wire_tag, fields_text)\
     \ VALUES ($1::uuid, $2, $3)"
-    ( fieldParam (.taggedResponseItemId) textParam
-        <> fieldParam (.taggedWireTag) textParam
-        <> fieldParam (.taggedFields) textParam
+    ( fieldParam (.taggedResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.taggedWireTag) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.taggedFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -999,22 +989,22 @@ insertContentPartStatement = mkStatement
     \ logprobs_text, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,\
     \ $12, $13, $14, $15, $16)"
-    ( fieldParam (.contentPartResponseItemId) textParam
-        <> fieldParam (.contentPartIndex) int32Param
-        <> fieldParam (.contentPartType) textParam
-        <> fieldParam (.contentPartText) nullableTextParam
-        <> fieldParam (.contentPartRefusal) nullableTextParam
-        <> fieldParam (.contentPartDetail) nullableTextParam
-        <> fieldParam (.contentPartFileData) nullableTextParam
-        <> fieldParam (.contentPartFileId) nullableTextParam
-        <> fieldParam (.contentPartFileUrl) nullableTextParam
-        <> fieldParam (.contentPartFilename) nullableTextParam
-        <> fieldParam (.contentPartImageUrl) nullableTextParam
-        <> fieldParam (.contentPartInputAudio) nullableTextParam
-        <> fieldParam (.contentPartPromptCacheBreakpoint) nullableTextParam
-        <> fieldParam (.contentPartAnnotations) nullableTextParam
-        <> fieldParam (.contentPartLogprobs) nullableTextParam
-        <> fieldParam (.contentPartExtraFields) textParam
+    ( fieldParam (.contentPartResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.contentPartIndex) (Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> fieldParam (.contentPartType) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> fieldParam (.contentPartText) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartRefusal) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartDetail) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFileData) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFileId) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFileUrl) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFilename) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartImageUrl) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartInputAudio) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartPromptCacheBreakpoint) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartAnnotations) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartLogprobs) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartExtraFields) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -1025,13 +1015,13 @@ loadBaseRowsStatement = mkStatement
     \ FROM harness.session_response_items\
     \ WHERE turn_id = $1::uuid\
     \ ORDER BY item_index"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         BaseRow
-            <$> textColumn
-            <*> textColumn
-            <*> textColumn
-            <*> textColumn)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadMessageStatement :: Statement Text (Maybe MessageRow)
@@ -1040,16 +1030,16 @@ loadMessageStatement = mkStatement
     \ content_text, extra_fields_text\
     \ FROM harness.session_messages\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         MessageRow
-            <$> nullableTextColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> textColumn)
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadFunctionCallStatement :: Statement Text (Maybe StoredFunctionCall)
@@ -1058,15 +1048,15 @@ loadFunctionCallStatement = mkStatement
     \ extra_fields_text\
     \ FROM harness.session_function_calls\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         StoredFunctionCall
-            <$> nullableTextColumn
-            <*> textColumn
-            <*> textColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> (StoredOpaqueObject <$> textColumn))
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 loadFunctionOutputStatement :: Statement Text (Maybe FunctionOutputRow)
@@ -1075,15 +1065,15 @@ loadFunctionOutputStatement = mkStatement
     \ extra_fields_text\
     \ FROM harness.session_function_call_outputs\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         FunctionOutputRow
-            <$> nullableTextColumn
-            <*> textColumn
-            <*> textColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> textColumn)
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadCustomCallStatement :: Statement Text (Maybe StoredCustomToolCall)
@@ -1092,15 +1082,15 @@ loadCustomCallStatement = mkStatement
     \ extra_fields_text\
     \ FROM harness.session_custom_tool_calls\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         StoredCustomToolCall
-            <$> nullableTextColumn
-            <*> textColumn
-            <*> textColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> (StoredOpaqueObject <$> textColumn))
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 loadCustomOutputStatement :: Statement Text (Maybe CustomOutputRow)
@@ -1109,16 +1099,16 @@ loadCustomOutputStatement = mkStatement
     \ status_name, extra_fields_text\
     \ FROM harness.session_custom_tool_call_outputs\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         CustomOutputRow
-            <$> nullableTextColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> textColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> textColumn)
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadReasoningStatement :: Statement Text (Maybe ReasoningRow)
@@ -1127,14 +1117,14 @@ loadReasoningStatement = mkStatement
     \ extra_fields_text\
     \ FROM harness.session_reasoning_items\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         ReasoningRow
-            <$> nullableTextColumn
-            <*> boolColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> textColumn)
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadSummariesStatement :: Statement Text [StoredReasoningSummaryPart]
@@ -1143,12 +1133,12 @@ loadSummariesStatement = mkStatement
     \ FROM harness.session_reasoning_summaries\
     \ WHERE response_item_id = $1::uuid\
     \ ORDER BY part_index"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         StoredReasoningSummaryPart
-            <$> textColumn
-            <*> nullableTextColumn
-            <*> (StoredOpaqueObject <$> textColumn))
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 loadReferenceStatement :: Statement Text (Maybe StoredItemReference)
@@ -1156,11 +1146,11 @@ loadReferenceStatement = mkStatement
     "SELECT provider_item_id, extra_fields_text\
     \ FROM harness.session_item_references\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
         StoredItemReference
-            <$> textColumn
-            <*> (StoredOpaqueObject <$> textColumn))
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 loadTaggedStatement :: Statement Text (Maybe TaggedRow)
@@ -1168,9 +1158,9 @@ loadTaggedStatement = mkStatement
     "SELECT wire_tag, fields_text\
     \ FROM harness.session_tagged_items\
     \ WHERE response_item_id = $1::uuid"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe $
-        TaggedRow <$> textColumn <*> textColumn)
+        TaggedRow <$> Decoders.column (Decoders.nonNullable Decoders.text) <*> Decoders.column (Decoders.nonNullable Decoders.text))
     True
 
 loadContentPartsStatement :: Statement Text [StoredContentPart]
@@ -1182,23 +1172,23 @@ loadContentPartsStatement = mkStatement
     \ FROM harness.session_response_content_parts\
     \ WHERE response_item_id = $1::uuid\
     \ ORDER BY part_index"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         StoredContentPart
-            <$> textColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
             <*> nullableOpaqueValueColumn
             <*> nullableOpaqueValueColumn
             <*> nullableOpaqueValueColumn
             <*> nullableOpaqueValueColumn
-            <*> (StoredOpaqueObject <$> textColumn))
+            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 fieldParam :: (a -> b) -> Encoders.Params b -> Encoders.Params a
@@ -1206,4 +1196,4 @@ fieldParam field encoder = field >$< encoder
 
 nullableOpaqueValueColumn :: Decoders.Row (Maybe StoredOpaqueValue)
 nullableOpaqueValueColumn =
-    fmap StoredOpaqueValue <$> nullableTextColumn
+    fmap StoredOpaqueValue <$> Decoders.column (Decoders.nullable Decoders.text)
