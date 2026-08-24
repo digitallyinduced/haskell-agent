@@ -96,6 +96,9 @@ library
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
                     , Agent.Telegram
+                    , Agent.Telegram.Markdown
+                    , Agent.Telegram.Types
+                    , Agent.Telegram.Voice
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools

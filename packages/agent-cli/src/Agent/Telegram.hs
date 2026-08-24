@@ -57,10 +57,12 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , sessionsRoot
     )
+import Agent.Telegram.Types
+import Agent.Telegram.Markdown (markdownToTelegramHtml)
+import Agent.Telegram.Voice (transcribeWithCodex)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
-import Agent.Provider (Provider, parseProvider, providerSlug)
-import Control.Applicative ((<|>))
+import Agent.Provider (Provider, parseProvider)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -92,27 +94,16 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( FromJSON(..)
-    , Result(..)
-    , ToJSON(..)
     , Value(..)
     , eitherDecode
-    , eitherDecodeStrict'
     , encode
-    , fromJSON
     , object
     , withObject
-    , (.:)
     , (.:?)
-    , (.!=)
     , (.=)
     )
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as LBS8
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text.Encoding as TextEncoding
-import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -121,7 +112,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import qualified Data.Vector as Vector
 import qualified Network.HTTP.Client as Http
 import qualified Network.HTTP.Client.TLS as HttpTls
 import qualified System.Directory as Directory
@@ -137,9 +127,7 @@ import System.Environment (getArgs, getExecutablePath, lookupEnv)
 import System.Exit (die)
 import System.FilePath (takeExtension)
 import System.IO
-    ( Handle
-    , IOMode(AppendMode)
-    , hClose
+    ( IOMode(AppendMode)
     , hFlush
     , hGetEcho
     , hIsTerminalDevice
@@ -160,344 +148,9 @@ import System.Process
     , createProcess
     , getProcessExitCode
     , proc
-    , terminateProcess
-    , waitForProcess
     )
 import qualified System.FileLock as FileLock
-import qualified System.Timeout as Timeout
 import Text.Read (readMaybe)
-
-data TelegramConfig = TelegramConfig
-    { telegramProvider :: !Provider
-    , telegramModel :: !(Maybe Text)
-    , telegramCwd :: !FilePath
-    , telegramEffort :: !(Maybe Text)
-    , telegramYolo :: !Bool
-    , telegramAllowedUsers :: !(Set Integer)
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramConfig where
-    toJSON config = object
-        [ "provider" .= providerSlug config.telegramProvider
-        , "model" .= config.telegramModel
-        , "cwd" .= config.telegramCwd
-        , "effort" .= config.telegramEffort
-        , "yolo" .= config.telegramYolo
-        , "allowedUsers" .= Set.toList config.telegramAllowedUsers
-        ]
-
-instance FromJSON TelegramConfig where
-    parseJSON = withObject "TelegramConfig" \o -> do
-        providerText <- o .: "provider"
-        telegramProvider <- maybe
-            (fail ("unknown provider: " <> Text.unpack providerText))
-            pure
-            (parseProvider providerText)
-        TelegramConfig
-            <$> pure telegramProvider
-            <*> o .:? "model"
-            <*> o .: "cwd"
-            <*> o .:? "effort"
-            <*> (o .:? "yolo" .!= False)
-            <*> (Set.fromList <$> (o .: "allowedUsers"))
-
-data TelegramSetupOptions = TelegramSetupOptions
-    { setupProvider :: !(Maybe Provider)
-    , setupModel :: !(Maybe Text)
-    , setupCwd :: !(Maybe FilePath)
-    , setupEffort :: !(Maybe Text)
-    , setupYolo :: !Bool
-    , setupAllowedUser :: !(Maybe Integer)
-    , setupStart :: !Bool
-    } deriving (Eq, Show)
-
-defaultTelegramSetupOptions :: TelegramSetupOptions
-defaultTelegramSetupOptions = TelegramSetupOptions
-    { setupProvider = Nothing
-    , setupModel = Nothing
-    , setupCwd = Nothing
-    , setupEffort = Nothing
-    , setupYolo = False
-    , setupAllowedUser = Nothing
-    , setupStart = False
-    }
-
-data TelegramCommand
-    = TelegramSetup !TelegramSetupOptions
-    | TelegramRun
-    | TelegramStart
-    | TelegramStop
-    | TelegramStatus
-    | TelegramHelp
-    | TelegramVersion
-    deriving (Eq, Show)
-
-data TelegramChatKey = TelegramChatKey
-    { chatId :: !Integer
-    , messageThreadId :: !(Maybe Integer)
-    } deriving (Eq, Ord, Show)
-
-instance ToJSON TelegramChatKey where
-    toJSON key = object
-        [ "chatId" .= key.chatId
-        , "messageThreadId" .= key.messageThreadId
-        ]
-
-instance FromJSON TelegramChatKey where
-    parseJSON = withObject "TelegramChatKey" \o ->
-        TelegramChatKey
-            <$> o .: "chatId"
-            <*> o .:? "messageThreadId"
-
-data TelegramBinding = TelegramBinding
-    { bindingChat :: !TelegramChatKey
-    , bindingSessionId :: !Text
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramBinding where
-    toJSON binding = object
-        [ "chat" .= binding.bindingChat
-        , "sessionId" .= binding.bindingSessionId
-        ]
-
-instance FromJSON TelegramBinding where
-    parseJSON = withObject "TelegramBinding" \o ->
-        TelegramBinding
-            <$> o .: "chat"
-            <*> o .: "sessionId"
-
-data TelegramState = TelegramState
-    { nextUpdateId :: !(Maybe Integer)
-    , bindings :: !(Map TelegramChatKey Text)
-    , pendingQueues :: !(Map TelegramChatKey (Map Integer PendingChatAction))
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramState where
-    toJSON state = object
-        [ "nextUpdateId" .= state.nextUpdateId
-        , "bindings" .=
-            [ TelegramBinding key sessionId
-            | (key, sessionId) <- Map.toList state.bindings
-            ]
-        , "pendingTurns" .=
-            sortOn (.pendingTurnUpdateId)
-                [ pending
-                | queue <- Map.elems state.pendingQueues
-                , RunPendingTurn pending <- Map.elems queue
-                ]
-        , "pendingReplies" .=
-            sortOn (.pendingUpdateId)
-                [ pending
-                | queue <- Map.elems state.pendingQueues
-                , DeliverReply pending <- Map.elems queue
-                ]
-        ]
-
-instance FromJSON TelegramState where
-    parseJSON = withObject "TelegramState" \o -> do
-        nextUpdateId <- o .:? "nextUpdateId"
-        storedBindings <-
-            o .:? "bindings" .!= ([] :: [TelegramBinding])
-        pendingTurns <-
-            o .:? "pendingTurns" .!= ([] :: [TelegramPendingTurn])
-        pendingReplies <-
-            o .:? "pendingReplies" .!= ([] :: [TelegramPendingReply])
-        pure TelegramState
-            { nextUpdateId
-            , bindings =
-                foldr
-                    (\binding ->
-                        Map.insert
-                            binding.bindingChat
-                            binding.bindingSessionId)
-                    Map.empty
-                    storedBindings
-            , pendingQueues =
-                foldl'
-                    (flip insertPendingAction)
-                    Map.empty
-                    ( map RunPendingTurn pendingTurns
-                        <> map DeliverReply pendingReplies
-                    )
-            }
-
-data TelegramPendingTurn = TelegramPendingTurn
-    { pendingTurnUpdateId :: !Integer
-    , pendingTurnMessageId :: !Integer
-    , pendingTurnChat :: !TelegramChatKey
-    , pendingTurnText :: !Text
-    , pendingTurnVoice :: !(Maybe TelegramVoice)
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramPendingTurn where
-    toJSON pending = object
-        [ "updateId" .= pending.pendingTurnUpdateId
-        , "messageId" .= pending.pendingTurnMessageId
-        , "chat" .= pending.pendingTurnChat
-        , "text" .= pending.pendingTurnText
-        , "voice" .= pending.pendingTurnVoice
-        ]
-
-instance FromJSON TelegramPendingTurn where
-    parseJSON = withObject "TelegramPendingTurn" \o ->
-        TelegramPendingTurn
-            <$> o .: "updateId"
-            <*> o .:? "messageId" .!= 0
-            <*> o .: "chat"
-            <*> o .: "text"
-            <*> o .:? "voice"
-
-data TelegramPendingReply = TelegramPendingReply
-    { pendingUpdateId :: !Integer
-    , pendingChat :: !TelegramChatKey
-    , pendingReplyToMessageId :: !(Maybe Integer)
-    , pendingText :: !Text
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramPendingReply where
-    toJSON pending = object
-        [ "updateId" .= pending.pendingUpdateId
-        , "chat" .= pending.pendingChat
-        , "replyToMessageId" .= pending.pendingReplyToMessageId
-        , "text" .= pending.pendingText
-        ]
-
-instance FromJSON TelegramPendingReply where
-    parseJSON = withObject "TelegramPendingReply" \o ->
-        TelegramPendingReply
-            <$> o .: "updateId"
-            <*> o .: "chat"
-            <*> o .:? "replyToMessageId"
-            <*> o .: "text"
-
-data TelegramVoice = TelegramVoice
-    { voiceFileId :: !Text
-    , voiceDuration :: !Int
-    , voiceMimeType :: !(Maybe Text)
-    , voiceFileSize :: !(Maybe Integer)
-    } deriving (Eq, Show)
-
-instance ToJSON TelegramVoice where
-    toJSON voice = object
-        [ "fileId" .= voice.voiceFileId
-        , "duration" .= voice.voiceDuration
-        , "mimeType" .= voice.voiceMimeType
-        , "fileSize" .= voice.voiceFileSize
-        ]
-
-data TelegramUser = TelegramUser
-    { userId :: !Integer
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramUser where
-    parseJSON = withObject "TelegramUser" \o ->
-        TelegramUser <$> o .: "id"
-
-data TelegramChat = TelegramChat
-    { telegramChatId :: !Integer
-    , telegramChatType :: !Text
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramChat where
-    parseJSON = withObject "TelegramChat" \o ->
-        TelegramChat
-            <$> o .: "id"
-            <*> o .: "type"
-
-data TelegramMessage = TelegramMessage
-    { messageId :: !Integer
-    , messageFrom :: !(Maybe TelegramUser)
-    , messageChat :: !TelegramChat
-    , messageThread :: !(Maybe Integer)
-    , messageText :: !(Maybe Text)
-    , messageVoice :: !(Maybe TelegramVoice)
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramMessage where
-    parseJSON = withObject "TelegramMessage" \o ->
-        TelegramMessage
-            <$> o .: "message_id"
-            <*> o .:? "from"
-            <*> o .: "chat"
-            <*> o .:? "message_thread_id"
-            <*> o .:? "text"
-            <*> o .:? "voice"
-
-instance FromJSON TelegramVoice where
-    parseJSON = withObject "TelegramVoice" \o ->
-        TelegramVoice
-            <$> (o .:? "file_id" >>= maybe (o .: "fileId") pure)
-            <*> (o .:? "duration" .!= 0)
-            <*> (o .:? "mime_type" >>= maybe (o .:? "mimeType") (pure . Just))
-            <*> (o .:? "file_size" >>= maybe (o .:? "fileSize") (pure . Just))
-
-data TelegramReactionType = TelegramReactionType
-    { reactionType :: !Text
-    , reactionEmoji :: !(Maybe Text)
-    , reactionCustomEmojiId :: !(Maybe Text)
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramReactionType where
-    parseJSON = withObject "TelegramReactionType" \o ->
-        TelegramReactionType
-            <$> o .: "type"
-            <*> o .:? "emoji"
-            <*> o .:? "custom_emoji_id"
-
-data TelegramMessageReaction = TelegramMessageReaction
-    { messageReactionChat :: !TelegramChat
-    , messageReactionMessageId :: !Integer
-    , messageReactionUser :: !(Maybe TelegramUser)
-    , messageReactionOld :: ![TelegramReactionType]
-    , messageReactionNew :: ![TelegramReactionType]
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramMessageReaction where
-    parseJSON = withObject "TelegramMessageReaction" \o ->
-        TelegramMessageReaction
-            <$> o .: "chat"
-            <*> o .: "message_id"
-            <*> o .:? "user"
-            <*> (o .:? "old_reaction" .!= [])
-            <*> (o .:? "new_reaction" .!= [])
-
-data TelegramUpdate = TelegramUpdate
-    { updateId :: !Integer
-    , updateMessage :: !(Maybe TelegramMessage)
-    , updateMessageReaction :: !(Maybe TelegramMessageReaction)
-    } deriving (Eq, Show)
-
-instance FromJSON TelegramUpdate where
-    parseJSON = withObject "TelegramUpdate" \o ->
-        TelegramUpdate
-            <$> o .: "update_id"
-            <*> o .:? "message"
-            <*> o .:? "message_reaction"
-
-data TelegramResponse a = TelegramResponse
-    { responseOk :: !Bool
-    , responseResult :: !(Maybe a)
-    , responseDescription :: !(Maybe Text)
-    }
-
-instance FromJSON a => FromJSON (TelegramResponse a) where
-    parseJSON = withObject "TelegramResponse" \o ->
-        TelegramResponse
-            <$> o .: "ok"
-            <*> o .:? "result"
-            <*> o .:? "description"
-
-data TelegramClient = TelegramClient
-    { clientToken :: !Text
-    , clientManager :: !Http.Manager
-    }
-
-emptyTelegramState :: TelegramState
-emptyTelegramState = TelegramState
-    { nextUpdateId = Nothing
-    , bindings = Map.empty
-    , pendingQueues = Map.empty
-    }
 
 parseAllowedUsers :: Text -> Either Text (Set Integer)
 parseAllowedUsers raw = do
@@ -974,50 +627,6 @@ updateAlreadyStored updateId state =
     maybe False (> updateId) state.nextUpdateId
         || any (Map.member updateId) state.pendingQueues
 
-data PendingChatAction
-    = DeliverReply !TelegramPendingReply
-    | RunPendingTurn !TelegramPendingTurn
-    deriving (Eq, Show)
-
-pendingActionUpdateId :: PendingChatAction -> Integer
-pendingActionUpdateId = \case
-    DeliverReply pending -> pending.pendingUpdateId
-    RunPendingTurn pending -> pending.pendingTurnUpdateId
-
-pendingActionChat :: PendingChatAction -> TelegramChatKey
-pendingActionChat = \case
-    DeliverReply pending -> pending.pendingChat
-    RunPendingTurn pending -> pending.pendingTurnChat
-
-insertPendingAction
-    :: PendingChatAction
-    -> Map TelegramChatKey (Map Integer PendingChatAction)
-    -> Map TelegramChatKey (Map Integer PendingChatAction)
-insertPendingAction action =
-    Map.alter
-        (Just . Map.insert (pendingActionUpdateId action) action
-            . fromMaybe Map.empty)
-        (pendingActionChat action)
-
-enqueuePendingAction :: PendingChatAction -> TelegramState -> TelegramState
-enqueuePendingAction action state =
-    state
-        { pendingQueues = insertPendingAction action state.pendingQueues
-        }
-
-deletePendingAction :: PendingChatAction -> TelegramState -> TelegramState
-deletePendingAction action state =
-    state
-        { pendingQueues =
-            Map.update
-                (\queue ->
-                    let remaining =
-                            Map.delete (pendingActionUpdateId action) queue
-                    in if Map.null remaining then Nothing else Just remaining)
-                (pendingActionChat action)
-                state.pendingQueues
-        }
-
 dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime = do
     state <- readMVar runtime.runtimeStateVar
@@ -1245,148 +854,6 @@ downloadTelegramFile client remotePath destination = do
     setFileMode (unsafeToFilePath destination) 0o600
     pure destination
 
-transcribeWithCodex :: FilePath -> FilePath -> IO Text
-transcribeWithCodex cwd audioPath = do
-    result <- Timeout.timeout (5 * 60 * 1_000_000) $
-        bracket start stop \(input, output, _) -> do
-            send input $ object
-                [ "method" .= ("initialize" :: Text)
-                , "id" .= (1 :: Int)
-                , "params" .= object
-                    [ "clientInfo" .= object
-                        [ "name" .= ("haskell_agent_telegram" :: Text)
-                        , "title" .= ("Haskell Agent Telegram" :: Text)
-                        , "version" .= ("0.1.0" :: Text)
-                        ]
-                    ]
-                ]
-            _ <- awaitResult output 1
-            send input $ object
-                [ "method" .= ("initialized" :: Text)
-                , "params" .= object []
-                ]
-            send input $ object
-                [ "method" .= ("thread/start" :: Text)
-                , "id" .= (2 :: Int)
-                , "params" .= object
-                    [ "ephemeral" .= True
-                    , "cwd" .= cwd
-                    , "approvalPolicy" .= ("never" :: Text)
-                    , "sandbox" .= ("read-only" :: Text)
-                    ]
-                ]
-            threadResponse <- awaitResult output 2
-            threadId <- maybe
-                (fail "Codex thread/start response did not contain a thread ID")
-                pure
-                (lookupText ["result", "thread", "id"] threadResponse)
-            send input $ object
-                [ "method" .= ("turn/start" :: Text)
-                , "id" .= (3 :: Int)
-                , "params" .= object
-                    [ "threadId" .= threadId
-                    , "input" .=
-                        [ object
-                            [ "type" .= ("text" :: Text)
-                            , "text" .=
-                                ("Transcribe the attached voice message exactly. \
-                                \Return only the transcription, without commentary."
-                                    :: Text)
-                            ]
-                        , object
-                            [ "type" .= ("localAudio" :: Text)
-                            , "path" .= audioPath
-                            ]
-                        ]
-                    ]
-                ]
-            _ <- awaitResult output 3
-            awaitCodexTranscript output Nothing
-    maybe (fail "Codex voice transcription timed out") pure result
-  where
-    start = do
-        (Just input, Just output, _, process) <-
-            createProcess (proc "codex" ["app-server", "--stdio"])
-                { std_in = CreatePipe
-                , std_out = CreatePipe
-                , std_err = Inherit
-                }
-        pure (input, output, process)
-    stop (input, output, process) = do
-        void (tryAny (hClose input))
-        void (tryAny (hClose output))
-        void (tryAny (terminateProcess process))
-        void (tryAny (waitForProcess process))
-    send handle value = do
-        LBS8.hPutStrLn handle (encode value)
-        hFlush handle
-
-awaitResult :: Handle -> Int -> IO Value
-awaitResult output expectedId = do
-    value <- readCodexValue output
-    case lookupInteger ["id"] value of
-        Just actualId
-            | actualId == fromIntegral expectedId ->
-                case lookupText ["error", "message"] value of
-                    Just message -> fail (Text.unpack message)
-                    Nothing -> pure value
-        _ -> awaitResult output expectedId
-
-awaitCodexTranscript :: Handle -> Maybe Text -> IO Text
-awaitCodexTranscript output latest = do
-    value <- readCodexValue output
-    let latest' = case
-            ( lookupText ["method"] value
-            , lookupText ["params", "item", "type"] value
-            , lookupText ["params", "item", "text"] value
-            ) of
-                (Just "item/completed", Just "agentMessage", Just text) ->
-                    Just text
-                _ -> latest
-    case lookupText ["method"] value of
-        Just "turn/completed" -> case
-            lookupText ["params", "turn", "error", "message"] value of
-                Just message -> fail (Text.unpack message)
-                Nothing ->
-                    maybe
-                        (fail "Codex completed without a transcription")
-                        pure
-                        ( latest'
-                            <|> lookupText
-                                ["params", "turn", "items", "0", "text"]
-                                value
-                        )
-        _ -> awaitCodexTranscript output latest'
-
-readCodexValue :: Handle -> IO Value
-readCodexValue output = do
-    line <- BS8.hGetLine output
-    case eitherDecodeStrict' line of
-        Left _ -> readCodexValue output
-        Right value -> pure value
-
-lookupText :: [Text] -> Value -> Maybe Text
-lookupText path value = case lookupValue path value of
-    Just (String text) -> Just text
-    _ -> Nothing
-
-lookupInteger :: [Text] -> Value -> Maybe Integer
-lookupInteger path value = case lookupValue path value of
-    Just number -> case fromJSON number of
-        Success integer -> Just integer
-        Error _ -> Nothing
-    _ -> Nothing
-
-lookupValue :: [Text] -> Value -> Maybe Value
-lookupValue [] value = Just value
-lookupValue (field : fields) (Object values) =
-    KeyMap.lookup (Key.fromText field) values >>= lookupValue fields
-lookupValue (index : fields) (Array values) = do
-    position <- readMaybe (Text.unpack index)
-    value <- values Vector.!? position
-    lookupValue fields value
-lookupValue _ _ = Nothing
-
 nextChatAction
     :: TelegramRuntime
     -> TelegramChatKey
@@ -1594,93 +1061,6 @@ sendTypingAction client key =
             <> maybe []
                 (\threadId -> ["message_thread_id" .= threadId])
                 key.messageThreadId
-
--- | Convert the Markdown subset commonly emitted by agents to Telegram's
--- supported HTML. Literal text and link attributes are always escaped.
-markdownToTelegramHtml :: Text -> Text
-markdownToTelegramHtml input =
-    Text.concat (zipWith renderSegment [0 :: Int ..] (Text.splitOn "```" input))
-  where
-    renderSegment index segment
-        | odd index =
-            "<pre>" <> escapeTelegramHtml (stripLanguage segment) <> "</pre>"
-        | otherwise =
-            Text.replace "\n" "<br>" (renderInline segment)
-
-    stripLanguage segment =
-        case Text.breakOn "\n" segment of
-            (language, rest)
-                | not (Text.null language)
-                , Text.all isLanguageCharacter language ->
-                    Text.drop 1 rest
-            _ -> segment
-
-    isLanguageCharacter char =
-        ('a' <= char && char <= 'z')
-            || ('A' <= char && char <= 'Z')
-            || ('0' <= char && char <= '9')
-            || char `elem` ("-+#_" :: String)
-
-renderInline :: Text -> Text
-renderInline text
-    | Text.null text = ""
-    | Just rest <- Text.stripPrefix "`" text =
-        renderDelimited "`" "<code>" "</code>" rest
-    | Just rest <- Text.stripPrefix "**" text =
-        renderDelimited "**" "<b>" "</b>" rest
-    | Just rest <- Text.stripPrefix "~~" text =
-        renderDelimited "~~" "<s>" "</s>" rest
-    | Just rest <- Text.stripPrefix "*" text =
-        renderDelimited "*" "<i>" "</i>" rest
-    | Just rest <- Text.stripPrefix "[" text =
-        case parseMarkdownLink rest of
-            Just (label, url, remaining) ->
-                "<a href=\"" <> escapeTelegramHtml url <> "\">"
-                    <> escapeTelegramHtml label
-                    <> "</a>"
-                    <> renderInline remaining
-            Nothing -> "&#91;" <> renderInline rest
-    | otherwise =
-        let (plain, rest) = Text.break isMarkdownStarter text
-        in if Text.null plain
-            then escapeTelegramHtml (Text.take 1 text)
-                <> renderInline (Text.drop 1 text)
-            else escapeTelegramHtml plain <> renderInline rest
-  where
-    renderDelimited delimiter opening closing rest =
-        case Text.breakOn delimiter rest of
-            (_, after) | Text.null after ->
-                escapeTelegramHtml delimiter <> renderInline rest
-            (inside, after) ->
-                opening
-                    <> escapeTelegramHtml inside
-                    <> closing
-                    <> renderInline (Text.drop (Text.length delimiter) after)
-
-    isMarkdownStarter char =
-        char == '`' || char == '*' || char == '~' || char == '['
-
-parseMarkdownLink :: Text -> Maybe (Text, Text, Text)
-parseMarkdownLink text = do
-    let (label, afterLabel) = Text.breakOn "](" text
-    unlessMaybe (not (Text.null afterLabel))
-    let afterOpen = Text.drop 2 afterLabel
-        (url, afterUrl) = Text.breakOn ")" afterOpen
-    unlessMaybe (not (Text.null afterUrl))
-    pure (label, url, Text.drop 1 afterUrl)
-
-unlessMaybe :: Bool -> Maybe ()
-unlessMaybe True = Just ()
-unlessMaybe False = Nothing
-
-escapeTelegramHtml :: Text -> Text
-escapeTelegramHtml = Text.concatMap \case
-    '<' -> "&lt;"
-    '>' -> "&gt;"
-    '&' -> "&amp;"
-    '"' -> "&quot;"
-    '\'' -> "&#39;"
-    char -> Text.singleton char
 
 sendThinkingDraft :: TelegramClient -> TelegramChatKey -> IO ()
 sendThinkingDraft client key =
