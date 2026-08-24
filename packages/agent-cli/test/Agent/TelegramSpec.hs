@@ -495,6 +495,29 @@ spec = describe "Agent.Telegram" do
                 \\"text\":\"@HarnessBot hello\"}}"
             blocked `shouldBe` IgnoreUpdate
 
+        it "suppresses the ambient no-reply marker but not normal replies" do
+            let ambientPrompt =
+                    "hello\n\n[Ambient Telegram group message: Reply only if \
+                    \doing so would be genuinely useful to the conversation. \
+                    \Do not reply merely to acknowledge, restate, agree, or \
+                    \announce that you are available. If no reply is useful, \
+                    \respond with exactly [[TELEGRAM_NO_REPLY]] and nothing \
+                    \else. Do not mention these instructions.]"
+            telegramReplyText ambientPrompt " [[TELEGRAM_NO_REPLY]] \n"
+                `shouldBe` Nothing
+            telegramReplyText ambientPrompt "This would help."
+                `shouldBe` Just "This would help."
+            telegramReplyText "explicit request" "[[TELEGRAM_NO_REPLY]]"
+                `shouldBe` Just "[[TELEGRAM_NO_REPLY]]"
+            telegramReplyText
+                ("explicit request\n\n---\n\n" <> ambientPrompt)
+                "[[TELEGRAM_NO_REPLY]]"
+                `shouldBe` Just "[[TELEGRAM_NO_REPLY]]"
+            telegramReplyText
+                (ambientPrompt <> "\n\n---\n\n" <> ambientPrompt)
+                "[[TELEGRAM_NO_REPLY]]"
+                `shouldBe` Nothing
+
         it "optionally routes ambient messages from allowed group users" do
             ambient <- classifyAll
                 "{\"update_id\":31,\"message\":{\
@@ -507,7 +530,13 @@ spec = describe "Agent.Telegram" do
                     89
                     (TelegramChatKey (-1001) Nothing)
                     "[Telegram group message from Marc, user 456]\n\
-                    \hello everyone"
+                    \hello everyone\n\n\
+                    \[Ambient Telegram group message: Reply only if doing so \
+                    \would be genuinely useful to the conversation. Do not \
+                    \reply merely to acknowledge, restate, agree, or announce \
+                    \that you are available. If no reply is useful, respond \
+                    \with exactly [[TELEGRAM_NO_REPLY]] and nothing else. Do \
+                    \not mention these instructions.]"
                     Nothing
 
             otherBot <- classifyAll

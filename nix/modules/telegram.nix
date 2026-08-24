@@ -125,8 +125,9 @@ let
           type = types.bool;
           default = false;
           description = ''
-            Whether messages from allowed users in groups are handled without
-            requiring a mention or reply to the bot.
+            Whether messages from allowed users in groups are considered
+            without requiring a mention or reply to the bot. The agent stays
+            silent when it does not have a useful response.
           '';
         };
 
