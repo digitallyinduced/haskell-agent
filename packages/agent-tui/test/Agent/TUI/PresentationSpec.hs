@@ -89,6 +89,23 @@ spec = describe "tool presentation" do
                 "{\"prompt\":\"Enter API token\"}")
             `shouldBe` "Enter API token"
 
+    it "renders learned-skill mutations with scope, slug, and approval intent" do
+        let create = functionToolCall
+                "skill"
+                "skill_create"
+                "{\"scope\":\"repository\",\"slug\":\"postgres-sessions\"}"
+        summarizeToolCall create
+            `shouldBe` "Learned repository/postgres-sessions"
+        permissionToolCallPrompt create
+            `shouldBe`
+                "Create learned skill repository/postgres-sessions?"
+        formatToolOutput create
+            "{\"status\":\"applied\",\"skill\":{\"scope\":\"repository\",\
+            \\"slug\":\"postgres-sessions\",\"revision\":2,\
+            \\"activation\":\"relevant\"}}"
+            `shouldBe`
+                "repository/postgres-sessions · revision 2 · relevant"
+
     it "parses and truncates search-replace diffs once for all renderers" do
         let oldText = Text.intercalate "\\n"
                 ["old" <> Text.pack (show n) | n <- [1 :: Int .. 15]]

@@ -133,6 +133,21 @@ spec = do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
 
+        it "renders learned-skill mutations as visible learning activity" do
+            formatToolStarted False
+                (functionToolCall
+                    "c6"
+                    "skill_create"
+                    "{\"scope\":\"user\",\"slug\":\"post-task-review\"}")
+                `shouldBe` "◆ Learned user/post-task-review"
+            formatToolStarted False
+                (functionToolCall
+                    "c7"
+                    "skill_update"
+                    "{\"scope\":\"repository\",\"slug\":\"postgres-sessions\"}")
+                `shouldBe`
+                    "◆ Updated skill repository/postgres-sessions"
+
     describe "formatSearchReplaceDiff" do
         it "renders a compact unified diff" do
             let args =

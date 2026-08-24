@@ -52,6 +52,14 @@ permissionToolCallPrompt call =
             detailedPrompt
                 "Run this shell command?"
                 (jsonTextFieldDefault "command" call.arguments)
+        "skill_create" ->
+            "Create learned skill " <> skillIdentity call.arguments <> "?"
+        "skill_update" ->
+            "Update learned skill " <> skillIdentity call.arguments <> "?"
+        "skill_archive" ->
+            "Archive learned skill " <> skillIdentity call.arguments <> "?"
+        "skill_rollback" ->
+            "Restore learned skill " <> skillIdentity call.arguments <> "?"
         _ -> "Allow " <> summarizeToolCall call <> "?"
   where
     detailedPrompt question input
@@ -140,6 +148,10 @@ formatToolOutput call output = case canonicalToolName call.name of
     "interrupt_agent" ->
         maybe output ("Previous status: " <>)
             (nonEmptyJsonText "previous_status" output)
+    "skill_create" -> fromMaybe output (formatSkillMutation output)
+    "skill_update" -> fromMaybe output (formatSkillMutation output)
+    "skill_archive" -> fromMaybe output (formatSkillMutation output)
+    "skill_rollback" -> fromMaybe output (formatSkillMutation output)
     _ -> output
 
 toolVerb :: Text -> Text
@@ -168,6 +180,12 @@ toolVerb name = case canonicalToolName name of
     "exit_plan_mode" -> "Exited"
     "ask_user_question" -> "Asked"
     "ask_secret" -> "Requested secret"
+    "skill_search" -> "Searched skills"
+    "skill_read" -> "Read skill"
+    "skill_create" -> "Learned"
+    "skill_update" -> "Updated skill"
+    "skill_archive" -> "Archived skill"
+    "skill_rollback" -> "Restored skill"
     other -> other
 
 toolDetail :: ToolCall -> Text
@@ -198,7 +216,40 @@ toolDetail call = case canonicalToolName call.name of
     "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
     "list_agents" ->
         maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
+    "skill_search" -> firstLine (jsonTextFieldDefault "query" call.arguments)
+    "skill_read" -> skillIdentity call.arguments
+    "skill_create" -> skillIdentity call.arguments
+    "skill_update" -> skillIdentity call.arguments
+    "skill_archive" -> skillIdentity call.arguments
+    "skill_rollback" -> skillIdentity call.arguments
     _ -> ""
+
+skillIdentity :: Text -> Text
+skillIdentity arguments =
+    case
+        ( nonEmptyJsonText "scope" arguments
+        , nonEmptyJsonText "slug" arguments
+        )
+    of
+        (Just scope, Just slug) -> scope <> "/" <> slug
+        (Nothing, Just slug) -> slug
+        _ -> "the selected skill"
+
+formatSkillMutation :: Text -> Maybe Text
+formatSkillMutation output = do
+    Aeson.Object envelope <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
+    Aeson.Object skill <- KeyMap.lookup "skill" envelope
+    scope <- jsonObjectText "scope" skill
+    slug <- jsonObjectText "slug" skill
+    revision <- jsonObjectInteger "revision" skill
+    let activation = maybe "" (" · " <>) (jsonObjectText "activation" skill)
+    pure $
+        scope
+            <> "/"
+            <> slug
+            <> " · revision "
+            <> revision
+            <> activation
 
 nonEmptyJsonText :: Text -> Text -> Maybe Text
 nonEmptyJsonText key input = jsonTextField key input >>= \value ->
@@ -235,6 +286,13 @@ jsonObjectText key object =
         Just (Aeson.String value)
             | not (Text.null (Text.strip value)) -> Just (Text.strip value)
         _ -> Nothing
+
+jsonObjectInteger :: Text -> Aeson.Object -> Maybe Text
+jsonObjectInteger key object = do
+    value <- KeyMap.lookup (Key.fromText key) object
+    case Aeson.fromJSON value :: Aeson.Result Integer of
+        Aeson.Success integer -> pure (Text.pack (show integer))
+        Aeson.Error _ -> Nothing
 
 firstPatchPath :: Text -> Maybe Text
 firstPatchPath patch =

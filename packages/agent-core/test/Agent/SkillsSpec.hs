@@ -68,6 +68,47 @@ spec = describe "Agent.Skills" do
                         `shouldBe` ["shell_command", "apply_patch"]
                 other -> expectationFailure ("unexpected skills: " <> show other)
 
+    it "loads always-active Markdown skills directly into model context" do
+        withTempDir \dir -> do
+            let skillDir = dir </> "post-task-review"
+            writeSkill skillDir
+                "post-task-review" "Review completed work"
+                [ "activation: always"
+                , "disable-model-invocation: true"
+                , "user-invocable: false"
+                ]
+            loaded <- loadSkillFile
+                BuiltinSkill
+                AgentSkills
+                (skillDir </> "SKILL.md")
+            skill <- case loaded of
+                Right value -> pure value
+                Left warning ->
+                    expectationFailure (show warning) >> fail "unreachable"
+            skill.skillContextMode `shouldBe` SkillContextAlways
+            let catalog = SkillCatalog [skill] []
+            case formatSkillCatalogContext 2000 catalog of
+                (Just rendered, 0) -> do
+                    rendered `shouldSatisfy`
+                        Text.isInfixOf "Always-active skill: post-task-review"
+                    rendered `shouldSatisfy` Text.isInfixOf "Do the thing."
+                    rendered `shouldSatisfy`
+                        (not . Text.isInfixOf "$post-task-review")
+                other -> expectationFailure ("unexpected context: " <> show other)
+
+    it "rejects always activation outside trusted built-in skills" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+            writeSkill (repo </> ".agents" </> "skills" </> "always")
+                "always" "Untrusted automatic instructions"
+                ["activation: always"]
+            catalog <- discoverSkills (options home repo repo)
+            catalog.catalogSkills `shouldBe` []
+            map (.skillWarningMessage) catalog.catalogWarnings
+                `shouldBe`
+                    ["activation `always` is reserved for trusted built-in skills"]
+
     it "warns for invalid frontmatter without failing discovery" do
         withTempDir \dir -> do
             let home = dir </> "home"
@@ -122,6 +163,20 @@ spec = describe "Agent.Skills" do
             Nothing ->
                 expectationFailure "expected a rendered skill catalog"
         omitted `shouldBe` 0
+
+    it "omits an oversized always-active skill instead of truncating it" do
+        let alwaysSkill =
+                (fakeSkill "always" "always" BuiltinSkill AgentSkills)
+                    { skillContextMode = SkillContextAlways
+                    , skillBody = Text.replicate 2000 "x"
+                    }
+            visible = fakeSkill "visible" "visible" UserSkill AgentSkills
+            (rendered, omitted) =
+                formatSkillCatalogContext 1000
+                    (SkillCatalog [alwaysSkill, visible] [])
+        omitted `shouldBe` 2
+        rendered `shouldSatisfy`
+            maybe False (not . Text.isInfixOf "Always-active skill: always")
 
     it "resolves and deduplicates explicit dollar mentions" do
         let skill = fakeSkill "deploy" "deploy" UserSkill AgentSkills
@@ -192,6 +247,7 @@ fakeSkill name description scope origin = Skill
     , skillShortDescription = Nothing
     , skillDefaultPrompt = Nothing
     , skillWhenToUse = Nothing
+    , skillContextMode = SkillContextOnDemand
     , skillArgumentHint = Nothing
     , skillUserInvocable = True
     , skillModelInvocable = True
