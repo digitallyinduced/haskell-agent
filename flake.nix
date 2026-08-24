@@ -426,6 +426,8 @@
                                     wrapProgram "$out/bin/agent-telegram" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
+                                        --set-default HASKELL_AGENT_EXECUTABLE \
+                                            "${agentCliExecutable}/bin/agent-cli" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.postgresql_18
