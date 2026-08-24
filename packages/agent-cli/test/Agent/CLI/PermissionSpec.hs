@@ -38,8 +38,9 @@ spec = do
         it "names the tool and the three choices" do
             let frame =
                     renderPermissionFrame False
-                        (initialPermissionState "search_replace src/A.hs")
-            frame `shouldSatisfy` Text.isInfixOf "search_replace src/A.hs"
+                        (initialPermissionState "Allow search_replace src/A.hs?")
+            frame `shouldSatisfy`
+                Text.isInfixOf "Allow search_replace src/A.hs?"
             frame `shouldSatisfy` Text.isInfixOf "Allow once"
             frame `shouldSatisfy` Text.isInfixOf "Always allow this tool this session"
             frame `shouldSatisfy` Text.isInfixOf "Deny"

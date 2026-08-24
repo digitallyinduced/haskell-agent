@@ -6,6 +6,7 @@ module Agent.TUI.Presentation
     , formatSearchReplaceDiff
     , formatToolOutput
     , parseSearchReplaceDiff
+    , permissionToolCallPrompt
     , summarizeToolCall
     , toolCallInput
     , toolCallTitle
@@ -13,6 +14,7 @@ module Agent.TUI.Presentation
     ) where
 
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
+import Agent.TUI.TextWidth (displayTerminalText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -31,6 +33,30 @@ summarizeToolCall call =
     let verb = toolVerb call.name
         detail = toolDetail call
     in if Text.null detail then verb else verb <> " " <> detail
+
+-- | Complete question shown before a mutating tool call is approved.
+-- Command-like tools include their full input: a first-line activity summary
+-- is not enough for multiline @do@ blocks or shell scripts.
+permissionToolCallPrompt :: ToolCall -> Text
+permissionToolCallPrompt call =
+    displayTerminalText case canonicalToolName call.name of
+        "run_ghci" ->
+            detailedPrompt
+                "Evaluate this Haskell code in GHCi?"
+                (jsonTextFieldDefault "expression" call.arguments)
+        "run_terminal_cmd" ->
+            detailedPrompt
+                "Run this shell command?"
+                (jsonTextFieldDefault "command" call.arguments)
+        "shell_command" ->
+            detailedPrompt
+                "Run this shell command?"
+                (jsonTextFieldDefault "command" call.arguments)
+        _ -> "Allow " <> summarizeToolCall call <> "?"
+  where
+    detailedPrompt question input
+        | Text.null (Text.strip input) = question
+        | otherwise = question <> "\n\n" <> input
 
 -- | Compact heading for a retained tool block. GHCi expressions are rendered
 -- separately as code, so keeping them out of the heading avoids an unbounded
