@@ -1,6 +1,7 @@
 packages:
     packages/agent-process
     packages/agent-cli
+    packages/agent-telegram
     packages/agent-core
     packages/agent-codex-dialect
     packages/agent-grok-build-dialect

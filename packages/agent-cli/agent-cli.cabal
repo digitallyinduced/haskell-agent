@@ -119,13 +119,6 @@ library
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
-                    , Agent.Telegram
-                    , Agent.Telegram.Client
-                    , Agent.Telegram.Bridge
-                    , Agent.Telegram.Log
-                    , Agent.Telegram.Markdown
-                    , Agent.Telegram.Types
-                    , Agent.Telegram.Voice
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -194,14 +187,6 @@ executable agent-cli
     -- Keep the heap ceiling without multiplying a large allocation area by
     -- every host core. Four capabilities cover the agent's concurrent I/O;
     -- leave -A at the GHC RTS default.
-    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
-    build-depends:    agent-cli
-                    , base >= 4.17 && < 5
-
-executable agent-telegram
-    import:           common-options
-    hs-source-dirs:   app
-    main-is:          Telegram.hs
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
@@ -297,7 +282,6 @@ test-suite agent-cli-test
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
-                    , Agent.TelegramSpec
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec

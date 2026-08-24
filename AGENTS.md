@@ -40,6 +40,7 @@ Load every library you may edit so `:r` recompiles across package boundaries (`a
 nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
+  agent-telegram:lib:agent-telegram \
   agent-core:lib:agent-core \
   agent-process:lib:agent-process \
   agent-codex-dialect:lib:agent-codex-dialect \
