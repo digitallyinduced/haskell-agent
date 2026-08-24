@@ -1034,22 +1034,13 @@ prepareAgentIteration
                             pure (Just loaded)
 
     source <- maybe getCurrentDirectory makeAbsolute options.optCwd
-    cwd <- case resumed of
+    initialCwd <- case resumed of
         Just (meta, _)
             | isJustCwd options -> pure source
             | otherwise -> makeAbsolute meta.metaCwd
-        Nothing
-            | options.optWorktree -> do
-                createWorktree source (worktreeRoot home)
-                    >>= either (failPreparation . Text.unpack) \path -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr (roleMuted color (glyphSession <> "worktree: " <> toText path))
-                    pure path
-            | otherwise -> pure source
-    setCurrentDirectory cwd
-
-    toolEnv <- defaultToolEnv cwd
+        Nothing -> pure source
     uiRuntimeRef <- newIORef Nothing
+    cancelToolRef <- newIORef (pure ())
     interrupt <- newInterruptState \msg -> do
         readIORef uiRuntimeRef >>= \case
             Just runtime ->
@@ -1067,8 +1058,6 @@ prepareAgentIteration
     stdinTty <- hIsTerminalDevice stdin
     stdoutTty <- hIsTerminalDevice stdout
     terminal <- detectTerminalCapabilities stdout
-    terminalCwd <- decodeFS cwd
-    reportTerminalCwd terminal stdout terminalCwd
     useColor <- resolveColor stdout
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
@@ -1083,22 +1072,29 @@ prepareAgentIteration
         initialFullscreenState =
             (reduceUi
                 (UiSetNotice
-                    (Just (progressNotice "Loading project…")))
+                    (Just (progressNotice
+                        (if options.optWorktree
+                            then "Creating worktree…"
+                            else "Loading project…"))))
                 (reduceUi
                     (UiSetRepository
                         ""
-                        (toText (takeFileName (takeDirectory cwd))
+                        (toText (takeFileName (takeDirectory initialCwd))
                             <> "/"
-                            <> toText (takeFileName cwd)))
+                            <> toText (takeFileName initialCwd)))
                     (hydrateUiHistory initialTurns)))
                         { uiQueuedInputs = queuedInputDisplays }
+    firstFrameReady <-
+        if isJust activeFullscreen || not fullscreenEnabled
+            then newMVar ()
+            else newEmptyMVar
     fullscreen <- case activeFullscreen of
         Just runtime -> pure (Just runtime)
         Nothing
             | fullscreenEnabled ->
                 Just <$> newFullscreenRuntime
                     fullscreenInputs
-                    (requestCancel toolEnv.toolCancel)
+                    (readIORef cancelToolRef >>= id)
                     (\level ->
                         readIORef restartEffortActionRef >>= ($ level))
                     (noteFullscreenCtrlC interrupt)
@@ -1112,48 +1108,96 @@ prepareAgentIteration
                             setNativeProgress stderr active)
                     (readIORef agentSnapshotRef >>= id)
                     (\target -> readIORef agentSelectRef >>= ($ target))
-                    (recordStartupTiming
-                        startedAt startupTimingsRef "first frame")
+                    (do
+                        recordStartupTiming
+                            startedAt startupTimingsRef "first frame"
+                        void (tryPutMVar firstFrameReady ()))
                     (writeIORef syntaxLoadDurationRef . Just)
                     options.optMotionMode
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
-    forM_ fullscreen \runtime ->
-        setFullscreenSessionActions
-            runtime
-            (requestCancel toolEnv.toolCancel)
-            (\level -> readIORef restartEffortActionRef >>= ($ level))
-            (noteFullscreenCtrlC interrupt)
-            (readIORef agentSnapshotRef >>= id)
-            (\target -> readIORef agentSelectRef >>= ($ target))
     writeIORef uiRuntimeRef fullscreen
-    let startup = StartupRuntime
-            { startupToolEnv = toolEnv
-            , startupInterrupt = interrupt
-            , startupEscPaused = escPaused
-            , startupUiRuntimeRef = uiRuntimeRef
-            , startupFullscreen = fullscreen
-            , startupTerminal = terminal
-            , startupUseColor = useColor
-            , startupStderrTty = stderrTty
-            , startupStdinTty = stdinTty
-            , startupStdoutTty = stdoutTty
-            , startupFullscreenReused = isJust activeFullscreen
-            , startupAgentSnapshot = agentSnapshotRef
-            , startupAgentSelect = agentSelectRef
-            , startupRestartEffort = restartEffortActionRef
-            , startupStartedAt = startedAt
-            , startupTimings = startupTimingsRef
-            , startupSyntaxLoadDuration = syntaxLoadDurationRef
-            , startupSessionState = sessionState
-            }
     resumeLock <- readIORef resumeLockRef
     let action =
-            runAgentInitialized
-                options transition home root resumed resumeLock cwd startup
+            do
+                cwd <- case resumed of
+                    Just _ -> pure initialCwd
+                    Nothing
+                        | options.optWorktree -> do
+                            readMVar firstFrameReady
+                            case fullscreen of
+                                Just _ -> pure ()
+                                Nothing ->
+                                    putTextLn stderr "Creating worktree…"
+                            createWorktree source (worktreeRoot home)
+                                >>= either
+                                    (\err -> do
+                                        mapM_ releaseSessionLock resumeLock
+                                        case fullscreen of
+                                            Nothing -> die (Text.unpack err)
+                                            Just _ ->
+                                                throwIO
+                                                    (StartupFailure
+                                                        (Text.unpack err)))
+                                    (\path -> do
+                                        color <- resolveColor stderr
+                                        case fullscreen of
+                                            Nothing ->
+                                                putTextLn stderr
+                                                    (roleMuted color
+                                                        (glyphSession
+                                                            <> "worktree: "
+                                                            <> toText path))
+                                            Just runtime ->
+                                                emitUiEvent runtime
+                                                    (UiSystemMessage
+                                                        (glyphSession
+                                                            <> "worktree: "
+                                                            <> toText path))
+                                        setStartupNotice fullscreen
+                                            "Loading project…"
+                                        pure path)
+                        | otherwise -> pure initialCwd
+                setCurrentDirectory cwd
+                terminalCwd <- decodeFS cwd
+                reportTerminalCwd terminal stdout terminalCwd
+                toolEnv <- defaultToolEnv cwd
+                writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
+                forM_ fullscreen \runtime ->
+                    setFullscreenSessionActions
+                        runtime
+                        (requestCancel toolEnv.toolCancel)
+                        (\level ->
+                            readIORef restartEffortActionRef >>= ($ level))
+                        (noteFullscreenCtrlC interrupt)
+                        (readIORef agentSnapshotRef >>= id)
+                        (\target -> readIORef agentSelectRef >>= ($ target))
+                let startup = StartupRuntime
+                        { startupToolEnv = toolEnv
+                        , startupInterrupt = interrupt
+                        , startupEscPaused = escPaused
+                        , startupUiRuntimeRef = uiRuntimeRef
+                        , startupFullscreen = fullscreen
+                        , startupTerminal = terminal
+                        , startupUseColor = useColor
+                        , startupStderrTty = stderrTty
+                        , startupStdinTty = stdinTty
+                        , startupStdoutTty = stdoutTty
+                        , startupFullscreenReused = isJust activeFullscreen
+                        , startupAgentSnapshot = agentSnapshotRef
+                        , startupAgentSelect = agentSelectRef
+                        , startupRestartEffort = restartEffortActionRef
+                        , startupStartedAt = startedAt
+                        , startupTimings = startupTimingsRef
+                        , startupSyntaxLoadDuration = syntaxLoadDurationRef
+                        , startupSessionState = sessionState
+                        }
+                runAgentInitialized
+                    options transition home root resumed resumeLock cwd startup
         cleanup = do
             writeIORef uiRuntimeRef Nothing
+            writeIORef cancelToolRef (pure ())
             forM_ fullscreen resetFullscreenSessionActions
     pure PreparedAgent
         { preparedFullscreen = fullscreen
