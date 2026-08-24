@@ -26,6 +26,10 @@ module Agent.CLI.TUI.Composer
     , wrapDraft
     ) where
 
+import Agent.CLI.Clipboard
+    ( nonEmptyClipboardText
+    , readClipboardText
+    )
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
@@ -555,8 +559,12 @@ handleComposerKey
                 moveCursor 1
         V.EvKey (V.KChar 'v') modifiers
             | V.MCtrl `elem` modifiers
-                || V.MMeta `elem` modifiers ->
-                submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                || V.MMeta `elem` modifiers -> do
+                clipboardText <- liftIO readClipboardText
+                case nonEmptyClipboardText clipboardText of
+                    Just text -> insertPastedText text
+                    Nothing ->
+                        submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
         V.EvKey V.KDel [] ->
             deleteAfter
         V.EvKey V.KLeft modifiers
@@ -581,16 +589,12 @@ handleComposerKey
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
-        V.EvPaste bytes -> do
-            let pasted = decodePaste bytes
-                before = Text.take ui.uiCursor ui.uiDraft
-                after = Text.drop ui.uiCursor ui.uiDraft
-                pastedDraft = before <> pasted <> after
-            modifyUi
-                (UiSetNotice
-                    (Just (progressNotice "Reading clipboard…")))
-            submitRaw
-                (ReplClipboardPasteOrText ui.uiDraft pastedDraft)
+        V.EvPaste bytes ->
+            case decodePaste bytes of
+                pasted
+                    | Text.null pasted ->
+                        submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                    | otherwise -> insertPastedText pasted
         _ -> pure ()
   where
     submitRaw replLine = do
@@ -712,6 +716,10 @@ handleComposerKey
             UiSetDraft
                 (before <> inserted <> after)
                 (ui.uiCursor + Text.length inserted)
+
+    insertPastedText inserted = do
+        insertText inserted
+        modify' \current -> current { appPasted = True }
 
     deleteBefore = do
         state <- get

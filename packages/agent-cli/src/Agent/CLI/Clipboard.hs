@@ -5,7 +5,9 @@ module Agent.CLI.Clipboard
     , readClipboardImage
     , readClipboardImages
     , readClipboardImagesImageFirst
+    , readClipboardText
     , nonEmptyClipboardImages
+    , nonEmptyClipboardText
     , loadImagesFromPastedText
     , formatImageSize
     ) where
@@ -107,6 +109,14 @@ nonEmptyClipboardImages
     -> Maybe [ImageAttachment]
 nonEmptyClipboardImages = \case
     Right images@(_:_) -> Just images
+    _ -> Nothing
+
+-- | Keep successful clipboard text, including whitespace-only text. Explicit
+-- Ctrl/Cmd+V should behave like a normal text paste whenever the clipboard
+-- exposes text, falling back to image attachment only when it does not.
+nonEmptyClipboardText :: Either Text Text -> Maybe Text
+nonEmptyClipboardText = \case
+    Right text | not (Text.null text) -> Just text
     _ -> Nothing
 
 formatImageSize :: Int -> Text
