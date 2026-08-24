@@ -102,7 +102,11 @@ import Agent.CLI.Resume
 import Agent.CLI.Render (formatElapsed, summarizeToolCall)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
-import Agent.CLI.Terminal (shiftEnterCsiBodies)
+import Agent.CLI.Terminal
+    ( kittyCtrlVCsiBodies
+    , kittySuperVCsiBodies
+    , shiftEnterCsiBodies
+    )
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import qualified Agent.CLI.TUI.Composer as Composer
@@ -474,7 +478,7 @@ readFullscreenLineOrWithModels
 
 -- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
 -- are not present in the default terminfo input table. Without these entries,
--- Vty emits the payload of Shift+Enter sequences as printable characters.
+-- Vty emits the payload of modified-key sequences as printable characters.
 fullscreenVtyConfig :: V.VtyUserConfig
 fullscreenVtyConfig =
     V.defaultConfig
@@ -486,6 +490,16 @@ fullscreenVtyConfig =
               )
             | body <- shiftEnterCsiBodies
             ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'v') [modifier]
+                 )
+               | (modifier, bodies) <-
+                    [ (V.MCtrl, kittyCtrlVCsiBodies)
+                    , (V.MMeta, kittySuperVCsiBodies)
+                    ]
+               , body <- bodies
+               ]
         }
 
 requestFullscreenPermission
