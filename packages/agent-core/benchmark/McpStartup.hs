@@ -1,14 +1,19 @@
 module Main (main) where
 
 import Agent.MCP
-    ( McpServerConfig(..)
+    ( McpFleet
+    , McpInitState(..)
+    , McpServerConfig(..)
+    , McpServerStatus(..)
     , McpServerStatus(..)
     , closeMcpFleet
     , mcpFleetStatuses
     , mcpFleetTools
     , startMcpFleet
+    , startMcpFleetProgressive
     )
 import Control.Exception.Safe (bracket)
+import Control.Concurrent (threadDelay)
 import Control.Monad (forM)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.List (sort)
@@ -27,6 +32,8 @@ data Workload
     = Sequential
     | LegacyToolInspection
     | LifecycleStatusInspection
+    | ProgressiveReady
+    | ProgressiveSettled
 
 data Sample = Sample
     { wallMillis :: !Double
@@ -60,13 +67,15 @@ main =
         _ ->
             die $
                 "usage: mcp-startup-bench WORKLOAD SERVERS DELAY_MS SAMPLES\n"
-                    <> "workloads: sequential, legacy-tools, lifecycle-status"
+                    <> "workloads: sequential, legacy-tools, lifecycle-status, progressive-ready, progressive-settled"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "sequential" -> pure Sequential
     "legacy-tools" -> pure LegacyToolInspection
     "lifecycle-status" -> pure LifecycleStatusInspection
+    "progressive-ready" -> pure ProgressiveReady
+    "progressive-settled" -> pure ProgressiveSettled
     other -> die ("unknown workload: " <> other)
 
 parsePositive :: String -> String -> IO Int
@@ -99,6 +108,27 @@ runWorkload workload configs = case workload of
             (\fleet -> do
                 statuses <- mcpFleetStatuses fleet
                 pure (sum (map (.mcpStatusToolCount) statuses)))
+    ProgressiveReady ->
+        bracket
+            (startMcpFleetProgressive (const (pure ())) configs)
+            closeMcpFleet
+            (\fleet -> length <$> mcpFleetStatuses fleet)
+    ProgressiveSettled ->
+        bracket
+            (startMcpFleetProgressive (const (pure ())) configs)
+            closeMcpFleet
+            awaitSettled
+
+awaitSettled :: McpFleet -> IO Int
+awaitSettled fleet = do
+    statuses <- mcpFleetStatuses fleet
+    if any isActive statuses
+        then threadDelay 1000 >> awaitSettled fleet
+        else pure (sum (map (.mcpStatusToolCount) statuses))
+  where
+    isActive :: McpServerStatus -> Bool
+    isActive status =
+        status.mcpStatusState `elem` [McpPending, McpInitializing]
 
 measure :: IO Int -> IO Sample
 measure action = do

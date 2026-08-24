@@ -166,6 +166,76 @@ spec = describe "Agent.MCP" do
                         , "a%5F%5Fshared__shared_read"
                         ]
 
+    it "returns a progressive fleet before handshake completion and publishes meta-tools" $
+        withDelayedFakeServer \script -> do
+            progress <- newIORef []
+            fleet <- startMcpFleetProgressive
+                (\statuses -> modifyIORef' progress (<> [statuses]))
+                [progressiveConfig script "0.2" "slow"]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                initial <- mcpFleetStatuses fleet
+                case initial of
+                    [McpServerStatus "slow" state 0] ->
+                        state `shouldSatisfy`
+                            (`elem` [McpPending, McpInitializing])
+                    _ -> expectationFailure ("unexpected initial status: " <> show initial)
+                let tools = mcpFleetMetaTools fleet
+                    dispatch ident name arguments = dispatchToolCall
+                        defaultLoopDispatch
+                        (appToolHandlers tools)
+                        (functionToolCall ident name arguments)
+                early <- dispatch "early" "mcp_call"
+                    "{\"name\":\"slow__delayed_read\",\"arguments\":{}}"
+                early.output `shouldSatisfy`
+                    Text.isInfixOf "still connecting"
+                waitUntilReady fleet
+                searched <- dispatch "search" "mcp_search"
+                    "{\"query\":\"delayed\"}"
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "slow__delayed_read"
+                called <- dispatch "call" "mcp_call"
+                    "{\"name\":\"slow__delayed_read\",\"arguments\":{}}"
+                called.output `shouldBe` "delayed response"
+                updates <- readIORef progress
+                updates `shouldSatisfy` (not . null)
+
+    it "publishes a fast server before a slow progressive peer settles" $
+        withDelayedFakeServer \script -> do
+            fleet <- startMcpFleetProgressive
+                (const (pure ()))
+                [ progressiveConfig script "0.02" "fast"
+                , progressiveConfig script "0.5" "slow"
+                ]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                waitForServerReady fleet "fast"
+                statuses <- mcpFleetStatuses fleet
+                find ((== "slow") . (.mcpStatusName)) statuses
+                    `shouldSatisfy`
+                        maybe False
+                            ((`elem` [McpPending, McpInitializing])
+                                . (.mcpStatusState))
+                let tools = mcpFleetMetaTools fleet
+                searched <- dispatchToolCall
+                    defaultLoopDispatch
+                    (appToolHandlers tools)
+                    (functionToolCall "search-fast" "mcp_search"
+                        "{\"server\":\"fast\"}")
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "fast__delayed_read"
+
+    it "reports a handshake failure after successful process construction" do
+        let config =
+                (baseConfig "exits" "/bin/sh")
+                    { mcpServerArgs = ["-c", "exit 1"]
+                    }
+        fleet <- startMcpFleetProgressive (const (pure ())) [config]
+        bracket (pure fleet) closeMcpFleet \_ -> do
+            waitForServerFailure fleet "exits"
+            statuses <- mcpFleetStatuses fleet
+            case statuses of
+                [McpServerStatus "exits" (McpFailed _) 0] -> pure ()
+                _ -> expectationFailure ("unexpected statuses: " <> show statuses)
+
 withFakeServer :: (FilePath -> IO a) -> IO a
 withFakeServer action = do
     temporary <- getTemporaryDirectory
@@ -189,6 +259,12 @@ concurrentConfig script barrier name = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 2
     , mcpServerRequestTimeoutSeconds = 2
     }
+
+progressiveConfig :: FilePath -> String -> Text.Text -> McpServerConfig
+progressiveConfig script delay name =
+    (baseConfig name script)
+        { mcpServerArgs = [delay]
+        }
 
 baseConfig :: Text.Text -> FilePath -> McpServerConfig
 baseConfig name command = McpServerConfig
@@ -222,6 +298,52 @@ withConcurrentFakeServer action = do
             removeDirectoryRecursive barrier)
         (uncurry action)
 
+withDelayedFakeServer :: (FilePath -> IO a) -> IO a
+withDelayedFakeServer action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (path, handle) <- openTempFile temporary "agent-mcp-delayed.sh"
+            LBS.hPutStr handle delayedFakeServer
+            hClose handle
+            setFileMode path 0o700
+            pure path)
+        removeFile
+        action
+
+waitUntilReady :: McpFleet -> IO ()
+waitUntilReady fleet = waitForServerReady fleet "slow"
+
+waitForServerReady :: McpFleet -> Text.Text -> IO ()
+waitForServerReady fleet name = go (200 :: Int)
+  where
+    go 0 = expectationFailure "MCP server did not become ready"
+    go remaining = do
+        statuses <- mcpFleetStatuses fleet
+        if any
+            (\status ->
+                status.mcpStatusName == name
+                    && status.mcpStatusState == McpReady)
+            statuses
+            then pure ()
+            else threadDelay 10000 >> go (remaining - 1)
+
+waitForServerFailure :: McpFleet -> Text.Text -> IO ()
+waitForServerFailure fleet name = go (200 :: Int)
+  where
+    go 0 = expectationFailure "MCP server did not fail"
+    go remaining = do
+        statuses <- mcpFleetStatuses fleet
+        if any
+            (\status ->
+                status.mcpStatusName == name
+                    && case status.mcpStatusState of
+                        McpFailed _ -> True
+                        _ -> False)
+            statuses
+            then pure ()
+            else threadDelay 10000 >> go (remaining - 1)
+
 fakeServer :: LBS.ByteString
 fakeServer =
     "#!/bin/sh\n\
@@ -241,6 +363,26 @@ fakeServer =
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second response\"}]}}'\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first response\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+delayedFakeServer :: LBS.ByteString
+delayedFakeServer =
+    "#!/bin/sh\n\
+    \delay=\"$1\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      sleep \"$delay\"\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"delayed\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"delayed_read\",\"description\":\"Delayed read.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/call\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"delayed response\"}]}}'\n\
     \      ;;\n\
     \  esac\n\
     \done\n"
