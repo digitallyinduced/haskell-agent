@@ -7,6 +7,7 @@ module Agent.TUI.Model
     , NoticeKind(..)
     , RetryCountdown(..)
     , PermissionOverlay(..)
+    , PromptLimitStatus(..)
     , PromptState(..)
     , UiBlock(..)
     , UiEvent(..)
@@ -25,6 +26,7 @@ module Agent.TUI.Model
     , moveWordRight
     , reduceUi
     , selectedBlockIndex
+    , timestampNewMessageBlocks
     , progressNotice
     , successNotice
     , uiNextDeadlineMillis
@@ -113,6 +115,7 @@ data UiBlock = UiBlock
     , blockKind :: !BlockKind
     , blockTitle :: !Text
     , blockBody :: !Text
+    , blockTimestamp :: !Text
     , blockDetail :: !Text
     , blockState :: !BlockState
     , blockExpanded :: !Bool
@@ -132,6 +135,12 @@ data PermissionOverlay = PermissionOverlay
     }
     deriving (Eq, Show)
 
+data PromptLimitStatus = PromptLimitStatus
+    { promptLimitText :: !Text
+    , promptLimitWarning :: !Bool
+    }
+    deriving (Eq, Show)
+
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
@@ -139,6 +148,7 @@ data PromptState = PromptState
     , promptAccount :: !Text
     , promptAccountSelectable :: !Bool
     , promptUsage :: !TokenUsage
+    , promptLimitStatus :: !(Maybe PromptLimitStatus)
     , promptAttachments :: !Int
     }
     deriving (Eq, Show)
@@ -182,6 +192,7 @@ data UiEvent
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
     | UiSetPromptEffort !Text
+    | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe UiNotice)
@@ -227,6 +238,7 @@ initialUiState = UiState
         , promptAccount = ""
         , promptAccountSelectable = False
         , promptUsage = emptyTokenUsage
+        , promptLimitStatus = Nothing
         , promptAttachments = 0
         }
     , uiBranch = ""
@@ -308,6 +320,11 @@ reduceUi event state = case event of
         state
             { uiPrompt = state.uiPrompt { promptEffort = effort }
             }
+    UiSetPromptLimitStatus limitStatus ->
+        state
+            { uiPrompt =
+                state.uiPrompt { promptLimitStatus = limitStatus }
+            }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
@@ -345,7 +362,7 @@ reduceUi event state = case event of
                 (\permission ->
                     permission
                         { permissionIndex =
-                            (permission.permissionIndex + delta) `mod` 3
+                            (permission.permissionIndex + delta) `mod` 4
                         })
                     <$> state.uiPermission
             }
@@ -729,6 +746,7 @@ appendBlock kind title body detail blockState callId state =
             , blockKind = kind
             , blockTitle = title
             , blockBody = body
+            , blockTimestamp = ""
             , blockDetail = detail
             , blockState
             , blockExpanded =
@@ -742,6 +760,24 @@ appendBlock kind title body detail blockState callId state =
         , uiSelectedBlockIndex = Just index
         , uiBlockIndices = Map.insert ident index state.uiBlockIndices
         }
+
+-- | Attach one captured wall-clock label to newly appended conversation
+-- messages. Tool and status blocks deliberately remain unstamped.
+timestampNewMessageBlocks :: Int -> Text -> UiState -> UiState
+timestampNewMessageBlocks firstNewIndex timestamp state
+    | Text.null timestamp = state
+    | otherwise =
+        state
+            { uiBlocks =
+                Seq.mapWithIndex
+                    (\index block ->
+                        if index >= firstNewIndex
+                            && Text.null block.blockTimestamp
+                            && block.blockKind `elem` [BlockUser, BlockAssistant]
+                            then block { blockTimestamp = timestamp }
+                            else block)
+                    state.uiBlocks
+            }
 
 completeTool :: Int -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex result state =

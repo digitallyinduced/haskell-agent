@@ -45,6 +45,10 @@ import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Tx
 import qualified Hasql.Transaction.Sessions as TxSessions
 
+import Agent.Store.Custom.QueryResult
+    ( CustomQueryResult(..)
+    , customQueryStatement
+    )
 import Agent.Store.Postgres.Scope
     ( Scope(..)
     , ScopeDatabase(..)
@@ -109,12 +113,6 @@ data CatalogIndex = CatalogIndex
     }
     deriving (Eq, Show)
 
-data CustomQueryResult = CustomQueryResult
-    { customQueryRows :: !Text
-    , customQueryTruncated :: !Bool
-    }
-    deriving (Eq, Show)
-
 data CustomAuditContext = CustomAuditContext
     { customAuditSessionId :: !(Maybe Text)
     , customAuditAgentId :: !(Maybe Text)
@@ -171,7 +169,8 @@ queryCustom scopePool database limits rawQuery =
     case validateLimits limits *> normalizeCustomQuery rawQuery of
         Left err -> pure (Left err)
         Right query -> do
-            let statement = customQueryStatement limits query
+            let statement =
+                    customQueryStatement limits.queryMaxRows query
                 transaction = do
                     expectedIdentity <- Tx.statement
                         database.scopeDatabaseRole
@@ -274,7 +273,7 @@ executeCustom trustedPool scopePool database audit limits purpose rawSql
                                         catalogBefore
 
 -- | Strip whitespace and trailing semicolons before nesting a user query in a
--- single JSONB-producing Hasql statement.
+-- single boundary-encoded Hasql statement.
 normalizeCustomQuery :: Text -> Either Text Text
 normalizeCustomQuery raw =
     let stripped = Text.dropWhileEnd isTrailing (Text.strip raw)
@@ -692,33 +691,6 @@ catalogIndexesStatement = mkStatement
             <$> textColumn
             <*> (CatalogIndex <$> textColumn <*> textColumn))
     True
-
-customQueryStatement :: QueryLimits -> Text -> Statement () CustomQueryResult
-customQueryStatement limits query = mkStatement
-    sql
-    Encoders.noParams
-    (Decoders.singleRow $
-        CustomQueryResult <$> textColumn <*> boolColumn)
-    False
-  where
-    rowCap = limits.queryMaxRows
-    overflowCap
-        | rowCap == maxBound = rowCap
-        | otherwise = rowCap + 1
-    cap = Text.pack (show rowCap)
-    capPlusOne = Text.pack (show overflowCap)
-    sql =
-        "select coalesce(jsonb_agg("
-            <> "q._ha_row order by q._ha_row_number"
-            <> ") filter (where q._ha_row_number <= " <> cap
-            <> "), '[]'::jsonb)::text,"
-            <> " coalesce(max(q._ha_row_number), 0) > " <> cap
-            <> " from ("
-            <> "select to_jsonb(_ha_data) as _ha_row, "
-            <> "row_number() over () as _ha_row_number "
-            <> "from (" <> query <> ") as _ha_data "
-            <> "limit " <> capPlusOne
-            <> ") as q"
 
 scopeIdentityStatement :: Statement Text Bool
 scopeIdentityStatement = mkStatement

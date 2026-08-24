@@ -72,7 +72,7 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.Approval
     ( ApprovalNotice(..)
     , approveToolDecision
-    , approveToolDecisionWithReporter
+    , approveToolDecisionWithReporterAndPersistence
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -82,12 +82,10 @@ import Agent.CLI.Btw
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
-    ( ClipboardContent(..)
-    , formatImageSize
+    ( formatImageSize
     , loadImagesFromPastedText
     , nonEmptyClipboardImages
-    , readClipboard
-    , readClipboardImages
+    , readClipboardImagesForPaste
     , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
@@ -231,6 +229,7 @@ import Agent.CLI.Project
     , projectModelProvider
     , resolveProjectRoot
     , saveProjectAccount
+    , saveProjectAutoApprove
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -382,6 +381,9 @@ import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
+    , formatGrokLimitStatus
+    , formatOpenAiLimitStatus
+    , formatOpenRouterLimitStatus
     , formatUsageReport
     )
 import Agent.CLI.Worktree
@@ -515,9 +517,11 @@ import Agent.Tools.Types
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter as OpenRouter
+import qualified Agent.OpenRouter.Usage as OpenRouterUsage
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
+import qualified Agent.XAI.Usage as XAIUsage
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
@@ -781,14 +785,16 @@ runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options = do
     fullscreenInputs <- newFullscreenInputBuffer
     sessionState <- newSessionState
+    mcpSupervisor <- MCP.newMcpSupervisor
     withRestoredCurrentDirectory
-        (go fullscreenInputs sessionState options Nothing)
+        (go mcpSupervisor fullscreenInputs sessionState options Nothing)
+        `finally` MCP.closeMcpSupervisor mcpSupervisor
   where
-    go fullscreenInputs sessionState current transition =
-        runAgent fullscreenInputs sessionState current transition >>= \case
+    go mcpSupervisor fullscreenInputs sessionState current transition =
+        runAgent mcpSupervisor fullscreenInputs sessionState current transition >>= \case
             RunResumeSession sessionId ->
                 newSessionState >>= \nextState ->
-                    go fullscreenInputs nextState
+                    go mcpSupervisor fullscreenInputs nextState
                         current
                             { optProvider = Nothing
                             , optModel = Nothing
@@ -802,7 +808,7 @@ runAgentWithRestarts options = do
                         Nothing
             RunSwitchWorktree path provider model effort ->
                 newSessionState >>= \nextState ->
-                    go fullscreenInputs nextState
+                    go mcpSupervisor fullscreenInputs nextState
                         current
                             { optProvider = Just provider
                             , optModel = Just model
@@ -815,11 +821,11 @@ runAgentWithRestarts options = do
                             }
                         Nothing
             RunSwitchProvider next ->
-                go fullscreenInputs sessionState
+                go mcpSupervisor fullscreenInputs sessionState
                     (applyProviderTransition current next)
                     (Just next)
             RunRestart sessionId ->
-                go fullscreenInputs sessionState
+                go mcpSupervisor fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
             RunProviderStartFailed apiError ->
@@ -829,7 +835,7 @@ runAgentWithRestarts options = do
                             continueAutomaticFallback
                                 Nothing failed apiError >>= \case
                                 Just next ->
-                                    go fullscreenInputs sessionState
+                                    go mcpSupervisor fullscreenInputs sessionState
                                         (applyProviderTransition current next)
                                         (Just next)
                                 Nothing -> do
@@ -1028,20 +1034,22 @@ formatRepositoryPath home cwd
     cwdText = toText cwd
 
 runAgent
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO RunResult
-runAgent fullscreenInputs sessionState options transition = do
+runAgent mcpSupervisor fullscreenInputs sessionState options transition = do
     prepared <-
         prepareAgentIteration
-            fullscreenInputs sessionState Nothing options transition
+            mcpSupervisor fullscreenInputs sessionState Nothing options transition
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
                 runFullscreen runtime $
                     runFullscreenRestartLoop
+                        mcpSupervisor
                         fullscreenInputs
                         sessionState
                         runtime
@@ -1066,13 +1074,15 @@ runAgent fullscreenInputs sessionState options transition = do
 -- alternate screen until the whole provider-restart chain finishes. Session
 -- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
 prepareAgentIteration
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> Maybe FullscreenRuntime
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO PreparedAgent
 prepareAgentIteration
+        mcpSupervisor
         fullscreenInputs sessionState activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
@@ -1285,7 +1295,15 @@ prepareAgentIteration
                         , startupSessionState = sessionState
                         }
                 runAgentInitialized
-                    options transition home root resumed resumeLock cwd startup
+                    mcpSupervisor
+                    options
+                    transition
+                    home
+                    root
+                    resumed
+                    resumeLock
+                    cwd
+                    startup
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
@@ -1309,7 +1327,8 @@ resetFullscreenSessionActions runtime =
         (const (pure ()))
 
 runFullscreenRestartLoop
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> FullscreenRuntime
     -> CliOptions
@@ -1317,6 +1336,7 @@ runFullscreenRestartLoop
     -> IO RunResult
     -> IO RunResult
 runFullscreenRestartLoop
+    mcpSupervisor
     fullscreenInputs
     sessionState
     runtime =
@@ -1365,6 +1385,7 @@ runFullscreenRestartLoop
             UiSetNotice (Just (progressNotice "Retrying startup…"))
         try @_ @StartupFailure
             (prepareAgentIteration
+                mcpSupervisor
                 fullscreenInputs
                 sessionState
                 (Just runtime)
@@ -1400,7 +1421,8 @@ runFullscreenRestartLoop
                 _ -> pure RunQuit
 
 runAgentInitialized
-    :: CliOptions
+    :: MCP.McpSupervisor
+    -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
     -> OsPath
@@ -1409,13 +1431,15 @@ runAgentInitialized
     -> OsPath
     -> StartupRuntime
     -> IO RunResult
-runAgentInitialized options transition home root resumed resumeLock cwd startup =
+runAgentInitialized
+        mcpSupervisor options transition home root resumed resumeLock cwd startup =
     runAgentInitializedWithLock
-        options transition home root resumed resumeLock cwd startup
+        mcpSupervisor options transition home root resumed resumeLock cwd startup
         `onException` mapM_ releaseSessionLock resumeLock
 
 runAgentInitializedWithLock
-    :: CliOptions
+    :: MCP.McpSupervisor
+    -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
     -> OsPath
@@ -1425,6 +1449,7 @@ runAgentInitializedWithLock
     -> StartupRuntime
     -> IO RunResult
 runAgentInitializedWithLock
+        mcpSupervisor
         options transition home root resumed resumeLock cwd startup = do
     let baseToolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
@@ -2030,7 +2055,9 @@ runAgentInitializedWithLock
                 { MCP.mcpServerName = label
                 , MCP.mcpServerCommand = Text.unpack config.mcpCommand
                 , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
-                , MCP.mcpServerCwd = Text.unpack <$> config.mcpCwd
+                , MCP.mcpServerCwd =
+                    Just $
+                        maybe (unsafeToFilePath cwd) Text.unpack config.mcpCwd
                 , MCP.mcpServerEnv =
                     [ (Text.unpack name, Text.unpack value)
                     | (name, value) <- Map.toAscList config.mcpEnv
@@ -2068,15 +2095,17 @@ runAgentInitializedWithLock
             when (settled && not (null statuses)) $
                 atomicModifyIORef' pendingNotices \notices ->
                     (notices <> [UserMessage (formatMcpModelNotice statuses)], ())
-    mcpFleet <-
+    mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
                 then
-                    MCP.startMcpFleetProgressive
+                    MCP.acquireMcpFleetProgressive
+                        mcpSupervisor
                         reportProgressiveMcp
                         mcpServerConfigs
                 else
-                    MCP.startMcpFleetWithProgress
+                    MCP.acquireMcpFleetWithProgress
+                        mcpSupervisor
                         (\names ->
                             setStartupNotice startup.startupFullscreen
                                 (if null names
@@ -2090,7 +2119,8 @@ runAgentInitializedWithLock
             Left exception ->
                 startupDie startup
                     ("Failed to initialize MCP tools: " <> show exception)
-            Right fleet -> pure fleet
+            Right lease -> pure lease
+    let mcpFleet = mcpLease.mcpLeaseFleet
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
@@ -2101,7 +2131,8 @@ runAgentInitializedWithLock
             secretHooks
             multiCtx
             agentTypesRef
-            `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
+            `onException`
+                (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -2197,7 +2228,7 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
-            MCP.closeMcpFleet mcpFleet
+            MCP.releaseMcpFleetLease mcpLease
             coding.codingClose
             cleanupScratch
     flip finally closeAll do
@@ -3486,9 +3517,10 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                     Nothing ->
                         withStdinPaused escPaused $
                             approveToolDecision
-                                policyRef allowedToolsRef toolRegistry planMode call
+                                policyRef allowedToolsRef toolRegistry planMode
+                                projectRoot call
                     Just runtime ->
-                        approveToolDecisionWithReporter
+                        approveToolDecisionWithReporterAndPersistence
                             (requestFullscreenPermission runtime)
                             (\case
                                 ApprovalWarning _ -> pure ()
@@ -3497,6 +3529,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                                         (UiSetNotice
                                             (Just
                                                 (successNotice message))))
+                            (saveProjectAutoApprove projectRoot True)
                             policyRef
                             allowedToolsRef
                             toolRegistry
@@ -3863,6 +3896,7 @@ buildPromptState params planState policy account accountSelectable usage attachm
         , promptAccount = account
         , promptAccountSelectable = accountSelectable
         , promptUsage = usage
+        , promptLimitStatus = Nothing
         , promptAttachments = attachments
         }
 
@@ -4184,16 +4218,26 @@ replWithDraft env@SessionEnv
                         (isJust selectAccount)
                         usage
                         (length pendingAttachments)
-            readIORef startupUnavailableRef >>= \case
-                Nothing ->
-                    Right
-                        <$> readFullscreenLineWithModels
-                            runtime skillCommands (catalogModelIds catalog)
-                            promptState draft
-                Just unavailable ->
-                    readFullscreenLineOrWithModels
-                        runtime skillCommands (catalogModelIds catalog)
-                        promptState draft unavailable
+                readPrompt =
+                    readIORef startupUnavailableRef >>= \case
+                        Nothing ->
+                            Right
+                                <$> readFullscreenLineWithModels
+                                    runtime
+                                    skillCommands
+                                    (catalogModelIds catalog)
+                                    promptState
+                                    draft
+                        Just unavailable ->
+                            readFullscreenLineOrWithModels
+                                runtime
+                                skillCommands
+                                (catalogModelIds catalog)
+                                promptState
+                                draft
+                                unavailable
+            withAsync (refreshAccountLimit runtime) \_ ->
+                readPrompt
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -4271,6 +4315,53 @@ replWithDraft env@SessionEnv
                 policy
                 mline
   where
+    refreshAccountLimit runtime =
+        case (provider, tokenProvider) of
+            (XAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
+                    refreshWith
+                        tokens
+                        XAIUsage.fetchGrokUsage
+                        formatGrokLimitStatus
+            (OpenAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
+                    getNextToken tokens Nothing >>= \case
+                        Left _ -> pure ()
+                        Right credential
+                            | Text.null (Text.strip credential.accountId) ->
+                                pure ()
+                            | otherwise ->
+                                fetchUsage
+                                    credential.accessToken
+                                    credential.accountId >>= \case
+                                        Left _ -> pure ()
+                                        Right snapshot ->
+                                            publish
+                                                (formatOpenAiLimitStatus snapshot)
+            (OpenRouterProvider, Just tokens) ->
+                getNextToken tokens Nothing >>= \case
+                    Left _ -> pure ()
+                    Right credential ->
+                        OpenRouterUsage.fetchOpenRouterUsage
+                            credential.accessToken >>= \case
+                                Left _ -> pure ()
+                                Right snapshot ->
+                                    publish
+                                        (formatOpenRouterLimitStatus snapshot)
+            _ -> pure ()
+      where
+        refreshWith tokens fetch formatStatus =
+            getNextToken tokens Nothing >>= \case
+                Left _ -> pure ()
+                Right credential ->
+                    fetch credential >>= \case
+                        Left _ -> pure ()
+                        Right snapshot -> publish (formatStatus snapshot)
+        publish limitStatus =
+            forM_
+                limitStatus
+                (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
+
     handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
         ReplEof -> do
             when (isNothing fullscreen) $
@@ -4338,9 +4429,14 @@ replWithDraft env@SessionEnv
                                         (roleMuted stdoutColor
                                             (glyphOk <> message))
             continueWith keptDraft
-        ReplClipboardPasteOrText keptDraft pastedDraft -> do
-            imagesResult <- readClipboardImagesImageFirst
-            case nonEmptyClipboardImages imagesResult of
+        ReplClipboardPasteOrText keptDraft pasted pastedDraft -> do
+            pastedImages <- loadImagesFromPastedText pasted
+            imagesResult <- case pastedImages of
+                Just images@(_:_) -> pure (Just images)
+                _ ->
+                    nonEmptyClipboardImages
+                        <$> readClipboardImagesImageFirst
+            case imagesResult of
                 Just images -> do
                     message <- queueAttachedImages
                         attachmentsRef
@@ -4355,7 +4451,7 @@ replWithDraft env@SessionEnv
                             (roleMuted stdoutColor
                                 (glyphOk <> message))
                     continueWith keptDraft
-                Nothing -> do
+                _ -> do
                     fullscreenEvent (UiSetNotice Nothing)
                     continueWith pastedDraft
         ReplChooseModel keptDraft -> do
@@ -4494,44 +4590,12 @@ replWithDraft env@SessionEnv
                     ReplPaste pasteImmediate pasteCaption -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
-                        imagesResult <- readClipboardImages
+                        imagesResult <- readClipboardImagesForPaste
                         case imagesResult of
                             Left err -> do
-                                -- Fall back to a richer clipboard sniff for better errors.
-                                content <- readClipboard
-                                let
-                                    message = case content of
-                                        ClipboardText _ ->
-                                            "clipboard has text, not an image \
-                                            \(paste text normally into the prompt)"
-                                        ClipboardPaths paths ->
-                                            "clipboard has file path(s), \
-                                            \but no loadable image: "
-                                                <> Text.intercalate
-                                                    ", " (map Text.pack paths)
-                                        ClipboardEmpty ->
-                                            err
-                                        ClipboardImage image ->
-                                            -- Shouldn't happen if readClipboardImages failed, but be safe.
-                                            "attached "
-                                                <> image.imageMime
-                                case content of
-                                    ClipboardImage image -> do
-                                        attachMessage <- queueAttachedImages
-                                            attachmentsRef
-                                            previewIdRef
-                                            color
-                                            (isNothing fullscreen)
-                                            [image]
-                                        syncFullscreenImagePreviews
-                                        displayInfo attachMessage $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    (glyphOk <> attachMessage))
-                                    _ ->
-                                        displayError message $
-                                            Text.hPutStrLn stderr
-                                                (roleError errColor message)
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError errColor err)
                                 continue
                             Right [] -> do
                                 displayError "no image found on the clipboard" $
@@ -6775,30 +6839,14 @@ queueClipboardImages
     previewIdRef
     color
     showPreview = do
-    imagesResult <- readClipboardImages
+    imagesResult <- readClipboardImagesForPaste
     case imagesResult of
         Right images@(_:_) ->
             Right <$> queueAttachedImages
                 attachmentsRef previewIdRef color showPreview images
         Right [] ->
             pure (Left "no image found on the clipboard")
-        Left err -> reportClipboardImageError err
-  where
-    reportClipboardImageError err =
-        readClipboard >>= \case
-            ClipboardText _ ->
-                pure $ Left
-                    "clipboard has text, not an image \
-                    \(paste text normally into the prompt)"
-            ClipboardPaths paths ->
-                pure $ Left
-                    ("clipboard has file path(s), but no loadable image: "
-                        <> Text.intercalate ", " (map Text.pack paths))
-            ClipboardEmpty ->
-                pure (Left err)
-            ClipboardImage image ->
-                Right <$> queueAttachedImages
-                    attachmentsRef previewIdRef color showPreview [image]
+        Left err -> pure (Left err)
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do

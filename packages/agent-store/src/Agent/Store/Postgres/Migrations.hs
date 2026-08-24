@@ -125,6 +125,12 @@ coreMigrations =
             learnedSkillSchemaStatements
             <> learnedSkillRuntimeGrantStatements
         }
+    , Migration
+        { migrationVersion = 6
+        , migrationName = "typed response item fields"
+        , migrationStatements =
+            [migrateOpaqueSessionFieldsToTextStatement]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
@@ -171,11 +177,13 @@ migrateToolOutputsToTextStatement =
     \       AND column_name = 'output'\
     \   ) THEN\
     \     ALTER TABLE harness.session_function_call_outputs\
-    \       ALTER COLUMN output TYPE text USING\
-    \         CASE WHEN jsonb_typeof(output) = 'string'\
-    \           THEN output #>> '{}' ELSE output::text END;\
+    \       ALTER COLUMN output TYPE text USING output::text;\
     \     ALTER TABLE harness.session_function_call_outputs\
     \       RENAME COLUMN output TO output_text;\
+    \     ALTER TABLE harness.session_function_call_outputs\
+    \       ADD COLUMN IF NOT EXISTS\
+    \         output_kind text NOT NULL DEFAULT 'encoded'\
+    \       CHECK (output_kind IN ('text', 'encoded'));\
     \   END IF;\
     \   IF EXISTS (\
     \     SELECT 1 FROM information_schema.columns\
@@ -184,11 +192,136 @@ migrateToolOutputsToTextStatement =
     \       AND column_name = 'output'\
     \   ) THEN\
     \     ALTER TABLE harness.session_custom_tool_call_outputs\
-    \       ALTER COLUMN output TYPE text USING\
-    \         CASE WHEN jsonb_typeof(output) = 'string'\
-    \           THEN output #>> '{}' ELSE output::text END;\
+    \       ALTER COLUMN output TYPE text USING output::text;\
     \     ALTER TABLE harness.session_custom_tool_call_outputs\
     \       RENAME COLUMN output TO output_text;\
+    \     ALTER TABLE harness.session_custom_tool_call_outputs\
+    \       ADD COLUMN IF NOT EXISTS\
+    \         output_kind text NOT NULL DEFAULT 'encoded'\
+    \       CHECK (output_kind IN ('text', 'encoded'));\
+    \   END IF;\
+    \ END\
+    \ $ha$"
+
+-- Stores that already ran the original version-4 migration have no shape
+-- marker for older output rows. Defaulting those rows to plain text preserves
+-- the behavior of the previous loader; new rows retain their explicit kind.
+migrateOpaqueSessionFieldsToTextStatement :: ByteString
+migrateOpaqueSessionFieldsToTextStatement =
+    "DO $ha$\
+    \ DECLARE\
+    \   target record;\
+    \   constraint_name text;\
+    \ BEGIN\
+    \   FOR target IN\
+    \     SELECT * FROM (VALUES\
+    \       ('session_messages', 'extra_fields', 'extra_fields_text', true),\
+    \       ('session_function_calls', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_function_call_outputs', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_custom_tool_calls', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_custom_tool_call_outputs', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_reasoning_items', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_reasoning_summaries', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_item_references', 'extra_fields',\
+    \         'extra_fields_text', true),\
+    \       ('session_tagged_items', 'fields', 'fields_text', true),\
+    \       ('session_response_content_parts', 'input_audio',\
+    \         'input_audio_text', false),\
+    \       ('session_response_content_parts', 'prompt_cache_breakpoint',\
+    \         'prompt_cache_breakpoint_text', false),\
+    \       ('session_response_content_parts', 'annotations',\
+    \         'annotations_text', false),\
+    \       ('session_response_content_parts', 'logprobs',\
+    \         'logprobs_text', false),\
+    \       ('session_response_content_parts', 'extra_fields',\
+    \         'extra_fields_text', true)\
+    \     ) AS fields(table_name, old_name, new_name, has_default)\
+    \   LOOP\
+    \     IF EXISTS (\
+    \       SELECT 1 FROM information_schema.columns\
+    \       WHERE table_schema = 'harness'\
+    \         AND table_name = target.table_name\
+    \         AND column_name = target.old_name\
+    \     ) THEN\
+    \       FOR constraint_name IN\
+    \         SELECT constraint_row.conname\
+    \         FROM pg_catalog.pg_constraint constraint_row\
+    \         JOIN pg_catalog.pg_class relation\
+    \           ON relation.oid = constraint_row.conrelid\
+    \         JOIN pg_catalog.pg_namespace schema_row\
+    \           ON schema_row.oid = relation.relnamespace\
+    \         WHERE schema_row.nspname = 'harness'\
+    \           AND relation.relname = target.table_name\
+    \           AND constraint_row.contype = 'c'\
+    \           AND position(\
+    \             target.old_name\
+    \             IN pg_catalog.pg_get_constraintdef(constraint_row.oid)\
+    \           ) > 0\
+    \       LOOP\
+    \         EXECUTE format(\
+    \           'ALTER TABLE harness.%I DROP CONSTRAINT %I',\
+    \           target.table_name, constraint_name\
+    \         );\
+    \       END LOOP;\
+    \       EXECUTE format(\
+    \         'ALTER TABLE harness.%I ALTER COLUMN %I DROP DEFAULT',\
+    \         target.table_name, target.old_name\
+    \       );\
+    \       EXECUTE format(\
+    \         'ALTER TABLE harness.%I ALTER COLUMN %I TYPE text USING %I::text',\
+    \         target.table_name, target.old_name, target.old_name\
+    \       );\
+    \       IF target.has_default THEN\
+    \         EXECUTE format(\
+    \           'ALTER TABLE harness.%I ALTER COLUMN %I SET DEFAULT %L',\
+    \           target.table_name, target.old_name, '{}'\
+    \         );\
+    \       END IF;\
+    \       EXECUTE format(\
+    \         'ALTER TABLE harness.%I RENAME COLUMN %I TO %I',\
+    \         target.table_name, target.old_name, target.new_name\
+    \       );\
+    \     END IF;\
+    \   END LOOP;\
+    \   IF to_regclass('harness.session_function_call_outputs')\
+    \       IS NOT NULL THEN\
+    \     ALTER TABLE harness.session_function_call_outputs\
+    \       ADD COLUMN IF NOT EXISTS output_kind text NOT NULL DEFAULT 'text';\
+    \     IF NOT EXISTS (\
+    \       SELECT 1 FROM pg_catalog.pg_constraint\
+    \       WHERE conrelid =\
+    \         'harness.session_function_call_outputs'::regclass\
+    \         AND conname =\
+    \           'session_function_call_outputs_output_kind_check'\
+    \     ) THEN\
+    \       ALTER TABLE harness.session_function_call_outputs\
+    \         ADD CONSTRAINT\
+    \           session_function_call_outputs_output_kind_check\
+    \         CHECK (output_kind IN ('text', 'encoded'));\
+    \     END IF;\
+    \   END IF;\
+    \   IF to_regclass('harness.session_custom_tool_call_outputs')\
+    \       IS NOT NULL THEN\
+    \     ALTER TABLE harness.session_custom_tool_call_outputs\
+    \       ADD COLUMN IF NOT EXISTS output_kind text NOT NULL DEFAULT 'text';\
+    \     IF NOT EXISTS (\
+    \       SELECT 1 FROM pg_catalog.pg_constraint\
+    \       WHERE conrelid =\
+    \         'harness.session_custom_tool_call_outputs'::regclass\
+    \         AND conname =\
+    \           'session_custom_tool_call_outputs_output_kind_check'\
+    \     ) THEN\
+    \       ALTER TABLE harness.session_custom_tool_call_outputs\
+    \         ADD CONSTRAINT\
+    \           session_custom_tool_call_outputs_output_kind_check\
+    \         CHECK (output_kind IN ('text', 'encoded'));\
+    \     END IF;\
     \   END IF;\
     \ END\
     \ $ha$"

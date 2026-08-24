@@ -297,7 +297,9 @@ with subagents. Blocking startup exposes read-only tools as
 `server__tool`. Progressive startup exposes stable `mcp_search` and `mcp_call`
 tools immediately, then publishes each server's read-only catalog as it
 becomes ready. Only tools explicitly annotated `readOnlyHint: true` are
-available.
+available. Live MCP fleets are reused across provider/session rebuilds when
+their configuration is unchanged. Progressive `mcp_call` invocations also
+restart a failed stdio transport once and retry the read-only call.
 
 ### Secret entry
 

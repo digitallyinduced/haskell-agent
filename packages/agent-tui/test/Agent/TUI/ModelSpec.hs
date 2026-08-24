@@ -17,6 +17,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "cycles across all four permission choices" do
+        let shown = reduceUi (UiPermissionShown "write a file") initialUiState
+            moved count = iterate (reduceUi (UiPermissionMoved 1)) shown !! count
+        fmap (.permissionIndex) shown.uiPermission `shouldBe` Just 0
+        fmap (.permissionIndex) (moved 1).uiPermission `shouldBe` Just 1
+        fmap (.permissionIndex) (moved 2).uiPermission `shouldBe` Just 2
+        fmap (.permissionIndex) (moved 3).uiPermission `shouldBe` Just 3
+        fmap (.permissionIndex) (moved 4).uiPermission `shouldBe` Just 0
+
     it "retains user, reasoning, and assistant blocks across a turn" do
         let state =
                 apply
@@ -32,6 +41,25 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) blocks
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
+
+    it "timestamps only newly appended user and assistant messages" do
+        let existing =
+                reduceUi (UiUserSubmitted "old prompt") initialUiState
+            appended =
+                applyFrom
+                    existing
+                    [ UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "thinking")
+                    , UiLoop (TextDelta "answer")
+                    ]
+            stamped =
+                timestampNewMessageBlocks
+                    (length existing.uiBlocks)
+                    "1:53 PM"
+                    appended
+            blocks = Foldable.toList stamped.uiBlocks
+        map (.blockTimestamp) blocks
+            `shouldBe` ["", "", "1:53 PM"]
 
     it "selects and expands a clicked reasoning block in one action" do
         let before =

@@ -6,10 +6,9 @@
 
 -- | Typed PostgreSQL persistence for harness sessions.
 --
--- Harness-owned records are stored in explicit relational columns. Provider
--- response items are normalized by 'Agent.Store.Postgres.SessionItem'; JSONB
--- is reserved for intrinsically open provider leaf values such as tool output
--- and extension fields.
+-- Harness-owned records and provider response items are stored in explicit
+-- relational columns. Intentionally open provider leaves cross the database
+-- boundary as opaque text and are interpreted only by the caller.
 module Agent.Store.Postgres.Session
     ( SessionMetadata(..)
     , SessionLegacyTarget(..)

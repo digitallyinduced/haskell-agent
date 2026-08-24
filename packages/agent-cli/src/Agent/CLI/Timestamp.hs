@@ -5,7 +5,9 @@
 -- The REPL UI keeps the unstamped text; assistant replies are scrubbed if
 -- the model echoes a stamp.
 module Agent.CLI.Timestamp
-    ( renderMessageTimestamp
+    ( currentShortMessageTimestamp
+    , renderMessageTimestamp
+    , renderShortMessageTimestamp
     , stampUserText
     , stampUserTextAt
     , stampTurnInputs
@@ -22,6 +24,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Time.LocalTime
     ( TimeZone
     , getCurrentTimeZone
+    , getZonedTime
     , timeZoneName
     , utcToZonedTime
     )
@@ -34,6 +37,16 @@ renderMessageTimestamp tz utc =
         formatTime defaultTimeLocale "[%Y-%m-%d %H:%M " local
             <> timeZoneName tz
             <> "]"
+
+-- | Format a local time for the compact right-edge message label.
+renderShortMessageTimestamp :: TimeZone -> UTCTime -> Text
+renderShortMessageTimestamp tz utc =
+    Text.pack $
+        formatTime defaultTimeLocale "%-I:%M %p" (utcToZonedTime tz utc)
+
+currentShortMessageTimestamp :: IO Text
+currentShortMessageTimestamp =
+    Text.pack . formatTime defaultTimeLocale "%-I:%M %p" <$> getZonedTime
 
 -- | Append a local timestamp to @text@ (idempotent if one is already present).
 stampUserText :: Text -> IO Text

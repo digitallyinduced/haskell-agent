@@ -3,7 +3,7 @@ module Agent.CLI.TimestampSpec (spec) where
 import Agent.CLI.Timestamp
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
-import Data.Time.LocalTime (TimeZone(..))
+import Data.Time.LocalTime (TimeZone(..), minutesToTimeZone)
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -17,6 +17,13 @@ utcSample = UTCTime (fromGregorian 2026 8 20) (secondsToDiffTime (14 * 3600 + 45
 
 spec :: Spec
 spec = do
+    describe "renderShortMessageTimestamp" do
+        it "uses compact local clock labels" do
+            renderShortMessageTimestamp
+                (minutesToTimeZone 120)
+                (UTCTime (fromGregorian 2026 8 24) (11 * 3600 + 53 * 60))
+                `shouldBe` "1:53 PM"
+
     describe "renderMessageTimestamp" do
         it "formats local wall-clock with timezone name" do
             renderMessageTimestamp cest utcSample

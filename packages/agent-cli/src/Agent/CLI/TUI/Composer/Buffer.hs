@@ -87,7 +87,7 @@ isPromptPrelude :: FullscreenInput -> Bool
 isPromptPrelude input =
     case input.fullscreenInputLine of
         ReplClipboardPaste _ _ -> True
-        ReplClipboardPasteOrText _ _ -> True
+        ReplClipboardPasteOrText _ _ _ -> True
         _ -> False
 
 takeFullscreenInput

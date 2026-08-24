@@ -14,7 +14,7 @@ import Agent.Tools.Types
     )
 import Control.Exception.Safe (bracket)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
 import Data.Aeson (object, (.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -25,9 +25,11 @@ import System.Directory
     , getTemporaryDirectory
     , removeDirectoryRecursive
     , removeFile
+    , withCurrentDirectory
     )
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -236,6 +238,128 @@ spec = describe "Agent.MCP" do
                 [McpServerStatus "exits" (McpFailed _) 0] -> pure ()
                 _ -> expectationFailure ("unexpected statuses: " <> show statuses)
 
+    describe "McpSupervisor" do
+        it "single-flights concurrent acquisitions for the same configuration" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config =
+                            (baseConfig "shared" script)
+                                { mcpServerArgs = [counter, "0.2"]
+                                }
+                    withAsync (acquireMcpFleet supervisor [config]) \first ->
+                        withAsync (acquireMcpFleet supervisor [config]) \second -> do
+                            firstLease <- wait first
+                            secondLease <- wait second
+                            releaseMcpFleetLease firstLease
+                            releaseMcpFleetLease secondLease
+                    countStarts counter `shouldReturn` 1
+
+        it "reuses an idle fleet with the same canonical configuration" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config =
+                            (baseConfig "cached" script)
+                                { mcpServerArgs = [counter]
+                                , mcpServerEnv =
+                                    [("SECOND", "2"), ("FIRST", "1")]
+                                }
+                    first <- acquireMcpFleet supervisor [config]
+                    releaseMcpFleetLease first
+                    second <- acquireMcpFleet supervisor
+                        [ config
+                            { mcpServerEnv =
+                                [("FIRST", "1"), ("SECOND", "2")]
+                            }
+                        ]
+                    releaseMcpFleetLease second
+                    countStarts counter `shouldReturn` 1
+
+        it "starts a replacement fleet when the configuration changes" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    first <- acquireMcpFleet supervisor
+                        [ (baseConfig "cached" script)
+                            { mcpServerArgs = [counter, "first"]
+                            }
+                        ]
+                    releaseMcpFleetLease first
+                    second <- acquireMcpFleet supervisor
+                        [ (baseConfig "cached" script)
+                            { mcpServerArgs = [counter, "second"]
+                            }
+                        ]
+                    releaseMcpFleetLease second
+                    countStarts counter `shouldReturn` 2
+
+        it "does not reuse an inherited-cwd fleet after the cwd changes" $
+            withCountingFakeServer \script counter ->
+                withDistinctWorkingDirectories \firstDir secondDir -> do
+                    supervisor <- newMcpSupervisor
+                    bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                        let config =
+                                (baseConfig "cwd-sensitive" script)
+                                    { mcpServerArgs = [counter]
+                                    }
+                        first <- withCurrentDirectory firstDir $
+                            acquireMcpFleet supervisor [config]
+                        releaseMcpFleetLease first
+                        second <- withCurrentDirectory secondDir $
+                            acquireMcpFleet supervisor [config]
+                        releaseMcpFleetLease second
+                        countStarts counter `shouldReturn` 2
+
+        it "cancels and joins a pending startup when the supervisor closes" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                acquiring <- async $
+                    acquireMcpFleet supervisor
+                        [ (baseConfig "slow-close" script)
+                            { mcpServerArgs = [counter, "2"]
+                            }
+                        ]
+                threadDelay 50000
+                timeout 1000000 (closeMcpSupervisor supervisor)
+                    `shouldReturn` Just ()
+                _ <- waitCatch acquiring
+                pure ()
+
+        it "reconnects once and retries a meta-tool call after transport loss" $
+            withCountingReconnectServer \script counter -> do
+                fleet <- startMcpFleetProgressive
+                    (const (pure ()))
+                    [ (baseConfig "reconnect" script)
+                        { mcpServerArgs = [counter]
+                        }
+                    ]
+                bracket (pure fleet) closeMcpFleet \_ -> do
+                    waitForServerReady fleet "reconnect"
+                    let tools = mcpFleetMetaTools fleet
+                    called <- dispatchToolCall
+                        defaultLoopDispatch
+                        (appToolHandlers tools)
+                        (functionToolCall "reconnect-call" "mcp_call"
+                            "{\"name\":\"reconnect__read\",\"arguments\":{}}")
+                    called.output `shouldBe` "reconnected response"
+                    countStarts counter `shouldReturn` 2
+
+        it "rebuilds an idle fleet whose transport failed" $
+            withCountingFailingServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config =
+                            (baseConfig "recover" script)
+                                { mcpServerArgs = [counter]
+                                }
+                    first <- acquireMcpFleet supervisor [config]
+                    waitForServerFailure first.mcpLeaseFleet "recover"
+                    releaseMcpFleetLease first
+                    second <- acquireMcpFleet supervisor [config]
+                    releaseMcpFleetLease second
+                    countStarts counter `shouldReturn` 2
+
 withFakeServer :: (FilePath -> IO a) -> IO a
 withFakeServer action = do
     temporary <- getTemporaryDirectory
@@ -248,6 +372,61 @@ withFakeServer action = do
             pure path)
         removeFile
         action
+
+withCountingFakeServer :: (FilePath -> FilePath -> IO a) -> IO a
+withCountingFakeServer = withCountingServer countingFakeServer
+
+withCountingFailingServer :: (FilePath -> FilePath -> IO a) -> IO a
+withCountingFailingServer = withCountingServer countingFailingServer
+
+withCountingReconnectServer :: (FilePath -> FilePath -> IO a) -> IO a
+withCountingReconnectServer = withCountingServer countingReconnectServer
+
+withCountingServer
+    :: LBS.ByteString
+    -> (FilePath -> FilePath -> IO a)
+    -> IO a
+withCountingServer body action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (counter, counterHandle) <-
+                openTempFile temporary "agent-mcp-start-count"
+            hClose counterHandle
+            (script, scriptHandle) <-
+                openTempFile temporary "agent-mcp-counting.sh"
+            LBS.hPutStr scriptHandle body
+            hClose scriptHandle
+            setFileMode script 0o700
+            pure (script, counter))
+        (\(script, counter) -> do
+            removeFile script
+            removeFile counter)
+        (uncurry action)
+
+withDistinctWorkingDirectories :: (FilePath -> FilePath -> IO a) -> IO a
+withDistinctWorkingDirectories action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (first, firstHandle) <-
+                openTempFile temporary "agent-mcp-cwd-first"
+            hClose firstHandle
+            removeFile first
+            createDirectory first
+            (second, secondHandle) <-
+                openTempFile temporary "agent-mcp-cwd-second"
+            hClose secondHandle
+            removeFile second
+            createDirectory second
+            pure (first, second))
+        (\(first, second) -> do
+            removeDirectoryRecursive first
+            removeDirectoryRecursive second)
+        (uncurry action)
+
+countStarts :: FilePath -> IO Int
+countStarts path = length . lines <$> readFile path
 
 concurrentConfig :: FilePath -> FilePath -> Text.Text -> McpServerConfig
 concurrentConfig script barrier name = McpServerConfig
@@ -363,6 +542,68 @@ fakeServer =
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second response\"}]}}'\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first response\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+countingReconnectServer :: LBS.ByteString
+countingReconnectServer =
+    "#!/bin/sh\n\
+    \counter=\"$1\"\n\
+    \printf 'started\\n' >> \"$counter\"\n\
+    \instance=\"$(wc -l < \"$counter\" | tr -d ' ')\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"reconnect\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"read\",\"description\":\"Read.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/call\"'*)\n\
+    \      if [ \"$instance\" -eq 1 ]; then\n\
+    \        exit 0\n\
+    \      else\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"reconnected response\"}]}}'\n\
+    \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+countingFakeServer :: LBS.ByteString
+countingFakeServer =
+    "#!/bin/sh\n\
+    \counter=\"$1\"\n\
+    \delay=\"$2\"\n\
+    \printf 'started\\n' >> \"$counter\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      if [ -n \"$delay\" ]; then sleep \"$delay\"; fi\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"counting\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}'\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+countingFailingServer :: LBS.ByteString
+countingFailingServer =
+    "#!/bin/sh\n\
+    \counter=\"$1\"\n\
+    \printf 'started\\n' >> \"$counter\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"failing\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}'\n\
+    \      exit 0\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

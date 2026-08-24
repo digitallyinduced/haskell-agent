@@ -20,7 +20,7 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Session
-import Agent.Store.SessionItem (StoredResponseItem(..))
+import Agent.Store.SessionItem
 
 spec :: Spec
 spec = describe "PostgreSQL session schema" do
@@ -54,8 +54,12 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_custom_tool_call_outputs"
         ddl `shouldContainBytes` "call_id text NOT NULL"
         ddl `shouldContainBytes` "arguments text NOT NULL"
+        ddl `shouldContainBytes`
+            "output_kind text NOT NULL CHECK (output_kind IN ('text', 'encoded'))"
         ddl `shouldContainBytes` "output_text text NOT NULL"
-        ddl `shouldNotContainBytes` "output jsonb NOT NULL"
+        ddl `shouldContainBytes` "extra_fields_text text NOT NULL"
+        ddl `shouldNotContainBytes` "jsonb"
+        ddl `shouldNotContainBytes` "::json"
         ddl `shouldContainBytes` "search_vector tsvector GENERATED ALWAYS"
         ddl `shouldContainBytes` "USING gin (search_vector)"
         ddl `shouldContainBytes` "session_events_immutable"
@@ -69,7 +73,7 @@ spec = describe "PostgreSQL session schema" do
         ddl `shouldContainBytes` "UNIQUE (source_path, content_hash)"
 
     it "round-trips response items, tool calls, and outputs through relational rows" $
-        withSystemTempDirectory "hs" \stateDirectory -> do
+        withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
                 cleanup = do
@@ -94,16 +98,7 @@ spec = describe "PostgreSQL session schema" do
                                     stored.storedMetadata `shouldBe` metadata
                                     case map (.storedTurn) stored.storedTurns of
                                         [loadedTurn] -> do
-                                            loadedTurn
-                                                { sessionTurnItems = [] }
-                                                `shouldBe`
-                                                    turn
-                                                        { sessionTurnItems = [] }
-                                            map itemIdentity
-                                                loadedTurn.sessionTurnItems
-                                                `shouldBe`
-                                                    map itemIdentity
-                                                        turn.sessionTurnItems
+                                            loadedTurn `shouldBe` turn
                                         loaded ->
                                             expectationFailure
                                                 ("unexpected turns: " <> show loaded)
@@ -163,47 +158,130 @@ testTurn now = SessionTurn
     , sessionTurnError = Nothing
     , sessionTurnResponseId = Just "response-1"
     , sessionTurnItems =
-        [ stored "message" "core"
-            "{\"type\":\"message\",\"id\":\"item-message\",\"role\":\"developer\",\
-            \\"status\":\"in_progress\",\"phase\":\"commentary\",\"content\":[\
-            \{\"type\":\"input_text\",\"text\":\"hello\",\
-            \\"prompt_cache_breakpoint\":{\"scope\":\"turn\"}},\
-            \{\"type\":\"output_text\",\"text\":\"hello back\",\
-            \\"annotations\":[{\"type\":\"citation\"}],\
-            \\"logprobs\":[{\"token\":\"hello\"}]},\
-            \{\"type\":\"provider_content\",\"provider_extension\":true}],\
-            \\"provider_extension\":\"message\"}"
-        , stored "message" "core"
-            "{\"type\":\"message\",\"id\":\"item-text-message\",\
-            \\"role\":\"observer\",\"status\":\"paused\",\"content\":\"plain text\"}"
-        , stored "function_call" "core"
-            "{\"type\":\"function_call\",\"id\":\"item-call\",\"call_id\":\"call-1\",\
-            \\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\",\
-            \\"status\":\"completed\",\"provider_extension\":\"function-call\"}"
-        , stored "function_call_output" "core"
-            "{\"type\":\"function_call_output\",\"id\":\"item-output\",\
-            \\"call_id\":\"call-1\",\"output\":\"{\\\"stdout\\\":\\\"/tmp/project\\\"}\",\
-            \\"status\":\"completed\",\"provider_extension\":\"function-output\"}"
-        , stored "custom_tool_call" "core"
-            "{\"type\":\"custom_tool_call\",\"id\":\"item-custom-call\",\
-            \\"call_id\":\"custom-1\",\"name\":\"apply_patch\",\
-            \\"input\":\"*** Begin Patch\",\"status\":\"in_progress\"}"
-        , stored "custom_tool_call_output" "core"
-            "{\"type\":\"custom_tool_call_output\",\"id\":\"item-custom-output\",\
-            \\"call_id\":\"custom-1\",\"name\":\"apply_patch\",\"output\":\"Done\",\
-            \\"status\":\"completed\"}"
-        , stored "reasoning" "core"
-            "{\"type\":\"reasoning\",\"id\":\"item-reasoning\",\
-            \\"summary\":[{\"type\":\"summary_text\",\"text\":\"Checked the schema\"}],\
-            \\"content\":[{\"type\":\"reasoning_text\",\
-            \\"text\":\"private reasoning placeholder\"}],\
-            \\"encrypted_content\":\"encrypted\",\"status\":\"completed\"}"
-        , stored "item_reference" "core"
-            "{\"type\":\"item_reference\",\"id\":\"item-call\"}"
-        , stored "compaction_trigger" "known"
-            "{\"type\":\"compaction_trigger\",\"provider_extension\":\"known-tagged\"}"
-        , stored "provider_extension" "unknown"
-            "{\"type\":\"provider_extension\",\"provider_extension\":\"unknown-tagged\"}"
+        [ StoredMessageItem StoredMessage
+            { storedMessageProviderItemId = Just "item-message"
+            , storedMessageContent = StoredMessageParts
+                [ (emptyContentPart "input_text")
+                    { storedContentPartText = Just "hello"
+                    , storedContentPartPromptCacheBreakpoint =
+                        Just (StoredOpaqueValue "{\"scope\":\"turn\"}")
+                    }
+                , (emptyContentPart "output_text")
+                    { storedContentPartText = Just "hello back"
+                    , storedContentPartAnnotations =
+                        Just
+                            (StoredOpaqueValue
+                                "[{\"type\":\"citation\"}]")
+                    , storedContentPartLogprobs =
+                        Just
+                            (StoredOpaqueValue
+                                "[{\"token\":\"hello\"}]")
+                    }
+                , (emptyContentPart "provider_content")
+                    { storedContentPartExtraFields =
+                        StoredOpaqueObject
+                            "{\"provider_extension\":true}"
+                    }
+                ]
+            , storedMessageRole = "developer"
+            , storedMessageStatus = Just "in_progress"
+            , storedMessagePhase = Just "commentary"
+            , storedMessageExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"message\"}"
+            }
+        , StoredMessageItem StoredMessage
+            { storedMessageProviderItemId = Just "item-text-message"
+            , storedMessageContent = StoredMessageText "plain text"
+            , storedMessageRole = "observer"
+            , storedMessageStatus = Just "paused"
+            , storedMessagePhase = Nothing
+            , storedMessageExtraFields = emptyObject
+            }
+        , StoredFunctionCallItem StoredFunctionCall
+            { storedFunctionCallProviderItemId = Just "item-call"
+            , storedFunctionCallCallId = "call-1"
+            , storedFunctionCallName = "shell_command"
+            , storedFunctionCallArguments = "{\"command\":\"pwd\"}"
+            , storedFunctionCallStatus = Just "completed"
+            , storedFunctionCallExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"function-call\"}"
+            }
+        , StoredFunctionCallOutputItem StoredFunctionCallOutput
+            { storedFunctionCallOutputProviderItemId =
+                Just "item-output"
+            , storedFunctionCallOutputCallId = "call-1"
+            , storedFunctionCallOutputValue = StoredToolOutput
+                { storedToolOutputKind = StoredToolOutputEncoded
+                , storedToolOutputText =
+                    "{\"stdout\":\"/tmp/project\"}"
+                }
+            , storedFunctionCallOutputStatus = Just "completed"
+            , storedFunctionCallOutputExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"function-output\"}"
+            }
+        , StoredCustomToolCallItem StoredCustomToolCall
+            { storedCustomToolCallProviderItemId =
+                Just "item-custom-call"
+            , storedCustomToolCallCallId = "custom-1"
+            , storedCustomToolCallName = "apply_patch"
+            , storedCustomToolCallInput = "*** Begin Patch"
+            , storedCustomToolCallStatus = Just "in_progress"
+            , storedCustomToolCallExtraFields = emptyObject
+            }
+        , StoredCustomToolCallOutputItem StoredCustomToolCallOutput
+            { storedCustomToolCallOutputProviderItemId =
+                Just "item-custom-output"
+            , storedCustomToolCallOutputCallId = "custom-1"
+            , storedCustomToolCallOutputName = Just "apply_patch"
+            , storedCustomToolCallOutputValue = StoredToolOutput
+                { storedToolOutputKind = StoredToolOutputText
+                , storedToolOutputText = "Done"
+                }
+            , storedCustomToolCallOutputStatus = Just "completed"
+            , storedCustomToolCallOutputExtraFields = emptyObject
+            }
+        , StoredReasoningItem StoredReasoning
+            { storedReasoningProviderItemId = Just "item-reasoning"
+            , storedReasoningSummary =
+                [ StoredReasoningSummaryPart
+                    { storedReasoningSummaryPartType = "summary_text"
+                    , storedReasoningSummaryPartText =
+                        Just "Checked the schema"
+                    , storedReasoningSummaryPartExtraFields = emptyObject
+                    }
+                ]
+            , storedReasoningContent =
+                Just
+                    [ (emptyContentPart "reasoning_text")
+                        { storedContentPartText =
+                            Just "private reasoning placeholder"
+                        }
+                    ]
+            , storedReasoningEncryptedContent = Just "encrypted"
+            , storedReasoningStatus = Just "completed"
+            , storedReasoningExtraFields = emptyObject
+            }
+        , StoredItemReferenceItem StoredItemReference
+            { storedItemReferenceProviderItemId = "item-call"
+            , storedItemReferenceExtraFields = emptyObject
+            }
+        , StoredTaggedResponseItem StoredTaggedItem
+            { storedTaggedItemRepresentation = StoredKnownRepresentation
+            , storedTaggedItemWireTag = "compaction_trigger"
+            , storedTaggedItemFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"known-tagged\"}"
+            }
+        , StoredTaggedResponseItem StoredTaggedItem
+            { storedTaggedItemRepresentation = StoredUnknownRepresentation
+            , storedTaggedItemWireTag = "provider_extension"
+            , storedTaggedItemFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"unknown-tagged\"}"
+            }
         ]
     , sessionTurnUsage = Just SessionUsage
         { sessionUsageInputTokens = 10
@@ -212,18 +290,26 @@ testTurn now = SessionTurn
         }
     }
 
-stored :: Text -> Text -> Text -> StoredResponseItem
-stored itemType representation payload = StoredResponseItem
-    { storedResponseItemType = itemType
-    , storedResponseItemRepresentation = representation
-    , storedResponseItemPayload = payload
-    }
+emptyObject :: StoredOpaqueObject
+emptyObject = StoredOpaqueObject "{}"
 
-itemIdentity :: StoredResponseItem -> (Text, Text)
-itemIdentity item =
-    ( item.storedResponseItemType
-    , item.storedResponseItemRepresentation
-    )
+emptyContentPart :: Text -> StoredContentPart
+emptyContentPart partType = StoredContentPart
+    { storedContentPartType = partType
+    , storedContentPartText = Nothing
+    , storedContentPartRefusal = Nothing
+    , storedContentPartDetail = Nothing
+    , storedContentPartFileData = Nothing
+    , storedContentPartFileId = Nothing
+    , storedContentPartFileUrl = Nothing
+    , storedContentPartFilename = Nothing
+    , storedContentPartImageUrl = Nothing
+    , storedContentPartInputAudio = Nothing
+    , storedContentPartPromptCacheBreakpoint = Nothing
+    , storedContentPartAnnotations = Nothing
+    , storedContentPartLogprobs = Nothing
+    , storedContentPartExtraFields = emptyObject
+    }
 
 shouldContainBytes :: ByteString.ByteString -> ByteString.ByteString -> Expectation
 shouldContainBytes haystack needle =

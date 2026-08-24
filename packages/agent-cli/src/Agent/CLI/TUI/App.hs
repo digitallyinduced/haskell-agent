@@ -8,6 +8,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceRowColumns
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
@@ -38,7 +39,9 @@ module Agent.CLI.TUI.App
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
+    , fullscreenBounds
     , fullscreenVtyConfig
+    , fullscreenSurface
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
@@ -102,6 +105,7 @@ import Agent.CLI.Resume
 import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( kittyCtrlVCsiBodies
     , kittySuperVCsiBodies
@@ -1549,40 +1553,110 @@ fullscreenApp = App
 
 drawApp :: AppState -> [Widget Name]
 drawApp state =
-    let mainLayers = stickyPromptLayers state <> [drawMain state]
-        interactiveLayers =
-            agentPopoverLayers state
-                <> imagePreviewLayers
-                    state.appRuntime.runtimeNativeImagePreviews
-                    state.appImagePreviews
-                <> mainLayers
-        dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
-    in
-    case state.appResume of
-        Just resume ->
-            drawResume state resume : dimmedMainLayers
-        Nothing ->
-            case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                (Just prompt, _, _) ->
-                    drawTextPrompt state prompt : dimmedMainLayers
-                (Nothing, Just choice, _) ->
-                    drawChoice state choice : dimmedMainLayers
-                (Nothing, Nothing, Just permission) ->
-                    drawPermission state permission : dimmedMainLayers
-                (Nothing, Nothing, Nothing) -> interactiveLayers
+    map fullscreenBounds $
+        case state.appResume of
+            Just resume ->
+                drawResume state resume : dimmedMainLayers
+            Nothing ->
+                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                    (Just prompt, _, _) ->
+                        drawTextPrompt state prompt : dimmedMainLayers
+                    (Nothing, Just choice, _) ->
+                        drawChoice state choice : dimmedMainLayers
+                    (Nothing, Nothing, Just permission) ->
+                        drawPermission state permission : dimmedMainLayers
+                    (Nothing, Nothing, Nothing) -> interactiveLayers
+  where
+    mainLayers = stickyPromptLayers state <> [drawMain state]
+    interactiveLayers =
+        agentPopoverLayers state
+            <> imagePreviewLayers
+                state.appRuntime.runtimeNativeImagePreviews
+                state.appImagePreviews
+            <> mainLayers
+    dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
-    withAttr Theme.baseAttr $
-        vBox
-            [ drawHeader state
-            , drawWorkspace state
-            , drawNotice state
-            , Composer.drawQueuedInputs state.appUi
-            , Composer.drawSlashMenu state
-            , drawFollowStatus state.appUi
-            , Composer.drawComposer state
-            , drawFooter state
+    fullscreenSurface $
+        withAttr Theme.baseAttr $
+            vBox
+                [ drawHeader state
+                , drawWorkspace state
+                , drawNotice state
+                , Composer.drawQueuedInputs state.appUi
+                , Composer.drawSlashMenu state
+                , drawFollowStatus state.appUi
+                , Composer.drawComposer state
+                , drawFooter state
+                ]
+
+-- | Crop a top-level layer to the terminal without filling its unused cells.
+-- Overlay layers must remain transparent, but custom widgets can otherwise
+-- return images (and cursors) outside the render context and make Vty wrap
+-- terminal rows.
+fullscreenBounds :: Widget n -> Widget n
+fullscreenBounds widget =
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        result <- B.render widget
+        let width = max 0 context.availWidth
+            height = max 0 context.availHeight
+            cursorInBounds cursor =
+                let Location (column, row) = cursor.cursorLocation
+                in column >= 0
+                    && column < width
+                    && row >= 0
+                    && row < height
+        pure
+            result
+                { B.image = V.crop width height result.image
+                , B.cursors = filter cursorInBounds result.cursors
+                }
+
+-- | Bound the retained main layer to the terminal and explicitly paint every
+-- cell. Some terminals can retain cells from an older, wider layout when a
+-- later Brick image is narrower; an over-wide image can instead trigger
+-- terminal-side wrapping and shift subsequent rows. Keeping the backing layer
+-- exactly the render-context size prevents both failure modes.
+fullscreenSurface :: Widget n -> Widget n
+fullscreenSurface widget =
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        base <- B.lookupAttrName Theme.baseAttr
+        result <- B.render widget
+        let width = max 0 context.availWidth
+            height = max 0 context.availHeight
+            cropped = V.crop width height result.image
+            widthPadded =
+                padImageRight
+                    base
+                    (width - V.imageWidth cropped)
+                    cropped
+            padded =
+                padImageBottom
+                    base
+                    width
+                    (height - V.imageHeight widthPadded)
+                    widthPadded
+        pure result { B.image = padded }
+
+padImageRight :: V.Attr -> Int -> V.Image -> V.Image
+padImageRight attr amount image
+    | amount <= 0 || V.imageHeight image <= 0 = image
+    | otherwise =
+        V.horizCat
+            [ image
+            , V.charFill attr ' ' amount (V.imageHeight image)
+            ]
+
+padImageBottom :: V.Attr -> Int -> Int -> V.Image -> V.Image
+padImageBottom attr width amount image
+    | amount <= 0 || width <= 0 = image
+    | otherwise =
+        V.vertCat
+            [ image
+            , V.charFill attr ' ' width amount
             ]
 
 imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
@@ -2454,19 +2528,22 @@ drawBlock state block =
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
-                    padAll 1 (txtWrap block.blockBody)
+                    padAll 1 $
+                        timestampedMessage block.blockTimestamp
+                            (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
-                    withAttr Theme.assistantAttr
-                        (markdownWidgetWithSyntaxHighlighting
-                            state.appSyntaxHighlighter
-                            (\codeIndex ->
-                                cached
-                                    (CodeBlockCache
-                                        block.blockId
-                                        codeIndex))
-                            (codeBlockHeader state block.blockId)
-                            block.blockBody)
+                    timestampedMessage block.blockTimestamp $
+                        withAttr Theme.assistantAttr
+                            (markdownWidgetWithSyntaxHighlighting
+                                state.appSyntaxHighlighter
+                                (\codeIndex ->
+                                    cached
+                                        (CodeBlockCache
+                                            block.blockId
+                                            codeIndex))
+                                (codeBlockHeader state block.blockId)
+                                block.blockBody)
             BlockThinking ->
                 accentBlock (thinkingBlockAttr state block)
                     (blockStateGlyph state block <> block.blockTitle)
@@ -2514,6 +2591,15 @@ drawBlock state block =
                 (codeCopyCacheState state block.blockId))
             rendered
         else rendered
+
+timestampedMessage :: Text -> Widget Name -> Widget Name
+timestampedMessage timestamp body
+    | Text.null timestamp = body
+    | otherwise =
+        hBox
+            [ padRight Max body
+            , withAttr Theme.mutedAttr (txt ("  " <> timestamp))
+            ]
 
 codeBlockHeader :: AppState -> BlockId -> Int -> Text -> Widget Name
 codeBlockHeader state blockId codeIndex language =
@@ -2741,6 +2827,7 @@ drawPermission state permission =
                                             (permissionRow permission.permissionIndex)
                                             [0 ..]
                                             [ "Allow once"
+                                            , "Always approve all tools for this project"
                                             , "Always allow this tool this session"
                                             , "Deny"
                                             ]
@@ -3138,11 +3225,19 @@ choiceRow appState selected index (label, detail) =
     let prefix = if selected == index then "› " else "  "
         name = ChoiceRow index
         row =
-            hBox
-                [ txt (prefix <> label)
-                , vLimit 1 (fill ' ')
-                , withAttr Theme.mutedAttr (txt detail)
-                ]
+            Widget Greedy Fixed do
+                context <- getContext
+                let (shownLabel, shownDetail) =
+                        choiceRowColumns
+                            context.availWidth
+                            (prefix <> label)
+                            detail
+                render $
+                    hBox
+                        [ txt shownLabel
+                        , vLimit 1 (fill ' ')
+                        , withAttr Theme.mutedAttr (txt shownDetail)
+                        ]
         styled =
             if selected == index
                 then withAttr Theme.selectedAttr row
@@ -3152,9 +3247,35 @@ choiceRow appState selected index (label, detail) =
             Just attr -> forceAttr attr row
     in clickable name interactive
 
+-- | Fit a choice label and its right-aligned detail into one terminal row.
+-- When both do not fit, the label gets roughly two thirds of the available
+-- cells and the detail gets the rest; short columns donate their unused space.
+choiceRowColumns :: Int -> Text -> Text -> (Text, Text)
+choiceRowColumns width label detail
+    | width <= 0 = ("", "")
+    | Text.null detail = (truncateDisplayText width label, "")
+    | labelWidth + choiceRowGap + detailWidth <= width = (label, detail)
+    | width <= choiceRowGap + 1 = (truncateDisplayText width label, "")
+    | otherwise =
+        ( truncateDisplayText labelBudget label
+        , truncateDisplayText detailBudget detail
+        )
+  where
+    choiceRowGap = 2
+    labelWidth = terminalTextWidth label
+    detailWidth = terminalTextWidth detail
+    contentBudget = width - choiceRowGap
+    preferredDetailBudget =
+        min detailWidth (max 1 (contentBudget `div` 3))
+    labelBudget =
+        min labelWidth (contentBudget - preferredDetailBudget)
+    detailBudget =
+        min detailWidth (contentBudget - labelBudget)
+
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
     initial <- get
+    timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
             then conversationUnpaddedContentHeight
@@ -3162,7 +3283,7 @@ handleUiEvents uiEvents = do
     let
         (final, nativeProgress, shouldFollow, shouldInvalidate) =
             foldl'
-                (applyOne renderedContentHeight)
+                (applyOne timestamp renderedContentHeight)
                 (initial, Nothing, False, False)
                 uiEvents
     put final
@@ -3181,16 +3302,25 @@ handleUiEvents uiEvents = do
                 vScrollToEnd (viewportScroll ConversationViewport)
   where
     applyOne
+        timestamp
         renderedContentHeight
         (state, previousProgress, followed, invalidated)
         uiEvent =
             let
-                next =
+                unstamped =
                     applyUiEvent uiEvent $
                         applyConversationUiEvent
                             renderedContentHeight
                             uiEvent
                             state
+                next =
+                    unstamped
+                        { appUi =
+                            timestampNewMessageBlocks
+                                (Seq.length state.appUi.uiBlocks)
+                                timestamp
+                                unstamped.appUi
+                        }
                 progress =
                     case Bridge.nativeProgressSignal
                         (userActionPending next)
@@ -3796,6 +3926,7 @@ handlePermissionKey = \case
     V.EvKey V.KBackTab [] -> movePermission (-1)
     V.EvKey (V.KChar '\t') [] -> movePermission 1
     V.EvKey (V.KChar 'y') [] -> resolvePermission PermissionAllowOnce
+    V.EvKey (V.KChar 'A') [] -> resolvePermission PermissionAllowAll
     V.EvKey (V.KChar 'a') [] -> resolvePermission PermissionAllowTool
     V.EvKey (V.KChar 'n') [] -> resolvePermission PermissionDeny
     V.EvKey V.KEsc [] -> resolvePermission PermissionDeny
@@ -3818,7 +3949,8 @@ handlePermissionKey = \case
 permissionChoiceAt :: Int -> PermissionChoice
 permissionChoiceAt = \case
     0 -> PermissionAllowOnce
-    1 -> PermissionAllowTool
+    1 -> PermissionAllowAll
+    2 -> PermissionAllowTool
     _ -> PermissionDeny
 
 resolvePermission

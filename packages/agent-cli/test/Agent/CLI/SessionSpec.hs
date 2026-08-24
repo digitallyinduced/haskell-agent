@@ -83,6 +83,101 @@ spec = describe "Agent.CLI.Session" do
                                 "provider_extension"
                                 (Aeson.Bool True)
                         }
+                    , MessageItem ResponseMessage
+                        { messageId = Just "message-2"
+                        , content = MessageContentParts
+                            [ InputTextPart
+                                { text = "input"
+                                , promptCacheBreakpoint =
+                                    Just
+                                        (Aeson.object
+                                            ["scope" Aeson..= ("turn" :: Text.Text)])
+                                , extraFields = KeyMap.empty
+                                }
+                            , OutputTextPart
+                                { text = "output"
+                                , annotations =
+                                    Just
+                                        [ Aeson.object
+                                            ["type" Aeson..= ("citation" :: Text.Text)]
+                                        ]
+                                , logprobs =
+                                    Just
+                                        [ Aeson.object
+                                            ["token" Aeson..= ("output" :: Text.Text)]
+                                        ]
+                                , extraFields = KeyMap.empty
+                                }
+                            , UnknownContentPart TaggedObject
+                                { tag = "provider_content"
+                                , fields =
+                                    KeyMap.singleton
+                                        "opaque"
+                                        (Aeson.Bool True)
+                                }
+                            ]
+                        , role = RoleDeveloper
+                        , status = Just ItemInProgress
+                        , phase = Just "commentary"
+                        , extraFields = KeyMap.empty
+                        }
+                    , FunctionCallItem FunctionCall
+                        { itemId = Just "call-item"
+                        , callId = "call-1"
+                        , name = "shell"
+                        , arguments = "{\"command\":\"pwd\"}"
+                        , status = Just ItemCompleted
+                        , extraFields = KeyMap.empty
+                        }
+                    , FunctionCallOutputItem FunctionCallOutput
+                        { itemId = Just "output-item"
+                        , callId = "call-1"
+                        , output =
+                            Aeson.object
+                                ["stdout" Aeson..= ("/tmp/project" :: Text.Text)]
+                        , status = Just ItemCompleted
+                        , extraFields = KeyMap.empty
+                        }
+                    , CustomToolCallItem CustomToolCall
+                        { itemId = Nothing
+                        , callId = "custom-1"
+                        , name = "apply_patch"
+                        , input = "*** Begin Patch"
+                        , status = Nothing
+                        , extraFields = KeyMap.empty
+                        }
+                    , CustomToolCallOutputItem CustomToolCallOutput
+                        { itemId = Nothing
+                        , callId = "custom-1"
+                        , name = Just "apply_patch"
+                        , output = Aeson.String "Done"
+                        , status = Just ItemCompleted
+                        , extraFields = KeyMap.empty
+                        }
+                    , ReasoningItemValue ReasoningItem
+                        { itemId = Just "reasoning-1"
+                        , summary =
+                            [ ReasoningSummaryPart
+                                { partType = "summary_text"
+                                , text = Just "Checked the schema"
+                                , extraFields = KeyMap.empty
+                                }
+                            ]
+                        , content =
+                            Just
+                                [ ReasoningTextPart
+                                    { text = "private placeholder"
+                                    , extraFields = KeyMap.empty
+                                    }
+                                ]
+                        , encryptedContent = Just "encrypted"
+                        , status = Just ItemCompleted
+                        , extraFields = KeyMap.empty
+                        }
+                    , ItemReferenceValue ItemReference
+                        { itemId = "call-item"
+                        , extraFields = KeyMap.empty
+                        }
                     , KnownResponseItem ItemCompactionTrigger TaggedObject
                         { tag = "compaction_trigger"
                         , fields = KeyMap.empty

@@ -101,7 +101,7 @@ spec =
                             Right () -> pure ()
                     ) `finally` cleanup
 
-        it "migrates typed tool outputs from JSONB to text" $
+        it "migrates legacy tool outputs to typed text fields" $
             withSystemTempDirectory "ha" \stateDirectory -> do
                 let
                     config = defaultManagedPostgresConfig stateDirectory ""
@@ -128,6 +128,37 @@ spec =
                                             migratedToolOutputsStatement)
                                         `shouldReturn`
                                             Right (True, True, True, True)
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
+        it "migrates opaque response fields to text columns" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        legacyOpaqueFieldMigrations
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement ()
+                                            migratedOpaqueFieldsStatement)
+                                        `shouldReturn`
+                                            Right (True, True, True)
                                 )
                                 (closeStorePool ownerPool)
                     ) `finally` cleanup
@@ -159,6 +190,75 @@ legacyMigrations =
             , "GRANT USAGE ON SCHEMA harness TO ha_runtime"
             , "GRANT SELECT ON harness.schema_migrations TO ha_runtime"
             ]
+        }
+    ]
+
+legacyOpaqueFieldMigrations :: [Migration]
+legacyOpaqueFieldMigrations =
+    [ Migration
+        { migrationVersion = 1
+        , migrationName = "initial harness storage"
+        , migrationStatements =
+            [ "CREATE TABLE harness.session_messages (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ extra_fields jsonb NOT NULL DEFAULT '{}'::jsonb\
+              \   CONSTRAINT provider_fields_are_objects\
+              \   CHECK (jsonb_typeof(extra_fields) = 'object')\
+              \ )"
+            , "INSERT INTO harness.session_messages\
+              \ (response_item_id, extra_fields) VALUES\
+              \ ('00000000-0000-0000-0000-000000000001',\
+              \ '{\"provider\":true}')"
+            , "CREATE TABLE harness.session_tagged_items (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ fields jsonb NOT NULL DEFAULT '{}'::jsonb\
+              \   CHECK (jsonb_typeof(fields) = 'object')\
+              \ )"
+            , "INSERT INTO harness.session_tagged_items\
+              \ (response_item_id, fields) VALUES\
+              \ ('00000000-0000-0000-0000-000000000002',\
+              \ '{\"tagged\":true}')"
+            , "CREATE TABLE harness.session_response_content_parts (\
+              \ content_part_id uuid PRIMARY KEY,\
+              \ input_audio jsonb,\
+              \ prompt_cache_breakpoint jsonb,\
+              \ annotations jsonb,\
+              \ logprobs jsonb,\
+              \ extra_fields jsonb NOT NULL DEFAULT '{}'::jsonb\
+              \   CHECK (jsonb_typeof(extra_fields) = 'object')\
+              \ )"
+            , "INSERT INTO harness.session_response_content_parts\
+              \ (content_part_id, input_audio, prompt_cache_breakpoint,\
+              \ annotations, logprobs, extra_fields) VALUES\
+              \ ('00000000-0000-0000-0000-000000000003',\
+              \ '{\"data\":\"abc\"}', '{\"scope\":\"turn\"}',\
+              \ '[{\"type\":\"citation\"}]', '[{\"token\":\"ok\"}]',\
+              \ '{\"leaf\":true}')"
+            ]
+        }
+    , Migration
+        { migrationVersion = 2
+        , migrationName = "restricted harness runtime role"
+        , migrationStatements =
+            [ "CREATE ROLE ha_runtime LOGIN\
+              \ NOSUPERUSER NOCREATEDB NOCREATEROLE\
+              \ NOINHERIT NOREPLICATION NOBYPASSRLS"
+            ]
+        }
+    , Migration
+        { migrationVersion = 3
+        , migrationName = "typed relational session storage"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 4
+        , migrationName = "text tool outputs"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 5
+        , migrationName = "versioned learned skills"
+        , migrationStatements = []
         }
     ]
 
@@ -240,6 +340,38 @@ serverStatement = Statement.preparable
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
 
+migratedOpaqueFieldsStatement :: Statement () (Bool, Bool, Bool)
+migratedOpaqueFieldsStatement = Statement.preparable
+    "SELECT\
+    \ (SELECT count(*) = 7\
+    \   FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND data_type = 'text'\
+    \     AND (table_name, column_name) IN (\
+    \       ('session_messages', 'extra_fields_text'),\
+    \       ('session_tagged_items', 'fields_text'),\
+    \       ('session_response_content_parts', 'input_audio_text'),\
+    \       ('session_response_content_parts',\
+    \         'prompt_cache_breakpoint_text'),\
+    \       ('session_response_content_parts', 'annotations_text'),\
+    \       ('session_response_content_parts', 'logprobs_text'),\
+    \       ('session_response_content_parts', 'extra_fields_text')\
+    \     )),\
+    \ (SELECT extra_fields_text LIKE '%\"provider\"%'\
+    \   FROM harness.session_messages),\
+    \ (SELECT input_audio_text LIKE '%\"data\"%'\
+    \     AND prompt_cache_breakpoint_text LIKE '%\"scope\"%'\
+    \     AND annotations_text LIKE '%\"citation\"%'\
+    \     AND logprobs_text LIKE '%\"token\"%'\
+    \     AND extra_fields_text LIKE '%\"leaf\"%'\
+    \   FROM harness.session_response_content_parts)"
+    Encoders.noParams
+    (Decoders.singleRow $
+        (,,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
 migratedToolOutputsStatement :: Statement () (Bool, Bool, Bool, Bool)
 migratedToolOutputsStatement = Statement.preparable
     "SELECT\
@@ -249,8 +381,14 @@ migratedToolOutputsStatement = Statement.preparable
     \     AND table_name = 'session_function_call_outputs'\
     \     AND column_name = 'output_text'\
     \     AND data_type = 'text'\
+    \ ) AND EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'session_function_call_outputs'\
+    \     AND column_name = 'output_kind'\
+    \     AND data_type = 'text'\
     \ ),\
-    \ (SELECT output_text = 'plain'\
+    \ (SELECT output_text = '\"plain\"' AND output_kind = 'encoded'\
     \   FROM harness.session_function_call_outputs),\
     \ EXISTS (\
     \   SELECT 1 FROM information_schema.columns\
@@ -258,8 +396,15 @@ migratedToolOutputsStatement = Statement.preparable
     \     AND table_name = 'session_custom_tool_call_outputs'\
     \     AND column_name = 'output_text'\
     \     AND data_type = 'text'\
+    \ ) AND EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'session_custom_tool_call_outputs'\
+    \     AND column_name = 'output_kind'\
+    \     AND data_type = 'text'\
     \ ),\
-    \ (SELECT output_text::jsonb = '{\"nested\":true}'::jsonb\
+    \ (SELECT output_text = '{\"nested\": true}'\
+    \     AND output_kind = 'encoded'\
     \   FROM harness.session_custom_tool_call_outputs)"
     Encoders.noParams
     (Decoders.singleRow $

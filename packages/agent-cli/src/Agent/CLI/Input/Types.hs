@@ -19,7 +19,11 @@ data ReplLine
     | ReplText Text
     | ReplPasted Text
     | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
-    | ReplClipboardPasteOrText !Text !Text
+    -- | Classify a bracketed paste off the UI thread. The fields are the draft
+    -- before the paste, the raw pasted payload, and the draft with that payload
+    -- inserted. Image paths or clipboard images become attachments; otherwise
+    -- the inserted draft is restored.
+    | ReplClipboardPasteOrText !Text !Text !Text
     | ReplCycleMode Text
     | ReplChooseModel Text
     | ReplChooseEffort Text

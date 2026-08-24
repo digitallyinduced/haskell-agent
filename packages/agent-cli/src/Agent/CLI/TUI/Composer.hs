@@ -294,7 +294,8 @@ drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
     hBox $
         intersperse (withAttr Theme.mutedAttr (txt " · ")) $
-            modelAndEffort
+            accountLimit
+                <> modelAndEffort
                 <> [ modeControl
                    | not (Text.null mode)
                    ]
@@ -307,6 +308,14 @@ drawComposerStatus state =
     prompt = state.appUi.uiPrompt
     mode = prompt.promptMode
     account = prompt.promptAccount
+    accountLimit =
+        [ withAttr
+            (if limitStatus.promptLimitWarning
+                then Theme.syntaxWarningAttr
+                else Theme.successAttr)
+            (txt limitStatus.promptLimitText)
+        | limitStatus <- maybeToList prompt.promptLimitStatus
+        ]
     modelControl =
         clickable ComposerModel $
             forceAttr
@@ -331,6 +340,10 @@ drawComposerStatus state =
             forceAttr
                 (controlAttr state ComposerAccount Theme.controlLinkAttr)
                 (txt account)
+
+    maybeToList = \case
+        Nothing -> []
+        Just value -> [value]
 
 handlePromptControlClick
     :: ApplyLocalUiEvent
@@ -589,12 +602,22 @@ handleComposerKey
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
-        V.EvPaste bytes ->
-            case decodePaste bytes of
-                pasted
-                    | Text.null pasted ->
-                        submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
-                    | otherwise -> insertPastedText pasted
+        V.EvPaste bytes -> do
+            let pasted = decodePaste bytes
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            if Text.null pasted
+                then submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                else do
+                    modifyUi
+                        (UiSetNotice
+                            (Just (progressNotice "Reading clipboard…")))
+                    submitRaw
+                        (ReplClipboardPasteOrText
+                            ui.uiDraft
+                            pasted
+                            pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do

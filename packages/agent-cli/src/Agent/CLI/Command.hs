@@ -171,9 +171,20 @@ parseReplLineWithSkills skills raw =
         else if line == ":reload"
             then ReplReload
             else case Text.uncons line of
-                Just ('/', _) -> parseSlash skills line
+                Just ('/', _)
+                    | looksLikeAbsolutePath line -> ReplPrompt raw
+                    | otherwise -> parseSlash skills line
                 Just (':', _) -> parseColon raw
                 _ -> ReplPrompt raw
+
+-- Absolute paths share slash commands' leading slash. A path with at least
+-- one further separator is unambiguously path-like, so leave it as prompt
+-- text instead of reporting its first component as an unknown command.
+looksLikeAbsolutePath :: Text -> Bool
+looksLikeAbsolutePath line =
+    case Text.words line of
+        first : _ -> Text.any (== '/') (Text.drop 1 first)
+        [] -> False
 
 parseColon :: Text -> ReplAction
 parseColon raw

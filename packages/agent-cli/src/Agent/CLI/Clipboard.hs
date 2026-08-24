@@ -5,6 +5,7 @@ module Agent.CLI.Clipboard
     , readClipboardImage
     , readClipboardImages
     , readClipboardImagesImageFirst
+    , readClipboardImagesForPaste
     , readClipboardText
     , nonEmptyClipboardImages
     , nonEmptyClipboardText
@@ -92,6 +93,42 @@ readClipboardImagesImageFirst = do
                         Right images@(_:_) -> pure (Right images)
                         Right [] -> pure (Left bitmapError)
                         Left err -> pure (Left err)
+
+-- | Read images for an explicit image-paste action and produce the richer
+-- text/path diagnostics without probing the clipboard a second time.
+readClipboardImagesForPaste :: IO (Either Text [ImageAttachment])
+readClipboardImagesForPaste = do
+    paths <- readClipboardPaths
+    existingPaths <- filterM doesFileExist paths
+    let imagePaths =
+            filter (isImageExtension . takeExtension) existingPaths
+    case imagePaths of
+        _ : _ ->
+            mapM readImageFile imagePaths >>= \loaded ->
+                pure $ case sequence loaded of
+                    Right images@(_ : _) -> Right images
+                    _ -> Left (clipboardPathsError existingPaths)
+        [] ->
+            readClipboardImageBytes >>= \case
+                Right image -> pure (Right [image])
+                Left imageError
+                    | not (null existingPaths) ->
+                        pure (Left (clipboardPathsError existingPaths))
+                    | otherwise ->
+                        readClipboardText >>= \case
+                            Right text
+                                | not (Text.null (Text.strip text)) ->
+                                    pure (Left clipboardTextError)
+                            _ -> pure (Left imageError)
+
+clipboardTextError :: Text
+clipboardTextError =
+    "clipboard has text, not an image (paste text normally into the prompt)"
+
+clipboardPathsError :: [FilePath] -> Text
+clipboardPathsError paths =
+    "clipboard has file path(s), but no loadable image: "
+        <> Text.intercalate ", " (map Text.pack paths)
 
 -- | Prefer PNG; fall back to JPEG. Back-compat for one-image callers.
 readClipboardImage :: IO (Either Text ImageAttachment)

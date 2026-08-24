@@ -31,6 +31,14 @@ spec = do
             parseReplLine "  :status  "
                 `shouldBe` ReplPrompt "  :status  "
 
+        it "treats absolute paths as prompt text rather than slash commands" do
+            parseReplLine "/Users/marc/Downloads/template.png"
+                `shouldBe` ReplPrompt "/Users/marc/Downloads/template.png"
+            parseReplLine
+                "  /Users/marc/Downloads/template.png use this template  "
+                `shouldBe` ReplPrompt
+                    "  /Users/marc/Downloads/template.png use this template  "
+
         it "shows the current effort with a bare /effort" do
             parseReplLine "/effort" `shouldBe` ReplShowEffort
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort

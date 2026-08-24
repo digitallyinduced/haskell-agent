@@ -40,7 +40,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-responses agent-store base bytestring
-    containers JuicyPixels text
+    containers directory filepath JuicyPixels safe-exceptions text
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

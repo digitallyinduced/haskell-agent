@@ -221,7 +221,7 @@ readChangeNotes interrupt color = do
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
-        ReplClipboardPasteOrText _ text ->
+        ReplClipboardPasteOrText _ _ text ->
             if Text.null (Text.strip text)
                 then readChangeNotes interrupt color
                 else pure (Text.strip text)
@@ -265,7 +265,7 @@ askQuestion interrupt resolveColor question options = do
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
-                        ReplClipboardPasteOrText _ text ->
+                        ReplClipboardPasteOrText _ _ text ->
                             if Text.null (Text.strip text)
                                 then askQuestion interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
