@@ -267,6 +267,7 @@ Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
 ```json
 {
   "version": 1,
+  "mcpInitStrategy": "auto",
   "mcpServers": {
     "seo-mcp": {
       "command": "nix",
@@ -287,10 +288,16 @@ server, Space to enable or disable it, `x` to remove it, and `r` to restart the
 MCP runtime. Saved changes restart the runtime while resuming the same session.
 Environment variable values are never displayed.
 
+`mcpInitStrategy` accepts `auto`, `progressive`, or `blocking`. `auto`
+starts MCP servers progressively for interactive sessions so the prompt is
+available immediately, while one-shot commands wait for MCP initialization.
+
 The harness starts enabled servers once per root session and shares their tools
-with subagents. MCP tool names are preserved, so they must not collide with
-built-in or other configured tools. Only tools explicitly annotated
-`readOnlyHint: true` are exposed.
+with subagents. Blocking startup exposes read-only tools as
+`server__tool`. Progressive startup exposes stable `mcp_search` and `mcp_call`
+tools immediately, then publishes each server's read-only catalog as it
+becomes ready. Only tools explicitly annotated `readOnlyHint: true` are
+available.
 
 ### Secret entry
 

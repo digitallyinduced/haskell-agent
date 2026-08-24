@@ -2,11 +2,13 @@
 -- @~/.haskell-agent/config.json@.
 module Agent.CLI.Config
     ( HarnessConfig(..)
+    , McpInitStrategy(..)
     , McpServerConfig(..)
     , defaultHarnessConfig
     , harnessConfigPath
     , loadHarnessConfig
     , saveHarnessConfig
+    , useProgressiveMcp
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -15,6 +17,7 @@ import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (unless, when)
 import Data.Aeson
     ( FromJSON(..)
+    , withText
     , withObject
     , (.:)
     , (.:?)
@@ -52,6 +55,31 @@ data McpServerConfig = McpServerConfig
     }
     deriving (Eq)
 
+data McpInitStrategy
+    = McpInitAuto
+    | McpInitProgressive
+    | McpInitBlocking
+    deriving (Eq, Show)
+
+-- | Resolve the configured MCP startup policy for the current invocation.
+-- Interactive sessions favor prompt availability, while one-shot commands
+-- preserve deterministic startup unless explicitly overridden.
+useProgressiveMcp :: McpInitStrategy -> Bool -> Bool
+useProgressiveMcp strategy oneShot = case strategy of
+    McpInitAuto -> not oneShot
+    McpInitProgressive -> True
+    McpInitBlocking -> False
+
+instance FromJSON McpInitStrategy where
+    parseJSON = withText "McpInitStrategy" \case
+        "auto" -> pure McpInitAuto
+        "progressive" -> pure McpInitProgressive
+        "blocking" -> pure McpInitBlocking
+        value ->
+            fail
+                ("unknown MCP initialization strategy: "
+                    <> Text.unpack value)
+
 instance Show McpServerConfig where
     show server =
         "McpServerConfig { mcpEnabled = "
@@ -86,6 +114,7 @@ instance Aeson.ToJSON McpServerConfig where
 
 data HarnessConfig = HarnessConfig
     { configVersion :: !Int
+    , configMcpInitStrategy :: !McpInitStrategy
     , configMcpServers :: !(Map Text McpServerConfig)
     }
     deriving (Eq, Show)
@@ -100,6 +129,7 @@ instance Aeson.ToJSON HarnessConfig where
 defaultHarnessConfig :: HarnessConfig
 defaultHarnessConfig = HarnessConfig
     { configVersion = harnessConfigSchemaVersion
+    , configMcpInitStrategy = McpInitAuto
     , configMcpServers = Map.empty
     }
 
@@ -120,6 +150,7 @@ instance FromJSON HarnessConfig where
     parseJSON = withObject "HarnessConfig" \object ->
         HarnessConfig
             <$> object .:? "version" .!= harnessConfigSchemaVersion
+            <*> object .:? "mcpInitStrategy" .!= McpInitAuto
             <*> object .:? "mcpServers" .!= Map.empty
 
 -- | @~/.haskell-agent/config.json@ for a supplied home directory.

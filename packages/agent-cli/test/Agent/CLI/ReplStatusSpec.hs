@@ -8,6 +8,8 @@ import Agent.CLI
     , buildPromptState
     , cycleReplInteraction
     , devArgs
+    , formatMcpModelNotice
+    , formatMcpProgress
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -31,9 +33,13 @@ import Agent.CLI.ReplMode
     )
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (LoopEvent(..), TokenUsage(..), emptyTokenUsage)
+import Agent.MCP
+    ( McpInitState(..)
+    , McpServerStatus(..)
+    )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types (defaultResponseCreateParams)
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.TUI.Model
     ( PromptState(..)
     , UiEvent(..)
@@ -55,11 +61,34 @@ import System.Directory
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+mcpStatus :: Text.Text -> McpInitState -> Int -> McpServerStatus
+mcpStatus name state toolCount = McpServerStatus
+    { mcpStatusName = name
+    , mcpStatusState = state
+    , mcpStatusToolCount = toolCount
+    }
 
 spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
+    describe "progressive MCP status" do
+        it "formats connecting and ready startup progress" do
+            formatMcpProgress
+                [mcpStatus "slow" McpInitializing 0]
+                `shouldBe` "Loading built-in tools… MCP: 1 connecting, 0 ready"
+            formatMcpProgress
+                [mcpStatus "fast" McpReady 2, mcpStatus "bad" (McpFailed "boom") 0]
+                `shouldBe` "Loading built-in tools… MCP: 1 ready, 1 unavailable"
+
+        it "gives the model stable discovery and invocation guidance" do
+            formatMcpModelNotice
+                [mcpStatus "fast" McpReady 2, mcpStatus "bad" (McpFailed "boom") 0]
+                `shouldBe`
+                    "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
+
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
             let target =
