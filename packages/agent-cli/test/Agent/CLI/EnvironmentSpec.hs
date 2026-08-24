@@ -1,7 +1,7 @@
 module Agent.CLI.EnvironmentSpec (spec) where
 
 import Agent.CLI.Environment (lookupNonEmpty)
-import Control.Exception (bracket_)
+import Control.Exception.Safe (bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
