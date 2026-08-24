@@ -119,6 +119,51 @@ spec = do
             retainedTexts `shouldBe` [Text.take 8 old, recent]
             last compacted `shouldBe` opaque
 
+        it "omits inline image payloads from retained user messages" do
+            let opaque = checkpoint "opaque"
+                imageUrl =
+                    "data:image/png;base64,"
+                        <> Text.replicate 1_000_000 "x"
+                multimodal = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        , InputImagePart
+                            { detail = Just "auto"
+                            , fileId = Nothing
+                            , imageUrl = Just imageUrl
+                            , promptCacheBreakpoint = Nothing
+                            , extraFields = KeyMap.empty
+                            }
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                compacted =
+                    buildRemoteCompactedHistory 64_000 [multimodal] opaque
+            estimateItemsTokens compacted `shouldSatisfy` (< 1_000)
+            case compacted of
+                MessageItem message : _ ->
+                    case message.content of
+                        MessageContentParts parts -> do
+                            parts `shouldSatisfy`
+                                all (\case InputImagePart {} -> False; _ -> True)
+                            parts `shouldSatisfy`
+                                any (\case
+                                    InputTextPart text _ _ ->
+                                        Text.isInfixOf
+                                            "image attachment omitted"
+                                            text
+                                    _ -> False)
+                        other ->
+                            expectationFailure
+                                ("expected retained content parts, got " <> show other)
+                other ->
+                    expectationFailure
+                        ("expected retained user message, got " <> show other)
+
         it "rewrites a trailing oversized tool output to fit the request window" do
             let oversized = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
@@ -139,6 +184,41 @@ spec = do
                 other ->
                     expectationFailure
                         ("expected rewritten tool output, got " <> show other)
+
+        it "rewrites image-bearing messages when trimming a compaction request" do
+            let imageUrl =
+                    "data:image/png;base64,"
+                        <> Text.replicate 1_000_000 "x"
+                multimodal = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        , InputImagePart
+                            { detail = Just "auto"
+                            , fileId = Nothing
+                            , imageUrl = Just imageUrl
+                            , promptCacheBreakpoint = Nothing
+                            , extraFields = KeyMap.empty
+                            }
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        1_000
+                        Nothing
+                        [multimodal]
+            estimateItemsTokens trimmed `shouldSatisfy` (< 1_000)
+            trimmed `shouldSatisfy` \case
+                [MessageItem message] ->
+                    case message.content of
+                        MessageContentParts parts ->
+                            all (\case InputImagePart {} -> False; _ -> True) parts
+                        _ -> False
+                _ -> False
 
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do
