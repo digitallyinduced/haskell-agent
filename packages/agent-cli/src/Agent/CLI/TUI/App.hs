@@ -12,6 +12,7 @@ module Agent.CLI.TUI.App
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
+    , externalUrlCommand
     , hasQueuedFullscreenInput
     , motionDemandFor
     , lambdaArtWidget
@@ -125,8 +126,8 @@ import Agent.CLI.TUI.ImagePreview
     )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting
-    , markdownWidget
-    , markdownWidgetWithSyntaxHighlighting
+    , markdownWidgetWithLinks
+    , markdownWidgetWithSyntaxHighlightingAndLinks
     )
 import Agent.Syntax
     ( SyntaxHighlighter
@@ -181,7 +182,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
-import Data.Char (isControl)
+import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef
     ( modifyIORef'
@@ -206,8 +207,10 @@ import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
+import System.Info (os)
 import System.IO (stdout)
 import System.Posix.Process (getProcessID)
+import System.Process (callProcess)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer = Composer.newFullscreenInputBuffer
@@ -1387,6 +1390,8 @@ activateControl = \case
         confirmResumeId sessionId
     CodeCopy blockId codeIndex ->
         copyCodeBlock blockId codeIndex
+    MarkdownLink url ->
+        openMarkdownLink url
     _ ->
         pure ()
 
@@ -1400,6 +1405,42 @@ isInteractiveControl = \case
     ResumeRow _ -> True
     CodeCopy _ _ -> True
     _ -> False
+
+openMarkdownLink :: Text -> EventM Name AppState ()
+openMarkdownLink url = do
+    opened <- liftIO (openExternalUrl url)
+    unless opened $
+        modify' $
+            applyUiEvent
+                (UiSetNotice
+                    (Just (warningNotice "Could not open that link.")))
+
+openExternalUrl :: Text -> IO Bool
+openExternalUrl url =
+    case externalUrlCommand url of
+        Nothing -> pure False
+        Just (command, arguments) ->
+            either (const False) (const True)
+                <$> tryAny (callProcess command arguments)
+
+externalUrlCommand :: Text -> Maybe (FilePath, [String])
+externalUrlCommand url
+    | Text.length url > 4096 = Nothing
+    | Text.any (\character -> isControl character || isSpace character) url =
+        Nothing
+    | not (isWebUrl url) = Nothing
+    | os == "darwin" = Just ("/usr/bin/open", [Text.unpack url])
+    | os == "mingw32" =
+        Just
+            ( "rundll32"
+            , ["url.dll,FileProtocolHandler", Text.unpack url]
+            )
+    | otherwise = Just ("xdg-open", [Text.unpack url])
+  where
+    isWebUrl value =
+        let lower = Text.toLower value
+        in Text.isPrefixOf "https://" lower
+            || Text.isPrefixOf "http://" lower
 
 copyCodeBlock :: BlockId -> Int -> EventM Name AppState ()
 copyCodeBlock blockId codeIndex = do
@@ -2543,8 +2584,9 @@ drawBlock state block =
                     padRight (Pad 1) $
                         timestampedMessage block.blockTimestamp $
                             withAttr Theme.assistantAttr
-                                (markdownWidgetWithSyntaxHighlighting
+                                (markdownWidgetWithSyntaxHighlightingAndLinks
                                     state.appSyntaxHighlighter
+                                    MarkdownLink
                                     (\codeIndex ->
                                         cached
                                             (CodeBlockCache
@@ -3039,7 +3081,9 @@ drawDialogChoice appState choice =
                                         else padBottom (Pad 1) $
                                             vLimitPercent 65 $
                                                 viewport OverlayViewport Vertical $
-                                                    markdownWidget choice.choiceBody
+                                                    markdownWidgetWithLinks
+                                                        MarkdownLink
+                                                        choice.choiceBody
                                     , vBox $
                                         zipWith
                                             (choiceRow
@@ -3187,7 +3231,9 @@ drawTextPrompt state prompt =
                                         else padBottom (Pad 1) $
                                             vLimitPercent 60 $
                                                 viewport OverlayViewport Vertical $
-                                                    markdownWidget prompt.textBody
+                                                    markdownWidgetWithLinks
+                                                        MarkdownLink
+                                                        prompt.textBody
                                     , overrideAttr Border.borderAttr Theme.borderActiveAttr $
                                         withBorderStyle unicodeRounded $
                                             borderWithLabel (txt " Answer ") $
@@ -3855,6 +3901,8 @@ handleEventInner event = case event of
                                     (state.appRuntime.runtimeAgentSelect target)
                                 modify' \current ->
                                     current { appAgentSelected = target }
+                            (link@MarkdownLink{}, V.BLeft) ->
+                                Composer.handleControlMouseDown link
                             _ -> handleMouseDown name button
                     (Nothing, Just _, _) ->
                         case (name, button) of
@@ -3886,6 +3934,9 @@ handleEventInner event = case event of
         keepAgentHover target
     MouseUp AgentPane Nothing _ ->
         pure ()
+    MouseUp link@MarkdownLink{} (Just V.BLeft) _ -> do
+        clearAgentHover
+        Composer.handleControlMouseUp link (activateControl link)
     MouseUp name button _
         | isInteractiveControl name
         , button == Just V.BLeft || button == Nothing -> do

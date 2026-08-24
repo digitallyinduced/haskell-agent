@@ -6,8 +6,12 @@ import Agent.TUI.TextWidth (displayCharCellWidth)
 import qualified Agent.TUI.Theme as Theme
 import Brick
     ( (<=>)
+    , Extent(..)
+    , Location(..)
+    , RenderState
     , ViewportType(..)
     , Widget
+    , renderFinal
     , renderWidget
     , txt
     , viewport
@@ -16,7 +20,7 @@ import Brick.AttrMap (attrMapLookup)
 import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
-import Data.List (find, findIndex, isInfixOf)
+import Data.List (find, findIndex, isInfixOf, sortOn)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -53,6 +57,41 @@ spec = describe "fullscreen Markdown rendering" do
         let url = "https://github.com/digitallyinduced/haskell-agent/pull/339"
             spans = concat (renderSpanRows 100 ("PR: " <> url))
         spans `shouldSatisfy` any (hasUrl url)
+
+    it "registers application click targets for links" do
+        let url = "https://example.com/docs"
+            widget :: Widget Text.Text
+            widget = markdownWidgetWithLinks id ("Read [docs](" <> url <> ")")
+            (_, _, _, extents) =
+                renderFinal
+                    Theme.terminalDefault
+                    [widget]
+                    (40, 3)
+                    (const Nothing)
+                    emptyRenderState
+        map
+            (\extent ->
+                ( extentName extent
+                , extentUpperLeft extent
+                , extentSize extent
+                ))
+            extents
+            `shouldContain` [(url, Location (5, 0), (31, 1))]
+
+    it "registers a click target for every wrapped link fragment" do
+        let url = "https://example.com/abcdefgh"
+            widget :: Widget Text.Text
+            widget = markdownWidgetWithLinks id url
+            (_, _, _, extents) =
+                renderFinal
+                    Theme.terminalDefault
+                    [widget]
+                    (10, 4)
+                    (const Nothing)
+                    emptyRenderState
+        let ordered = sortOn extentUpperLeft extents
+        map extentName ordered `shouldBe` replicate 3 url
+        map extentSize ordered `shouldBe` [(10, 1), (10, 1), (8, 1)]
 
     it "keeps a wide inline glyph inside a one-cell render context" do
         let image =
@@ -652,6 +691,14 @@ renderSpanRows width input =
                 displayOpsForPic
                     (renderWidget Nothing [widget] region)
                     region
+
+emptyRenderState :: (Ord n, Read n) => RenderState n
+emptyRenderState =
+    read
+        "RS {viewportMap = fromList [], rsScrollRequests = [], \
+        \observedNames = fromList [], renderCache = fromList [], \
+        \clickableNames = [], requestedVisibleNames_ = fromList [], \
+        \reportedExtents = fromList []}"
 
 spanRowText :: [SpanOp] -> Text.Text
 spanRowText =

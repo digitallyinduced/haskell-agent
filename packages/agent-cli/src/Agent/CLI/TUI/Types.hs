@@ -54,6 +54,7 @@ data Name
         !(Maybe (Int, Bool))
     | CodeBlockCache !BlockId !Int
     | CodeCopy !BlockId !Int
+    | MarkdownLink !Text
     | ComposerArea
     | ComposerCursor
     | ComposerModel
