@@ -19,7 +19,14 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Connection (storePool)
 import Agent.Store.Postgres.Custom
-    ( CustomAuditContext(..)
+    ( CatalogColumn(..)
+    , CatalogConstraint(..)
+    , CatalogDefinition(..)
+    , CatalogIndex(..)
+    , CatalogObject(..)
+    , CustomAuditContext(..)
+    , CustomExecutionResult(..)
+    , CustomQueryResult(..)
     , defaultQueryLimits
     , executeCustom
     , inspectCustomSchema
@@ -95,15 +102,17 @@ databaseToolsEnvForStore
 databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
     { databaseDescribeScope = \selected ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
-            fmap toJSON <$> inspectCustomSchema pool database
+            fmap (toJSON . map catalogObjectValue)
+                <$> inspectCustomSchema pool database
     , databaseRunQuery = \selected sql ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
-            fmap toJSON <$> queryCustom
-                pool database defaultQueryLimits sql
+            queryCustom pool database defaultQueryLimits sql >>= \case
+                Left err -> pure (Left err)
+                Right result -> pure (queryResultValue result)
     , databaseRunExecute = \selected purpose sql ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool -> do
             sessionId <- currentSessionId
-            fmap toJSON <$> executeCustom
+            fmap executionResultValue <$> executeCustom
                 (storePool (trustedPool store))
                 pool
                 database
@@ -119,6 +128,73 @@ databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
             Left err -> pure (Left (renderStoreError err))
             Right results -> pure $ Right $ toJSON (map searchResultValue results)
     }
+
+queryResultValue :: CustomQueryResult -> Either Text Value
+queryResultValue result = do
+    rows <- decodeJsonText "custom query rows" result.customQueryRows
+    pure $ Aeson.object
+        [ "rows" Aeson..= rows
+        , "truncated" Aeson..= result.customQueryTruncated
+        ]
+
+executionResultValue :: CustomExecutionResult -> Value
+executionResultValue result = Aeson.object
+    [ "audit_id" Aeson..= result.customExecutionAuditId
+    , "catalog_before" Aeson..=
+        map catalogObjectValue result.customExecutionCatalogBefore
+    , "catalog_after" Aeson..=
+        map catalogObjectValue result.customExecutionCatalogAfter
+    , "warning" Aeson..= result.customExecutionWarning
+    ]
+
+catalogObjectValue :: CatalogObject -> Value
+catalogObjectValue object = Aeson.object
+    [ "kind" Aeson..= object.catalogObjectKind
+    , "name" Aeson..= object.catalogObjectName
+    , "definition" Aeson..= catalogDefinitionValue
+        object.catalogObjectDefinition
+    ]
+
+catalogDefinitionValue :: CatalogDefinition -> Value
+catalogDefinitionValue definition = Aeson.object
+    [ "owner" Aeson..= definition.definitionOwner
+    , "comment" Aeson..= definition.definitionComment
+    , "view_definition" Aeson..= definition.definitionView
+    , "columns" Aeson..= map catalogColumnValue definition.definitionColumns
+    , "constraints" Aeson..=
+        map catalogConstraintValue definition.definitionConstraints
+    , "indexes" Aeson..= map catalogIndexValue definition.definitionIndexes
+    ]
+
+catalogColumnValue :: CatalogColumn -> Value
+catalogColumnValue column = Aeson.object
+    [ "name" Aeson..= column.columnName
+    , "type" Aeson..= column.columnType
+    , "nullable" Aeson..= column.columnNullable
+    , "default" Aeson..= column.columnDefault
+    , "identity" Aeson..= column.columnIdentity
+    , "generated" Aeson..= column.columnGenerated
+    , "comment" Aeson..= column.columnComment
+    ]
+
+catalogConstraintValue :: CatalogConstraint -> Value
+catalogConstraintValue constraint = Aeson.object
+    [ "name" Aeson..= constraint.constraintName
+    , "type" Aeson..= constraint.constraintType
+    , "definition" Aeson..= constraint.constraintDefinition
+    ]
+
+catalogIndexValue :: CatalogIndex -> Value
+catalogIndexValue index = Aeson.object
+    [ "name" Aeson..= index.indexName
+    , "definition" Aeson..= index.indexDefinition
+    ]
+
+decodeJsonText :: Text -> Text -> Either Text Value
+decodeJsonText label value =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 value) of
+        Left err -> Left (label <> ": " <> Text.pack err)
+        Right decoded -> Right decoded
 
 searchResultValue :: ConversationSearchResult -> Value
 searchResultValue result = Aeson.object

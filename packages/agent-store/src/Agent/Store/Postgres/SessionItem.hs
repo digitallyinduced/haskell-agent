@@ -16,38 +16,17 @@ module Agent.Store.Postgres.SessionItem
     ) where
 
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON, ToJSON, Value(..))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32)
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Transaction
 
-import Agent.Responses.Types
-    ( CustomToolCall(..)
-    , CustomToolCallOutput(..)
-    , FunctionCall(..)
-    , FunctionCallOutput(..)
-    , ItemReference(..)
-    , MessageContent(..)
-    , ReasoningItem(..)
-    , ReasoningSummaryPart(..)
-    , ResponseContentPart(..)
-    , ResponseItem(..)
-    , ResponseMessage(..)
-    , TaggedObject(..)
-    , parseResponseItemType
-    , responseItemTypeText
-    )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.SessionItem (StoredResponseItem(..))
 
 sessionItemSchemaStatements :: [ByteString.ByteString]
 sessionItemSchemaStatements =
@@ -203,353 +182,110 @@ data BaseParams = BaseParams
     , baseRepresentation :: !Text
     }
 
-data MessageParams = MessageParams
-    { messageItemId :: !Text
-    , messageProviderId :: !(Maybe Text)
-    , messageRole :: !Text
-    , messageStatus :: !(Maybe Text)
-    , messagePhase :: !(Maybe Text)
-    , messageContentKind :: !Text
-    , messageContentText :: !(Maybe Text)
-    , messageExtras :: !Value
-    }
-
-data CallParams = CallParams
-    { callItemId :: !Text
-    , callProviderId :: !(Maybe Text)
-    , callId :: !Text
-    , callName :: !Text
-    , callInput :: !Text
-    , callStatus :: !(Maybe Text)
-    , callExtras :: !Value
-    }
-
-data OutputParams = OutputParams
-    { outputItemId :: !Text
-    , outputProviderId :: !(Maybe Text)
-    , outputCallId :: !Text
-    , outputName :: !(Maybe Text)
-    , outputText :: !Text
-    , outputStatus :: !(Maybe Text)
-    , outputExtras :: !Value
-    }
-
-data ReasoningParams = ReasoningParams
-    { reasoningItemId :: !Text
-    , reasoningProviderId :: !(Maybe Text)
-    , reasoningHasContent :: !Bool
-    , reasoningEncrypted :: !(Maybe Text)
-    , reasoningStatus :: !(Maybe Text)
-    , reasoningExtras :: !Value
-    }
-
-data SummaryParams = SummaryParams
-    { summaryItemId :: !Text
-    , summaryIndex :: !Int32
-    , summaryType :: !Text
-    , summaryText :: !(Maybe Text)
-    , summaryExtras :: !Value
-    }
-
-data ContentParams = ContentParams
-    { contentItemId :: !Text
-    , contentIndex :: !Int32
-    , contentType :: !Text
-    , contentText :: !(Maybe Text)
-    , contentRefusal :: !(Maybe Text)
-    , contentDetail :: !(Maybe Text)
-    , contentFileData :: !(Maybe Text)
-    , contentFileId :: !(Maybe Text)
-    , contentFileUrl :: !(Maybe Text)
-    , contentFilename :: !(Maybe Text)
-    , contentImageUrl :: !(Maybe Text)
-    , contentInputAudio :: !(Maybe Value)
-    , contentCacheBreakpoint :: !(Maybe Value)
-    , contentAnnotations :: !(Maybe Value)
-    , contentLogprobs :: !(Maybe Value)
-    , contentExtras :: !Value
-    }
-
-insertResponseItems :: Text -> [ResponseItem] -> Transaction.Transaction ()
+insertResponseItems
+    :: Text
+    -> [StoredResponseItem]
+    -> Transaction.Transaction ()
 insertResponseItems turnId items =
     forM_ (zip [0..] items) \(index, item) -> do
+        let kind = storageKind item
         itemId <- Transaction.statement
             BaseParams
                 { baseTurnId = turnId
                 , baseIndex = fromIntegral (index :: Int)
-                , baseStorageKind = storageKind item
-                , baseItemType = itemType item
-                , baseRepresentation = representation item
+                , baseStorageKind = kind
+                , baseItemType = item.storedResponseItemType
+                , baseRepresentation =
+                    item.storedResponseItemRepresentation
                 }
             insertBaseStatement
-        insertItem itemId item
+        insertItemPayload kind itemId item.storedResponseItemPayload
 
-storageKind :: ResponseItem -> Text
-storageKind = \case
-    MessageItem{} -> "message"
-    FunctionCallItem{} -> "function_call"
-    FunctionCallOutputItem{} -> "function_call_output"
-    CustomToolCallItem{} -> "custom_tool_call"
-    CustomToolCallOutputItem{} -> "custom_tool_call_output"
-    ReasoningItemValue{} -> "reasoning"
-    ItemReferenceValue{} -> "item_reference"
-    KnownResponseItem{} -> "tagged"
-    UnknownResponseItem{} -> "tagged"
+storageKind :: StoredResponseItem -> Text
+storageKind item
+    | item.storedResponseItemRepresentation /= "core" = "tagged"
+    | otherwise =
+        case item.storedResponseItemType of
+            "message" -> "message"
+            "function_call" -> "function_call"
+            "function_call_output" -> "function_call_output"
+            "custom_tool_call" -> "custom_tool_call"
+            "custom_tool_call_output" -> "custom_tool_call_output"
+            "reasoning" -> "reasoning"
+            "item_reference" -> "item_reference"
+            _ -> "tagged"
 
-itemType :: ResponseItem -> Text
-itemType = \case
-    MessageItem{} -> "message"
-    FunctionCallItem{} -> "function_call"
-    FunctionCallOutputItem{} -> "function_call_output"
-    CustomToolCallItem{} -> "custom_tool_call"
-    CustomToolCallOutputItem{} -> "custom_tool_call_output"
-    ReasoningItemValue{} -> "reasoning"
-    ItemReferenceValue{} -> "item_reference"
-    KnownResponseItem kind _ -> responseItemTypeText kind
-    UnknownResponseItem tagged -> tagged.tag
-
-representation :: ResponseItem -> Text
-representation = \case
-    KnownResponseItem{} -> "known"
-    UnknownResponseItem{} -> "unknown"
-    _ -> "core"
-
-insertItem :: Text -> ResponseItem -> Transaction.Transaction ()
-insertItem itemId = \case
-    MessageItem value -> do
-        let (contentKind, contentText, parts) = case value.content of
-                MessageContentText text -> ("text", Just text, [])
-                MessageContentParts values -> ("parts", Nothing, values)
-        Transaction.statement
-            MessageParams
-                { messageItemId = itemId
-                , messageProviderId = value.messageId
-                , messageRole = enumText value.role
-                , messageStatus = fmap enumText value.status
-                , messagePhase = value.phase
-                , messageContentKind = contentKind
-                , messageContentText = contentText
-                , messageExtras = Object value.extraFields
-                }
-            insertMessageStatement
-        insertContentParts itemId parts
-    FunctionCallItem value ->
-        Transaction.statement
-            CallParams
-                { callItemId = itemId
-                , callProviderId = value.itemId
-                , callId = value.callId
-                , callName = value.name
-                , callInput = value.arguments
-                , callStatus = fmap enumText value.status
-                , callExtras = Object value.extraFields
-                }
-            insertFunctionCallStatement
-    FunctionCallOutputItem value ->
-        Transaction.statement
-            OutputParams
-                { outputItemId = itemId
-                , outputProviderId = value.itemId
-                , outputCallId = value.callId
-                , outputName = Nothing
-                , outputText = renderToolOutput value.output
-                , outputStatus = fmap enumText value.status
-                , outputExtras = Object value.extraFields
-                }
-            insertFunctionOutputStatement
-    CustomToolCallItem value ->
-        Transaction.statement
-            CallParams
-                { callItemId = itemId
-                , callProviderId = value.itemId
-                , callId = value.callId
-                , callName = value.name
-                , callInput = value.input
-                , callStatus = fmap enumText value.status
-                , callExtras = Object value.extraFields
-                }
-            insertCustomCallStatement
-    CustomToolCallOutputItem value ->
-        Transaction.statement
-            OutputParams
-                { outputItemId = itemId
-                , outputProviderId = value.itemId
-                , outputCallId = value.callId
-                , outputName = value.name
-                , outputText = renderToolOutput value.output
-                , outputStatus = fmap enumText value.status
-                , outputExtras = Object value.extraFields
-                }
-            insertCustomOutputStatement
-    ReasoningItemValue value -> do
-        Transaction.statement
-            ReasoningParams
-                { reasoningItemId = itemId
-                , reasoningProviderId = value.itemId
-                , reasoningHasContent = maybe False (const True) value.content
-                , reasoningEncrypted = value.encryptedContent
-                , reasoningStatus = fmap enumText value.status
-                , reasoningExtras = Object value.extraFields
-                }
-            insertReasoningStatement
-        forM_ (zip [0..] value.summary) \(index, part) ->
+insertItemPayload
+    :: Text
+    -> Text
+    -> Text
+    -> Transaction.Transaction ()
+insertItemPayload kind itemId payload =
+    case kind of
+        "message" -> do
+            Transaction.statement (itemId, payload) insertMessagePayloadStatement
+            Transaction.statement (itemId, payload) insertContentPayloadStatement
+        "function_call" ->
             Transaction.statement
-                SummaryParams
-                    { summaryItemId = itemId
-                    , summaryIndex = fromIntegral (index :: Int)
-                    , summaryType = part.partType
-                    , summaryText = part.text
-                    , summaryExtras = Object part.extraFields
-                    }
-                insertSummaryStatement
-        insertContentParts itemId (maybe [] id value.content)
-    ItemReferenceValue value ->
-        Transaction.statement
-            (itemId, value.itemId, Object value.extraFields)
-            insertReferenceStatement
-    KnownResponseItem _ tagged ->
-        Transaction.statement
-            (itemId, tagged.tag, Object tagged.fields)
-            insertTaggedStatement
-    UnknownResponseItem tagged ->
-        Transaction.statement
-            (itemId, tagged.tag, Object tagged.fields)
-            insertTaggedStatement
-
-insertContentParts :: Text -> [ResponseContentPart] -> Transaction.Transaction ()
-insertContentParts itemId parts =
-    forM_ (zip [0..] parts) \(index, part) ->
-        Transaction.statement
-            (contentParams itemId (fromIntegral (index :: Int)) part)
-            insertContentStatement
-
-contentParams :: Text -> Int32 -> ResponseContentPart -> ContentParams
-contentParams itemId index = \case
-    InputTextPart { text, promptCacheBreakpoint, extraFields } ->
-        (emptyContent itemId index "input_text")
-            { contentText = Just text
-            , contentCacheBreakpoint = promptCacheBreakpoint
-            , contentExtras = Object extraFields
-            }
-    InputImagePart
-        { detail, fileId, imageUrl, promptCacheBreakpoint, extraFields } ->
-        (emptyContent itemId index "input_image")
-            { contentDetail = detail
-            , contentFileId = fileId
-            , contentImageUrl = imageUrl
-            , contentCacheBreakpoint = promptCacheBreakpoint
-            , contentExtras = Object extraFields
-            }
-    InputFilePart
-        { detail, fileData, fileId, fileUrl, filename
-        , promptCacheBreakpoint, extraFields
-        } ->
-        (emptyContent itemId index "input_file")
-            { contentDetail = detail
-            , contentFileData = fileData
-            , contentFileId = fileId
-            , contentFileUrl = fileUrl
-            , contentFilename = filename
-            , contentCacheBreakpoint = promptCacheBreakpoint
-            , contentExtras = Object extraFields
-            }
-    InputAudioPart { inputAudio, extraFields } ->
-        (emptyContent itemId index "input_audio")
-            { contentInputAudio = Just inputAudio
-            , contentExtras = Object extraFields
-            }
-    OutputTextPart { text, annotations, logprobs, extraFields } ->
-        (emptyContent itemId index "output_text")
-            { contentText = Just text
-            , contentAnnotations = fmap Aeson.toJSON annotations
-            , contentLogprobs = fmap Aeson.toJSON logprobs
-            , contentExtras = Object extraFields
-            }
-    RefusalPart { refusal, extraFields } ->
-        (emptyContent itemId index "refusal")
-            { contentRefusal = Just refusal
-            , contentExtras = Object extraFields
-            }
-    ReasoningTextPart { text, extraFields } ->
-        (emptyContent itemId index "reasoning_text")
-            { contentText = Just text
-            , contentExtras = Object extraFields
-            }
-    SummaryTextPart { text, extraFields } ->
-        (emptyContent itemId index "summary_text")
-            { contentText = Just text
-            , contentExtras = Object extraFields
-            }
-    UnknownContentPart tagged ->
-        (emptyContent itemId index tagged.tag)
-            { contentExtras = Object tagged.fields }
-
-emptyContent :: Text -> Int32 -> Text -> ContentParams
-emptyContent itemId index kind = ContentParams
-    { contentItemId = itemId
-    , contentIndex = index
-    , contentType = kind
-    , contentText = Nothing
-    , contentRefusal = Nothing
-    , contentDetail = Nothing
-    , contentFileData = Nothing
-    , contentFileId = Nothing
-    , contentFileUrl = Nothing
-    , contentFilename = Nothing
-    , contentImageUrl = Nothing
-    , contentInputAudio = Nothing
-    , contentCacheBreakpoint = Nothing
-    , contentAnnotations = Nothing
-    , contentLogprobs = Nothing
-    , contentExtras = Object KeyMap.empty
-    }
+                (itemId, payload)
+                insertFunctionCallPayloadStatement
+        "function_call_output" ->
+            Transaction.statement
+                (itemId, payload)
+                insertFunctionOutputPayloadStatement
+        "custom_tool_call" ->
+            Transaction.statement
+                (itemId, payload)
+                insertCustomCallPayloadStatement
+        "custom_tool_call_output" ->
+            Transaction.statement
+                (itemId, payload)
+                insertCustomOutputPayloadStatement
+        "reasoning" -> do
+            Transaction.statement
+                (itemId, payload)
+                insertReasoningPayloadStatement
+            Transaction.statement
+                (itemId, payload)
+                insertSummaryPayloadStatement
+            Transaction.statement
+                (itemId, payload)
+                insertContentPayloadStatement
+        "item_reference" ->
+            Transaction.statement
+                (itemId, payload)
+                insertReferencePayloadStatement
+        _ ->
+            Transaction.statement
+                (itemId, payload)
+                insertTaggedPayloadStatement
 
 data LoadedItem = LoadedItem
     { loadedRepresentation :: !Text
     , loadedItemType :: !Text
-    , loadedValue :: !Value
+    , loadedPayload :: !Text
     }
 
 loadResponseItems
     :: Text
-    -> Transaction.Transaction (Either Text [ResponseItem])
+    -> Transaction.Transaction (Either Text [StoredResponseItem])
 loadResponseItems turnId = do
     rows <- Transaction.statement turnId loadItemsStatement
-    pure (traverse decodeLoaded rows)
-
-decodeLoaded :: LoadedItem -> Either Text ResponseItem
-decodeLoaded row =
-    case row.loadedRepresentation of
-        "core" -> decodeValue "response item" row.loadedValue
-        "known" -> do
-            tagged <- decodeValue "known tagged response item" row.loadedValue
-            pure $ KnownResponseItem
-                (parseResponseItemType row.loadedItemType)
-                tagged
-        "unknown" ->
-            UnknownResponseItem
-                <$> decodeValue "unknown tagged response item" row.loadedValue
-        value -> Left ("unknown response item representation: " <> value)
-
-decodeValue :: FromJSON a => Text -> Value -> Either Text a
-decodeValue label value =
-    case Aeson.fromJSON value of
-        Aeson.Success result -> Right result
-        Aeson.Error err -> Left (label <> ": " <> Text.pack err)
-
-enumText :: ToJSON a => a -> Text
-enumText value = case Aeson.toJSON value of
-    String text -> text
-    _ -> ""
-
--- Tool execution produces text. Keep compatibility with older/provider wire
--- values by storing their JSON rendering rather than retaining a JSONB column.
-renderToolOutput :: Value -> Text
-renderToolOutput = \case
-    String text -> text
-    value ->
-        TextEncoding.decodeUtf8
-            (LazyByteString.toStrict (Aeson.encode value))
+    pure (traverse storedItem rows)
+  where
+    storedItem :: LoadedItem -> Either Text StoredResponseItem
+    storedItem row =
+        case row.loadedRepresentation of
+            "core" -> Right (toStored row)
+            "known" -> Right (toStored row)
+            "unknown" -> Right (toStored row)
+            value -> Left ("unknown response item representation: " <> value)
+    toStored :: LoadedItem -> StoredResponseItem
+    toStored row = StoredResponseItem
+        { storedResponseItemType = row.loadedItemType
+        , storedResponseItemRepresentation = row.loadedRepresentation
+        , storedResponseItemPayload = row.loadedPayload
+        }
 
 insertBaseStatement :: Statement BaseParams Text
 insertBaseStatement = mkStatement
@@ -566,183 +302,180 @@ insertBaseStatement = mkStatement
     textSingleResult
     True
 
-insertMessageStatement :: Statement MessageParams ()
-insertMessageStatement = mkStatement
-    "INSERT INTO harness.session_messages\
+insertMessagePayloadStatement :: Statement (Text, Text) ()
+insertMessagePayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_messages\
     \ (response_item_id, provider_item_id, role_name, status_name, phase,\
     \ content_kind, content_text, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)"
-    ( fieldParam (.messageItemId) textParam
-        <> fieldParam (.messageProviderId) nullableTextParam
-        <> fieldParam (.messageRole) textParam
-        <> fieldParam (.messageStatus) nullableTextParam
-        <> fieldParam (.messagePhase) nullableTextParam
-        <> fieldParam (.messageContentKind) textParam
-        <> fieldParam (.messageContentText) nullableTextParam
-        <> fieldParam (.messageExtras) jsonbParam
-    )
+    \ SELECT $1::uuid, value->>'id', value->>'role', value->>'status',\
+    \ value->>'phase',\
+    \ CASE jsonb_typeof(value->'content')\
+    \   WHEN 'string' THEN 'text' ELSE 'parts' END,\
+    \ CASE jsonb_typeof(value->'content')\
+    \   WHEN 'string' THEN value->>'content' ELSE NULL END,\
+    \ value - ARRAY['type','id','content','role','status','phase']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertFunctionCallStatement :: Statement CallParams ()
-insertFunctionCallStatement = mkStatement
-    "INSERT INTO harness.session_function_calls\
+insertFunctionCallPayloadStatement :: Statement (Text, Text) ()
+insertFunctionCallPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_function_calls\
     \ (response_item_id, provider_item_id, call_id, function_name,\
     \ arguments, status_name, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    callEncoder
+    \ SELECT $1::uuid, value->>'id', value->>'call_id', value->>'name',\
+    \ value->>'arguments', value->>'status',\
+    \ value - ARRAY['type','id','call_id','name','arguments','status']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertCustomCallStatement :: Statement CallParams ()
-insertCustomCallStatement = mkStatement
-    "INSERT INTO harness.session_custom_tool_calls\
+insertCustomCallPayloadStatement :: Statement (Text, Text) ()
+insertCustomCallPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_custom_tool_calls\
     \ (response_item_id, provider_item_id, call_id, tool_name,\
     \ input_text, status_name, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    callEncoder
+    \ SELECT $1::uuid, value->>'id', value->>'call_id', value->>'name',\
+    \ value->>'input', value->>'status',\
+    \ value - ARRAY['type','id','call_id','name','input','status']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-callEncoder :: Encoders.Params CallParams
-callEncoder =
-    fieldParam (.callItemId) textParam
-        <> fieldParam (.callProviderId) nullableTextParam
-        <> fieldParam (.callId) textParam
-        <> fieldParam (.callName) textParam
-        <> fieldParam (.callInput) textParam
-        <> fieldParam (.callStatus) nullableTextParam
-        <> fieldParam (.callExtras) jsonbParam
-
-insertFunctionOutputStatement :: Statement OutputParams ()
-insertFunctionOutputStatement = mkStatement
-    "INSERT INTO harness.session_function_call_outputs\
+insertFunctionOutputPayloadStatement :: Statement (Text, Text) ()
+insertFunctionOutputPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_function_call_outputs\
     \ (response_item_id, provider_item_id, call_id, output_text,\
     \ status_name, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
-    ( fieldParam (.outputItemId) textParam
-        <> fieldParam (.outputProviderId) nullableTextParam
-        <> fieldParam (.outputCallId) textParam
-        <> fieldParam (.outputText) textParam
-        <> fieldParam (.outputStatus) nullableTextParam
-        <> fieldParam (.outputExtras) jsonbParam
-    )
+    \ SELECT $1::uuid, value->>'id', value->>'call_id',\
+    \ CASE jsonb_typeof(value->'output')\
+    \   WHEN 'string' THEN value->>'output' ELSE (value->'output')::text END,\
+    \ value->>'status',\
+    \ value - ARRAY['type','id','call_id','output','status']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertCustomOutputStatement :: Statement OutputParams ()
-insertCustomOutputStatement = mkStatement
-    "INSERT INTO harness.session_custom_tool_call_outputs\
+insertCustomOutputPayloadStatement :: Statement (Text, Text) ()
+insertCustomOutputPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_custom_tool_call_outputs\
     \ (response_item_id, provider_item_id, call_id, tool_name, output_text,\
     \ status_name, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
-    outputEncoder
+    \ SELECT $1::uuid, value->>'id', value->>'call_id', value->>'name',\
+    \ CASE jsonb_typeof(value->'output')\
+    \   WHEN 'string' THEN value->>'output' ELSE (value->'output')::text END,\
+    \ value->>'status',\
+    \ value - ARRAY['type','id','call_id','name','output','status']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-outputEncoder :: Encoders.Params OutputParams
-outputEncoder =
-    fieldParam (.outputItemId) textParam
-        <> fieldParam (.outputProviderId) nullableTextParam
-        <> fieldParam (.outputCallId) textParam
-        <> fieldParam (.outputName) nullableTextParam
-        <> fieldParam (.outputText) textParam
-        <> fieldParam (.outputStatus) nullableTextParam
-        <> fieldParam (.outputExtras) jsonbParam
-
-insertReasoningStatement :: Statement ReasoningParams ()
-insertReasoningStatement = mkStatement
-    "INSERT INTO harness.session_reasoning_items\
+insertReasoningPayloadStatement :: Statement (Text, Text) ()
+insertReasoningPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_reasoning_items\
     \ (response_item_id, provider_item_id, has_content, encrypted_content,\
     \ status_name, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
-    ( fieldParam (.reasoningItemId) textParam
-        <> fieldParam (.reasoningProviderId) nullableTextParam
-        <> fieldParam (.reasoningHasContent) boolParam
-        <> fieldParam (.reasoningEncrypted) nullableTextParam
-        <> fieldParam (.reasoningStatus) nullableTextParam
-        <> fieldParam (.reasoningExtras) jsonbParam
-    )
+    \ SELECT $1::uuid, value->>'id', value ? 'content',\
+    \ value->>'encrypted_content', value->>'status',\
+    \ value - ARRAY[\
+    \   'type','id','summary','content','encrypted_content','status']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertSummaryStatement :: Statement SummaryParams ()
-insertSummaryStatement = mkStatement
-    "INSERT INTO harness.session_reasoning_summaries\
+insertSummaryPayloadStatement :: Statement (Text, Text) ()
+insertSummaryPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_reasoning_summaries\
     \ (response_item_id, part_index, part_type, text_value, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5)"
-    ( fieldParam (.summaryItemId) textParam
-        <> fieldParam (.summaryIndex) int32Param
-        <> fieldParam (.summaryType) textParam
-        <> fieldParam (.summaryText) nullableTextParam
-        <> fieldParam (.summaryExtras) jsonbParam
-    )
+    \ SELECT $1::uuid, (part.ordinality - 1)::integer,\
+    \ part.value->>'type', part.value->>'text',\
+    \ part.value - ARRAY['type','text']::text[]\
+    \ FROM payload\
+    \ CROSS JOIN LATERAL jsonb_array_elements(\
+    \   COALESCE(payload.value->'summary', '[]'::jsonb))\
+    \   WITH ORDINALITY AS part(value, ordinality)"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertReferenceStatement :: Statement (Text, Text, Value) ()
-insertReferenceStatement = mkStatement
-    "INSERT INTO harness.session_item_references\
+insertReferencePayloadStatement :: Statement (Text, Text) ()
+insertReferencePayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_item_references\
     \ (response_item_id, provider_item_id, extra_fields)\
-    \ VALUES ($1::uuid, $2, $3)"
-    ( ((\(a, _, _) -> a) >$< textParam)
-        <> ((\(_, b, _) -> b) >$< textParam)
-        <> ((\(_, _, c) -> c) >$< jsonbParam)
-    )
+    \ SELECT $1::uuid, value->>'id', value - ARRAY['type','id']::text[]\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertTaggedStatement :: Statement (Text, Text, Value) ()
-insertTaggedStatement = mkStatement
-    "INSERT INTO harness.session_tagged_items\
+insertTaggedPayloadStatement :: Statement (Text, Text) ()
+insertTaggedPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_tagged_items\
     \ (response_item_id, wire_tag, fields)\
-    \ VALUES ($1::uuid, $2, $3)"
-    ( ((\(a, _, _) -> a) >$< textParam)
-        <> ((\(_, b, _) -> b) >$< textParam)
-        <> ((\(_, _, c) -> c) >$< jsonbParam)
-    )
+    \ SELECT $1::uuid, value->>'type', value - 'type'\
+    \ FROM payload"
+    itemPayloadParams
     Decoders.noResult
     True
 
-insertContentStatement :: Statement ContentParams ()
-insertContentStatement = mkStatement
-    "INSERT INTO harness.session_response_content_parts\
+insertContentPayloadStatement :: Statement (Text, Text) ()
+insertContentPayloadStatement = mkStatement
+    "WITH payload AS (SELECT $2::jsonb AS value)\
+    \ INSERT INTO harness.session_response_content_parts\
     \ (response_item_id, part_index, part_type, text_value, refusal_text,\
     \ detail, file_data, file_id, file_url, filename, image_url,\
     \ input_audio, prompt_cache_breakpoint, annotations, logprobs,\
     \ extra_fields)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,\
-    \ $12, $13, $14, $15, $16)"
-    ( fieldParam (.contentItemId) textParam
-        <> fieldParam (.contentIndex) int32Param
-        <> fieldParam (.contentType) textParam
-        <> fieldParam (.contentText) nullableTextParam
-        <> fieldParam (.contentRefusal) nullableTextParam
-        <> fieldParam (.contentDetail) nullableTextParam
-        <> fieldParam (.contentFileData) nullableTextParam
-        <> fieldParam (.contentFileId) nullableTextParam
-        <> fieldParam (.contentFileUrl) nullableTextParam
-        <> fieldParam (.contentFilename) nullableTextParam
-        <> fieldParam (.contentImageUrl) nullableTextParam
-        <> fieldParam (.contentInputAudio) nullableJsonbParam
-        <> fieldParam (.contentCacheBreakpoint) nullableJsonbParam
-        <> fieldParam (.contentAnnotations) nullableJsonbParam
-        <> fieldParam (.contentLogprobs) nullableJsonbParam
-        <> fieldParam (.contentExtras) jsonbParam
-    )
+    \ SELECT $1::uuid, (part.ordinality - 1)::integer,\
+    \ part.value->>'type', part.value->>'text', part.value->>'refusal',\
+    \ part.value->>'detail', part.value->>'file_data', part.value->>'file_id',\
+    \ part.value->>'file_url', part.value->>'filename',\
+    \ part.value->>'image_url', part.value->'input_audio',\
+    \ part.value->'prompt_cache_breakpoint', part.value->'annotations',\
+    \ part.value->'logprobs',\
+    \ part.value - ARRAY[\
+    \   'type','text','refusal','detail','file_data','file_id','file_url',\
+    \   'filename','image_url','input_audio','prompt_cache_breakpoint',\
+    \   'annotations','logprobs']::text[]\
+    \ FROM payload\
+    \ CROSS JOIN LATERAL jsonb_array_elements(\
+    \   CASE WHEN jsonb_typeof(payload.value->'content') = 'array'\
+    \     THEN payload.value->'content' ELSE '[]'::jsonb END)\
+    \   WITH ORDINALITY AS part(value, ordinality)"
+    itemPayloadParams
     Decoders.noResult
     True
+
+itemPayloadParams :: Encoders.Params (Text, Text)
+itemPayloadParams =
+    (fst >$< textParam)
+        <> (snd >$< textParam)
 
 loadItemsStatement :: Statement Text [LoadedItem]
 loadItemsStatement = mkStatement loadItemsSql textParam
     (Decoders.rowList $
-        LoadedItem <$> textColumn <*> textColumn <*> jsonbColumn)
+        LoadedItem <$> textColumn <*> textColumn <*> textColumn)
     True
 
 loadItemsSql :: Text
 loadItemsSql =
     "SELECT i.representation, i.item_type,\
-    \ CASE i.storage_kind\
+    \ (CASE i.storage_kind\
     \ WHEN 'message' THEN\
     \   m.extra_fields\
     \   || jsonb_build_object(\
@@ -841,7 +574,7 @@ loadItemsSql =
     \     'type', 'item_reference', 'id', ir.provider_item_id)\
     \ WHEN 'tagged' THEN\
     \   ti.fields || jsonb_build_object('type', ti.wire_tag)\
-    \ END AS payload\
+    \ END)::text AS payload\
     \ FROM harness.session_response_items i\
     \ LEFT JOIN harness.session_messages m USING (response_item_id)\
     \ LEFT JOIN harness.session_function_calls fc USING (response_item_id)\
@@ -860,26 +593,11 @@ fieldParam field encoder = field >$< encoder
 textParam :: Encoders.Params Text
 textParam = Encoders.param (Encoders.nonNullable Encoders.text)
 
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
 int32Param :: Encoders.Params Int32
 int32Param = Encoders.param (Encoders.nonNullable Encoders.int4)
 
-boolParam :: Encoders.Params Bool
-boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
-
-jsonbParam :: Encoders.Params Value
-jsonbParam = Encoders.param (Encoders.nonNullable Encoders.jsonb)
-
-nullableJsonbParam :: Encoders.Params (Maybe Value)
-nullableJsonbParam = Encoders.param (Encoders.nullable Encoders.jsonb)
-
 textColumn :: Decoders.Row Text
 textColumn = Decoders.column (Decoders.nonNullable Decoders.text)
-
-jsonbColumn :: Decoders.Row Value
-jsonbColumn = Decoders.column (Decoders.nonNullable Decoders.jsonb)
 
 textSingleResult :: Decoders.Result Text
 textSingleResult = Decoders.singleRow textColumn

@@ -1,6 +1,10 @@
 module Agent.CLI.SessionSpec (spec) where
 
 import Agent.CLI.Session
+import Agent.CLI.Session.StoreCodec
+    ( fromStoredResponseItem
+    , toStoredResponseItem
+    )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
@@ -65,6 +69,32 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` "one two three four five six seven eight nine ten"
             resumeHint "it's" "id"
                 `shouldBe` "Resume this session with: 'it'\\''s' --resume id"
+
+        it "keeps response-item JSON codecs at the CLI storage boundary" do
+            let items =
+                    [ MessageItem ResponseMessage
+                        { messageId = Just "message-1"
+                        , content = MessageContentText "hello"
+                        , role = RoleAssistant
+                        , status = Just ItemCompleted
+                        , phase = Nothing
+                        , extraFields =
+                            KeyMap.singleton
+                                "provider_extension"
+                                (Aeson.Bool True)
+                        }
+                    , KnownResponseItem ItemCompactionTrigger TaggedObject
+                        { tag = "compaction_trigger"
+                        , fields = KeyMap.empty
+                        }
+                    , UnknownResponseItem TaggedObject
+                        { tag = "provider_item"
+                        , fields =
+                            KeyMap.singleton "payload" (Aeson.String "opaque")
+                        }
+                    ]
+            traverse fromStoredResponseItem (map toStoredResponseItem items)
+                `shouldBe` Right items
 
     describe "PostgreSQL session persistence" do
         it "round-trips and clears ephemeral session activity" $

@@ -3,27 +3,129 @@
 
 module Agent.Store.Postgres.CustomSpec (spec) where
 
-import qualified Data.Aeson as Aeson
+import Control.Exception.Safe (finally)
+import qualified Data.Text as Text
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+import Agent.Store.Postgres
+    ( closeStore
+    , defaultManagedPostgresConfig
+    , openStore
+    , provisioningPool
+    , scopePool
+    , trustedPool
+    )
+import Agent.Store.Postgres.Connection (storePool)
 import Agent.Store.Postgres.Custom
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Postgres.Scope
+    ( Scope(..)
+    , ScopeDatabase(..)
+    , ScopeKind(..)
+    , mkScopeId
+    , provisionScope
+    )
 
 spec :: Spec
 spec = describe "custom PostgreSQL SQL normalization" do
-    it "includes the durable audit id in successful execution results" do
-        Aeson.toJSON CustomExecutionResult
+    it "keeps successful execution results as typed storage records" do
+        CustomExecutionResult
             { customExecutionAuditId = "0198d1ac-7b48-7000-8000-000000000000"
             , customExecutionCatalogBefore = []
             , customExecutionCatalogAfter = []
             , customExecutionWarning = Nothing
             }
-            `shouldBe` Aeson.object
-                [ "audit_id" Aeson..=
-                    ("0198d1ac-7b48-7000-8000-000000000000" :: String)
-                , "catalog_before" Aeson..= ([] :: [CatalogObject])
-                , "catalog_after" Aeson..= ([] :: [CatalogObject])
-                , "warning" Aeson..= (Nothing :: Maybe String)
-                ]
+            `shouldBe` CustomExecutionResult
+                { customExecutionAuditId =
+                    "0198d1ac-7b48-7000-8000-000000000000"
+                , customExecutionCatalogBefore = []
+                , customExecutionCatalogAfter = []
+                , customExecutionWarning = Nothing
+                }
+
+    it "returns typed catalogs and JSON text only at the query boundary" $
+        withSystemTempDirectory "hs-custom" \stateDirectory -> do
+            let
+                config = defaultManagedPostgresConfig stateDirectory ""
+                cleanup = do
+                    _ <- stopManagedPostgres config
+                    pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure ("could not open store: " <> show err)
+                Right store ->
+                    finally
+                        (do
+                            scopeId <- mkScopeId
+                                "0123456789abcdef0123456789abcdef"
+                                `shouldSatisfyRight` const True
+                            let scope = Scope RepositoryScope scopeId
+                            provisionScope
+                                (storePool (provisioningPool store))
+                                scope >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not provision scope: "
+                                                <> Text.unpack err)
+                                    Right database ->
+                                        scopePool
+                                            store
+                                            database.scopeDatabaseRole
+                                            >>= \case
+                                                Left err ->
+                                                    expectationFailure
+                                                        ("could not open scope pool: "
+                                                            <> show err)
+                                                Right scoped -> do
+                                                    let rawScope = storePool scoped
+                                                    execution <- executeCustom
+                                                        (storePool (trustedPool store))
+                                                        rawScope
+                                                        database
+                                                        CustomAuditContext
+                                                            { customAuditSessionId =
+                                                                Nothing
+                                                            , customAuditAgentId =
+                                                                Nothing
+                                                            }
+                                                        defaultQueryLimits
+                                                        "test typed catalog"
+                                                        "CREATE TABLE todos (\
+                                                        \ id bigint PRIMARY KEY,\
+                                                        \ title text NOT NULL);\
+                                                        \ INSERT INTO todos VALUES\
+                                                        \ (1, 'one')"
+                                                    _ <- execution
+                                                        `shouldSatisfyRight`
+                                                            (const True)
+                                                    catalog <- inspectCustomSchema
+                                                        rawScope
+                                                        database
+                                                    _ <- catalog
+                                                        `shouldSatisfyRight`
+                                                            (any
+                                                                (\object ->
+                                                                    object.catalogObjectKind
+                                                                        == "table"
+                                                                        && object.catalogObjectName
+                                                                            == "todos"))
+                                                    result <- queryCustom
+                                                        rawScope
+                                                        database
+                                                        defaultQueryLimits
+                                                        "SELECT id, title FROM todos"
+                                                    _ <- result
+                                                        `shouldSatisfyRight`
+                                                            (\queryResult ->
+                                                                not
+                                                                    queryResult.customQueryTruncated
+                                                                    && "\"title\": \"one\""
+                                                                        `Text.isInfixOf`
+                                                                            queryResult.customQueryRows)
+                                                    pure ()
+                        )
+                        (closeStore store)
+                ) `finally` cleanup
 
     describe "normalizeCustomQuery" do
         it "strips whitespace and trailing statement terminators" do
@@ -74,3 +176,17 @@ spec = describe "custom PostgreSQL SQL normalization" do
                     Left
                         "database execution only accepts DDL/DML statements; \
                         \transaction and session control are not allowed"
+
+shouldSatisfyRight
+    :: (Show left, Show right)
+    => Either left right
+    -> (right -> Bool)
+    -> IO right
+shouldSatisfyRight value predicate =
+    case value of
+        Left err ->
+            expectationFailure ("expected Right, got Left " <> show err)
+                >> fail "unreachable"
+        Right result -> do
+            result `shouldSatisfy` predicate
+            pure result

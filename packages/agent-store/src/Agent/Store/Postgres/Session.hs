@@ -46,7 +46,7 @@ import qualified Hasql.Transaction as Transaction
 import qualified Hasql.Transaction.Sessions as Transactions
 import Hasql.Statement (Statement)
 
-import Agent.Responses.Types (ResponseItem)
+import Agent.Store.SessionItem (StoredResponseItem)
 import Agent.Store.Postgres.Connection
     ( StorePool
     , withSession
@@ -104,7 +104,7 @@ data SessionTurn = SessionTurn
     , sessionTurnAssistantText :: !(Maybe Text)
     , sessionTurnError :: !(Maybe Text)
     , sessionTurnResponseId :: !(Maybe Text)
-    , sessionTurnItems :: ![ResponseItem]
+    , sessionTurnItems :: ![StoredResponseItem]
     , sessionTurnUsage :: !(Maybe SessionUsage)
     }
     deriving (Eq, Show)

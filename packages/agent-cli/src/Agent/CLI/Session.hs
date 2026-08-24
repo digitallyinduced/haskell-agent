@@ -51,6 +51,10 @@ import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
     )
+import Agent.CLI.Session.StoreCodec
+    ( fromStoredResponseItem
+    , toStoredResponseItem
+    )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Dialect
@@ -1088,20 +1092,22 @@ toStoredTurn turn = Store.SessionTurn
     , sessionTurnAssistantText = turn.turnAssistantText
     , sessionTurnError = turn.turnError
     , sessionTurnResponseId = turn.turnResponseId
-    , sessionTurnItems = turn.turnItems
+    , sessionTurnItems = map toStoredResponseItem turn.turnItems
     , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
     }
 
 fromStoredTurn :: Store.SessionTurn -> Either Text SessionTurn
-fromStoredTurn stored = Right SessionTurn
-    { turnAt = stored.sessionTurnOccurredAt
-    , turnUserText = stored.sessionTurnUserText
-    , turnAssistantText = stored.sessionTurnAssistantText
-    , turnError = stored.sessionTurnError
-    , turnResponseId = stored.sessionTurnResponseId
-    , turnItems = stored.sessionTurnItems
-    , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
-    }
+fromStoredTurn stored = do
+    items <- traverse fromStoredResponseItem stored.sessionTurnItems
+    pure SessionTurn
+        { turnAt = stored.sessionTurnOccurredAt
+        , turnUserText = stored.sessionTurnUserText
+        , turnAssistantText = stored.sessionTurnAssistantText
+        , turnError = stored.sessionTurnError
+        , turnResponseId = stored.sessionTurnResponseId
+        , turnItems = items
+        , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
+        }
 
 toStoredUsage :: TokenUsage -> Store.SessionUsage
 toStoredUsage usage = Store.SessionUsage

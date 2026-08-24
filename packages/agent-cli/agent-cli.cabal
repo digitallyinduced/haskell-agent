@@ -102,6 +102,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
                     , Agent.CLI.SessionLock

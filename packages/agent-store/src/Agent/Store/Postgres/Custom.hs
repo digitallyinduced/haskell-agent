@@ -12,6 +12,10 @@ module Agent.Store.Postgres.Custom
     ( QueryLimits(..)
     , defaultQueryLimits
     , CatalogObject(..)
+    , CatalogDefinition(..)
+    , CatalogColumn(..)
+    , CatalogConstraint(..)
+    , CatalogIndex(..)
     , CustomQueryResult(..)
     , CustomAuditContext(..)
     , CustomExecutionResult(..)
@@ -23,13 +27,11 @@ module Agent.Store.Postgres.Custom
     ) where
 
 import Control.Monad (forM_, unless)
-import Data.Aeson (FromJSON, ToJSON, Value)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32, Int64)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -58,18 +60,6 @@ data QueryLimits = QueryLimits
     }
     deriving (Eq, Show)
 
-instance FromJSON CustomQueryResult where
-    parseJSON = Aeson.withObject "CustomQueryResult" \object ->
-        CustomQueryResult
-            <$> object Aeson..: "rows"
-            <*> object Aeson..: "truncated"
-
-instance ToJSON CustomQueryResult where
-    toJSON result = Aeson.object
-        [ "rows" Aeson..= result.customQueryRows
-        , "truncated" Aeson..= result.customQueryTruncated
-        ]
-
 defaultQueryLimits :: QueryLimits
 defaultQueryLimits = QueryLimits
     { queryMaxRows = 500
@@ -81,26 +71,46 @@ defaultQueryLimits = QueryLimits
 data CatalogObject = CatalogObject
     { catalogObjectKind :: !Text
     , catalogObjectName :: !Text
-    , catalogObjectDefinition :: !Value
+    , catalogObjectDefinition :: !CatalogDefinition
     }
     deriving (Eq, Show)
 
-instance FromJSON CatalogObject where
-    parseJSON = Aeson.withObject "CatalogObject" \object ->
-        CatalogObject
-            <$> object Aeson..: "kind"
-            <*> object Aeson..: "name"
-            <*> object Aeson..: "definition"
+data CatalogDefinition = CatalogDefinition
+    { definitionOwner :: !(Maybe Text)
+    , definitionComment :: !(Maybe Text)
+    , definitionView :: !(Maybe Text)
+    , definitionColumns :: ![CatalogColumn]
+    , definitionConstraints :: ![CatalogConstraint]
+    , definitionIndexes :: ![CatalogIndex]
+    }
+    deriving (Eq, Show)
 
-instance ToJSON CatalogObject where
-    toJSON object = Aeson.object
-        [ "kind" Aeson..= object.catalogObjectKind
-        , "name" Aeson..= object.catalogObjectName
-        , "definition" Aeson..= object.catalogObjectDefinition
-        ]
+data CatalogColumn = CatalogColumn
+    { columnName :: !Text
+    , columnType :: !Text
+    , columnNullable :: !Bool
+    , columnDefault :: !(Maybe Text)
+    , columnIdentity :: !(Maybe Text)
+    , columnGenerated :: !(Maybe Text)
+    , columnComment :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
+data CatalogConstraint = CatalogConstraint
+    { constraintName :: !Text
+    , constraintType :: !Text
+    , constraintDefinition :: !Text
+    }
+    deriving (Eq, Show)
+
+data CatalogIndex = CatalogIndex
+    { indexName :: !Text
+    , indexDefinition :: !Text
+    }
+    deriving (Eq, Show)
 
 data CustomQueryResult = CustomQueryResult
-    { customQueryRows :: !Value
+    { customQueryRows :: !Text
     , customQueryTruncated :: !Bool
     }
     deriving (Eq, Show)
@@ -119,14 +129,6 @@ data CustomExecutionResult = CustomExecutionResult
     }
     deriving (Eq, Show)
 
-instance ToJSON CustomExecutionResult where
-    toJSON result = Aeson.object
-        [ "audit_id" Aeson..= result.customExecutionAuditId
-        , "catalog_before" Aeson..= result.customExecutionCatalogBefore
-        , "catalog_after" Aeson..= result.customExecutionCatalogAfter
-        , "warning" Aeson..= result.customExecutionWarning
-        ]
-
 inspectCustomSchema
     :: Pool
     -> ScopeDatabase
@@ -135,7 +137,7 @@ inspectCustomSchema scopePool database =
     runPool scopePool session >>= \case
         Left err -> pure (Left err)
         Right (Left err) -> pure (Left err)
-        Right (Right value) -> pure (decodeCatalogValue value)
+        Right (Right value) -> pure (Right value)
   where
     session = do
         expectedIdentity <- Session.statement
@@ -143,9 +145,21 @@ inspectCustomSchema scopePool database =
             scopeIdentityStatement
         if not expectedIdentity
             then pure (Left scopeIdentityError)
-            else Right <$> Session.statement
-                database.scopeDatabaseSchema
-                catalogStatement
+            else do
+                objects <- Session.statement
+                    database.scopeDatabaseSchema
+                    catalogObjectsStatement
+                columns <- Session.statement
+                    database.scopeDatabaseSchema
+                    catalogColumnsStatement
+                constraints <- Session.statement
+                    database.scopeDatabaseSchema
+                    catalogConstraintsStatement
+                indexes <- Session.statement
+                    database.scopeDatabaseSchema
+                    catalogIndexesStatement
+                pure $ Right $
+                    assembleCatalog objects columns constraints indexes
 
 queryCustom
     :: Pool
@@ -175,18 +189,15 @@ queryCustom scopePool database limits rawQuery =
             runPool scopePool session >>= \case
                 Left err -> pure (Left err)
                 Right (Left err) -> pure (Left err)
-                Right (Right value) ->
-                    case decodeQueryEnvelope value of
-                        Left err -> pure (Left err)
-                        Right result
-                            | encodedSize result.customQueryRows
-                                > limits.queryMaxOutputBytes ->
-                                pure $ Left $
-                                    "database query result exceeds "
-                                        <> Text.pack
-                                            (show limits.queryMaxOutputBytes)
-                                        <> " encoded bytes; select fewer rows or columns"
-                            | otherwise -> pure (Right result)
+                Right (Right result)
+                    | encodedSize result.customQueryRows
+                        > limits.queryMaxOutputBytes ->
+                        pure $ Left $
+                            "database query result exceeds "
+                                <> Text.pack
+                                    (show limits.queryMaxOutputBytes)
+                                <> " encoded bytes; select fewer rows or columns"
+                    | otherwise -> pure (Right result)
 
 executeCustom
     :: Pool
@@ -512,92 +523,182 @@ validateLimits limits
         Left "database lock timeout must be positive"
     | otherwise = Right ()
 
-catalogStatement :: Statement Text Value
-catalogStatement = mkStatement
-    (Text.decodeUtf8 catalogSql)
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    jsonbSingleRow
+data CatalogObjectRow = CatalogObjectRow
+    { catalogRowId :: !Text
+    , catalogRowKind :: !Text
+    , catalogRowName :: !Text
+    , catalogRowOwner :: !(Maybe Text)
+    , catalogRowComment :: !(Maybe Text)
+    , catalogRowView :: !(Maybe Text)
+    }
+
+data CatalogColumnRow = CatalogColumnRow
+    { catalogColumnRowObjectId :: !Text
+    , catalogColumnRowValue :: !CatalogColumn
+    }
+
+data CatalogConstraintRow = CatalogConstraintRow
+    { catalogConstraintRowObjectId :: !Text
+    , catalogConstraintRowValue :: !CatalogConstraint
+    }
+
+data CatalogIndexRow = CatalogIndexRow
+    { catalogIndexRowObjectId :: !Text
+    , catalogIndexRowValue :: !CatalogIndex
+    }
+
+assembleCatalog
+    :: [CatalogObjectRow]
+    -> [CatalogColumnRow]
+    -> [CatalogConstraintRow]
+    -> [CatalogIndexRow]
+    -> [CatalogObject]
+assembleCatalog objects columns constraints indexes =
+    map assembleObject objects
+  where
+    columnsByObject = Map.fromListWith (flip (<>))
+        [ (row.catalogColumnRowObjectId, [row.catalogColumnRowValue])
+        | row <- columns
+        ]
+    constraintsByObject = Map.fromListWith (flip (<>))
+        [ (row.catalogConstraintRowObjectId, [row.catalogConstraintRowValue])
+        | row <- constraints
+        ]
+    indexesByObject = Map.fromListWith (flip (<>))
+        [ (row.catalogIndexRowObjectId, [row.catalogIndexRowValue])
+        | row <- indexes
+        ]
+    assembleObject :: CatalogObjectRow -> CatalogObject
+    assembleObject row = CatalogObject
+        { catalogObjectKind = row.catalogRowKind
+        , catalogObjectName = row.catalogRowName
+        , catalogObjectDefinition = CatalogDefinition
+            { definitionOwner = row.catalogRowOwner
+            , definitionComment = row.catalogRowComment
+            , definitionView = row.catalogRowView
+            , definitionColumns =
+                Map.findWithDefault [] row.catalogRowId columnsByObject
+            , definitionConstraints =
+                Map.findWithDefault [] row.catalogRowId constraintsByObject
+            , definitionIndexes =
+                Map.findWithDefault [] row.catalogRowId indexesByObject
+            }
+        }
+
+catalogObjectsStatement :: Statement Text [CatalogObjectRow]
+catalogObjectsStatement = mkStatement
+    "select c.oid::text,\
+    \ case c.relkind\
+    \   when 'r' then 'table'\
+    \   when 'p' then 'partitioned_table'\
+    \   when 'v' then 'view'\
+    \   when 'm' then 'materialized_view'\
+    \   when 'S' then 'sequence'\
+    \   else c.relkind::text\
+    \ end,\
+    \ c.relname::text,\
+    \ pg_catalog.pg_get_userbyid(c.relowner)::text,\
+    \ obj_description(c.oid, 'pg_class'),\
+    \ case when c.relkind in ('v','m')\
+    \   then pg_catalog.pg_get_viewdef(c.oid, true) else null end\
+    \ from pg_catalog.pg_class c\
+    \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
+    \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
+    \ order by 2, c.relname"
+    textParam
+    (Decoders.rowList $
+        CatalogObjectRow
+            <$> textColumn
+            <*> textColumn
+            <*> textColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn)
     True
 
-catalogSql :: ByteString.ByteString
-catalogSql =
-    "with relations as (\
-    \  select c.oid, c.relname, c.relkind,\
-    \    case c.relkind\
-    \      when 'r' then 'table'\
-    \      when 'p' then 'partitioned_table'\
-    \      when 'v' then 'view'\
-    \      when 'm' then 'materialized_view'\
-    \      when 'S' then 'sequence'\
-    \      else c.relkind::text\
-    \    end as object_kind,\
-    \    pg_catalog.pg_get_userbyid(c.relowner) as owner,\
-    \    obj_description(c.oid, 'pg_class') as comment\
-    \  from pg_catalog.pg_class c\
-    \  join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
-    \  where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
-    \), objects as (\
-    \  select r.object_kind as kind, r.relname as name,\
-    \    jsonb_build_object(\
-    \      'owner', r.owner,\
-    \      'comment', r.comment,\
-    \      'view_definition', case when r.relkind in ('v','m')\
-    \        then pg_catalog.pg_get_viewdef(r.oid, true) else null end,\
-    \      'columns', coalesce((\
-    \        select jsonb_agg(jsonb_build_object(\
-    \          'name', a.attname,\
-    \          'type', pg_catalog.format_type(a.atttypid, a.atttypmod),\
-    \          'nullable', not a.attnotnull,\
-    \          'default', pg_catalog.pg_get_expr(d.adbin, d.adrelid),\
-    \          'identity', case a.attidentity\
-    \            when 'a' then 'always' when 'd' then 'by_default' else null end,\
-    \          'generated', case a.attgenerated\
-    \            when 's' then 'stored' when 'v' then 'virtual' else null end,\
-    \          'comment', col_description(a.attrelid, a.attnum)\
-    \        ) order by a.attnum)\
-    \        from pg_catalog.pg_attribute a\
-    \        left join pg_catalog.pg_attrdef d\
-    \          on d.adrelid = a.attrelid and d.adnum = a.attnum\
-    \        where a.attrelid = r.oid and a.attnum > 0 and not a.attisdropped\
-    \      ), '[]'::jsonb),\
-    \      'constraints', coalesce((\
-    \        select jsonb_agg(jsonb_build_object(\
-    \          'name', con.conname,\
-    \          'type', case con.contype\
-    \            when 'p' then 'primary_key'\
-    \            when 'u' then 'unique'\
-    \            when 'f' then 'foreign_key'\
-    \            when 'c' then 'check'\
-    \            when 'x' then 'exclusion'\
-    \            when 'n' then 'not_null'\
-    \            else con.contype::text end,\
-    \          'definition', pg_catalog.pg_get_constraintdef(con.oid, true)\
-    \        ) order by con.conname)\
-    \        from pg_catalog.pg_constraint con\
-    \        where con.conrelid = r.oid\
-    \      ), '[]'::jsonb),\
-    \      'indexes', coalesce((\
-    \        select jsonb_agg(jsonb_build_object(\
-    \          'name', i.relname,\
-    \          'definition', pg_catalog.pg_get_indexdef(ix.indexrelid)\
-    \        ) order by i.relname)\
-    \        from pg_catalog.pg_index ix\
-    \        join pg_catalog.pg_class i on i.oid = ix.indexrelid\
-    \        where ix.indrelid = r.oid\
-    \      ), '[]'::jsonb)\
-    \    ) as definition\
-    \  from relations r\
-    \)\
-    \select coalesce(jsonb_agg(jsonb_build_object(\
-    \  'kind', kind, 'name', name, 'definition', definition\
-    \) order by kind, name), '[]'::jsonb)\
-    \from objects"
+catalogColumnsStatement :: Statement Text [CatalogColumnRow]
+catalogColumnsStatement = mkStatement
+    "select a.attrelid::text, a.attname::text,\
+    \ pg_catalog.format_type(a.atttypid, a.atttypmod),\
+    \ not a.attnotnull,\
+    \ pg_catalog.pg_get_expr(d.adbin, d.adrelid),\
+    \ case a.attidentity\
+    \   when 'a' then 'always' when 'd' then 'by_default' else null end,\
+    \ case a.attgenerated\
+    \   when 's' then 'stored' when 'v' then 'virtual' else null end,\
+    \ col_description(a.attrelid, a.attnum)\
+    \ from pg_catalog.pg_attribute a\
+    \ join pg_catalog.pg_class c on c.oid = a.attrelid\
+    \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
+    \ left join pg_catalog.pg_attrdef d\
+    \   on d.adrelid = a.attrelid and d.adnum = a.attnum\
+    \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
+    \   and a.attnum > 0 and not a.attisdropped\
+    \ order by a.attrelid, a.attnum"
+    textParam
+    (Decoders.rowList $
+        CatalogColumnRow
+            <$> textColumn
+            <*> (CatalogColumn
+                <$> textColumn
+                <*> textColumn
+                <*> boolColumn
+                <*> nullableTextColumn
+                <*> nullableTextColumn
+                <*> nullableTextColumn
+                <*> nullableTextColumn))
+    True
 
-customQueryStatement :: QueryLimits -> Text -> Statement () Value
+catalogConstraintsStatement :: Statement Text [CatalogConstraintRow]
+catalogConstraintsStatement = mkStatement
+    "select con.conrelid::text, con.conname::text,\
+    \ case con.contype\
+    \   when 'p' then 'primary_key'\
+    \   when 'u' then 'unique'\
+    \   when 'f' then 'foreign_key'\
+    \   when 'c' then 'check'\
+    \   when 'x' then 'exclusion'\
+    \   when 'n' then 'not_null'\
+    \   else con.contype::text end,\
+    \ pg_catalog.pg_get_constraintdef(con.oid, true)\
+    \ from pg_catalog.pg_constraint con\
+    \ join pg_catalog.pg_class c on c.oid = con.conrelid\
+    \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
+    \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
+    \ order by con.conrelid, con.conname"
+    textParam
+    (Decoders.rowList $
+        CatalogConstraintRow
+            <$> textColumn
+            <*> (CatalogConstraint
+                <$> textColumn
+                <*> textColumn
+                <*> textColumn))
+    True
+
+catalogIndexesStatement :: Statement Text [CatalogIndexRow]
+catalogIndexesStatement = mkStatement
+    "select ix.indrelid::text, i.relname::text,\
+    \ pg_catalog.pg_get_indexdef(ix.indexrelid)\
+    \ from pg_catalog.pg_index ix\
+    \ join pg_catalog.pg_class c on c.oid = ix.indrelid\
+    \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
+    \ join pg_catalog.pg_class i on i.oid = ix.indexrelid\
+    \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
+    \ order by ix.indrelid, i.relname"
+    textParam
+    (Decoders.rowList $
+        CatalogIndexRow
+            <$> textColumn
+            <*> (CatalogIndex <$> textColumn <*> textColumn))
+    True
+
+customQueryStatement :: QueryLimits -> Text -> Statement () CustomQueryResult
 customQueryStatement limits query = mkStatement
     sql
     Encoders.noParams
-    jsonbSingleRow
+    (Decoders.singleRow $
+        CustomQueryResult <$> textColumn <*> boolColumn)
     False
   where
     rowCap = limits.queryMaxRows
@@ -607,22 +708,17 @@ customQueryStatement limits query = mkStatement
     cap = Text.pack (show rowCap)
     capPlusOne = Text.pack (show overflowCap)
     sql =
-        "select jsonb_build_object("
-            <> "'rows', coalesce(jsonb_agg("
+        "select coalesce(jsonb_agg("
             <> "q._ha_row order by q._ha_row_number"
-            <> ") filter (where q._ha_row_number <= " <> cap <> "), '[]'::jsonb),"
-            <> "'truncated', coalesce(max(q._ha_row_number), 0) > " <> cap
-            <> ") from ("
+            <> ") filter (where q._ha_row_number <= " <> cap
+            <> "), '[]'::jsonb)::text,"
+            <> " coalesce(max(q._ha_row_number), 0) > " <> cap
+            <> " from ("
             <> "select to_jsonb(_ha_data) as _ha_row, "
             <> "row_number() over () as _ha_row_number "
             <> "from (" <> query <> ") as _ha_data "
             <> "limit " <> capPlusOne
             <> ") as q"
-
-jsonbSingleRow :: Decoders.Result Value
-jsonbSingleRow =
-    Decoders.singleRow $
-        Decoders.column (Decoders.nonNullable Decoders.jsonb)
 
 scopeIdentityStatement :: Statement Text Bool
 scopeIdentityStatement = mkStatement
@@ -636,140 +732,39 @@ scopeIdentityError :: Text
 scopeIdentityError =
     "custom database pool is not authenticated directly as the selected scope role"
 
-decodeCatalogValue :: Value -> Either Text [CatalogObject]
-decodeCatalogValue value =
-    case Aeson.fromJSON value of
-        Aeson.Success objects -> Right objects
-        Aeson.Error err ->
-            Left ("could not decode PostgreSQL catalog response: " <> Text.pack err)
-
-decodeQueryEnvelope :: Value -> Either Text CustomQueryResult
-decodeQueryEnvelope value =
-    case Aeson.fromJSON value of
-        Aeson.Success result -> Right result
-        Aeson.Error err ->
-            Left ("could not decode PostgreSQL query response: " <> Text.pack err)
-
 replaceCatalogProjection
     :: Pool
     -> ScopeDatabase
     -> [CatalogObject]
     -> IO (Either Text ())
 replaceCatalogProjection pool database objects =
-    case prepareCatalog objects of
-        Left err -> pure (Left err)
-        Right prepared ->
-            runPool pool $
-                TxSessions.transactionNoRetry
-                    TxSessions.Serializable
-                    TxSessions.Write
-                    do
-                        Tx.statement scopeKey deleteCurrentCatalogStatement
-                        _ <- insertCatalogSnapshot scopeKey "current" prepared
-                        pure ()
+    runPool pool $
+        TxSessions.transactionNoRetry
+            TxSessions.Serializable
+            TxSessions.Write
+            do
+                Tx.statement scopeKey deleteCurrentCatalogStatement
+                _ <- insertCatalogSnapshot scopeKey "current" objects
+                pure ()
   where
     scopeKey = scopeIdText database.scopeDatabaseScope.scopeId
-
-data CatalogDefinition = CatalogDefinition
-    { definitionOwner :: !(Maybe Text)
-    , definitionComment :: !(Maybe Text)
-    , definitionView :: !(Maybe Text)
-    , definitionColumns :: ![CatalogColumn]
-    , definitionConstraints :: ![CatalogConstraint]
-    , definitionIndexes :: ![CatalogIndex]
-    }
-
-data CatalogColumn = CatalogColumn
-    { columnName :: !Text
-    , columnType :: !Text
-    , columnNullable :: !Bool
-    , columnDefault :: !(Maybe Text)
-    , columnIdentity :: !(Maybe Text)
-    , columnGenerated :: !(Maybe Text)
-    , columnComment :: !(Maybe Text)
-    }
-
-data CatalogConstraint = CatalogConstraint
-    { constraintName :: !Text
-    , constraintType :: !Text
-    , constraintDefinition :: !Text
-    }
-
-data CatalogIndex = CatalogIndex
-    { indexName :: !Text
-    , indexDefinition :: !Text
-    }
-
-instance FromJSON CatalogDefinition where
-    parseJSON = Aeson.withObject "CatalogDefinition" \object ->
-        CatalogDefinition
-            <$> object Aeson..:? "owner"
-            <*> object Aeson..:? "comment"
-            <*> object Aeson..:? "view_definition"
-            <*> (object Aeson..:? "columns" Aeson..!= [])
-            <*> (object Aeson..:? "constraints" Aeson..!= [])
-            <*> (object Aeson..:? "indexes" Aeson..!= [])
-
-instance FromJSON CatalogColumn where
-    parseJSON = Aeson.withObject "CatalogColumn" \object ->
-        CatalogColumn
-            <$> object Aeson..: "name"
-            <*> object Aeson..: "type"
-            <*> object Aeson..: "nullable"
-            <*> object Aeson..:? "default"
-            <*> object Aeson..:? "identity"
-            <*> object Aeson..:? "generated"
-            <*> object Aeson..:? "comment"
-
-instance FromJSON CatalogConstraint where
-    parseJSON = Aeson.withObject "CatalogConstraint" \object ->
-        CatalogConstraint
-            <$> object Aeson..: "name"
-            <*> object Aeson..: "type"
-            <*> object Aeson..: "definition"
-
-instance FromJSON CatalogIndex where
-    parseJSON = Aeson.withObject "CatalogIndex" \object ->
-        CatalogIndex
-            <$> object Aeson..: "name"
-            <*> object Aeson..: "definition"
-
-data PreparedCatalogObject = PreparedCatalogObject
-    { preparedKind :: !Text
-    , preparedName :: !Text
-    , preparedDefinition :: !CatalogDefinition
-    }
-
-prepareCatalog :: [CatalogObject] -> Either Text [PreparedCatalogObject]
-prepareCatalog = traverse \object ->
-    case Aeson.fromJSON object.catalogObjectDefinition of
-        Aeson.Error err ->
-            Left $
-                "could not normalize catalog object "
-                    <> object.catalogObjectName <> ": " <> Text.pack err
-        Aeson.Success definition ->
-            Right PreparedCatalogObject
-                { preparedKind = object.catalogObjectKind
-                , preparedName = object.catalogObjectName
-                , preparedDefinition = definition
-                }
 
 insertCatalogSnapshot
     :: Text
     -> Text
-    -> [PreparedCatalogObject]
+    -> [CatalogObject]
     -> Tx.Transaction Text
 insertCatalogSnapshot scopeKey purpose objects = do
     snapshotId <- Tx.statement
         (scopeKey, purpose)
         insertCatalogSnapshotStatement
     forM_ objects \object -> do
-        let definition = object.preparedDefinition
+        let definition = object.catalogObjectDefinition
         objectId <- Tx.statement
             CatalogObjectParams
                 { objectSnapshotId = snapshotId
-                , objectKind = object.preparedKind
-                , objectName = object.preparedName
+                , objectKind = object.catalogObjectKind
+                , objectName = object.catalogObjectName
                 , objectOwner = definition.definitionOwner
                 , objectComment = definition.definitionComment
                 , objectViewDefinition = definition.definitionView
@@ -1024,30 +1019,27 @@ recordAuditStarted
     -> [CatalogObject]
     -> IO (Either Text Text)
 recordAuditStarted pool database audit purpose sql startedAt before =
-    case prepareCatalog before of
-        Left err -> pure (Left err)
-        Right prepared ->
-            runPool pool $
-                TxSessions.transactionNoRetry
-                    TxSessions.Serializable
-                    TxSessions.Write
-                    do
-                        snapshotId <- insertCatalogSnapshot
-                            (scopeIdText database.scopeDatabaseScope.scopeId)
-                            "audit_before"
-                            prepared
-                        Tx.statement
-                            AuditStartedParams
-                                { startSessionId = audit.customAuditSessionId
-                                , startAgentId = audit.customAuditAgentId
-                                , startScopeKey =
-                                    scopeIdText database.scopeDatabaseScope.scopeId
-                                , startPurpose = purpose
-                                , startSql = sql
-                                , startAt = startedAt
-                                , startSnapshotId = snapshotId
-                                }
-                            auditStartedStatement
+    runPool pool $
+        TxSessions.transactionNoRetry
+            TxSessions.Serializable
+            TxSessions.Write
+            do
+                snapshotId <- insertCatalogSnapshot
+                    (scopeIdText database.scopeDatabaseScope.scopeId)
+                    "audit_before"
+                    before
+                Tx.statement
+                    AuditStartedParams
+                        { startSessionId = audit.customAuditSessionId
+                        , startAgentId = audit.customAuditAgentId
+                        , startScopeKey =
+                            scopeIdText database.scopeDatabaseScope.scopeId
+                        , startPurpose = purpose
+                        , startSql = sql
+                        , startAt = startedAt
+                        , startSnapshotId = snapshotId
+                        }
+                    auditStartedStatement
 
 recordAuditFinished
     :: Pool
@@ -1058,36 +1050,34 @@ recordAuditFinished
     -> [CatalogObject]
     -> IO (Either Text ())
 recordAuditFinished pool auditId finishedAt succeeded errorText after =
-    case prepareCatalog after of
-        Left err -> pure (Left err)
-        Right prepared -> do
-            result <- runPool pool $
-                TxSessions.transactionNoRetry
-                    TxSessions.Serializable
-                    TxSessions.Write
-                    do
-                        scopeKey <- Tx.statement auditId auditScopeStatement
-                        snapshotId <- insertCatalogSnapshot
-                            scopeKey
-                            "audit_after"
-                            prepared
-                        updated <- Tx.statement
-                            AuditFinishedParams
-                                { finishAuditId = auditId
-                                , finishAt = finishedAt
-                                , finishSucceeded = succeeded
-                                , finishError = errorText
-                                , finishSnapshotId = snapshotId
-                                }
-                            auditFinishedStatement
-                        unless updated Tx.condemn
-                        pure updated
-            case result of
-                Left err -> pure (Left err)
-                Right False ->
-                    pure $ Left $
-                        "audit row was not in started state: " <> auditId
-                Right True -> pure (Right ())
+    do
+        result <- runPool pool $
+            TxSessions.transactionNoRetry
+                TxSessions.Serializable
+                TxSessions.Write
+                do
+                    scopeKey <- Tx.statement auditId auditScopeStatement
+                    snapshotId <- insertCatalogSnapshot
+                        scopeKey
+                        "audit_after"
+                        after
+                    updated <- Tx.statement
+                        AuditFinishedParams
+                            { finishAuditId = auditId
+                            , finishAt = finishedAt
+                            , finishSucceeded = succeeded
+                            , finishError = errorText
+                            , finishSnapshotId = snapshotId
+                            }
+                        auditFinishedStatement
+                    unless updated Tx.condemn
+                    pure updated
+        case result of
+            Left err -> pure (Left err)
+            Right False ->
+                pure $ Left $
+                    "audit row was not in started state: " <> auditId
+            Right True -> pure (Right ())
 
 data AuditStartedParams = AuditStartedParams
     { startSessionId :: !(Maybe Text)
@@ -1174,7 +1164,19 @@ timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
 textSingleRow :: Decoders.Result Text
 textSingleRow =
     Decoders.singleRow $
-        Decoders.column (Decoders.nonNullable Decoders.text)
+        textColumn
+
+textColumn :: Decoders.Row Text
+textColumn =
+    Decoders.column (Decoders.nonNullable Decoders.text)
+
+nullableTextColumn :: Decoders.Row (Maybe Text)
+nullableTextColumn =
+    Decoders.column (Decoders.nullable Decoders.text)
+
+boolColumn :: Decoders.Row Bool
+boolColumn =
+    Decoders.column (Decoders.nonNullable Decoders.bool)
 
 confinementSql :: ScopeDatabase -> QueryLimits -> ByteString.ByteString
 confinementSql database limits =
@@ -1193,8 +1195,8 @@ quoteIdentifier :: Text -> Text
 quoteIdentifier value =
     "\"" <> Text.replace "\"" "\"\"" value <> "\""
 
-encodedSize :: Value -> Int
-encodedSize = fromIntegral . LazyByteString.length . Aeson.encode
+encodedSize :: Text -> Int
+encodedSize = ByteString.length . Text.encodeUtf8
 
 runPool :: Pool -> Session.Session a -> IO (Either Text a)
 runPool pool session =

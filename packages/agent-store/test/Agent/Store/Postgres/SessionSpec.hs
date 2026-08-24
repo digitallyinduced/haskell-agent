@@ -3,31 +3,13 @@
 module Agent.Store.Postgres.SessionSpec (spec) where
 
 import Control.Exception.Safe (finally)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
+import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-import Agent.Responses.Types
-    ( CustomToolCall(..)
-    , CustomToolCallOutput(..)
-    , FunctionCall(..)
-    , FunctionCallOutput(..)
-    , ItemReference(..)
-    , ItemStatus(..)
-    , MessageContent(..)
-    , ReasoningItem(..)
-    , ReasoningSummaryPart(..)
-    , ResponseContentPart(..)
-    , ResponseItem(..)
-    , ResponseItemType(..)
-    , ResponseMessage(..)
-    , ResponseRole(..)
-    , TaggedObject(..)
-    )
 import Agent.Store.Postgres
     ( closeStore
     , defaultManagedPostgresConfig
@@ -36,6 +18,7 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Session
+import Agent.Store.SessionItem (StoredResponseItem(..))
 
 spec :: Spec
 spec = describe "PostgreSQL session schema" do
@@ -97,8 +80,21 @@ spec = describe "PostgreSQL session schema" do
                             loadSession pool "session-1" >>= \case
                                 Right (Just stored) -> do
                                     stored.storedMetadata `shouldBe` metadata
-                                    map (.storedTurn) stored.storedTurns
-                                        `shouldBe` [turn]
+                                    case map (.storedTurn) stored.storedTurns of
+                                        [loadedTurn] -> do
+                                            loadedTurn
+                                                { sessionTurnItems = [] }
+                                                `shouldBe`
+                                                    turn
+                                                        { sessionTurnItems = [] }
+                                            map itemIdentity
+                                                loadedTurn.sessionTurnItems
+                                                `shouldBe`
+                                                    map itemIdentity
+                                                        turn.sessionTurnItems
+                                        loaded ->
+                                            expectationFailure
+                                                ("unexpected turns: " <> show loaded)
                                 other ->
                                     expectationFailure
                                         ("unexpected stored session: " <> show other)
@@ -155,143 +151,47 @@ testTurn now = SessionTurn
     , sessionTurnError = Nothing
     , sessionTurnResponseId = Just "response-1"
     , sessionTurnItems =
-        [ MessageItem ResponseMessage
-            { messageId = Just "item-message"
-            , content = MessageContentParts
-                [ InputTextPart
-                    { text = "hello"
-                    , promptCacheBreakpoint =
-                        Just (Aeson.object ["scope" Aeson..= ("turn" :: String)])
-                    , extraFields = testExtras "input-text"
-                    }
-                , InputImagePart
-                    { detail = Just "high"
-                    , fileId = Just "image-file"
-                    , imageUrl = Just "https://example.invalid/image.png"
-                    , promptCacheBreakpoint = Just (Aeson.Bool True)
-                    , extraFields = testExtras "input-image"
-                    }
-                , InputFilePart
-                    { detail = Just "document"
-                    , fileData = Just "ZmlsZQ=="
-                    , fileId = Just "document-file"
-                    , fileUrl = Just "https://example.invalid/document.txt"
-                    , filename = Just "document.txt"
-                    , promptCacheBreakpoint = Just (Aeson.String "break")
-                    , extraFields = testExtras "input-file"
-                    }
-                , InputAudioPart
-                    { inputAudio =
-                        Aeson.object
-                            [ "data" Aeson..= ("YXVkaW8=" :: String)
-                            , "format" Aeson..= ("wav" :: String)
-                            ]
-                    , extraFields = testExtras "input-audio"
-                    }
-                , OutputTextPart
-                    { text = "hello back"
-                    , annotations =
-                        Just
-                            [ Aeson.object
-                                [ "type" Aeson..= ("citation" :: String)
-                                ]
-                            ]
-                    , logprobs =
-                        Just
-                            [ Aeson.object
-                                [ "token" Aeson..= ("hello" :: String)
-                                ]
-                            ]
-                    , extraFields = testExtras "output-text"
-                    }
-                , RefusalPart
-                    { refusal = "not available"
-                    , extraFields = testExtras "refusal"
-                    }
-                , UnknownContentPart TaggedObject
-                    { tag = "provider_content"
-                    , fields = testExtras "unknown-content"
-                    }
-                ]
-            , role = RoleDeveloper
-            , status = Just ItemInProgress
-            , phase = Just "commentary"
-            , extraFields = testExtras "message"
-            }
-        , MessageItem ResponseMessage
-            { messageId = Just "item-text-message"
-            , content = MessageContentText "plain text"
-            , role = RoleUnknown "observer"
-            , status = Just (ItemStatusUnknown "paused")
-            , phase = Nothing
-            , extraFields = testExtras "text-message"
-            }
-        , FunctionCallItem FunctionCall
-            { itemId = Just "item-call"
-            , callId = "call-1"
-            , name = "shell_command"
-            , arguments = "{\"command\":\"pwd\"}"
-            , status = Just ItemCompleted
-            , extraFields = testExtras "function-call"
-            }
-        , FunctionCallOutputItem FunctionCallOutput
-            { itemId = Just "item-output"
-            , callId = "call-1"
-            , output = Aeson.String "{\"stdout\":\"/tmp/project\"}"
-            , status = Just ItemCompleted
-            , extraFields = testExtras "function-output"
-            }
-        , CustomToolCallItem CustomToolCall
-            { itemId = Just "item-custom-call"
-            , callId = "custom-1"
-            , name = "apply_patch"
-            , input = "*** Begin Patch"
-            , status = Just ItemInProgress
-            , extraFields = testExtras "custom-call"
-            }
-        , CustomToolCallOutputItem CustomToolCallOutput
-            { itemId = Just "item-custom-output"
-            , callId = "custom-1"
-            , name = Just "apply_patch"
-            , output = Aeson.String "Done"
-            , status = Just ItemCompleted
-            , extraFields = testExtras "custom-output"
-            }
-        , ReasoningItemValue ReasoningItem
-            { itemId = Just "item-reasoning"
-            , summary =
-                [ ReasoningSummaryPart
-                    { partType = "summary_text"
-                    , text = Just "Checked the schema"
-                    , extraFields = testExtras "reasoning-summary"
-                    }
-                ]
-            , content = Just
-                [ ReasoningTextPart
-                    { text = "private reasoning placeholder"
-                    , extraFields = testExtras "reasoning-text"
-                    }
-                , SummaryTextPart
-                    { text = "summary placeholder"
-                    , extraFields = testExtras "summary-text"
-                    }
-                ]
-            , encryptedContent = Just "encrypted"
-            , status = Just ItemCompleted
-            , extraFields = testExtras "reasoning"
-            }
-        , ItemReferenceValue ItemReference
-            { itemId = "item-call"
-            , extraFields = testExtras "reference"
-            }
-        , KnownResponseItem ItemCompactionTrigger TaggedObject
-            { tag = "compaction_trigger"
-            , fields = testExtras "known-tagged"
-            }
-        , UnknownResponseItem TaggedObject
-            { tag = "provider_extension"
-            , fields = testExtras "unknown-tagged"
-            }
+        [ stored "message" "core"
+            "{\"type\":\"message\",\"id\":\"item-message\",\"role\":\"developer\",\
+            \\"status\":\"in_progress\",\"phase\":\"commentary\",\"content\":[\
+            \{\"type\":\"input_text\",\"text\":\"hello\",\
+            \\"prompt_cache_breakpoint\":{\"scope\":\"turn\"}},\
+            \{\"type\":\"output_text\",\"text\":\"hello back\",\
+            \\"annotations\":[{\"type\":\"citation\"}],\
+            \\"logprobs\":[{\"token\":\"hello\"}]},\
+            \{\"type\":\"provider_content\",\"provider_extension\":true}],\
+            \\"provider_extension\":\"message\"}"
+        , stored "message" "core"
+            "{\"type\":\"message\",\"id\":\"item-text-message\",\
+            \\"role\":\"observer\",\"status\":\"paused\",\"content\":\"plain text\"}"
+        , stored "function_call" "core"
+            "{\"type\":\"function_call\",\"id\":\"item-call\",\"call_id\":\"call-1\",\
+            \\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\",\
+            \\"status\":\"completed\",\"provider_extension\":\"function-call\"}"
+        , stored "function_call_output" "core"
+            "{\"type\":\"function_call_output\",\"id\":\"item-output\",\
+            \\"call_id\":\"call-1\",\"output\":\"{\\\"stdout\\\":\\\"/tmp/project\\\"}\",\
+            \\"status\":\"completed\",\"provider_extension\":\"function-output\"}"
+        , stored "custom_tool_call" "core"
+            "{\"type\":\"custom_tool_call\",\"id\":\"item-custom-call\",\
+            \\"call_id\":\"custom-1\",\"name\":\"apply_patch\",\
+            \\"input\":\"*** Begin Patch\",\"status\":\"in_progress\"}"
+        , stored "custom_tool_call_output" "core"
+            "{\"type\":\"custom_tool_call_output\",\"id\":\"item-custom-output\",\
+            \\"call_id\":\"custom-1\",\"name\":\"apply_patch\",\"output\":\"Done\",\
+            \\"status\":\"completed\"}"
+        , stored "reasoning" "core"
+            "{\"type\":\"reasoning\",\"id\":\"item-reasoning\",\
+            \\"summary\":[{\"type\":\"summary_text\",\"text\":\"Checked the schema\"}],\
+            \\"content\":[{\"type\":\"reasoning_text\",\
+            \\"text\":\"private reasoning placeholder\"}],\
+            \\"encrypted_content\":\"encrypted\",\"status\":\"completed\"}"
+        , stored "item_reference" "core"
+            "{\"type\":\"item_reference\",\"id\":\"item-call\"}"
+        , stored "compaction_trigger" "known"
+            "{\"type\":\"compaction_trigger\",\"provider_extension\":\"known-tagged\"}"
+        , stored "provider_extension" "unknown"
+            "{\"type\":\"provider_extension\",\"provider_extension\":\"unknown-tagged\"}"
         ]
     , sessionTurnUsage = Just SessionUsage
         { sessionUsageInputTokens = 10
@@ -300,9 +200,18 @@ testTurn now = SessionTurn
         }
     }
 
-testExtras :: String -> Aeson.Object
-testExtras label =
-    KeyMap.singleton "provider_extension" (Aeson.toJSON label)
+stored :: Text -> Text -> Text -> StoredResponseItem
+stored itemType representation payload = StoredResponseItem
+    { storedResponseItemType = itemType
+    , storedResponseItemRepresentation = representation
+    , storedResponseItemPayload = payload
+    }
+
+itemIdentity :: StoredResponseItem -> (Text, Text)
+itemIdentity item =
+    ( item.storedResponseItemType
+    , item.storedResponseItemRepresentation
+    )
 
 shouldContainBytes :: ByteString.ByteString -> ByteString.ByteString -> Expectation
 shouldContainBytes haystack needle =
