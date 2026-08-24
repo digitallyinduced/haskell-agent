@@ -190,6 +190,24 @@ executable eval-ghci-vs-bash
                     , time
                     , unix
 
+executable eval-agent-vs-codex-todo
+    import:           common-options
+    hs-source-dirs:   eval
+    main-is:          AgentVsCodexTodo.hs
+    ghc-options:      -threaded -rtsopts
+    build-depends:    agent-cli
+                    , agent-responses-types
+                    , aeson >= 2.0
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
+
 benchmark subagent-retention-bench
     import:           common-options
     type:             exitcode-stdio-1.0
