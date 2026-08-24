@@ -76,6 +76,20 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
+    it "loads the packaged learn-about-user skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "learn-about-user") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+        map (.skillUserInvocable) matching `shouldBe` [True]
+
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")
         _ <- queueSkillCatalogContextWithOmissions
