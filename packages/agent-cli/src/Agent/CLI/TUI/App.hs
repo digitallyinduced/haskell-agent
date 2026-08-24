@@ -39,6 +39,7 @@ module Agent.CLI.TUI.App
     , runFullscreen
     , setFullscreenSessionActions
     , fullscreenVtyConfig
+    , fullscreenSurface
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
@@ -1572,16 +1573,62 @@ drawApp state =
 
 drawMain :: AppState -> Widget Name
 drawMain state =
-    withAttr Theme.baseAttr $
-        vBox
-            [ drawHeader state
-            , drawWorkspace state
-            , drawNotice state
-            , Composer.drawQueuedInputs state.appUi
-            , Composer.drawSlashMenu state
-            , drawFollowStatus state.appUi
-            , Composer.drawComposer state
-            , drawFooter state
+    fullscreenSurface $
+        withAttr Theme.baseAttr $
+            vBox
+                [ drawHeader state
+                , drawWorkspace state
+                , drawNotice state
+                , Composer.drawQueuedInputs state.appUi
+                , Composer.drawSlashMenu state
+                , drawFollowStatus state.appUi
+                , Composer.drawComposer state
+                , drawFooter state
+                ]
+
+-- | Bound the retained main layer to the terminal and explicitly paint every
+-- cell. Some terminals can retain cells from an older, wider layout when a
+-- later Brick image is narrower; an over-wide image can instead trigger
+-- terminal-side wrapping and shift subsequent rows. Keeping the backing layer
+-- exactly the render-context size prevents both failure modes.
+fullscreenSurface :: Widget n -> Widget n
+fullscreenSurface widget =
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        base <- B.lookupAttrName Theme.baseAttr
+        result <- B.render widget
+        let width = max 0 context.availWidth
+            height = max 0 context.availHeight
+            cropped = V.crop width height result.image
+            widthPadded =
+                padImageRight
+                    base
+                    (width - V.imageWidth cropped)
+                    cropped
+            padded =
+                padImageBottom
+                    base
+                    width
+                    (height - V.imageHeight widthPadded)
+                    widthPadded
+        pure result { B.image = padded }
+
+padImageRight :: V.Attr -> Int -> V.Image -> V.Image
+padImageRight attr amount image
+    | amount <= 0 || V.imageHeight image <= 0 = image
+    | otherwise =
+        V.horizCat
+            [ image
+            , V.charFill attr ' ' amount (V.imageHeight image)
+            ]
+
+padImageBottom :: V.Attr -> Int -> Int -> V.Image -> V.Image
+padImageBottom attr width amount image
+    | amount <= 0 || width <= 0 = image
+    | otherwise =
+        V.vertCat
+            [ image
+            , V.charFill attr ' ' width amount
             ]
 
 imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]

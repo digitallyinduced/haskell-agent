@@ -11,6 +11,7 @@ import Agent.CLI.TUI.App
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , fullscreenVtyConfig
+    , fullscreenSurface
     , motionDemandFor
     , lambdaArtWidget
     , nativeProgressKeepaliveDue
@@ -33,8 +34,10 @@ import Agent.CLI.TUI.Types
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
     ( VScrollbarRenderer(..)
+    , Widget
     , hLimit
     , renderWidget
+    , txt
     , vLimit
     )
 import Agent.Subagents (SubagentId(..))
@@ -195,6 +198,21 @@ spec = do
                         renderWidget Nothing [lambdaArtWidget 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
+
+        it "paints an exact terminal-sized backing surface" do
+            let image =
+                    V.picImage $
+                        renderWidget
+                            Nothing
+                            [ ( fullscreenSurface $
+                                    vLimit 1 $
+                                        hLimit 20 $
+                                            txt "content that exceeds the terminal"
+                              ) :: Widget ()
+                            ]
+                            (8, 4)
+            V.imageWidth image `shouldBe` 8
+            V.imageHeight image `shouldBe` 4
 
     describe "resume search cursor" do
         it "uses terminal cells for wide and combining characters" do
