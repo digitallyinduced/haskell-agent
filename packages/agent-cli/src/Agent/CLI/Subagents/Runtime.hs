@@ -20,8 +20,7 @@ import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction (autoCompactOpenAiBackendWithThreshold)
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
-    ( ApprovalPolicy
-    , CliOptions(..)
+    ( CliOptions(..)
     , defaultEffortFor
     )
 import Agent.CLI.Prompt
@@ -32,15 +31,23 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
-    ( LegacySubagentTargetFields(..)
-    , SubagentDiskFields(..)
-    , SubagentDiskMeta(..)
+    ( SubagentDiskFields(..)
     , SubagentStateSnapshot(..)
     , SubagentTarget(..)
     , forkSubagentTranscript
     , loadSubagentState
     , saveSubagentState
     , subagentDiskFields
+    )
+import Agent.CLI.Subagents.Target
+    ( activeSubagentTargetError
+    , unsupportedDialectMessage
+    , validatePersistedSubagentTarget
+    )
+import Agent.CLI.Subagents.Types
+    ( SubagentRuntime(..)
+    , SubagentSession(..)
+    , SubagentStoreRoot
     )
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
@@ -60,7 +67,6 @@ import Agent.Dialect
     , dialectForId
     , dialectId
     , dialectIdForModel
-    , dialectSlug
     , providerSupportsDialect
     )
 import Agent.InterAgentMessage
@@ -87,7 +93,7 @@ import Agent.OpenAI.LoopBackend
     )
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
 import System.OsPath (OsPath)
-import Agent.Provider (Provider(..), TokenProvider, providerSlug)
+import Agent.Provider (Provider(..), TokenProvider)
 import Agent.Responses.Types
     ( ReasoningConfig(..)
     , ResponseCreateParams(..)
@@ -131,7 +137,7 @@ import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
     )
-import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
+import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -140,8 +146,7 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
+    ( modifyMVar
     , modifyMVar_
     , newMVar
     , withMVar
@@ -157,40 +162,6 @@ import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
 import System.Environment (lookupEnv)
 import qualified System.Info as SystemInfo
-
-data SubagentSession = SubagentSession
-    { subSessionTranscript :: !(IORef [ResponseItem])
-    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
-    , subSessionProvider :: !Provider
-    , subSessionConnection :: !Text
-    , subSessionEffectiveModel :: !Text
-    , subSessionDialect :: !DialectId
-    , subSessionPinned :: !(IORef Bool)
-    , subSessionHydrated :: !(MVar Bool)
-    }
-
--- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
-type SubagentStoreRoot = IORef (Maybe OsPath)
-
--- | Provider-neutral dependencies shared by all child-agent backends.
-data SubagentRuntime = SubagentRuntime
-    { subagentOptions :: !CliOptions
-    , subagentGhciEnabled :: !(IORef Bool)
-    , subagentBashEnabled :: !(IORef Bool)
-    , subagentPolicy :: !ApprovalPolicy
-    , subagentPlanHooks :: !PlanModeHooks
-    , subagentSessionTmp :: !(IORef (Maybe OsPath))
-    , subagentMcpTools :: ![AppTool]
-    , subagentParams :: !(IORef ResponseCreateParams)
-    , subagentRegistry :: !SubagentRegistry
-    , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
-    , subagentStoreRoot :: !SubagentStoreRoot
-    , subagentTypes :: !GrokSubagentSpecs
-    , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
-    , subagentConnection :: !Text
-    , subagentMapModel :: !(Text -> Text)
-    , subagentSpawnModelGuidance :: !(Maybe Text)
-    }
 
 data PreparedChild = PreparedChild
     { preparedParentParams :: !ResponseCreateParams
@@ -1065,137 +1036,3 @@ recordPersistedAgentSpec typesRef agentId fields =
                 , reasoningEffortOverride = fields.diskReasoningEffort
                 }
         Nothing -> pure ()
-
-validatePersistedSubagentTarget
-    :: Provider
-    -> Text
-    -> Text
-    -> DialectId
-    -> Maybe LegacySubagentTarget
-    -> SubagentDiskMeta
-    -> Either Text SubagentTarget
-validatePersistedSubagentTarget
-        provider connection expectedEffectiveModel expectedDialect legacyTarget meta = do
-    let expectedTarget = SubagentTarget
-            { targetProvider = provider
-            , targetConnection = connection
-            , targetEffectiveModel = expectedEffectiveModel
-            , targetDialect = expectedDialect
-            }
-    storedTarget <- normalizePersistedSubagentTarget
-        legacyTarget
-        expectedTarget
-        meta
-    case subagentTargetError expectedTarget storedTarget of
-        Just err -> Left err
-        Nothing -> Right ()
-    Right storedTarget
-
-normalizePersistedSubagentTarget
-    :: Maybe LegacySubagentTarget
-    -> SubagentTarget
-    -> SubagentDiskMeta
-    -> Either Text SubagentTarget
-normalizePersistedSubagentTarget legacyTarget expectedTarget = \case
-    CurrentSubagentDiskMeta _ storedTarget ->
-        Right storedTarget
-    LegacySubagentDiskMeta _ legacyFields -> do
-        legacyDialect <- case
-                legacyDialectForTarget legacyTarget expectedTarget
-                of
-            Just dialect -> Right dialect
-            Nothing ->
-                Left
-                    "cannot restore a legacy subagent with incomplete target \
-                    \metadata after changing the session target; reopen the \
-                    \parent session under its original target first"
-        Right SubagentTarget
-            { targetProvider =
-                fromMaybe
-                    expectedTarget.targetProvider
-                    legacyFields.legacyDiskProvider
-            , targetConnection =
-                fromMaybe
-                    expectedTarget.targetConnection
-                    legacyFields.legacyDiskConnection
-            , targetEffectiveModel =
-                fromMaybe
-                    expectedTarget.targetEffectiveModel
-                    legacyFields.legacyDiskEffectiveModel
-            , targetDialect =
-                fromMaybe legacyDialect legacyFields.legacyDiskDialect
-            }
-
-legacyDialectForTarget
-    :: Maybe LegacySubagentTarget
-    -> SubagentTarget
-    -> Maybe DialectId
-legacyDialectForTarget target expectedTarget = do
-    legacy <- target
-    if legacy.legacyTargetProvider == expectedTarget.targetProvider
-        && legacy.legacyTargetConnection == expectedTarget.targetConnection
-        && legacy.legacyTargetEffectiveModel
-            == expectedTarget.targetEffectiveModel
-        && legacy.legacyTargetDialect == expectedTarget.targetDialect
-        then Just expectedTarget.targetDialect
-        else Nothing
-
-activeSubagentTargetError
-    :: Provider
-    -> Text
-    -> Text
-    -> SubagentSession
-    -> Maybe Text
-activeSubagentTargetError provider connection effectiveModel session =
-    subagentTargetError
-        SubagentTarget
-            { targetProvider = provider
-            , targetConnection = connection
-            , targetEffectiveModel = effectiveModel
-            , targetDialect = session.subSessionDialect
-            }
-        SubagentTarget
-            { targetProvider = session.subSessionProvider
-            , targetConnection = session.subSessionConnection
-            , targetEffectiveModel = session.subSessionEffectiveModel
-            , targetDialect = session.subSessionDialect
-            }
-
-subagentTargetError
-    :: SubagentTarget
-    -> SubagentTarget
-    -> Maybe Text
-subagentTargetError expected stored
-    | stored.targetProvider /= expected.targetProvider =
-        Just
-            ( "cannot continue subagent created for the "
-                <> providerSlug stored.targetProvider
-                <> " transport under "
-                <> providerSlug expected.targetProvider
-            )
-    | stored.targetConnection /= expected.targetConnection =
-        Just
-            ( "cannot continue subagent created for connection "
-                <> stored.targetConnection
-                <> " under connection "
-                <> expected.targetConnection
-            )
-    | stored.targetEffectiveModel /= expected.targetEffectiveModel =
-        Just
-            ( "cannot continue subagent after its effective model changed \
-                \from "
-                <> stored.targetEffectiveModel
-                <> " to "
-                <> expected.targetEffectiveModel
-            )
-    | otherwise = Nothing
-
-unsupportedDialectMessage :: Provider -> SubagentId -> DialectId -> Text
-unsupportedDialectMessage provider agentId storedDialect =
-    "cannot restore subagent "
-        <> agentId.unSubagentId
-        <> ": dialect "
-        <> dialectSlug storedDialect
-        <> " is not supported by the current "
-        <> providerSlug provider
-        <> " transport"

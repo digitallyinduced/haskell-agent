@@ -41,7 +41,9 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Paths_agent_cli
+    other-modules:    Agent.CLI.Subagents.Target
+                    , Agent.CLI.Subagents.Types
+                    , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
