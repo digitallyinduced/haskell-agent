@@ -2,8 +2,9 @@ module Main (main) where
 
 import Agent.CLI.Session
     ( SessionMeta(..)
-    , SessionTurn
+    , SessionTurn(..)
     , loadSession
+    , sessionConversationText
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (finally, tryIO)
@@ -91,6 +92,9 @@ data RunResult = RunResult
     , resultInputTokens :: !(Maybe Int)
     , resultOutputTokens :: !(Maybe Int)
     , resultCachedTokens :: !(Maybe Int)
+    , resultUncachedInputTokens :: !(Maybe Int)
+    , resultSelfVerified :: !Bool
+    , resultDelegated :: !Bool
     , resultSessionId :: !(Maybe Text)
     , resultWorkspace :: !FilePath
     , resultStdoutLog :: !FilePath
@@ -101,6 +105,8 @@ data TokenUsage = TokenUsage
     { inputTokens :: !(Maybe Int)
     , outputTokens :: !(Maybe Int)
     , cachedTokens :: !(Maybe Int)
+    , selfVerified :: !Bool
+    , delegated :: !Bool
     }
 
 data HttpResponse = HttpResponse
@@ -126,6 +132,9 @@ instance ToJSON RunResult where
         , "inputTokens" .= result.resultInputTokens
         , "outputTokens" .= result.resultOutputTokens
         , "cachedTokens" .= result.resultCachedTokens
+        , "uncachedInputTokens" .= result.resultUncachedInputTokens
+        , "selfVerified" .= result.resultSelfVerified
+        , "delegated" .= result.resultDelegated
         , "sessionId" .= result.resultSessionId
         , "workspace" .= result.resultWorkspace
         , "stdoutLog" .= result.resultStdoutLog
@@ -138,6 +147,7 @@ main = do
     config <- case parseConfig args of
         Left err -> hPutStrLn stderr err >> exitFailure
         Right parsed -> pure parsed
+    ensureExecutionEnvironment
     prepareResultsDirectory config.resultsDir
     Text.writeFile (config.resultsDir </> "prompt.txt") todoPrompt
     versions <- collectVersions config
@@ -236,6 +246,13 @@ todoPrompt = Text.unlines
     , "- `DELETE /tasks/:id` deletes an existing task and uses HTTP 204."
     , "- Store all task state in memory in an `MVar`; do not use a database or disk persistence."
     , "- Use `application/json` for JSON responses."
+    , ""
+    , "Fair-evaluation constraints:"
+    , "- Do not spawn subagents or use web search; do the implementation and verification yourself."
+    , "- Verify GHC with `nix develop path:. -c ghc --numeric-version`."
+    , "- Build with `nix build path:.`."
+    , "- Start the server with `nix run path:.` and test GET, POST, and DELETE with `curl`."
+    , "- End your final response with exactly `SELF_VERIFIED: yes` only after those checks succeed."
     ]
 
 runOne :: Config -> Int -> Runner -> IO RunResult
@@ -249,8 +266,9 @@ runOne config trial runner = do
     createDirectoryIfMissing True (takeDirectory stdoutLog)
     _ <- readProcessWithExitCode "git" ["-C", workspace, "init", "--quiet"] ""
     home <- getHomeDirectory
+    executionEnv <- executionEnvironment
     let sessionsDir = home </> ".haskell-agent" </> "sessions"
-        processSpec = case runner of
+        processSpec = (case runner of
             AgentCli ->
                 proc config.agentBin
                     [ "--cwd", workspace
@@ -258,6 +276,9 @@ runOne config trial runner = do
                     , "--save-session"
                     , "--no-agents-md"
                     , "--no-skills"
+                    , "--no-subagents"
+                    , "--bash"
+                    , "--no-ghci"
                     , "--yolo"
                     , "--max-turns", "50"
                     , "--provider", "openai"
@@ -278,6 +299,7 @@ runOne config trial runner = do
                     , "--color", "never"
                     , Text.unpack todoPrompt
                     ]
+            ) { env = Just executionEnv }
     started <- getCurrentTime
     exitCode <- runProcessWithTimeout
         config.timeoutSeconds processSpec stdoutLog stderrLog
@@ -292,13 +314,17 @@ runOne config trial runner = do
     (graded, gradeMessage) <- gradeTodo workspace port
     gradeEnded <- getCurrentTime
     let timedOut = exitCode == ExitFailure 124
-        finalGrade
-            | timedOut = "timed out; " <> gradeMessage
-            | otherwise = gradeMessage
+        comparable = usageResult.selfVerified && not usageResult.delegated
+        finalGrade = Text.intercalate "; "
+            [ if timedOut then "timed out" else "agent exited"
+            , "self-verified=" <> yesNo usageResult.selfVerified
+            , "delegated=" <> yesNo usageResult.delegated
+            , gradeMessage
+            ]
     pure RunResult
         { resultTrial = trial
         , resultRunner = runner
-        , resultPassed = graded && exitCode == ExitSuccess
+        , resultPassed = graded && comparable && exitCode == ExitSuccess
         , resultGrade = finalGrade
         , resultExitCode = exitCodeNumber exitCode
         , resultTimedOut = timedOut
@@ -307,6 +333,10 @@ runOne config trial runner = do
         , resultInputTokens = usageResult.inputTokens
         , resultOutputTokens = usageResult.outputTokens
         , resultCachedTokens = usageResult.cachedTokens
+        , resultUncachedInputTokens =
+            uncachedInput usageResult.inputTokens usageResult.cachedTokens
+        , resultSelfVerified = usageResult.selfVerified
+        , resultDelegated = usageResult.delegated
         , resultSessionId = sessionId
         , resultWorkspace = workspace
         , resultStdoutLog = stdoutLog
@@ -332,14 +362,20 @@ agentUsage sessionsDir resultsRoot runName (Just identifier) = do
 
 sessionUsage :: SessionMeta -> [SessionTurn] -> TokenUsage
 sessionUsage _ [] = emptyUsage
-sessionUsage meta _ = TokenUsage
+sessionUsage meta turns = TokenUsage
     { inputTokens = Just meta.metaInputTokens
     , outputTokens = Just meta.metaOutputTokens
     , cachedTokens = Just meta.metaCachedTokens
+    , selfVerified = "SELF_VERIFIED: yes" `Text.isInfixOf` sessionConversationText turns
+    , delegated = any delegatedTurn turns
     }
+  where
+    delegatedTurn SessionTurn { turnItems = items } =
+        "spawn_agent" `Text.isInfixOf`
+            Text.decodeUtf8 (LBS.toStrict (encode items))
 
 emptyUsage :: TokenUsage
-emptyUsage = TokenUsage Nothing Nothing Nothing
+emptyUsage = TokenUsage Nothing Nothing Nothing False False
 
 codexUsage :: FilePath -> IO TokenUsage
 codexUsage path = do
@@ -361,7 +397,30 @@ codexUsage path = do
                         <|> nestedInt
                             ["input_tokens_details", "cached_tokens"]
                             finalUsage
+                , selfVerified = any
+                    selfVerifiedEvent
+                    events
+                , delegated = any
+                    delegatedEvent
+                    events
                 }
+  where
+    selfVerifiedEvent (Object event) =
+        lookupText "type" event == Just "item.completed"
+            && case lookupKey "item" event of
+                Just (Object item) ->
+                    lookupText "type" item == Just "agent_message"
+                        && maybe False ("SELF_VERIFIED: yes" `Text.isInfixOf`) (lookupText "text" item)
+                _ -> False
+    selfVerifiedEvent _ = False
+    delegatedEvent (Object event) =
+        lookupText "type" event == Just "item.completed"
+            && case lookupKey "item" event of
+                Just (Object item) ->
+                    lookupText "type" item == Just "command_execution"
+                        && maybe False ("spawn_agent" `Text.isInfixOf`) (lookupText "command" item)
+                _ -> False
+    delegatedEvent _ = False
 
 codexSessionId :: FilePath -> IO (Maybe Text)
 codexSessionId path = do
@@ -410,6 +469,28 @@ valueInt :: Value -> Maybe Int
 valueInt value = case fromJSON value of
     Success number -> Just number
     Error _ -> Nothing
+
+uncachedInput :: Maybe Int -> Maybe Int -> Maybe Int
+uncachedInput (Just input) (Just cached) = Just (max 0 (input - cached))
+uncachedInput _ _ = Nothing
+
+ensureExecutionEnvironment :: IO ()
+ensureExecutionEnvironment = do
+    forM_ [("nix", ["--version"]), ("curl", ["--version"]), ("bash", ["--version"])] $
+        \(executable, args) ->
+            tryIO (readProcessWithExitCode executable args "") >>= \case
+                Right (ExitSuccess, _, _) -> pure ()
+                Right (_, _, err) ->
+                    hPutStrLn stderr
+                        ("execution preflight failed for " <> executable <> ": " <> err)
+                        >> exitFailure
+                Left err ->
+                    hPutStrLn stderr
+                        ("execution preflight failed for " <> executable <> ": " <> show err)
+                        >> exitFailure
+
+executionEnvironment :: IO [(String, String)]
+executionEnvironment = getEnvironment
 
 gradeTodo :: FilePath -> Int -> IO (Bool, Text)
 gradeTodo workspace port = do
@@ -712,16 +793,16 @@ renderSummary config versions results =
             , ""
             , "## Individual runs"
             , ""
-            , "| trial | runner | pass | timeout | agent seconds | grade seconds | input | output | cached | grade |"
-            , "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|"
+            , "| trial | runner | pass | self-verified | delegated | timeout | agent seconds | grade seconds | input | uncached | output | cached | grade |"
+            , "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
             ]
         <> Text.unlines (map renderRunRow results)
 
 renderConsoleSummary :: [RunResult] -> Text
 renderConsoleSummary results =
     Text.unlines $
-        [ "| runner | passed | median successful seconds | median successful input | median successful output | median successful cached |"
-        , "|---|---:|---:|---:|---:|---:|"
+        [ "| runner | passed | median successful seconds | median successful input | median successful uncached | median successful output | median successful cached |"
+        , "|---|---:|---:|---:|---:|---:|---:|"
         ]
             <> map renderRunnerSummary [AgentCli, Codex]
   where
@@ -733,6 +814,7 @@ renderConsoleSummary results =
             , Text.pack (show (length successful) <> "/" <> show (length selected))
             , optionalMedian (map (.resultSeconds) successful)
             , optionalIntMedian (catMaybes (map (.resultInputTokens) successful))
+            , optionalIntMedian (catMaybes (map (.resultUncachedInputTokens) successful))
             , optionalIntMedian (catMaybes (map (.resultOutputTokens) successful))
             , optionalIntMedian (catMaybes (map (.resultCachedTokens) successful)) <> " |"
             ]
@@ -742,10 +824,13 @@ renderRunRow result = Text.intercalate " | "
     [ "| " <> Text.pack (show result.resultTrial)
     , Text.pack (runnerSlug result.resultRunner)
     , yesNo result.resultPassed
+    , yesNo result.resultSelfVerified
+    , yesNo result.resultDelegated
     , yesNo result.resultTimedOut
     , formatDouble result.resultSeconds
     , formatDouble result.resultGradeSeconds
     , maybe "n/a" (Text.pack . show) result.resultInputTokens
+    , maybe "n/a" (Text.pack . show) result.resultUncachedInputTokens
     , maybe "n/a" (Text.pack . show) result.resultOutputTokens
     , maybe "n/a" (Text.pack . show) result.resultCachedTokens
     , Text.replace "|" "\\|" result.resultGrade <> " |"

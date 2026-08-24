@@ -1790,50 +1790,52 @@ runAgentInitializedWithLock
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
-        multiCtx = Just MultiAgentContext
-            { multiRegistry = registry
-            , multiSelfId = Nothing
-            , multiDepth = 0
-            , multiTaskPath = taskPathRoot
-            , multiRootTurnId = readIORef rootTurnRef
-            , multiResumeFromDisk = Just
-                (restoreAgentFromDisk
-                    provider
-                    inferredTarget.targetConnectionId
-                    transportModel
-                    inferredTarget.targetWireModelId
-                    dialectId
-                    legacySubagentTarget
-                    subagentStoreRoot
-                    registry
-                    subagentSessions
-                    agentTypesRef)
-            , multiCreateWorktree = Just \source ->
-                createWorktree source (worktreeRoot home) >>= \case
-                    Left err -> pure (Left err)
-                    Right path -> pure $ Right SubagentWorktree
-                        { subagentWorktreePath = path
-                        , subagentWorktreeCleanup =
-                            removeWorktree source path >>= \case
-                                Left err -> pure (Left err)
-                                Right () -> pure (Right ())
-                        }
-            , multiPrepareSpawn = Just
-                (prepareCollaborationSpawn
-                    provider
-                    inferredTarget.targetConnectionId
-                    transportModel
-                    inferredTarget.targetWireModelId
-                    dialectId
-                    legacySubagentTarget
-                    subagentSessions subagentStoreRoot agentTypesRef
-                    subagentForkSource)
-            , multiSendToRoot = Just sendToRoot
-            , multiSpawnModelGuidance =
-                subscriptionSubagentModelGuidance
-                    provider
-                    (tokenProviderBillingMode tokenProvider)
-            }
+        multiCtx
+            | not options.optSubagents = Nothing
+            | otherwise = Just MultiAgentContext
+                { multiRegistry = registry
+                , multiSelfId = Nothing
+                , multiDepth = 0
+                , multiTaskPath = taskPathRoot
+                , multiRootTurnId = readIORef rootTurnRef
+                , multiResumeFromDisk = Just
+                    (restoreAgentFromDisk
+                        provider
+                        inferredTarget.targetConnectionId
+                        transportModel
+                        inferredTarget.targetWireModelId
+                        dialectId
+                        legacySubagentTarget
+                        subagentStoreRoot
+                        registry
+                        subagentSessions
+                        agentTypesRef)
+                , multiCreateWorktree = Just \source ->
+                    createWorktree source (worktreeRoot home) >>= \case
+                        Left err -> pure (Left err)
+                        Right path -> pure $ Right SubagentWorktree
+                            { subagentWorktreePath = path
+                            , subagentWorktreeCleanup =
+                                removeWorktree source path >>= \case
+                                    Left err -> pure (Left err)
+                                    Right () -> pure (Right ())
+                            }
+                , multiPrepareSpawn = Just
+                    (prepareCollaborationSpawn
+                        provider
+                        inferredTarget.targetConnectionId
+                        transportModel
+                        inferredTarget.targetWireModelId
+                        dialectId
+                        legacySubagentTarget
+                        subagentSessions subagentStoreRoot agentTypesRef
+                        subagentForkSource)
+                , multiSendToRoot = Just sendToRoot
+                , multiSpawnModelGuidance =
+                    subscriptionSubagentModelGuidance
+                        provider
+                        (tokenProviderBillingMode tokenProvider)
+                }
     prompt <- loadPrompt options
     persist <-
         preparePersistence
@@ -1953,7 +1955,9 @@ runAgentInitializedWithLock
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
-        sessionTools = agentSessionTools sessionToolsEnv
+        sessionTools
+            | options.optSubagents = agentSessionTools sessionToolsEnv
+            | otherwise = []
         allTools = coding.codingAppTools ++ mcpTools ++ sessionTools
         tools =
             filterGhciTools options.optGhci

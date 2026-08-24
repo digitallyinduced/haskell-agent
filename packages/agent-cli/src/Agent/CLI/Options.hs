@@ -85,6 +85,8 @@ data CliOptions = CliOptions
       -- ^ Expose the persistent run_ghci tool (default: True).
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: False).
+    , optSubagents :: !Bool
+      -- ^ Expose collaboration and subagent tools (default: True).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -108,6 +110,7 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = True
     , optBash = False
+    , optSubagents = True
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -215,6 +218,10 @@ parseOptions options = \case
         parseOptions options { optBash = True } rest
     "--no-bash" : rest ->
         parseOptions options { optBash = False } rest
+    "--subagents" : rest ->
+        parseOptions options { optSubagents = True } rest
+    "--no-subagents" : rest ->
+        parseOptions options { optSubagents = False } rest
     "--fullscreen" : rest ->
         parseOptions options { optScreenMode = ScreenFullscreen } rest
     "--minimal" : rest ->
@@ -290,6 +297,8 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool"
     , "      --bash              Enable explicit shell execution tools"
     , "      --no-bash           Disable explicit shell execution tools (default)"
+    , "      --subagents         Enable collaboration/subagent tools (default)"
+    , "      --no-subagents      Disable collaboration/subagent tools"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

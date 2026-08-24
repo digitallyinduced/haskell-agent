@@ -41,6 +41,18 @@ spec = do
                     , optPrompt = Just "hello"
                     })
 
+        it "parses --subagents and --no-subagents" do
+            parseArgs ["--no-subagents", "-p", "hello"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optSubagents = False
+                    , optPrompt = Just "hello"
+                    })
+            parseArgs ["--no-subagents", "--subagents", "-p", "hello"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optSubagents = True
+                    , optPrompt = Just "hello"
+                    })
+
         it "parses --worktree" do
             parseArgs ["--worktree"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optWorktree = True })

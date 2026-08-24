@@ -9,6 +9,12 @@ This compares the two product configurations, not identical tool schemas or
 system prompts. Codex runs ephemerally with user config and exec-policy rules
 disabled; both runners still use their own built-in coding-agent contracts.
 
+The revised evaluator disables agent-cli subagents and its GHCi tool, enables
+its explicit Bash tool, and requires both runners to personally build and
+exercise the application before finishing. This prevents unreported
+child-model usage and gives both runners a shell-based execution path on hosts
+without `ghci` in the ambient `PATH`.
+
 The evaluator records:
 
 - deterministic grader pass/fail;
@@ -72,6 +78,14 @@ counts as successful when both the agent exits cleanly and every grader check
 passes.
 
 ## Results: August 24, 2026
+
+The results below are from the original run. Transcript analysis found that
+agent-cli could not launch its registered GHCi runner, performed only static
+verification, and delegated review to a `gpt-5.6-luna` child whose usage was
+not included in the root-session totals. Codex built and exercised its
+applications itself. These numbers are therefore retained as historical data,
+not as an apples-to-apples efficiency conclusion. The revised run uses
+`--no-subagents --no-ghci --bash` and requires recorded self-verification.
 
 The suite was run on the x86-64 Linux host `office-builder` with:
 
