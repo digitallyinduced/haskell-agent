@@ -99,7 +99,7 @@ import Agent.CLI.Resume
     , toggleResumeExpanded
     , visibleResumeBrowser
     )
-import Agent.CLI.Render (formatElapsed, summarizeToolCall)
+import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Terminal
@@ -141,6 +141,7 @@ import Agent.TUI.Motion
     , quietIndicator
     , waitingIndicator
     )
+import Agent.TUI.Presentation (permissionToolCallPrompt)
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -508,7 +509,7 @@ requestFullscreenPermission
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
-    let summary = summarizeToolCall call
+    let summary = permissionToolCallPrompt call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
@@ -2733,7 +2734,7 @@ drawPermission state permission =
                         (waitingOverlayLabel state "Permission") $
                         padAll 1 $
                             vBox
-                                [ txtWrap ("Allow " <> permission.permissionSummary <> "?")
+                                [ txtWrap permission.permissionSummary
                                 , padTop (Pad 1) $
                                     vBox $
                                         zipWith
