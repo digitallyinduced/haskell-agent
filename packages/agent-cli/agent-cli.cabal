@@ -61,6 +61,12 @@ library
                     , Agent.CLI.Error
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
+                    , Agent.CLI.Input.Types
+                    , Agent.CLI.Input.Display
+                    , Agent.CLI.Input.Paste
+                    , Agent.CLI.Input.History
+                    , Agent.CLI.Input.KeyDecoder
+                    , Agent.CLI.Input.Picker
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
