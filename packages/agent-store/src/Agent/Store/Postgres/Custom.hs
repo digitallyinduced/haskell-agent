@@ -54,7 +54,19 @@ import Agent.Store.Postgres.Scope
     , ScopeDatabase(..)
     , scopeIdText
     )
+import Agent.Store.Postgres.Codec
+    ( boolColumn
+    , boolParam
+    , int32Param
+    , nullableTextColumn
+    , nullableTextParam
+    , textColumn
+    , textParam
+    , textSingleResult
+    , timeParam
+    )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Sql (quoteIdentifier)
 
 data QueryLimits = QueryLimits
     { queryMaxRows :: !Int64
@@ -799,7 +811,7 @@ insertCatalogSnapshotStatement = mkStatement
     ( (fst >$< textParam)
         <> (snd >$< textParam)
     )
-    textSingleRow
+    textSingleResult
     True
 
 data CatalogObjectParams = CatalogObjectParams
@@ -825,7 +837,7 @@ insertCatalogObjectStatement = mkStatement
         <> ((.objectComment) >$< nullableTextParam)
         <> ((.objectViewDefinition) >$< nullableTextParam)
     )
-    textSingleRow
+    textSingleResult
     True
 
 data CatalogColumnParams = CatalogColumnParams
@@ -848,7 +860,7 @@ insertCatalogColumnStatement = mkStatement
     \  column_comment)\
     \ values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)"
     ( ((.catalogColumnObjectId) >$< textParam)
-        <> ((.catalogColumnOrdinal) >$< intParam)
+        <> ((.catalogColumnOrdinal) >$< int32Param)
         <> ((.catalogColumnName) >$< textParam)
         <> ((.catalogColumnType) >$< textParam)
         <> ((.catalogColumnNullable) >$< boolParam)
@@ -875,7 +887,7 @@ insertCatalogConstraintStatement = mkStatement
     \  constraint_kind, constraint_definition)\
     \ values ($1::uuid, $2, $3, $4, $5)"
     ( ((.catalogConstraintObjectId) >$< textParam)
-        <> ((.catalogConstraintOrdinal) >$< intParam)
+        <> ((.catalogConstraintOrdinal) >$< int32Param)
         <> ((.catalogConstraintName) >$< textParam)
         <> ((.catalogConstraintType) >$< textParam)
         <> ((.catalogConstraintDefinition) >$< textParam)
@@ -896,7 +908,7 @@ insertCatalogIndexStatement = mkStatement
     \ (catalog_object_id, index_ordinal, index_name, index_definition)\
     \ values ($1::uuid, $2, $3, $4)"
     ( ((.catalogIndexObjectId) >$< textParam)
-        <> ((.catalogIndexOrdinal) >$< intParam)
+        <> ((.catalogIndexOrdinal) >$< int32Param)
         <> ((.catalogIndexName) >$< textParam)
         <> ((.catalogIndexDefinition) >$< textParam)
     )
@@ -1079,7 +1091,7 @@ auditStartedStatement = mkStatement
         <> ((.startAt) >$< timeParam)
         <> ((.startSnapshotId) >$< textParam)
     )
-    textSingleRow
+    textSingleResult
     True
 
 auditScopeStatement :: Statement Text Text
@@ -1089,7 +1101,7 @@ auditScopeStatement = mkStatement
     \ join harness.custom_scopes scope on scope.scope_id = audit.scope_id\
     \ where audit.audit_id = $1::uuid"
     textParam
-    textSingleRow
+    textSingleResult
     True
 
 data AuditFinishedParams = AuditFinishedParams
@@ -1118,38 +1130,6 @@ auditFinishedStatement = mkStatement
     (fmap (> 0) Decoders.rowsAffected)
     True
 
-textParam :: Encoders.Params Text
-textParam = Encoders.param (Encoders.nonNullable Encoders.text)
-
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
-intParam :: Encoders.Params Int32
-intParam = Encoders.param (Encoders.nonNullable Encoders.int4)
-
-boolParam :: Encoders.Params Bool
-boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
-
-timeParam :: Encoders.Params UTCTime
-timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
-
-textSingleRow :: Decoders.Result Text
-textSingleRow =
-    Decoders.singleRow $
-        textColumn
-
-textColumn :: Decoders.Row Text
-textColumn =
-    Decoders.column (Decoders.nonNullable Decoders.text)
-
-nullableTextColumn :: Decoders.Row (Maybe Text)
-nullableTextColumn =
-    Decoders.column (Decoders.nullable Decoders.text)
-
-boolColumn :: Decoders.Row Bool
-boolColumn =
-    Decoders.column (Decoders.nonNullable Decoders.bool)
-
 confinementSql :: ScopeDatabase -> QueryLimits -> ByteString.ByteString
 confinementSql database limits =
     Text.encodeUtf8 $
@@ -1162,10 +1142,6 @@ confinementSql database limits =
             <> "; set local lock_timeout = "
             <> Text.pack (show (max 1 limits.queryLockTimeoutMs))
             <> ";"
-
-quoteIdentifier :: Text -> Text
-quoteIdentifier value =
-    "\"" <> Text.replace "\"" "\"\"" value <> "\""
 
 encodedSize :: Text -> Int
 encodedSize = ByteString.length . Text.encodeUtf8

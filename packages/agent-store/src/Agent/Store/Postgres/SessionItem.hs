@@ -26,6 +26,16 @@ import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Transaction
 
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Codec
+    ( boolColumn
+    , boolParam
+    , int32Param
+    , nullableTextColumn
+    , nullableTextParam
+    , textColumn
+    , textParam
+    , textSingleResult
+    )
 import Agent.Store.SessionItem
 
 sessionItemSchemaStatements :: [ByteString.ByteString]
@@ -1194,30 +1204,6 @@ loadContentPartsStatement = mkStatement
 fieldParam :: (a -> b) -> Encoders.Params b -> Encoders.Params a
 fieldParam field encoder = field >$< encoder
 
-textParam :: Encoders.Params Text
-textParam = Encoders.param (Encoders.nonNullable Encoders.text)
-
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
-int32Param :: Encoders.Params Int32
-int32Param = Encoders.param (Encoders.nonNullable Encoders.int4)
-
-boolParam :: Encoders.Params Bool
-boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
-
-textColumn :: Decoders.Row Text
-textColumn = Decoders.column (Decoders.nonNullable Decoders.text)
-
-nullableTextColumn :: Decoders.Row (Maybe Text)
-nullableTextColumn = Decoders.column (Decoders.nullable Decoders.text)
-
 nullableOpaqueValueColumn :: Decoders.Row (Maybe StoredOpaqueValue)
 nullableOpaqueValueColumn =
     fmap StoredOpaqueValue <$> nullableTextColumn
-
-boolColumn :: Decoders.Row Bool
-boolColumn = Decoders.column (Decoders.nonNullable Decoders.bool)
-
-textSingleResult :: Decoders.Result Text
-textSingleResult = Decoders.singleRow textColumn
