@@ -111,8 +111,6 @@ trimRemoteCompactionHistoryToFit contextWindow instructionText history =
 
 rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case
-    MessageItem message ->
-        MessageItem <$> omitMessageImages message
     FunctionCallOutputItem output ->
         Just $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.itemId
@@ -140,36 +138,6 @@ rewriteOversizedToolOutput = \case
                     tagged.fields
             }
     _ -> Nothing
-
-omitRemoteRetainedImages :: ResponseItem -> ResponseItem
-omitRemoteRetainedImages = \case
-    MessageItem message ->
-        maybe (MessageItem message) MessageItem (omitMessageImages message)
-    item -> item
-
-omitMessageImages :: ResponseMessage -> Maybe ResponseMessage
-omitMessageImages message =
-    case message.content of
-        MessageContentParts parts
-            | any isInputImagePart parts ->
-                Just $ replaceMessageContent message $
-                    MessageContentParts (concatMap omitImagePart parts)
-        _ -> Nothing
-
-isInputImagePart :: ResponseContentPart -> Bool
-isInputImagePart = \case
-    InputImagePart {} -> True
-    _ -> False
-
-omitImagePart :: ResponseContentPart -> [ResponseContentPart]
-omitImagePart = \case
-    InputImagePart {} ->
-        [ InputTextPart
-            "[Earlier image attachment omitted during compaction]"
-            Nothing
-            KeyMap.empty
-        ]
-    part -> [part]
 
 -- | A successful v2 stream must complete and contain exactly one compaction
 -- output item. Other output item types are ignored, matching Codex.
@@ -206,18 +174,9 @@ buildRemoteCompactedHistory
     -> [ResponseItem]
 buildRemoteCompactedHistory budget history checkpoint =
     truncateRetainedGroups budget
-        (map sanitizeRemoteRetainedGroup
-            (filter (\group -> isRemoteRetainedItem group.retainedSource)
-                (retainedGroups history)))
+        (filter (\group -> isRemoteRetainedItem group.retainedSource)
+            (retainedGroups history))
         <> [checkpoint]
-
-sanitizeRemoteRetainedGroup :: RetainedGroup -> RetainedGroup
-sanitizeRemoteRetainedGroup group =
-    -- Inline image payloads otherwise survive every checkpoint and can make
-    -- the newly compacted history immediately exceed the token threshold.
-    group
-        { retainedSource = omitRemoteRetainedImages group.retainedSource
-        }
 
 data RetainedGroup = RetainedGroup
     { retainedSource :: !ResponseItem

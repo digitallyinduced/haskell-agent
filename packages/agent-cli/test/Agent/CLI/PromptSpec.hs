@@ -161,6 +161,34 @@ spec = describe "systemPrompt" do
             "Never read, print, summarize"
         withoutSecret `shouldNotSatisfy` Text.isInfixOf "Use ask_secret"
 
+    it "adds reusable-memory guidance only when learned-skill tools are registered" do
+        let withSkills =
+                systemPromptForTools
+                    genericResponsesDialect
+                    [ "read_file"
+                    , "skill_search"
+                    , "skill_read"
+                    , "skill_create"
+                    , "skill_update"
+                    ]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutSkills =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withSkills `shouldSatisfy` Text.isInfixOf
+            "reusable guidance from earlier sessions"
+        withSkills `shouldSatisfy` Text.isInfixOf
+            "Store actionable reusable guidance"
+        withoutSkills `shouldNotSatisfy` Text.isInfixOf "Learned skills:"
+
     it "renders ghci-only and bash-only root prompts from registered tools" do
         let day = fromGregorian 2026 8 19
             ghciOnly =

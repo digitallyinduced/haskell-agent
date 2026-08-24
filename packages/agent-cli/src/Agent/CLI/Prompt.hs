@@ -84,6 +84,7 @@ systemPromptForTools
             [ base
             , sessionTempGuidance sessionTmp
             , secretInputGuidance available
+            , learnedSkillGuidance available
             , ghciGuidanceForTools dialect available
             , timeContextGuidance
             ]
@@ -133,6 +134,17 @@ secretInputGuidance available
             , "- Use ask_secret to request sensitive values. It returns a private temporary file path, never the secret value."
             , "- Pass that path to a consumer that supports file input and delete the file promptly after use."
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
+            ]
+
+learnedSkillGuidance :: [Text] -> Text
+learnedSkillGuidance available
+    | "skill_search" `notElem` available = ""
+    | otherwise =
+        Text.unlines
+            [ "Learned skills:"
+            , "- Use skill_search and skill_read when reusable guidance from earlier sessions may apply."
+            , "- When the user establishes a durable preference, decision, lesson, or repeatable procedure that will help future sessions, consider promoting it with skill_create or skill_update."
+            , "- Store actionable reusable guidance, not ordinary facts or transient task state. Search before creating, prefer updating an existing skill, and choose the narrowest correct scope."
             ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.

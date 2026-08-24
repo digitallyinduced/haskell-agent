@@ -26,6 +26,7 @@ import Agent.CLI.Session
     , sessionTempDirForId
     , sessionTitleFromPrompt
     )
+import Agent.Store.Postgres.Connection (StorePool)
 import Agent.CLI.SessionLock
     ( sessionLockIsActive
     , sessionLockPath
@@ -91,7 +92,8 @@ import System.Process
     )
 
 data AgentSessionToolsEnv = AgentSessionToolsEnv
-    { toolsRoot :: !OsPath
+    { toolsPool :: !StorePool
+    , toolsRoot :: !OsPath
     , toolsProvider :: !Provider
     , toolsConnection :: !Text
     , toolsModel :: !Text
@@ -436,7 +438,8 @@ runCreateAgentSession env args
                 Just value | not (Text.null value) -> value
                 _ -> sessionTitleFromPrompt args.message
             spec = SessionCreate
-                { createRoot = env.toolsRoot
+                { createPool = env.toolsPool
+                , createRoot = env.toolsRoot
                 , createTarget = target.modelTarget
                 , createCwd = env.toolsCwd
                 , createEffort = fromMaybe env.toolsEffort args.reasoningEffort
@@ -479,7 +482,7 @@ runReadAgentSession
     -> ReadAgentSessionArgs
     -> IO (Either Text Text)
 runReadAgentSession env args =
-    loadSession env.toolsRoot args.sessionId >>= \case
+    loadSession env.toolsPool env.toolsRoot args.sessionId >>= \case
         Left err -> pure (Left err)
         Right (meta, turns) -> do
             status <- env.toolsSessionStatus args.sessionId
@@ -528,12 +531,12 @@ runSendAgentSessionMessage env args
         current <- env.toolsCurrentSessionId
         if current == Just args.sessionId
             then pure (Left "cannot message the current agent session")
-            else loadSession env.toolsRoot args.sessionId >>= \case
+            else loadSession env.toolsPool env.toolsRoot args.sessionId >>= \case
                 Left err -> pure (Left err)
                 Right (meta, _) ->
                     launchToolSessionTurn
                         env
-                        (sessionHandle env.toolsRoot meta)
+                        (sessionHandle env.toolsPool env.toolsRoot meta)
                         args.message
 
 launchToolSessionTurn
@@ -552,11 +555,12 @@ launchToolSessionTurn env handle message =
                 , "status" .= status
                 ]
 
-sessionHandle :: OsPath -> SessionMeta -> SessionHandle
-sessionHandle root meta =
+sessionHandle :: StorePool -> OsPath -> SessionMeta -> SessionHandle
+sessionHandle pool root meta =
     let dir = root </> fromText meta.metaId
     in SessionHandle
-        { sessionDir = dir
+        { sessionPool = pool
+        , sessionDir = dir
         , sessionTempDir =
             either
                 (error . Text.unpack)

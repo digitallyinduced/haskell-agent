@@ -1,0 +1,322 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+module Agent.Store.Postgres.SessionSpec (spec) where
+
+import Control.Exception.Safe (finally)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString.Char8
+import Data.Text (Text)
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime(..), picosecondsToDiffTime)
+import System.IO.Temp (withSystemTempDirectory)
+import Test.Hspec
+
+import Agent.Store.Postgres
+    ( closeStore
+    , defaultManagedPostgresConfig
+    , normalizePostgresTimestamp
+    , openStore
+    , trustedPool
+    )
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Postgres.Session
+import Agent.Store.SessionItem
+
+spec :: Spec
+spec = describe "PostgreSQL session schema" do
+    it "normalizes timestamps to PostgreSQL microsecond precision" do
+        let timestamp = UTCTime
+                (fromGregorian 2026 8 24)
+                (picosecondsToDiffTime 467640816000)
+        normalizePostgresTimestamp timestamp
+            `shouldBe`
+                UTCTime
+                    (fromGregorian 2026 8 24)
+                    (picosecondsToDiffTime 467640000000)
+
+    it "uses typed session, turn, tool-call, and tool-output tables" do
+        let ddl = ByteString.intercalate "\n" sessionSchemaStatements
+        ddl `shouldContainBytes` "DEFAULT pg_catalog.uuidv7()"
+        ddl `shouldNotContainBytes` "CREATE OR REPLACE FUNCTION harness.uuid_v7()"
+        ddl `shouldNotContainBytes` "harness.structured_values"
+        ddl `shouldContainBytes` "CREATE TABLE IF NOT EXISTS harness.sessions"
+        ddl `shouldContainBytes` "CREATE TABLE IF NOT EXISTS harness.session_events"
+        ddl `shouldContainBytes` "CREATE TABLE IF NOT EXISTS harness.session_turns"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_response_items"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_function_calls"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_function_call_outputs"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_custom_tool_calls"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_custom_tool_call_outputs"
+        ddl `shouldContainBytes` "call_id text NOT NULL"
+        ddl `shouldContainBytes` "arguments text NOT NULL"
+        ddl `shouldContainBytes`
+            "output_kind text NOT NULL CHECK (output_kind IN ('text', 'encoded'))"
+        ddl `shouldContainBytes` "output_text text NOT NULL"
+        ddl `shouldContainBytes` "extra_fields_text text NOT NULL"
+        ddl `shouldNotContainBytes` "jsonb"
+        ddl `shouldNotContainBytes` "::json"
+        ddl `shouldContainBytes` "search_vector tsvector GENERATED ALWAYS"
+        ddl `shouldContainBytes` "USING gin (search_vector)"
+        ddl `shouldContainBytes` "session_events_immutable"
+        ddl `shouldContainBytes` "session_turns_immutable"
+
+    it "tracks restart-safe legacy imports" do
+        let ddl = ByteString.intercalate "\n" sessionSchemaStatements
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.legacy_session_imports"
+        ddl `shouldContainBytes` "import_id uuid PRIMARY KEY"
+        ddl `shouldContainBytes` "UNIQUE (source_path, content_hash)"
+
+    it "round-trips response items, tool calls, and outputs through relational rows" $
+        withSystemTempDirectory "ha" \stateDirectory -> do
+            let
+                config = defaultManagedPostgresConfig stateDirectory ""
+                cleanup = do
+                    _ <- stopManagedPostgres config
+                    pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure ("could not open store: " <> show err)
+                Right store ->
+                    finally
+                        (do
+                            let
+                                pool = trustedPool store
+                                now = read "2026-08-23 12:00:00 UTC"
+                                metadata = testMetadata now
+                                turn = testTurn now
+                            createSession pool metadata
+                                `shouldReturn` Right True
+                            appendSessionTurn pool turn metadata
+                                `shouldReturn` Right True
+                            loadSession pool "session-1" >>= \case
+                                Right (Just stored) -> do
+                                    stored.storedMetadata `shouldBe` metadata
+                                    case map (.storedTurn) stored.storedTurns of
+                                        [loadedTurn] -> do
+                                            loadedTurn `shouldBe` turn
+                                        loaded ->
+                                            expectationFailure
+                                                ("unexpected turns: " <> show loaded)
+                                other ->
+                                    expectationFailure
+                                        ("unexpected stored session: " <> show other)
+                            searchConversationTurns pool "compact" 10 >>= \case
+                                Right [match] -> do
+                                    match.searchSessionId `shouldBe` "session-1"
+                                    match.searchUserText `shouldBe` "/compact"
+                                other ->
+                                    expectationFailure
+                                        ("unexpected conversation search: " <> show other)
+                            deleteSession pool "session-1" now
+                                `shouldReturn` Right True
+                            events <- loadSessionEvents pool "session-1"
+                            fmap (map (.storedEventKind)) events
+                                `shouldBe`
+                                    Right
+                                        [ "session.created"
+                                        , "turn.appended"
+                                        , "session.deleted"
+                                        ]
+                        )
+                        (closeStore store)
+                ) `finally` cleanup
+
+testMetadata :: UTCTime -> SessionMetadata
+testMetadata now = SessionMetadata
+    { sessionMetadataKey = "session-1"
+    , sessionMetadataVersion = 1
+    , sessionMetadataCreatedAt = now
+    , sessionMetadataUpdatedAt = now
+    , sessionMetadataProvider = "openai"
+    , sessionMetadataConnection = "openai"
+    , sessionMetadataModel = "gpt-test"
+    , sessionMetadataTransportModel = Just "gpt-test"
+    , sessionMetadataDialect = "openai"
+    , sessionMetadataLegacyTarget = Nothing
+    , sessionMetadataCwd = "/tmp/project"
+    , sessionMetadataEffort = "medium"
+    , sessionMetadataTitle = "test"
+    , sessionMetadataTitleIsManual = False
+    , sessionMetadataTitleRefreshIndex = 0
+    , sessionMetadataTitleUserTurns = 1
+    , sessionMetadataLastResponseId = Just "response-1"
+    , sessionMetadataInputTokens = 10
+    , sessionMetadataOutputTokens = 5
+    , sessionMetadataCachedTokens = 2
+    }
+
+testTurn :: UTCTime -> SessionTurn
+testTurn now = SessionTurn
+    { sessionTurnOccurredAt = now
+    , sessionTurnUserText = "/compact"
+    , sessionTurnAssistantText = Just "done"
+    , sessionTurnError = Nothing
+    , sessionTurnResponseId = Just "response-1"
+    , sessionTurnItems =
+        [ StoredMessageItem StoredMessage
+            { storedMessageProviderItemId = Just "item-message"
+            , storedMessageContent = StoredMessageParts
+                [ (emptyContentPart "input_text")
+                    { storedContentPartText = Just "hello"
+                    , storedContentPartPromptCacheBreakpoint =
+                        Just (StoredOpaqueValue "{\"scope\":\"turn\"}")
+                    }
+                , (emptyContentPart "output_text")
+                    { storedContentPartText = Just "hello back"
+                    , storedContentPartAnnotations =
+                        Just
+                            (StoredOpaqueValue
+                                "[{\"type\":\"citation\"}]")
+                    , storedContentPartLogprobs =
+                        Just
+                            (StoredOpaqueValue
+                                "[{\"token\":\"hello\"}]")
+                    }
+                , (emptyContentPart "provider_content")
+                    { storedContentPartExtraFields =
+                        StoredOpaqueObject
+                            "{\"provider_extension\":true}"
+                    }
+                ]
+            , storedMessageRole = "developer"
+            , storedMessageStatus = Just "in_progress"
+            , storedMessagePhase = Just "commentary"
+            , storedMessageExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"message\"}"
+            }
+        , StoredMessageItem StoredMessage
+            { storedMessageProviderItemId = Just "item-text-message"
+            , storedMessageContent = StoredMessageText "plain text"
+            , storedMessageRole = "observer"
+            , storedMessageStatus = Just "paused"
+            , storedMessagePhase = Nothing
+            , storedMessageExtraFields = emptyObject
+            }
+        , StoredFunctionCallItem StoredFunctionCall
+            { storedFunctionCallProviderItemId = Just "item-call"
+            , storedFunctionCallCallId = "call-1"
+            , storedFunctionCallName = "shell_command"
+            , storedFunctionCallArguments = "{\"command\":\"pwd\"}"
+            , storedFunctionCallStatus = Just "completed"
+            , storedFunctionCallExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"function-call\"}"
+            }
+        , StoredFunctionCallOutputItem StoredFunctionCallOutput
+            { storedFunctionCallOutputProviderItemId =
+                Just "item-output"
+            , storedFunctionCallOutputCallId = "call-1"
+            , storedFunctionCallOutputValue = StoredToolOutput
+                { storedToolOutputKind = StoredToolOutputEncoded
+                , storedToolOutputText =
+                    "{\"stdout\":\"/tmp/project\"}"
+                }
+            , storedFunctionCallOutputStatus = Just "completed"
+            , storedFunctionCallOutputExtraFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"function-output\"}"
+            }
+        , StoredCustomToolCallItem StoredCustomToolCall
+            { storedCustomToolCallProviderItemId =
+                Just "item-custom-call"
+            , storedCustomToolCallCallId = "custom-1"
+            , storedCustomToolCallName = "apply_patch"
+            , storedCustomToolCallInput = "*** Begin Patch"
+            , storedCustomToolCallStatus = Just "in_progress"
+            , storedCustomToolCallExtraFields = emptyObject
+            }
+        , StoredCustomToolCallOutputItem StoredCustomToolCallOutput
+            { storedCustomToolCallOutputProviderItemId =
+                Just "item-custom-output"
+            , storedCustomToolCallOutputCallId = "custom-1"
+            , storedCustomToolCallOutputName = Just "apply_patch"
+            , storedCustomToolCallOutputValue = StoredToolOutput
+                { storedToolOutputKind = StoredToolOutputText
+                , storedToolOutputText = "Done"
+                }
+            , storedCustomToolCallOutputStatus = Just "completed"
+            , storedCustomToolCallOutputExtraFields = emptyObject
+            }
+        , StoredReasoningItem StoredReasoning
+            { storedReasoningProviderItemId = Just "item-reasoning"
+            , storedReasoningSummary =
+                [ StoredReasoningSummaryPart
+                    { storedReasoningSummaryPartType = "summary_text"
+                    , storedReasoningSummaryPartText =
+                        Just "Checked the schema"
+                    , storedReasoningSummaryPartExtraFields = emptyObject
+                    }
+                ]
+            , storedReasoningContent =
+                Just
+                    [ (emptyContentPart "reasoning_text")
+                        { storedContentPartText =
+                            Just "private reasoning placeholder"
+                        }
+                    ]
+            , storedReasoningEncryptedContent = Just "encrypted"
+            , storedReasoningStatus = Just "completed"
+            , storedReasoningExtraFields = emptyObject
+            }
+        , StoredItemReferenceItem StoredItemReference
+            { storedItemReferenceProviderItemId = "item-call"
+            , storedItemReferenceExtraFields = emptyObject
+            }
+        , StoredTaggedResponseItem StoredTaggedItem
+            { storedTaggedItemRepresentation = StoredKnownRepresentation
+            , storedTaggedItemWireTag = "compaction_trigger"
+            , storedTaggedItemFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"known-tagged\"}"
+            }
+        , StoredTaggedResponseItem StoredTaggedItem
+            { storedTaggedItemRepresentation = StoredUnknownRepresentation
+            , storedTaggedItemWireTag = "provider_extension"
+            , storedTaggedItemFields =
+                StoredOpaqueObject
+                    "{\"provider_extension\":\"unknown-tagged\"}"
+            }
+        ]
+    , sessionTurnUsage = Just SessionUsage
+        { sessionUsageInputTokens = 10
+        , sessionUsageOutputTokens = 5
+        , sessionUsageCachedTokens = 2
+        }
+    }
+
+emptyObject :: StoredOpaqueObject
+emptyObject = StoredOpaqueObject "{}"
+
+emptyContentPart :: Text -> StoredContentPart
+emptyContentPart partType = StoredContentPart
+    { storedContentPartType = partType
+    , storedContentPartText = Nothing
+    , storedContentPartRefusal = Nothing
+    , storedContentPartDetail = Nothing
+    , storedContentPartFileData = Nothing
+    , storedContentPartFileId = Nothing
+    , storedContentPartFileUrl = Nothing
+    , storedContentPartFilename = Nothing
+    , storedContentPartImageUrl = Nothing
+    , storedContentPartInputAudio = Nothing
+    , storedContentPartPromptCacheBreakpoint = Nothing
+    , storedContentPartAnnotations = Nothing
+    , storedContentPartLogprobs = Nothing
+    , storedContentPartExtraFields = emptyObject
+    }
+
+shouldContainBytes :: ByteString.ByteString -> ByteString.ByteString -> Expectation
+shouldContainBytes haystack needle =
+    ByteString.Char8.unpack haystack
+        `shouldContain` ByteString.Char8.unpack needle
+
+shouldNotContainBytes :: ByteString.ByteString -> ByteString.ByteString -> Expectation
+shouldNotContainBytes haystack needle =
+    ByteString.Char8.unpack haystack
+        `shouldNotContain` ByteString.Char8.unpack needle

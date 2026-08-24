@@ -66,6 +66,14 @@ import Agent.Telegram.Voice (transcribeWithCodex)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
+import Agent.Store.Postgres
+    ( Store
+    , managedPostgresConfigFromEnv
+    , trustedPool
+    , withStore
+    )
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -375,6 +383,16 @@ runConfiguredTelegram = do
 runTelegram :: TelegramConfig -> Text -> IO ()
 runTelegram config token = do
     home <- getHomeDirectory
+    databaseConfig <- managedPostgresConfigFromEnv
+        (unsafeToFilePath (home </> unsafeEncodeUtf ".haskell-agent"))
+    withStore databaseConfig
+        (\store -> runTelegramWithStore store home config token)
+        >>= either
+            (die . Text.unpack . renderStoreError)
+            pure
+
+runTelegramWithStore :: Store -> OsPath -> TelegramConfig -> Text -> IO ()
+runTelegramWithStore store home config token = do
     cwd <- makeAbsolute (unsafeEncodeUtf config.telegramCwd)
     catalog <- loadModelCatalog home >>= either
         (die . Text.unpack)
@@ -417,6 +435,7 @@ runTelegram config token = do
             , runtimeRespondToAllGroupMessages =
                 config.telegramRespondToAllGroupMessages
             , runtimeGatewayDirectory = gatewayDir
+            , runtimePool = trustedPool store
             , runtimeSessionsRoot = root
             , runtimeStatePath = statePath
             , runtimeStateVar = stateVar
@@ -514,6 +533,7 @@ data TelegramRuntime = TelegramRuntime
     , runtimeAllowedUsers :: !(Set Integer)
     , runtimeRespondToAllGroupMessages :: !Bool
     , runtimeGatewayDirectory :: !OsPath
+    , runtimePool :: !StorePool
     , runtimeSessionsRoot :: !OsPath
     , runtimeStatePath :: !OsPath
     , runtimeStateVar :: !(MVar TelegramState)
@@ -1082,6 +1102,7 @@ runAgentTurn runtime key prompt = do
                 \exactly one standard Telegram reaction emoji. Otherwise \
                 \respond normally. Do not mention this delivery context.]"
     priorTurnCount <- loadSessionHandle
+        runtime.runtimePool
         runtime.runtimeSessionsRoot
         handle.sessionMeta.metaId >>= \case
             Left err -> fail (Text.unpack err)
@@ -1097,6 +1118,7 @@ runAgentTurn runtime key prompt = do
             Left err -> fail (Text.unpack err)
             Right _ ->
                 loadSessionHandle
+                    runtime.runtimePool
                     runtime.runtimeSessionsRoot
                     handle.sessionMeta.metaId >>= \case
                         Left err -> fail (Text.unpack err)
@@ -1124,14 +1146,18 @@ sessionForPrompt runtime key prompt = do
     existing <- case lookupBinding key state of
         Nothing -> pure Nothing
         Just sessionId ->
-            loadSessionHandle runtime.runtimeSessionsRoot sessionId >>= \case
+            loadSessionHandle
+                runtime.runtimePool
+                runtime.runtimeSessionsRoot
+                sessionId >>= \case
                 Left _ -> pure Nothing
                 Right (handle, _) -> pure (Just handle)
     case existing of
         Just handle -> pure handle
         Nothing -> do
             handle <- createSession SessionCreate
-                { createRoot = runtime.runtimeSessionsRoot
+                { createPool = runtime.runtimePool
+                , createRoot = runtime.runtimeSessionsRoot
                 , createTarget = runtime.runtimeTarget
                 , createCwd = runtime.runtimeCwd
                 , createEffort = runtime.runtimeEffort

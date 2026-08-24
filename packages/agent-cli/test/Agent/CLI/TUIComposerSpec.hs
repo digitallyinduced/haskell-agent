@@ -51,30 +51,6 @@ spec = describe "fullscreen composer" do
         decodePaste (ByteString.pack [97, 0, 10, 9, 27, 98])
             `shouldBe` "a\n\tb"
 
-    it "inserts bracketed paste immediately while a turn is running" do
-        prepareBracketedPaste False "next message" 4 " pasted"
-            `shouldBe` ("next pasted message", 11, Nothing)
-
-    it "defers clipboard classification only while the REPL is awaiting input" do
-        prepareBracketedPaste True "next message" 4 " pasted"
-            `shouldBe`
-                ( "next message"
-                , 4
-                , Just
-                    (ReplClipboardPasteOrText
-                        "next message"
-                        " pasted"
-                        "next pasted message")
-                )
-
-    it "keeps empty paste events available for native clipboard images" do
-        prepareBracketedPaste False "next message" 4 ""
-            `shouldBe`
-                ( "next message"
-                , 4
-                , Just (ReplClipboardPaste "next message" Nothing)
-                )
-
     it "keeps clipboard preludes immediately before promoted input" do
         buffer <- newFullscreenInputBuffer
         atomically do

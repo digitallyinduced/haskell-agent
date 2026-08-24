@@ -18,7 +18,6 @@ module Agent.CLI.TUI.Composer
     , handleEffortControlClick
     , handlePromptControlClick
     , newFullscreenInputBuffer
-    , prepareBracketedPaste
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
@@ -471,36 +470,6 @@ activateSlashAt
                     (V.EvKey V.KEnter [])
         _ -> pure ()
 
--- | An idle composer can hand bracketed paste classification to the main REPL,
--- which is already waiting for input. During a running turn that consumer is
--- blocked, so insert terminal text locally rather than leaving the draft behind
--- a persistent "Reading clipboard…" notice.
-prepareBracketedPaste
-    :: Bool
-    -> Text
-    -> Int
-    -> Text
-    -> (Text, Int, Maybe ReplLine)
-prepareBracketedPaste awaitingInput draft cursor pasted =
-    let boundedCursor = max 0 (min (Text.length draft) cursor)
-        before = Text.take boundedCursor draft
-        after = Text.drop boundedCursor draft
-        pastedDraft = before <> pasted <> after
-        pastedCursor = boundedCursor + Text.length pasted
-    in if Text.null pasted
-        then
-            ( draft
-            , boundedCursor
-            , Just (ReplClipboardPaste draft Nothing)
-            )
-        else if awaitingInput
-        then
-            ( draft
-            , boundedCursor
-            , Just (ReplClipboardPasteOrText draft pasted pastedDraft)
-            )
-        else (pastedDraft, pastedCursor, Nothing)
-
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
 handleComposerKey
@@ -635,23 +604,20 @@ handleComposerKey
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
             let pasted = decodePaste bytes
-                (pastedDraft, pastedCursor, clipboardInput) =
-                    prepareBracketedPaste
-                        ui.uiAwaitingInput
-                        ui.uiDraft
-                        ui.uiCursor
-                        pasted
-            case clipboardInput of
-                Nothing -> do
-                    modifyUiResetSlash
-                        (UiSetDraft pastedDraft pastedCursor)
-                    modify' \current -> current { appPasted = True }
-                Just replLine -> do
-                    when (not (Text.null pasted)) $
-                        modifyUi
-                            (UiSetNotice
-                                (Just (progressNotice "Reading clipboard…")))
-                    submitRaw replLine
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            if Text.null pasted
+                then submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                else do
+                    modifyUi
+                        (UiSetNotice
+                            (Just (progressNotice "Reading clipboard…")))
+                    submitRaw
+                        (ReplClipboardPasteOrText
+                            ui.uiDraft
+                            pasted
+                            pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do

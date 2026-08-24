@@ -105,6 +105,20 @@ spec = do
             parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
                 `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
 
+        it "parses storage administration commands" do
+            parseArgs ["storage", "status"]
+                `shouldBe` Right (Storage StorageStatus)
+            parseArgs ["storage", "start"]
+                `shouldBe` Right (Storage StorageStart)
+            parseArgs ["storage", "stop"]
+                `shouldBe` Right (Storage StorageStop)
+            parseArgs ["storage", "migrate"]
+                `shouldBe` Right (Storage StorageMigrate)
+            parseArgs ["storage", "doctor"]
+                `shouldBe` Right (Storage StorageDoctor)
+            parseArgs ["storage"] `shouldSatisfy` isLeft
+            parseArgs ["storage", "vacuum"] `shouldSatisfy` isLeft
+
         it "parses --resume and --save-session" do
             parseArgs ["--resume", "2026-08-19-abcd1234"]
                 `shouldBe` Right (RunAgent defaultCliOptions

@@ -44,6 +44,7 @@ import Agent.OpenAI.ModelMetadata
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseTokenUsage
+    , toolResultToItem
     , turnInputsToItems
     , withRequestInput
     )
@@ -528,8 +529,8 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                     && projectedTokens >= tokenLimit
         if shouldCompact
             then if any isCompletedTool inputs
-                then submitAndTrack
-                    contextState history previous inputs onEvent
+                then compactToolContinuation
+                    contextState history inputs onEvent
                 else compactThenSubmit
                     contextState history inputs onEvent
             else submitAndTrack
@@ -540,10 +541,31 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
             <$> runAttemptAndRecord recordUsage (compactAction history)
 
     isCompletedTool = \case
-        -- Commit the tool result before compacting so the call and output
-        -- remain a coherent pair in the next compaction request.
         CompletedTool{} -> True
         _ -> False
+
+    -- Tool outputs must be part of the checkpoint, but the wrapped backend has
+    -- not committed them yet. Absorb them into history before compaction, then
+    -- resume from the new checkpoint without sending them a second time.
+    compactToolContinuation oldTokens oldHistory inputs onEvent = do
+        mask \restore -> do
+            let (toolItems, remainingInputs) = absorbCompletedTools inputs
+                compactHistory = oldHistory <> toolItems
+                rollback = writeIORef contextTokensRef oldTokens
+            (do
+                onEvent (ActivityUpdated "Compacting context…")
+                restore (runCompaction compactHistory) >>= \case
+                    Left err -> do
+                        rollback
+                        pure (Left (automaticCompactionError err))
+                    Right outcome ->
+                        installSubmitAndTrack
+                            restore
+                            rollback
+                            outcome
+                            remainingInputs
+                            onEvent
+                ) `onException` rollback
 
     compactThenSubmit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
@@ -586,6 +608,16 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
     -- leave token metadata describing an uncommitted transcript.
     invalidateContextTokens =
         writeIORef contextTokensRef Nothing
+
+    absorbCompletedTools =
+        foldr
+            (\input (toolItems, otherInputs) ->
+                case input of
+                    CompletedTool result ->
+                        (toolResultToItem result : toolItems, otherInputs)
+                    _ ->
+                        (toolItems, input : otherInputs))
+            ([], [])
 
     automaticCompactionError = \case
         ProviderError errorType message retryAfter ->

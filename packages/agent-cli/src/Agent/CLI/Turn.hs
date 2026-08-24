@@ -610,6 +610,7 @@ checkpointIncompleteTurn beforeItems turnInputs =
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
     loadSession
+        env.sessionDatabasePool
         (System.OsPath.takeDirectory handle.sessionDir)
         handle.sessionMeta.metaId
         >>= \case

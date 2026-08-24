@@ -480,7 +480,7 @@ spec = do
             readIORef seenPrevious `shouldReturn` [Nothing, Nothing]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
-        it "defers compaction while continuing a completed tool call" do
+        it "compacts when a pending tool output crosses the limit" do
             let danglingCall = FunctionCallItem FunctionCall
                     { itemId = Nothing
                     , callId = "call-1"
@@ -500,10 +500,13 @@ spec = do
                 (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
             compactCalls <- newIORef (0 :: Int)
             recordedUsage <- newIORef []
+            historyAtCompact <- newIORef []
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
-            let sender _request = do
+            let sender request = do
                     modifyIORef' compactCalls (+ 1)
+                    writeIORef historyAtCompact
+                        (init (requestItems request))
                     pure (Right remoteCompactionResponse)
                 base = Backend \state previous inputs _ -> do
                     modifyIORef' seenPrevious (<> [previous])
@@ -526,12 +529,20 @@ spec = do
             result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 0
-            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
-            readIORef seenInputs `shouldReturn` [inputs]
-            fmap (.backendState) result `shouldBe` Right oldHistory
+            readIORef compactCalls `shouldReturn` 1
+            compactInput <- readIORef historyAtCompact
+            compactInput `shouldSatisfy` \items ->
+                case reverse items of
+                    FunctionCallOutputItem output : _ ->
+                        output.callId == "call-1"
+                            && output.output == Aeson.String toolOutputText
+                    _ -> False
+            readIORef seenPrevious `shouldReturn` [Nothing]
+            readIORef seenInputs `shouldReturn` [[]]
+            let compacted = either (const []) (.backendState) result
+            compacted `shouldSatisfy` hasCompactionCheckpoint
             readIORef contextState `shouldReturn` Nothing
-            readIORef recordedUsage `shouldReturn` []
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
