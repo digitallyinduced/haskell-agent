@@ -20,6 +20,7 @@ module Agent.CLI
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..)
+    , providerSupportsUsageAccountSelection
     , selectProviderAccount
     )
 import Agent.CLI.Auth
@@ -1413,6 +1414,10 @@ runAgentInitializedWithLock
                         , fromMaybe selectionId active.transitionAccountId
                         )
                     )
+            | not
+                (providerSupportsUsageAccountSelection
+                    initialLoaded.loadedProvider) ->
+                        pure (initialLoaded, Nothing)
             | otherwise -> do
                 let provider = initialLoaded.loadedProvider
                     rememberedIds = fmap
@@ -5837,9 +5842,9 @@ chooseAutomaticProviderTransition
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
                         , transitionAccountSelectionId =
-                            Just selected.selectedSelectionId
+                            (.selectedSelectionId) <$> selected
                         , transitionAccountId =
-                            Just selected.selectedAccountId
+                            (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionUnavailableProviders = unavailable
@@ -5891,9 +5896,9 @@ chooseStartupProviderTransition
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
                         , transitionAccountSelectionId =
-                            Just selected.selectedSelectionId
+                            (.selectedSelectionId) <$> selected
                         , transitionAccountId =
-                            Just selected.selectedAccountId
+                            (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionUnavailableProviders = unavailable
@@ -5937,51 +5942,57 @@ validateProviderTarget choice =
 validateAutomaticProviderTarget
     :: BillingMode
     -> ModelOption
-    -> IO (Either Text SelectedAccount)
+    -> IO (Either Text (Maybe SelectedAccount))
 validateAutomaticProviderTarget sourceBilling choice = do
-    cwd <- getCurrentDirectory
-    projectRoot <- resolveProjectRoot cwd
-    settings <- loadProjectSettings projectRoot
     let provider = choice.modelTarget.targetProvider
-        rememberedIds = fmap
-            (\account ->
-                ( account.projectAccountSelectionId
-                , account.projectAccountId
-                ))
-            (projectAccountFor provider settings)
-        requiredBilling = case sourceBilling of
-            SubscriptionBilled -> Just SubscriptionBilled
-            ApiBilled -> Nothing
-    selectProviderAccount
-        provider
-        requiredBilling
-        rememberedIds >>= \case
-            Left err -> pure (Left err)
-            Right selected ->
-                loadSelectedAccountAuth
-                    provider
-                    selected.selectedSelectionId
-                    selected.selectedAccountId >>= \case
-                        Left err -> pure (Left err)
-                        Right loaded ->
-                            probeLoadedAutomaticAvailability loaded >>= \case
-                                Left err -> do
-                                    now <- getCurrentTime
-                                    pure $ Left $
-                                        "cannot switch to "
-                                            <> providerSlug provider
-                                            <> ": "
-                                            <> formatApiErrorInlineAt now err
-                                Right usable
-                                    | allowsAutomaticBillingFallback
-                                        sourceBilling
-                                        (tokenProviderBillingMode
-                                            usable.loadedTokenProvider) ->
-                                            pure (Right selected)
-                                    | otherwise ->
-                                        pure $ Left
-                                            "automatic fallback from subscription \
-                                            \billing to API credits is disabled"
+    if not (providerSupportsUsageAccountSelection provider)
+        then fmap (Nothing <$) $
+            loadValidatedProviderTarget
+                probeLoadedAutomaticAvailability
+                choice
+        else do
+            cwd <- getCurrentDirectory
+            projectRoot <- resolveProjectRoot cwd
+            settings <- loadProjectSettings projectRoot
+            let rememberedIds = fmap
+                    (\account ->
+                        ( account.projectAccountSelectionId
+                        , account.projectAccountId
+                        ))
+                    (projectAccountFor provider settings)
+                requiredBilling = case sourceBilling of
+                    SubscriptionBilled -> Just SubscriptionBilled
+                    ApiBilled -> Nothing
+            selectProviderAccount
+                provider
+                requiredBilling
+                rememberedIds >>= \case
+                    Left err -> pure (Left err)
+                    Right selected ->
+                        loadSelectedAccountAuth
+                            provider
+                            selected.selectedSelectionId
+                            selected.selectedAccountId >>= \case
+                                Left err -> pure (Left err)
+                                Right loaded ->
+                                    probeLoadedAutomaticAvailability loaded >>= \case
+                                        Left err -> do
+                                            now <- getCurrentTime
+                                            pure $ Left $
+                                                "cannot switch to "
+                                                    <> providerSlug provider
+                                                    <> ": "
+                                                    <> formatApiErrorInlineAt now err
+                                        Right usable
+                                            | allowsAutomaticBillingFallback
+                                                sourceBilling
+                                                (tokenProviderBillingMode
+                                                    usable.loadedTokenProvider) ->
+                                                    pure (Right (Just selected))
+                                            | otherwise ->
+                                                pure $ Left
+                                                    "automatic fallback from subscription \
+                                                    \billing to API credits is disabled"
 
 loadValidatedProviderTarget
     :: (LoadedAuth -> IO (Either ApiError LoadedAuth))

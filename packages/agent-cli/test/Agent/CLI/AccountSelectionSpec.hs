@@ -67,6 +67,25 @@ spec = describe "account selection" do
                 ])
             `shouldBe` Just "external:openai:z-source"
 
+    it "does not usage-rank Claude Code CLI authentication" do
+        providerSupportsUsageAccountSelection ClaudeCodeProvider
+            `shouldBe` False
+
+    it "keeps a verified OpenRouter free-tier key usable at zero credits" do
+        accountCapacity freeTierAccount `shouldBe` Just 1
+
+    it "still rejects a paid OpenRouter key with zero remaining credits" do
+        accountCapacity
+            (freeTierAccount
+                { loginUsage = UsageAvailable AccountUsage
+                    { usagePlan = Nothing
+                    , usageWindows = []
+                    , creditsRemaining = Just "$0.0"
+                    , creditsUsed = Just "$1.0"
+                    }
+                })
+            `shouldBe` Nothing
+
 candidate :: Text -> Text -> Maybe Double -> AccountCandidate
 candidate selectionId accountId capacity = AccountCandidate
     { candidateProvider = OpenAIProvider
@@ -107,3 +126,16 @@ subscriptionAccount source accountId used = LoginAccount
     , loginSecretPayload = "redacted"
     , loginEnabled = True
     }
+
+freeTierAccount :: LoginAccount
+freeTierAccount =
+    (subscriptionAccount "openrouter-env" "openrouter-key" 0)
+        { loginProvider = OpenRouterProvider
+        , loginBilling = ApiCreditsBilling
+        , loginUsage = UsageAvailable AccountUsage
+            { usagePlan = Just "free tier"
+            , usageWindows = []
+            , creditsRemaining = Just "$0.0"
+            , creditsUsed = Just "$0.0"
+            }
+        }

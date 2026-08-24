@@ -3,6 +3,7 @@ module Agent.CLI.AccountSelection
     ( AccountCandidate(..)
     , SelectedAccount(..)
     , accountCapacity
+    , providerSupportsUsageAccountSelection
     , selectCandidates
     , selectAccount
     , selectProviderAccount
@@ -46,6 +47,16 @@ data SelectedAccount = SelectedAccount
     , selectedLabel :: !Text
     }
     deriving (Eq, Show)
+
+-- | Providers whose credentials can be enumerated and compared through a
+-- provider usage endpoint. Claude Code owns authentication inside its CLI and
+-- therefore keeps the already-loaded auth instead.
+providerSupportsUsageAccountSelection :: Provider -> Bool
+providerSupportsUsageAccountSelection = \case
+    OpenAIProvider -> True
+    XAIProvider -> True
+    OpenRouterProvider -> True
+    ClaudeCodeProvider -> False
 
 -- | Provider-neutral input to the pure account ranking policy. A missing
 -- capacity means that the account could not be verified.
@@ -117,8 +128,7 @@ selectAccount remembered accounts =
         }
 
 -- | Pure ranking policy: a usable remembered account wins. Otherwise choose
--- the greatest capacity, with stable identifiers providing deterministic
--- tie-breaking.
+-- the greatest capacity, preserving discovery order for ties.
 selectCandidates
     :: Maybe (Text, Text)
     -> [AccountCandidate]
@@ -156,9 +166,17 @@ accountCapacity account = case account.loginUsage of
                     else Just (fromIntegral (100 - max 0 used))
             [] -> case usage.creditsRemaining >>= parseAmount of
                 Just remaining
+                    | remaining <= 0
+                    , isFreeTier usage -> Just 1
                     | remaining <= 0 -> Nothing
                     | otherwise -> Just remaining
                 Nothing -> Nothing
+
+isFreeTier :: AccountUsage -> Bool
+isFreeTier usage =
+    maybe False
+        ((== "free tier") . Text.toCaseFold . Text.strip)
+        usage.usagePlan
 
 billingMode :: AccountBilling -> BillingMode
 billingMode = \case
