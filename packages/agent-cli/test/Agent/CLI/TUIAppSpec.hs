@@ -12,6 +12,7 @@ import Agent.CLI.TUI.App
     , choiceRowColumns
     , choiceClosesOnUiTransition
     , elapsedMillisSince
+    , externalUrlCommand
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
@@ -60,6 +61,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "externalUrlCommand" do
+        it "opens HTTP(S) URLs without passing through a shell" do
+            let url = "https://github.com/digitallyinduced/haskell-agent"
+            externalUrlCommand url
+                `shouldSatisfy`
+                    maybe False ((== [Text.unpack url]) . snd)
+
+        it "rejects unsafe or malformed destinations" do
+            externalUrlCommand "file:///tmp/report" `shouldBe` Nothing
+            externalUrlCommand "javascript:alert(1)" `shouldBe` Nothing
+            externalUrlCommand "https://example.com/a b" `shouldBe` Nothing
+            externalUrlCommand "https://example.com/\nowned" `shouldBe` Nothing
+            externalUrlCommand
+                ("https://example.com/" <> Text.replicate 4096 "a")
+                `shouldBe` Nothing
+
     describe "secret text overlay" do
         it "renders only fixed-width masking glyphs" do
             maskedSecretText "top-secret-123"

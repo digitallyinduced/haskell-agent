@@ -4,8 +4,10 @@ module Agent.TUI.Markdown
     , codeWidgetWithSyntaxHighlighting
     , inlinePlainText
     , markdownWidget
+    , markdownWidgetWithLinks
     , markdownWidgetWithCodeControls
     , markdownWidgetWithSyntaxHighlighting
+    , markdownWidgetWithSyntaxHighlightingAndLinks
     , parseInline
     ) where
 
@@ -45,17 +47,34 @@ import qualified Graphics.Vty as V
 terminalCharWidth :: Char -> Int
 terminalCharWidth = displayCharCellWidth
 
-markdownWidget :: Text -> Widget n
+markdownWidget :: Ord n => Text -> Widget n
 markdownWidget =
     markdownWidgetWithCodeControls \_ language ->
         if Text.null language
             then emptyWidget
             else withAttr Theme.mutedAttr (txt language)
 
+-- | Render Markdown with application-level click targets for links.
+markdownWidgetWithLinks
+    :: Ord n
+    => (Text -> n)
+    -> Text
+    -> Widget n
+markdownWidgetWithLinks linkName =
+    markdownWidgetWithSyntaxHighlightingAndLinks
+        Nothing
+        linkName
+        (\_ widget -> widget)
+        (\_ language ->
+            if Text.null language
+                then emptyWidget
+                else withAttr Theme.mutedAttr (txt language))
+
 -- | Render Markdown, allowing callers to add an interactive control to each
 -- fenced code block header. Code block indices are one-based.
 markdownWidgetWithCodeControls
-    :: (Int -> Text -> Widget n)
+    :: Ord n
+    => (Int -> Text -> Widget n)
     -> Text
     -> Widget n
 markdownWidgetWithCodeControls codeHeader input =
@@ -70,15 +89,60 @@ markdownWidgetWithCodeControls codeHeader input =
 -- callers can use it to retain completed code bodies while later prose
 -- continues streaming.
 markdownWidgetWithSyntaxHighlighting
-    :: Maybe SyntaxHighlighter
+    :: Ord n
+    => Maybe SyntaxHighlighter
     -> (Int -> Widget n -> Widget n)
     -> (Int -> Text -> Widget n)
     -> Text
     -> Widget n
 markdownWidgetWithSyntaxHighlighting syntaxHighlighter cacheCode codeHeader input =
+    markdownWidgetWithInteractions
+        syntaxHighlighter
+        Nothing
+        cacheCode
+        codeHeader
+        input
+
+-- | Render Markdown with syntax highlighting, code controls, and
+-- application-level click targets for links.
+markdownWidgetWithSyntaxHighlightingAndLinks
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> (Text -> n)
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithSyntaxHighlightingAndLinks
+    syntaxHighlighter
+    linkName
+    cacheCode
+    codeHeader
+    input =
+        markdownWidgetWithInteractions
+            syntaxHighlighter
+            (Just linkName)
+            cacheCode
+            codeHeader
+            input
+
+markdownWidgetWithInteractions
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> Maybe (Text -> n)
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithInteractions
+    syntaxHighlighter
+    linkName
+    cacheCode
+    codeHeader
+    input =
     vBox $
         concatMap
-            (renderChunk syntaxHighlighter cacheCode codeHeader)
+            (renderChunk syntaxHighlighter linkName cacheCode codeHeader)
             (fenceChunks input)
 
 -- | Render a standalone code body with the same width bounding and optional
@@ -93,14 +157,16 @@ codeWidgetWithSyntaxHighlighting syntaxHighlighter language =
         . codeBodyLines
 
 renderChunk
-    :: Maybe SyntaxHighlighter
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> Maybe (Text -> n)
     -> (Int -> Widget n -> Widget n)
     -> (Int -> Text -> Widget n)
     -> FenceChunk
     -> [Widget n]
-renderChunk _ _ _ (FenceText prose) =
-    renderLines (Text.lines prose)
-renderChunk syntaxHighlighter cacheCode codeHeader (FenceBlock block) =
+renderChunk _ linkName _ _ (FenceText prose) =
+    renderLines linkName (Text.lines prose)
+renderChunk syntaxHighlighter _ cacheCode codeHeader (FenceBlock block) =
     [ codeHeader block.fencedIndex block.fencedInfo
     , if block.fencedClosed
         then cacheCode block.fencedIndex bodyWidget
@@ -114,47 +180,49 @@ renderChunk syntaxHighlighter cacheCode codeHeader (FenceBlock block) =
             (codeBodyLines block.fencedBody)
 
 renderLines
-    :: [Text]
+    :: Ord n
+    => Maybe (Text -> n)
+    -> [Text]
     -> [Widget n]
-renderLines [] = []
-renderLines lines_
+renderLines _ [] = []
+renderLines linkName lines_
     | Just (rows, rest) <- Block.takeTableRows lines_ =
-        tableWidget rows : renderLines rest
-renderLines (line : rest)
+        tableWidget rows : renderLines linkName rest
+renderLines linkName (line : rest)
     | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
         padTop (Pad 1)
-            (inlineWidgetWithAttr Theme.headingAttr (parseInline heading))
-            : renderLines rest
+            (inlineWidgetWithAttr linkName Theme.headingAttr (parseInline heading))
+            : renderLines linkName rest
     | Just (indent, item) <- Block.bulletPartsWith (== ' ') line =
         hBox
             [ txt indent
             , withAttr Theme.headingAttr (txt "• ")
-            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
+            , inlineWidgetWithAttr linkName Theme.assistantAttr (parseInline item)
             ]
-            : renderLines rest
+            : renderLines linkName rest
     | Just (indent, number, item) <- Block.orderedParts line =
         hBox
             [ txt indent
             , withAttr Theme.headingAttr (txt (number <> ". "))
-            , inlineWidgetWithAttr Theme.assistantAttr (parseInline item)
+            , inlineWidgetWithAttr linkName Theme.assistantAttr (parseInline item)
             ]
-            : renderLines rest
+            : renderLines linkName rest
     | Just rawQuote <- Block.blockQuoteRemainder line =
         let quote = fromMaybe rawQuote (Text.stripPrefix " " rawQuote)
         in
         hBox
             [ withAttr Theme.mutedAttr (txt "│ ")
-            , inlineWidgetWithAttr Theme.mutedAttr (parseInline quote)
+            , inlineWidgetWithAttr linkName Theme.mutedAttr (parseInline quote)
             ]
-            : renderLines rest
+            : renderLines linkName rest
     | Text.null (Text.strip line) =
-        txt " " : renderLines rest
+        txt " " : renderLines linkName rest
     | Block.isThematicBreak line =
         withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
-            : renderLines rest
+            : renderLines linkName rest
     | otherwise =
-        inlineWidgetWithAttr Theme.assistantAttr (parseInline line)
-            : renderLines rest
+        inlineWidgetWithAttr linkName Theme.assistantAttr (parseInline line)
+            : renderLines linkName rest
 
 codeBodyLines :: Text -> [Text]
 codeBodyLines body
@@ -497,26 +565,35 @@ fragmentsDisplayWidth =
                 0
                 . snd)
 
-inlineWidgetWithAttr :: AttrName -> [Inline] -> Widget n
-inlineWidgetWithAttr plainAttr inlines =
+inlineWidgetWithAttr
+    :: Ord n
+    => Maybe (Text -> n)
+    -> AttrName
+    -> [Inline]
+    -> Widget n
+inlineWidgetWithAttr linkName plainAttr inlines =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         styled <- resolveInline plainAttr inlines
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
-            rendered =
-                V.vertCat
-                    [ V.horizCat
-                        [ V.text attr (LazyText.fromStrict text)
-                        | (attr, text) <- row
-                        ]
-                    | row <- rows
+            rowWidget row =
+                hBox
+                    [ linkWidget attr text
+                    | (attr, text) <- row
                     ]
-            boundedImage
-                | V.imageWidth rendered > width =
-                    V.cropRight width rendered
-                | otherwise = rendered
-        pure B.emptyResult { B.image = boundedImage }
+            linkWidget attr text =
+                case (linkName, V.attrURL attr) of
+                    (Just toName, V.SetTo url) ->
+                        clickable (toName url) (spanWidget attr text)
+                    _ -> spanWidget attr text
+            spanWidget attr text =
+                B.Widget B.Fixed B.Fixed $
+                    pure B.emptyResult
+                        { B.image =
+                            V.text attr (LazyText.fromStrict text)
+                        }
+        B.render (vBox (map rowWidget rows))
 
 data InlineContext = InlineContext
     { inlineStrong :: !Bool
