@@ -504,6 +504,14 @@ ghciArgs =
     , "-XGHC2021"
     ]
         ++ map ("-X" <>) defaultGhciExtensions
+        ++
+            -- Keep the agent's scripting GHCi bounded independently of the
+            -- development REPL, and return unused megablocks promptly.
+            [ "+RTS"
+            , "-M256M"
+            , "-Fd1"
+            , "-RTS"
+            ]
 
 spawnProcess :: ToolEnv -> IO (Either Text GhciProcess)
 spawnProcess env = do
@@ -643,7 +651,8 @@ ghciInputResetsHelpers expression =
 sendGhciHelpers :: GhciProcess -> IO ()
 sendGhciHelpers process =
     mapM_ (sendLine process)
-        [ "import qualified System.Process as AgentGhciProcess"
+        [ ":set +r"
+        , "import qualified System.Process as AgentGhciProcess"
         , "import qualified System.IO as AgentGhciIO"
         , "import qualified Data.Text.IO as AgentGhciTextIO"
         , "import qualified System.Directory as AgentGhciDirectory"

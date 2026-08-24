@@ -99,6 +99,24 @@ spec = describe "Agent.Tools.Ghci" do
             readBack.ghciOutput
                 `shouldSatisfy` Text.isInfixOf "hello from helper"
 
+    it "enables evaluated module CAF reversion" do
+        withTempGhci \ghci -> do
+            settings <- evalGhci ghci ":set" 10000
+            settings.ghciOk `shouldBe` True
+            settings.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "options currently set: +r"
+
+    it "caps the managed heap at 256 MiB" do
+        withTempGhci \ghci -> do
+            imported <- evalGhci ghci "import GHC.RTS.Flags" 10000
+            imported.ghciOk `shouldBe` True
+            maximumBlocks <- evalGhci ghci
+                "getRTSFlags >>= print . maxHeapSize . gcFlags"
+                10000
+            maximumBlocks.ghciOk `shouldBe` True
+            maximumBlocks.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "65536"
+
     it "runs commands in an explicit working directory" do
         withTempEnv \env ->
             bracket (newGhciSession env) closeGhciSession \ghci -> do
