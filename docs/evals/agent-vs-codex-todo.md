@@ -79,6 +79,43 @@ passes.
 
 ## Results: August 24, 2026
 
+### Revised self-verifying run
+
+The revised suite was run on `office-builder` with the same model, medium
+effort, three trials, and 900-second per-run timeout. agent-cli used
+`--no-subagents --no-ghci --bash`; both runners had to record successful GHC,
+build, `nix run`, and HTTP CRUD verification. A run only passed when it was
+self-verified, did not delegate, exited successfully, and passed the independent
+grader.
+
+| runner | passed | median successful seconds | median input | median uncached | median output | median cached |
+|---|---:|---:|---:|---:|---:|---:|
+| agent-cli | 2/3 | 232.20 | 383,787 | 48,491 | 7,136 | 335,296 |
+| Codex | 3/3 | 213.94 | 657,318 | 51,364 | 6,835 | 610,816 |
+
+Among successful runs, agent-cli used 41.6% fewer total input tokens and 45.1%
+fewer cached-input tokens. The uncached-input advantage was much smaller at
+5.6%, and agent-cli used 4.4% more output tokens. Codex had the faster median by
+8.5% and completed all three trials.
+
+| trial | runner | pass | seconds | input | uncached | cached | output |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | agent-cli | yes | 175.95 | 251,329 | 42,177 | 209,152 | 5,571 |
+| 1 | Codex | yes | 213.94 | 657,318 | 46,502 | 610,816 | 7,459 |
+| 2 | Codex | yes | 207.32 | 547,104 | 58,400 | 488,704 | 6,835 |
+| 2 | agent-cli | yes | 288.45 | 516,245 | 54,805 | 461,440 | 8,702 |
+| 3 | agent-cli | no | 900.11 | n/a | n/a | n/a | n/a |
+| 3 | Codex | yes | 221.13 | 666,020 | 51,364 | 614,656 | 6,822 |
+
+Every completed run self-verified without delegation and passed the external
+GHC 9.10, `MVar`, and HTTP CRUD checks. agent-cli trial 3 stalled immediately
+after creating its plan, produced no project files, and reached the 900-second
+timeout. This revised result supports a narrower conclusion than the original:
+agent-cli still has materially lower cached-context amplification, but it was
+not faster or more reliable in this sample.
+
+### Original run
+
 The results below are from the original run. Transcript analysis found that
 agent-cli could not launch its registered GHCi runner, performed only static
 verification, and delegated review to a `gpt-5.6-luna` child whose usage was
