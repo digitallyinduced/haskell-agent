@@ -88,9 +88,9 @@ data CliOptions = CliOptions
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
     , optGhci :: !Bool
-      -- ^ Expose the persistent run_ghci tool (default: True).
+      -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
-      -- ^ Expose the provider's explicit shell execution tool (default: False).
+      -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -112,8 +112,8 @@ defaultCliOptions = CliOptions
     , optSaveSession = False
     , optAgentsMd = True
     , optSkills = True
-    , optGhci = True
-    , optBash = False
+    , optGhci = False
+    , optBash = True
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -292,10 +292,10 @@ usage = unlines
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --skills            Discover Agent Skills (default)"
     , "      --no-skills         Disable skill discovery and invocation"
-    , "      --ghci              Enable the persistent GHCi tool (default)"
-    , "      --no-ghci           Disable the persistent GHCi tool"
-    , "      --bash              Enable explicit shell execution tools"
-    , "      --no-bash           Disable explicit shell execution tools (default)"
+    , "      --ghci              Enable the persistent GHCi tool"
+    , "      --no-ghci           Disable the persistent GHCi tool (default)"
+    , "      --bash              Enable explicit shell execution tools (default)"
+    , "      --no-bash           Disable explicit shell execution tools"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

@@ -76,17 +76,17 @@ Start an interactive session:
 agent-cli
 ```
 
-`run_ghci` is the primary execution and scripting tool and is enabled by
-default. Enable the provider's explicit shell tool when needed:
+The provider's Bash/shell execution tool is enabled by default. Enable the
+persistent `run_ghci` tool when needed:
 
 ```console
-agent-cli --bash
+agent-cli --ghci
 ```
 
-For bash-only operation, disable GHCi explicitly:
+For GHCi-only operation, disable Bash explicitly:
 
 ```console
-agent-cli --no-ghci --bash
+agent-cli --ghci --no-bash
 ```
 
 During an interactive session, switch the available shell tools without
