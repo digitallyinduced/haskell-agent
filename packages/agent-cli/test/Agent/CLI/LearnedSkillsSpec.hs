@@ -1,6 +1,17 @@
 module Agent.CLI.LearnedSkillsSpec (spec) where
 
+import Agent.CLI.Database.Store (deriveDatabaseScopes)
 import Agent.CLI.LearnedSkills
+import Agent.CLI.LearnedSkills.Store
+    ( ensurePostTaskLearningSkillForStore
+    , loadApplicableLearnedSkillsForStore
+    )
+import Agent.Store.Postgres
+    ( closeStore
+    , defaultManagedPostgresConfig
+    , openStore
+    )
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Scope
     ( Scope(..)
     , ScopeKind(..)
@@ -23,12 +34,14 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , appToolHandlers
     )
-import Control.Exception.Safe (displayException)
+import Control.Exception.Safe (bracket, displayException, finally)
 import Data.Aeson (object, (.=))
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
+import qualified System.Directory as Directory
+import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
@@ -200,6 +213,49 @@ spec = do
             rendered `shouldNotContainText` "Broad instructions"
             omitted `shouldBe` 0
 
+    describe "default post-task learning skill" do
+        it "seeds one always-active user skill idempotently" $
+            withTempDirectory \stateDirectory -> do
+                let
+                    projectRoot = stateDirectory <> "/project"
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                scopes <- deriveDatabaseScopes stateDirectory projectRoot
+                    >>= either (fail . Text.unpack) pure
+                (openStore config >>= \case
+                    Left err ->
+                        expectationFailure
+                            ("could not open store: " <> show err)
+                    Right store ->
+                        finally
+                            (do
+                                ensurePostTaskLearningSkillForStore store scopes
+                                    `shouldReturn` Right ()
+                                ensurePostTaskLearningSkillForStore store scopes
+                                    `shouldReturn` Right ()
+                                loadApplicableLearnedSkillsForStore store scopes
+                                    >>= \case
+                                        Left err ->
+                                            expectationFailure
+                                                (Text.unpack err)
+                                        Right skills -> do
+                                            let seeded =
+                                                    filter
+                                                        ((== "post-task-learning-review")
+                                                            . (.learnedSkillSlug))
+                                                        skills
+                                            map (.learnedSkillActivation) seeded
+                                                `shouldBe` [SkillAlways]
+                                            map (.learnedSkillScope.scopeKind) seeded
+                                                `shouldBe` [UserScope]
+                                            map (.learnedSkillRevision) seeded
+                                                `shouldBe` [1]
+                            )
+                            (closeStore store)
+                    ) `finally` cleanup
+
 testEnv :: LearnedSkillToolsEnv
 testEnv = LearnedSkillToolsEnv
     { learnedSkillSearch = \_ _ -> pure (Right (object []))
@@ -256,6 +312,12 @@ shouldContainText actual expected =
 shouldNotContainText :: Text -> Text -> Expectation
 shouldNotContainText actual expected =
     actual `shouldSatisfy` (not . Text.isInfixOf expected)
+
+withTempDirectory :: (FilePath -> IO a) -> IO a
+withTempDirectory =
+    bracket
+        (mkdtemp "/tmp/ha-learned-skills-")
+        Directory.removeDirectoryRecursive
 
 approvalLabel :: ApprovalRule -> Text
 approvalLabel = \case

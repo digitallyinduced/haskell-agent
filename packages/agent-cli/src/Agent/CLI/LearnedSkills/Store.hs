@@ -1,9 +1,11 @@
 -- | Adapter from learned-skill tools to the Hasql-backed PostgreSQL store.
 module Agent.CLI.LearnedSkills.Store
-    ( learnedSkillToolsEnvForStore
+    ( ensurePostTaskLearningSkillForStore
+    , learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
     ) where
 
+import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseScopes
     , applicableDatabaseScopes
@@ -26,6 +28,7 @@ import Agent.Store.Postgres.Scope
     )
 import Agent.Store.Postgres.Skill
     ( LearnedSkill(..)
+    , LearnedSkillActivation(..)
     , LearnedSkillMutationResult(..)
     , LearnedSkillPatch(..)
     , LearnedSkillRevision(..)
@@ -55,6 +58,75 @@ import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
+
+-- | Install the built-in metalearning policy once in the user scope.
+--
+-- The unique scope/slug constraint makes this idempotent. In particular, an
+-- archived or user-edited copy is left untouched rather than silently reset.
+ensurePostTaskLearningSkillForStore
+    :: Store
+    -> DatabaseScopes
+    -> IO (Either Text ())
+ensurePostTaskLearningSkillForStore store scopes = do
+    now <- getCurrentTime
+    storeResultIO
+        (createLearnedSkill
+            (trustedPool store)
+            LearnedSkillCreate
+                { learnedSkillCreateScope =
+                    scopeForDatabase scopes DatabaseUserScope
+                , learnedSkillCreateSlug = "post-task-learning-review"
+                , learnedSkillCreateTitle = "Post-task learning review"
+                , learnedSkillCreateDescription =
+                    "Review substantial completed tasks for durable lessons and "
+                        <> "store only high-value reusable guidance."
+                , learnedSkillCreateAppliesWhen =
+                    "Before the top-level agent finishes a substantial task, "
+                        <> "especially after debugging, implementing a feature, "
+                        <> "validating a workflow, or preparing a pull request."
+                , learnedSkillCreateInstructions =
+                    Text.unlines
+                        [ "Before the final response, review the completed work "
+                            <> "for durable, actionable lessons."
+                        , "Consider surprising failure causes, repository "
+                            <> "conventions, reliable validation procedures, "
+                            <> "recurring user preferences, and approaches that "
+                            <> "failed and should not be repeated."
+                        , "Search existing skills before creating anything. "
+                            <> "Update an existing skill when possible."
+                        , "Create a skill only when the lesson is reusable, "
+                            <> "non-obvious, supported by concrete evidence, and "
+                            <> "likely to change future behavior."
+                        , "Prefer the narrowest applicable scope. Do not store "
+                            <> "ordinary task facts, summaries, temporary state, "
+                            <> "speculation, or guidance already captured in "
+                            <> "repository instructions."
+                        , "Create at most two skill mutations per task. If there "
+                            <> "is no meaningful learning, do nothing and do not "
+                            <> "mention the review."
+                        ]
+                , learnedSkillCreateActivation = SkillAlways
+                , learnedSkillCreatePriority = 0
+                , learnedSkillCreateStatus = SkillActive
+                , learnedSkillCreateSummary =
+                    "Install the default post-task learning review policy"
+                , learnedSkillCreateSource = LearnedSkillSourceInput
+                    { learnedSkillSourceInputSessionKey = Nothing
+                    , learnedSkillSourceInputTurnIndex = Nothing
+                    , learnedSkillSourceInputResponseItemId = Nothing
+                    , learnedSkillSourceInputEvidence =
+                        "Built-in metalearning policy installed by haskell-agent."
+                    }
+                , learnedSkillCreateAt = now
+                }) >>= \case
+                    Left err -> pure (Left err)
+                    Right LearnedSkillMutationAlreadyExists -> pure (Right ())
+                    Right (LearnedSkillMutationApplied _) -> pure (Right ())
+                    Right result ->
+                        pure $
+                            Left
+                                ("unexpected default learned-skill result: "
+                                    <> Text.pack (show result))
 
 learnedSkillToolsEnvForStore
     :: Store

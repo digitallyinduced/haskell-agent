@@ -120,7 +120,8 @@ import Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     )
 import Agent.CLI.LearnedSkills.Store
-    ( learnedSkillToolsEnvForStore
+    ( ensurePostTaskLearningSkillForStore
+    , learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
     )
 import Agent.CLI.Error
@@ -3353,7 +3354,14 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 ( omitted
                 , max 0 (contextLength after - contextLength before)
                 )
-        installLearnedSkills context maximum =
+        installLearnedSkills context maximum = do
+            ensurePostTaskLearningSkillForStore
+                startup.startupDatabaseStore
+                databaseScopes >>= \case
+                    Left err ->
+                        reportLearnedSkillWarning
+                            ("default learned skill unavailable: " <> err)
+                    Right () -> pure ()
             loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
                 databaseScopes >>= \case
@@ -3711,10 +3719,11 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
-            when queueInitialContext $
-                installLearnedSkills
-                    startupContext
-                    (defaultSkillCatalogMaxChars - skillContextChars)
+            -- Learned-skill instructions are startup context, not persisted
+            -- response items, so resumed sessions need them installed again.
+            installLearnedSkills
+                startupContext
+                (defaultSkillCatalogMaxChars - skillContextChars)
             finishStartup startup
         sessionAction = do
             initializeSkills
