@@ -512,7 +512,7 @@ createReservedSession spec sessionId tempDir = do
             , sessionTranscriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
             , sessionMeta = meta
             }
-    Store.createSession pool sessionId now (Aeson.toJSON meta) >>= \case
+    Store.createSession pool (toStoredMetadata meta) >>= \case
         Left err -> do
             _ <- tryIO (removePathForcibly dir)
             fail
@@ -569,10 +569,8 @@ appendTurnWithMetaTransition handle turn transition = do
         finalMeta = transition meta
     Store.appendSessionTurn
         pool
-        finalMeta.metaId
-        turn.turnAt
-        (Aeson.toJSON turn)
-        (Aeson.toJSON finalMeta) >>= \case
+        (toStoredTurn turn)
+        (toStoredMetadata finalMeta) >>= \case
             Left err ->
                 fail
                     ("could not append PostgreSQL session turn: "
@@ -616,10 +614,8 @@ addSessionUsage usage handle = do
             }
     Store.replaceSessionMetadata
         pool
-        meta.metaId
-        now
         "session.usage_added"
-        (Aeson.toJSON meta) >>= \case
+        (toStoredMetadata meta) >>= \case
             Left err ->
                 fail
                     ("could not update PostgreSQL session usage: "
@@ -684,11 +680,11 @@ loadSession pool root sessionId = runExceptT do
     stored' <- case stored of
         Just value -> pure (Just value)
         Nothing -> do
-            imported <- importLegacySession root pool sessionId
-            if imported
-                then lift (Store.loadSession pool sessionId)
-                    >>= either (throwE . renderStoreError) pure
-                else pure Nothing
+            _ <- importLegacySession root pool sessionId
+            -- Another process may win the import race and return False from
+            -- its idempotent insert. Always reload the canonical row.
+            lift (Store.loadSession pool sessionId)
+                >>= either (throwE . renderStoreError) pure
     case stored' of
         Nothing -> throwE ("session not found: " <> sessionId)
         Just value -> decodeStoredSession sessionId value
@@ -782,10 +778,8 @@ writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
 writeSessionMeta pool _path meta = do
     Store.replaceSessionMetadata
         pool
-        meta.metaId
-        meta.metaUpdatedAt
         "session.metadata_replaced"
-        (Aeson.toJSON meta) >>= \case
+        (toStoredMetadata meta) >>= \case
             Left err ->
                 fail
                     ("could not update PostgreSQL session metadata: "
@@ -968,23 +962,164 @@ decodeStoredSession
     -> Store.StoredSession
     -> ExceptT Text IO (SessionMeta, [SessionTurn])
 decodeStoredSession sessionId stored = do
-    meta <- except (decodeJsonValue "session metadata" stored.storedMetadata)
+    meta <- except (fromStoredMetadata stored.storedMetadata)
     validateSessionMeta sessionId meta
-    turns <- except $
-        mapM
-            (decodeJsonValue "session turn" . (.storedTurnPayload))
-            stored.storedTurns
+    turns <- except $ mapM (fromStoredTurn . (.storedTurn)) stored.storedTurns
     pure (meta, turns)
 
-decodeJsonValue :: FromJSON a => Text -> Aeson.Value -> Either Text a
-decodeJsonValue label value =
-    case Aeson.fromJSON value of
-        Aeson.Error err -> Left (label <> ": " <> Text.pack err)
-        Aeson.Success decoded -> Right decoded
+toStoredMetadata :: SessionMeta -> Store.SessionMetadata
+toStoredMetadata meta = Store.SessionMetadata
+    { sessionMetadataKey = meta.metaId
+    , sessionMetadataVersion = fromIntegral meta.metaVersion
+    , sessionMetadataCreatedAt = meta.metaCreatedAt
+    , sessionMetadataUpdatedAt = meta.metaUpdatedAt
+    , sessionMetadataProvider = providerSlug meta.metaProvider
+    , sessionMetadataConnection = meta.metaConnection
+    , sessionMetadataModel = meta.metaModel
+    , sessionMetadataTransportModel = meta.metaTransportModel
+    , sessionMetadataDialect = dialectSlug meta.metaDialect
+    , sessionMetadataLegacyTarget =
+        toStoredLegacyTarget <$> meta.metaLegacySubagentTarget
+    , sessionMetadataCwd = Text.pack (unsafeToFilePath meta.metaCwd)
+    , sessionMetadataEffort = meta.metaEffort
+    , sessionMetadataTitle = meta.metaTitle
+    , sessionMetadataTitleIsManual = meta.metaTitleIsManual
+    , sessionMetadataTitleRefreshIndex =
+        fromIntegral meta.metaTitleRefreshIndex
+    , sessionMetadataTitleUserTurns =
+        fromIntegral meta.metaTitleUserTurns
+    , sessionMetadataLastResponseId = meta.metaLastResponseId
+    , sessionMetadataInputTokens = fromIntegral meta.metaInputTokens
+    , sessionMetadataOutputTokens = fromIntegral meta.metaOutputTokens
+    , sessionMetadataCachedTokens = fromIntegral meta.metaCachedTokens
+    }
 
-decodeMetaQuiet :: Aeson.Value -> Maybe SessionMeta
+fromStoredMetadata :: Store.SessionMetadata -> Either Text SessionMeta
+fromStoredMetadata stored = do
+    when (Text.null (Text.strip stored.sessionMetadataConnection)) $
+        Left "stored session connection must not be empty"
+    provider <- maybe
+        (Left ("unknown stored provider: " <> stored.sessionMetadataProvider))
+        Right
+        (parseProvider stored.sessionMetadataProvider)
+    dialect <- maybe
+        (Left ("unknown stored dialect: " <> stored.sessionMetadataDialect))
+        Right
+        (parseDialect stored.sessionMetadataDialect)
+    unless (providerSupportsDialect provider dialect) $
+        Left
+            ( "stored dialect "
+                <> stored.sessionMetadataDialect
+                <> " is incompatible with provider "
+                <> stored.sessionMetadataProvider
+            )
+    legacyTarget <-
+        traverse fromStoredLegacyTarget stored.sessionMetadataLegacyTarget
+    pure SessionMeta
+        { metaVersion = fromIntegral stored.sessionMetadataVersion
+        , metaId = stored.sessionMetadataKey
+        , metaCreatedAt = stored.sessionMetadataCreatedAt
+        , metaUpdatedAt = stored.sessionMetadataUpdatedAt
+        , metaProvider = provider
+        , metaConnection = stored.sessionMetadataConnection
+        , metaModel = stored.sessionMetadataModel
+        , metaTransportModel = stored.sessionMetadataTransportModel
+        , metaDialect = dialect
+        , metaLegacySubagentTarget = legacyTarget
+        , metaCwd =
+            unsafeEncodeUtf (Text.unpack stored.sessionMetadataCwd)
+        , metaEffort = stored.sessionMetadataEffort
+        , metaTitle = stored.sessionMetadataTitle
+        , metaTitleIsManual = stored.sessionMetadataTitleIsManual
+        , metaTitleRefreshIndex =
+            fromIntegral stored.sessionMetadataTitleRefreshIndex
+        , metaTitleUserTurns =
+            fromIntegral stored.sessionMetadataTitleUserTurns
+        , metaLastResponseId = stored.sessionMetadataLastResponseId
+        , metaInputTokens = fromIntegral stored.sessionMetadataInputTokens
+        , metaOutputTokens = fromIntegral stored.sessionMetadataOutputTokens
+        , metaCachedTokens = fromIntegral stored.sessionMetadataCachedTokens
+        }
+
+toStoredLegacyTarget
+    :: LegacySubagentTarget
+    -> Store.SessionLegacyTarget
+toStoredLegacyTarget target = Store.SessionLegacyTarget
+    { sessionLegacyProvider = providerSlug target.legacyTargetProvider
+    , sessionLegacyConnection = target.legacyTargetConnection
+    , sessionLegacyEffectiveModel = target.legacyTargetEffectiveModel
+    , sessionLegacyDialect = dialectSlug target.legacyTargetDialect
+    }
+
+fromStoredLegacyTarget
+    :: Store.SessionLegacyTarget
+    -> Either Text LegacySubagentTarget
+fromStoredLegacyTarget stored = do
+    when (Text.null (Text.strip stored.sessionLegacyConnection)) $
+        Left "stored legacy session connection must not be empty"
+    when (Text.null (Text.strip stored.sessionLegacyEffectiveModel)) $
+        Left "stored legacy session effective model must not be empty"
+    provider <- maybe
+        (Left ("unknown stored legacy provider: " <> stored.sessionLegacyProvider))
+        Right
+        (parseProvider stored.sessionLegacyProvider)
+    dialect <- maybe
+        (Left ("unknown stored legacy dialect: " <> stored.sessionLegacyDialect))
+        Right
+        (parseDialect stored.sessionLegacyDialect)
+    unless (providerSupportsDialect provider dialect) $
+        Left
+            ( "stored legacy dialect "
+                <> stored.sessionLegacyDialect
+                <> " is incompatible with provider "
+                <> stored.sessionLegacyProvider
+            )
+    pure LegacySubagentTarget
+        { legacyTargetProvider = provider
+        , legacyTargetConnection = stored.sessionLegacyConnection
+        , legacyTargetEffectiveModel = stored.sessionLegacyEffectiveModel
+        , legacyTargetDialect = dialect
+        }
+
+toStoredTurn :: SessionTurn -> Store.SessionTurn
+toStoredTurn turn = Store.SessionTurn
+    { sessionTurnOccurredAt = turn.turnAt
+    , sessionTurnUserText = turn.turnUserText
+    , sessionTurnAssistantText = turn.turnAssistantText
+    , sessionTurnError = turn.turnError
+    , sessionTurnResponseId = turn.turnResponseId
+    , sessionTurnItems = turn.turnItems
+    , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
+    }
+
+fromStoredTurn :: Store.SessionTurn -> Either Text SessionTurn
+fromStoredTurn stored = Right SessionTurn
+    { turnAt = stored.sessionTurnOccurredAt
+    , turnUserText = stored.sessionTurnUserText
+    , turnAssistantText = stored.sessionTurnAssistantText
+    , turnError = stored.sessionTurnError
+    , turnResponseId = stored.sessionTurnResponseId
+    , turnItems = stored.sessionTurnItems
+    , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
+    }
+
+toStoredUsage :: TokenUsage -> Store.SessionUsage
+toStoredUsage usage = Store.SessionUsage
+    { sessionUsageInputTokens = fromIntegral usage.inputTokens
+    , sessionUsageOutputTokens = fromIntegral usage.outputTokens
+    , sessionUsageCachedTokens = fromIntegral usage.cachedTokens
+    }
+
+fromStoredUsage :: Store.SessionUsage -> TokenUsage
+fromStoredUsage usage = TokenUsage
+    { inputTokens = fromIntegral usage.sessionUsageInputTokens
+    , outputTokens = fromIntegral usage.sessionUsageOutputTokens
+    , cachedTokens = fromIntegral usage.sessionUsageCachedTokens
+    }
+
+decodeMetaQuiet :: Store.SessionMetadata -> Maybe SessionMeta
 decodeMetaQuiet value =
-    case decodeJsonValue "session metadata" value of
+    case fromStoredMetadata value of
         Right meta | meta.metaVersion == sessionSchemaVersion -> Just meta
         _ -> Nothing
 
@@ -1028,12 +1163,8 @@ importLegacySession root pool sessionId = do
                     { legacySourcePath = toText dir
                     , legacyContentHash =
                         contentFingerprint (metaBytes <> transcriptBytes)
-                    , legacySessionId = sessionId
-                    , legacyCreatedAt = meta.metaCreatedAt
-                    , legacyUpdatedAt = meta.metaUpdatedAt
-                    , legacyMetadata = Aeson.toJSON meta
-                    , legacyTurns =
-                        map (\turn -> (turn.turnAt, Aeson.toJSON turn)) turns
+                    , legacyMetadata = toStoredMetadata meta
+                    , legacyTurns = map toStoredTurn turns
                     }
             lift (Store.importLegacySession pool legacy) >>= \case
                 Left err -> throwE (renderStoreError err)

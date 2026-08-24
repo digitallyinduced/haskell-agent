@@ -29,9 +29,6 @@ import qualified Hasql.Transaction.Sessions as Transactions
 import Agent.Store.Postgres.Hasql (mkStatement)
 
 import Agent.Store.Postgres.Connection
-import Agent.Store.Postgres.NormalizedValue
-    ( normalizedSupportSchemaStatements
-    )
 import Agent.Store.Postgres.Scope (customSchemaStatements)
 import Agent.Store.Postgres.Session (sessionSchemaStatements)
 import Agent.Store.Types
@@ -86,17 +83,9 @@ coreMigrations =
               \ $ha$"
             , "GRANT USAGE ON SCHEMA harness TO ha_runtime"
             , "GRANT SELECT ON harness.schema_migrations TO ha_runtime"
-            , "GRANT SELECT, INSERT, UPDATE\
-              \ ON harness.sessions TO ha_runtime"
-            , "GRANT SELECT, INSERT\
-              \ ON harness.session_events TO ha_runtime"
-            , "GRANT SELECT, INSERT\
-              \ ON harness.session_turns TO ha_runtime"
-            , "GRANT SELECT, INSERT\
-              \ ON harness.legacy_session_imports TO ha_runtime"
-            , "GRANT SELECT, INSERT\
-              \ ON harness.structured_values TO ha_runtime"
-            , "GRANT SELECT, INSERT, UPDATE\
+            ]
+            <> sessionRuntimeGrantStatements
+            <> [ "GRANT SELECT, INSERT, UPDATE\
               \ ON harness.custom_scopes TO ha_runtime"
             , "GRANT SELECT, INSERT, UPDATE\
               \ ON harness.custom_sql_audit TO ha_runtime"
@@ -110,10 +99,83 @@ coreMigrations =
               \ ON harness.custom_catalog_constraints TO ha_runtime"
             , "GRANT SELECT, INSERT\
               \ ON harness.custom_catalog_indexes TO ha_runtime"
-            , "GRANT EXECUTE ON FUNCTION\
-              \ harness.raise_normalized_value_error(text) TO ha_runtime"
             ]
         }
+    , Migration
+        { migrationVersion = 3
+        , migrationName = "typed relational session storage"
+        , migrationStatements =
+            [ prepareTypedSessionSchemaStatement ]
+            <> sessionSchemaStatements
+            <> sessionRuntimeGrantStatements
+        }
+    ]
+
+-- Version 1 shipped only on the in-development PostgreSQL branch. Empty
+-- clusters can be upgraded in place; non-empty normalized session stores fail
+-- explicitly rather than discarding data that cannot be converted losslessly
+-- without retaining the removed generic value codec.
+prepareTypedSessionSchemaStatement :: ByteString
+prepareTypedSessionSchemaStatement =
+    "DO $ha$\
+    \ BEGIN\
+    \   IF EXISTS (\
+    \     SELECT 1 FROM information_schema.columns\
+    \     WHERE table_schema = 'harness'\
+    \       AND table_name = 'sessions'\
+    \       AND column_name = 'metadata_value_id'\
+    \   ) THEN\
+    \     IF EXISTS (SELECT 1 FROM harness.sessions) THEN\
+    \       RAISE EXCEPTION USING\
+    \         ERRCODE = '55000',\
+    \         MESSAGE =\
+    \           'cannot automatically migrate non-empty normalized session storage',\
+    \         HINT =\
+    \           'export or reset the private PostgreSQL session store before upgrading';\
+    \     END IF;\
+    \     DROP TABLE IF EXISTS harness.legacy_session_imports;\
+    \     DROP TABLE IF EXISTS harness.session_turns;\
+    \     DROP TABLE IF EXISTS harness.session_events;\
+    \     DROP TABLE IF EXISTS harness.sessions;\
+    \     DROP TABLE IF EXISTS harness.structured_values CASCADE;\
+    \     DROP FUNCTION IF EXISTS\
+    \       harness.raise_normalized_value_error(text);\
+    \   END IF;\
+    \ END\
+    \ $ha$"
+
+sessionRuntimeGrantStatements :: [ByteString]
+sessionRuntimeGrantStatements =
+    [ "GRANT SELECT, INSERT, UPDATE\
+      \ ON harness.sessions TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_events TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_turns TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.legacy_session_imports TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_response_items TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_messages TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_function_calls TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_function_call_outputs TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_custom_tool_calls TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_custom_tool_call_outputs TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_reasoning_items TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_reasoning_summaries TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_item_references TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_tagged_items TO ha_runtime"
+    , "GRANT SELECT, INSERT\
+      \ ON harness.session_response_content_parts TO ha_runtime"
     ]
 
 runCoreMigrations :: StorePool -> IO (Either StoreError ())
@@ -139,7 +201,6 @@ runMigrations pool migrations =
                     \ END $$"
                 Transaction.sql
                     "CREATE SCHEMA IF NOT EXISTS harness"
-                forM_ normalizedSupportSchemaStatements Transaction.sql
                 Transaction.sql
                     "CREATE TABLE IF NOT EXISTS harness.schema_migrations (\
                     \ migration_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\

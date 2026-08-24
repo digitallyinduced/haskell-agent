@@ -15,6 +15,7 @@ data StoreError
     | StoreProcessError !Text
     | StoreConnectionError !Text
     | StoreMigrationError !Text
+    | StoreDataError !Text
     deriving (Eq, Show)
 
 instance Exception StoreError
@@ -25,3 +26,4 @@ renderStoreError = \case
     StoreProcessError message -> message
     StoreConnectionError message -> message
     StoreMigrationError message -> message
+    StoreDataError message -> message

@@ -4,20 +4,23 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | PostgreSQL persistence for durable harness sessions.
+-- | Typed PostgreSQL persistence for harness sessions.
 --
--- PostgreSQL owns the canonical session projection and immutable event stream.
--- Arbitrary provider response values are stored in a normalized relational
--- value tree rather than JSON/JSONB columns. User and assistant text are also
--- projected into typed columns with a generated full-text-search vector.
+-- Harness-owned records are stored in explicit relational columns. Provider
+-- response items are normalized by 'Agent.Store.Postgres.SessionItem'; JSONB
+-- is reserved for intrinsically open provider leaf values such as tool output
+-- and extension fields.
 module Agent.Store.Postgres.Session
-    ( StoredSession(..)
+    ( SessionMetadata(..)
+    , SessionLegacyTarget(..)
+    , SessionTurn(..)
+    , SessionUsage(..)
+    , StoredSession(..)
     , StoredEvent(..)
     , StoredTurn(..)
     , LegacySession(..)
     , ConversationSearchResult(..)
     , sessionSchemaStatements
-    , migrateSessionSchema
     , createSession
     , replaceSessionMetadata
     , appendSessionTurn
@@ -31,52 +34,100 @@ module Agent.Store.Postgres.Session
     ) where
 
 import Control.Monad (forM, forM_, unless)
-import Data.Aeson (Value(..))
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString as ByteString
+import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Text (Text)
-import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (UTCTime)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
-import qualified Hasql.Session as Session
-import Hasql.Statement (Statement)
+import qualified Hasql.Session as HasqlSession
 import qualified Hasql.Transaction as Transaction
 import qualified Hasql.Transaction.Sessions as Transactions
+import Hasql.Statement (Statement)
 
+import Agent.Responses.Types (ResponseItem)
 import Agent.Store.Postgres.Connection
     ( StorePool
     , withSession
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
-import Agent.Store.Postgres.NormalizedValue
-    ( insertNormalizedValue
-    , loadNormalizedValueRequired
-    , normalizedValueSchemaStatements
+import Agent.Store.Postgres.SessionItem
+    ( insertResponseItems
+    , loadResponseItems
+    , sessionItemSchemaStatements
     )
-import Agent.Store.Types (StoreError)
+import Agent.Store.Types (StoreError(..))
+
+data SessionLegacyTarget = SessionLegacyTarget
+    { sessionLegacyProvider :: !Text
+    , sessionLegacyConnection :: !Text
+    , sessionLegacyEffectiveModel :: !Text
+    , sessionLegacyDialect :: !Text
+    }
+    deriving (Eq, Show)
+
+data SessionMetadata = SessionMetadata
+    { sessionMetadataKey :: !Text
+    , sessionMetadataVersion :: !Int32
+    , sessionMetadataCreatedAt :: !UTCTime
+    , sessionMetadataUpdatedAt :: !UTCTime
+    , sessionMetadataProvider :: !Text
+    , sessionMetadataConnection :: !Text
+    , sessionMetadataModel :: !Text
+    , sessionMetadataTransportModel :: !(Maybe Text)
+    , sessionMetadataDialect :: !Text
+    , sessionMetadataLegacyTarget :: !(Maybe SessionLegacyTarget)
+    , sessionMetadataCwd :: !Text
+    , sessionMetadataEffort :: !Text
+    , sessionMetadataTitle :: !Text
+    , sessionMetadataTitleIsManual :: !Bool
+    , sessionMetadataTitleRefreshIndex :: !Int64
+    , sessionMetadataTitleUserTurns :: !Int64
+    , sessionMetadataLastResponseId :: !(Maybe Text)
+    , sessionMetadataInputTokens :: !Int64
+    , sessionMetadataOutputTokens :: !Int64
+    , sessionMetadataCachedTokens :: !Int64
+    }
+    deriving (Eq, Show)
+
+data SessionUsage = SessionUsage
+    { sessionUsageInputTokens :: !Int64
+    , sessionUsageOutputTokens :: !Int64
+    , sessionUsageCachedTokens :: !Int64
+    }
+    deriving (Eq, Show)
+
+data SessionTurn = SessionTurn
+    { sessionTurnOccurredAt :: !UTCTime
+    , sessionTurnUserText :: !Text
+    , sessionTurnAssistantText :: !(Maybe Text)
+    , sessionTurnError :: !(Maybe Text)
+    , sessionTurnResponseId :: !(Maybe Text)
+    , sessionTurnItems :: ![ResponseItem]
+    , sessionTurnUsage :: !(Maybe SessionUsage)
+    }
+    deriving (Eq, Show)
 
 data StoredSession = StoredSession
-    { storedMetadata :: !Value
+    { storedMetadata :: !SessionMetadata
     , storedTurns :: ![StoredTurn]
-    } deriving (Eq, Show)
+    }
+    deriving (Eq, Show)
 
 data StoredEvent = StoredEvent
     { storedEventSequence :: !Int64
     , storedEventKind :: !Text
     , storedEventOccurredAt :: !UTCTime
-    , storedEventPayload :: !Value
-    } deriving (Eq, Show)
+    }
+    deriving (Eq, Show)
 
 data StoredTurn = StoredTurn
     { storedTurnIndex :: !Int64
     , storedEventSequence :: !Int64
-    , storedOccurredAt :: !UTCTime
-    , storedTurnPayload :: !Value
-    } deriving (Eq, Show)
+    , storedTurn :: !SessionTurn
+    }
+    deriving (Eq, Show)
 
 data ConversationSearchResult = ConversationSearchResult
     { searchSessionId :: !Text
@@ -85,78 +136,122 @@ data ConversationSearchResult = ConversationSearchResult
     , searchUserText :: !Text
     , searchAssistantText :: !(Maybe Text)
     , searchRank :: !Double
-    } deriving (Eq, Show)
+    }
+    deriving (Eq, Show)
 
 -- | One fully decoded legacy JSONL session ready for an atomic import.
 data LegacySession = LegacySession
     { legacySourcePath :: !Text
     , legacyContentHash :: !Text
-    , legacySessionId :: !Text
-    , legacyCreatedAt :: !UTCTime
-    , legacyUpdatedAt :: !UTCTime
-    , legacyMetadata :: !Value
-    , legacyTurns :: ![(UTCTime, Value)]
-    } deriving (Eq, Show)
+    , legacyMetadata :: !SessionMetadata
+    , legacyTurns :: ![SessionTurn]
+    }
+    deriving (Eq, Show)
 
-sessionSchemaStatements :: [ByteString.ByteString]
+sessionSchemaStatements :: [ByteString]
 sessionSchemaStatements =
-    normalizedValueSchemaStatements
-    <> [ "CREATE TABLE IF NOT EXISTS harness.sessions (\
-       \ session_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
-       \ session_key text NOT NULL UNIQUE,\
-       \ created_at timestamptz NOT NULL,\
-       \ updated_at timestamptz NOT NULL,\
-       \ metadata_value_id uuid NOT NULL\
-       \   REFERENCES harness.structured_values(value_id),\
-       \ next_event_sequence bigint NOT NULL DEFAULT 1,\
-       \ next_turn_index bigint NOT NULL DEFAULT 0,\
-       \ deleted_at timestamptz,\
-       \ CHECK (next_event_sequence >= 1),\
-       \ CHECK (next_turn_index >= 0)\
-       \ )"
-       , "CREATE INDEX IF NOT EXISTS sessions_updated_at_idx\
-       \ ON harness.sessions (updated_at DESC)\
-       \ WHERE deleted_at IS NULL"
-       , "CREATE TABLE IF NOT EXISTS harness.session_events (\
-       \ event_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
-       \ session_id uuid NOT NULL\
-       \   REFERENCES harness.sessions(session_id),\
-       \ sequence bigint NOT NULL,\
-       \ event_kind text NOT NULL,\
-       \ occurred_at timestamptz NOT NULL,\
-       \ payload_value_id uuid NOT NULL\
-       \   REFERENCES harness.structured_values(value_id),\
-       \ UNIQUE (session_id, sequence)\
-       \ )"
-       , "CREATE INDEX IF NOT EXISTS session_events_session_time_idx\
-       \ ON harness.session_events (session_id, occurred_at DESC)"
-       , "CREATE TABLE IF NOT EXISTS harness.session_turns (\
-       \ turn_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
-       \ session_id uuid NOT NULL\
-       \   REFERENCES harness.sessions(session_id),\
-       \ event_id uuid NOT NULL UNIQUE\
-       \   REFERENCES harness.session_events(event_id),\
-       \ turn_index bigint NOT NULL,\
-       \ event_sequence bigint NOT NULL,\
-       \ occurred_at timestamptz NOT NULL,\
-       \ user_text text NOT NULL,\
-       \ assistant_text text,\
-       \ turn_value_id uuid NOT NULL\
-       \   REFERENCES harness.structured_values(value_id),\
-       \ search_vector tsvector GENERATED ALWAYS AS (\
-       \   setweight(to_tsvector('english', coalesce(user_text, '')), 'A') ||\
-       \   setweight(to_tsvector('english', coalesce(assistant_text, '')), 'B')\
-       \ ) STORED,\
-       \ UNIQUE (session_id, turn_index),\
-       \ UNIQUE (session_id, event_sequence),\
-       \ FOREIGN KEY (session_id, event_sequence)\
-       \   REFERENCES harness.session_events(session_id, sequence)\
-       \ )"
-       , "CREATE INDEX IF NOT EXISTS session_turns_search_idx\
-       \ ON harness.session_turns USING gin (search_vector)"
-       , "CREATE INDEX IF NOT EXISTS session_turns_session_time_idx\
-       \ ON harness.session_turns (session_id, occurred_at DESC)"
-       , "CREATE TABLE IF NOT EXISTS harness.legacy_session_imports (\
+    [ "CREATE TABLE IF NOT EXISTS harness.sessions (\
+      \ session_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
+      \ session_key text NOT NULL UNIQUE,\
+      \ session_schema_version integer NOT NULL CHECK (session_schema_version > 0),\
+      \ created_at timestamptz NOT NULL,\
+      \ updated_at timestamptz NOT NULL,\
+      \ provider text NOT NULL CHECK (length(btrim(provider)) > 0),\
+      \ connection_id text NOT NULL CHECK (length(btrim(connection_id)) > 0),\
+      \ model_id text NOT NULL CHECK (length(btrim(model_id)) > 0),\
+      \ transport_model_id text,\
+      \ dialect text NOT NULL CHECK (length(btrim(dialect)) > 0),\
+      \ legacy_target_provider text,\
+      \ legacy_target_connection text,\
+      \ legacy_target_effective_model text,\
+      \ legacy_target_dialect text,\
+      \ cwd text NOT NULL,\
+      \ effort text NOT NULL,\
+      \ title text NOT NULL,\
+      \ title_is_manual boolean NOT NULL,\
+      \ title_refresh_index bigint NOT NULL CHECK (title_refresh_index >= 0),\
+      \ title_user_turns bigint NOT NULL CHECK (title_user_turns >= 0),\
+      \ last_response_id text,\
+      \ input_tokens bigint NOT NULL CHECK (input_tokens >= 0),\
+      \ output_tokens bigint NOT NULL CHECK (output_tokens >= 0),\
+      \ cached_tokens bigint NOT NULL CHECK (cached_tokens >= 0),\
+      \ next_event_sequence bigint NOT NULL DEFAULT 1,\
+      \ next_turn_index bigint NOT NULL DEFAULT 0,\
+      \ deleted_at timestamptz,\
+      \ CHECK (updated_at >= created_at),\
+      \ CHECK (next_event_sequence >= 1),\
+      \ CHECK (next_turn_index >= 0),\
+      \ CHECK (\
+      \   (legacy_target_provider IS NULL\
+      \     AND legacy_target_connection IS NULL\
+      \     AND legacy_target_effective_model IS NULL\
+      \     AND legacy_target_dialect IS NULL)\
+      \   OR\
+      \   (legacy_target_provider IS NOT NULL\
+      \     AND legacy_target_connection IS NOT NULL\
+      \     AND legacy_target_effective_model IS NOT NULL\
+      \     AND legacy_target_dialect IS NOT NULL\
+      \     AND length(btrim(legacy_target_provider)) > 0\
+      \     AND length(btrim(legacy_target_connection)) > 0\
+      \     AND length(btrim(legacy_target_effective_model)) > 0\
+      \     AND length(btrim(legacy_target_dialect)) > 0)\
+      \ )\
+      \ )"
+    , "CREATE INDEX IF NOT EXISTS sessions_updated_at_idx\
+      \ ON harness.sessions (updated_at DESC)\
+      \ WHERE deleted_at IS NULL"
+    , "CREATE TABLE IF NOT EXISTS harness.session_events (\
+      \ event_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
+      \ session_id uuid NOT NULL\
+      \   REFERENCES harness.sessions(session_id),\
+      \ sequence bigint NOT NULL,\
+      \ event_kind text NOT NULL,\
+      \ occurred_at timestamptz NOT NULL,\
+      \ UNIQUE (session_id, sequence)\
+      \ )"
+    , "CREATE INDEX IF NOT EXISTS session_events_session_time_idx\
+      \ ON harness.session_events (session_id, occurred_at DESC)"
+    , "CREATE TABLE IF NOT EXISTS harness.session_turns (\
+      \ turn_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
+      \ session_id uuid NOT NULL\
+      \   REFERENCES harness.sessions(session_id),\
+      \ event_id uuid NOT NULL UNIQUE\
+      \   REFERENCES harness.session_events(event_id),\
+      \ turn_index bigint NOT NULL,\
+      \ event_sequence bigint NOT NULL,\
+      \ occurred_at timestamptz NOT NULL,\
+      \ user_text text NOT NULL,\
+      \ assistant_text text,\
+      \ error_text text,\
+      \ response_id text,\
+      \ usage_input_tokens bigint,\
+      \ usage_output_tokens bigint,\
+      \ usage_cached_tokens bigint,\
+      \ search_vector tsvector GENERATED ALWAYS AS (\
+      \   setweight(to_tsvector('english', coalesce(user_text, '')), 'A') ||\
+      \   setweight(to_tsvector('english', coalesce(assistant_text, '')), 'B')\
+      \ ) STORED,\
+      \ UNIQUE (session_id, turn_index),\
+      \ UNIQUE (session_id, event_sequence),\
+      \ FOREIGN KEY (session_id, event_sequence)\
+      \   REFERENCES harness.session_events(session_id, sequence),\
+      \ CHECK (\
+      \   (usage_input_tokens IS NULL\
+      \     AND usage_output_tokens IS NULL\
+      \     AND usage_cached_tokens IS NULL)\
+      \   OR\
+      \   (usage_input_tokens >= 0\
+      \     AND usage_output_tokens >= 0\
+      \     AND usage_cached_tokens >= 0)\
+      \ )\
+      \ )"
+    , "CREATE INDEX IF NOT EXISTS session_turns_search_idx\
+      \ ON harness.session_turns USING gin (search_vector)"
+    , "CREATE INDEX IF NOT EXISTS session_turns_session_time_idx\
+      \ ON harness.session_turns (session_id, occurred_at DESC)"
+    ]
+    <> sessionItemSchemaStatements
+    <> [ "CREATE TABLE IF NOT EXISTS harness.legacy_session_imports (\
        \ import_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
        \ source_path text NOT NULL,\
        \ content_hash text NOT NULL,\
@@ -183,137 +278,115 @@ sessionSchemaStatements =
        \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
        ]
 
-migrateSessionSchema :: StorePool -> IO (Either StoreError ())
-migrateSessionSchema pool =
-    withSession pool
-        (forM_ sessionSchemaStatements (Session.script . Text.decodeUtf8))
-
 createSession
     :: StorePool
-    -> Text
-    -> UTCTime
-    -> Value
+    -> SessionMetadata
     -> IO (Either StoreError Bool)
-createSession pool sessionKey createdAt metadata =
+createSession pool metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
-            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
-            exists <- Transaction.statement sessionKey sessionExistsStatement
+            _ <- Transaction.statement
+                metadata.sessionMetadataKey
+                blockingAdvisoryLockStatement
+            exists <- Transaction.statement
+                metadata.sessionMetadataKey
+                sessionExistsStatement
             if exists
                 then pure False
                 else do
-                    metadataId <- insertNormalizedValue metadata
-                    sessionId <- Transaction.statement
-                        (sessionKey, createdAt, metadataId)
-                        insertSessionStatement
-                    Transaction.statement
-                        (sessionId, 0, "session.created", createdAt, metadataId)
+                    sessionId <- Transaction.statement metadata insertSessionStatement
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = 0
+                            , eventInsertKind = "session.created"
+                            , eventInsertOccurredAt =
+                                metadata.sessionMetadataCreatedAt
+                            }
                         insertEventStatement
                     pure True
 
 replaceSessionMetadata
     :: StorePool
     -> Text
-    -> UTCTime
-    -> Text
-    -> Value
+    -> SessionMetadata
     -> IO (Either StoreError Bool)
-replaceSessionMetadata pool sessionKey occurredAt eventKind metadata =
+replaceSessionMetadata pool eventKind metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
-            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
-            target <- Transaction.statement sessionKey activeSessionStatement
-            case target of
+            _ <- Transaction.statement
+                metadata.sessionMetadataKey
+                blockingAdvisoryLockStatement
+            changed <- Transaction.statement metadata replaceProjectionStatement
+            case changed of
                 Nothing -> pure False
-                Just _ -> do
-                    metadataId <- insertNormalizedValue metadata
-                    changed <- Transaction.statement
-                        (sessionKey, occurredAt, metadataId)
-                        replaceProjectionStatement
-                    case changed of
-                        Nothing -> pure False
-                        Just (sessionId, sequence) -> do
-                            Transaction.statement
-                                ( sessionId
-                                , sequence
-                                , eventKind
-                                , occurredAt
-                                , metadataId
-                                )
-                                insertEventStatement
-                            pure ()
-                            pure True
+                Just (sessionId, sequence) -> do
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind = eventKind
+                            , eventInsertOccurredAt =
+                                metadata.sessionMetadataUpdatedAt
+                            }
+                        insertEventStatement
+                    pure True
 
 appendSessionTurn
     :: StorePool
-    -> Text
-    -> UTCTime
-    -> Value
-    -> Value
+    -> SessionTurn
+    -> SessionMetadata
     -> IO (Either StoreError Bool)
-appendSessionTurn pool sessionKey occurredAt turn metadata =
+appendSessionTurn pool turn metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
-            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
-            target <- Transaction.statement sessionKey activeSessionStatement
-            case target of
+            _ <- Transaction.statement
+                metadata.sessionMetadataKey
+                blockingAdvisoryLockStatement
+            changed <- Transaction.statement metadata appendProjectionStatement
+            case changed of
                 Nothing -> pure False
-                Just _ -> do
-                    turnId <- insertNormalizedValue turn
-                    metadataId <- insertNormalizedValue metadata
-                    changed <- Transaction.statement
-                        (sessionKey, occurredAt, metadataId)
-                        appendProjectionStatement
-                    case changed of
-                        Nothing -> pure False
-                        Just (sessionId, sequence, turnIndex) -> do
-                            eventId <- Transaction.statement
-                                ( sessionId
-                                , sequence
-                                , "turn.appended"
-                                , occurredAt
-                                , turnId
-                                )
-                                insertEventStatement
-                            let (userText, assistantText) = searchableTurnText turn
-                            Transaction.statement
-                                ( sessionId
-                                , eventId
-                                , turnIndex
-                                , sequence
-                                , occurredAt
-                                , userText
-                                , assistantText
-                                , turnId
-                                )
-                                insertTurnStatement
-                            pure True
+                Just (sessionId, sequence, turnIndex) -> do
+                    eventId <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind = "turn.appended"
+                            , eventInsertOccurredAt = turn.sessionTurnOccurredAt
+                            }
+                        insertEventStatement
+                    turnId <- Transaction.statement
+                        TurnInsert
+                            { turnInsertSessionId = sessionId
+                            , turnInsertEventId = eventId
+                            , turnInsertIndex = turnIndex
+                            , turnInsertEventSequence = sequence
+                            , turnInsertTurn = turn
+                            }
+                        insertTurnStatement
+                    insertResponseItems turnId turn.sessionTurnItems
+                    pure True
 
 loadSession
     :: StorePool
     -> Text
     -> IO (Either StoreError (Maybe StoredSession))
 loadSession pool sessionKey =
-    withSession pool $
-        Transactions.transaction Transactions.RepeatableRead Transactions.Read do
-            metadataRoot <- Transaction.statement sessionKey loadMetadataRootStatement
-            case metadataRoot of
-                Nothing -> pure Nothing
-                Just root -> do
-                    metadata <- requireValue "session metadata" root
-                    turnRows <- Transaction.statement sessionKey loadTurnRootsStatement
-                    turns <- forM turnRows \(turnIndex, sequence, at, valueRoot) -> do
-                        payload <- requireValue "session turn" valueRoot
-                        pure StoredTurn
-                            { storedTurnIndex = turnIndex
-                            , storedEventSequence = sequence
-                            , storedOccurredAt = at
-                            , storedTurnPayload = payload
-                            }
-                    pure $ Just StoredSession
-                        { storedMetadata = metadata
-                        , storedTurns = turns
-                        }
+    withSession pool
+        (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
+            metadata <- Transaction.statement sessionKey loadMetadataStatement
+            case metadata of
+                Nothing -> pure (Right Nothing)
+                Just value -> do
+                    rows <- Transaction.statement sessionKey loadTurnsStatement
+                    turns <- forM rows loadStoredTurn
+                    pure do
+                        decodedTurns <- sequence turns
+                        pure $ Just StoredSession
+                            { storedMetadata = value
+                            , storedTurns = decodedTurns
+                            })
+        >>= flattenDataResult
 
 loadSessionEvents
     :: StorePool
@@ -321,23 +394,16 @@ loadSessionEvents
     -> IO (Either StoreError [StoredEvent])
 loadSessionEvents pool sessionKey =
     withSession pool $
-        Transactions.transaction Transactions.RepeatableRead Transactions.Read do
-            rows <- Transaction.statement sessionKey loadEventRootsStatement
-            forM rows \(sequence, kind, at, valueRoot) -> do
-                payload <- requireValue "session event" valueRoot
-                pure StoredEvent
-                    { storedEventSequence = sequence
-                    , storedEventKind = kind
-                    , storedEventOccurredAt = at
-                    , storedEventPayload = payload
-                    }
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement sessionKey loadEventsStatement
 
-listSessionMetadata :: StorePool -> IO (Either StoreError [Value])
+listSessionMetadata
+    :: StorePool
+    -> IO (Either StoreError [SessionMetadata])
 listSessionMetadata pool =
     withSession pool $
-        Transactions.transaction Transactions.RepeatableRead Transactions.Read do
-            roots <- Transaction.statement () listMetadataRootsStatement
-            traverse (requireValue "session metadata") roots
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement () listMetadataStatement
 
 searchConversationTurns
     :: StorePool
@@ -346,7 +412,7 @@ searchConversationTurns
     -> IO (Either StoreError [ConversationSearchResult])
 searchConversationTurns pool query limit =
     withSession pool $
-        Session.statement
+        HasqlSession.statement
             (query, fromIntegral (max 1 (min 100 limit)))
             searchTurnsStatement
 
@@ -359,26 +425,21 @@ deleteSession pool sessionKey occurredAt =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
-            target <- Transaction.statement sessionKey activeSessionStatement
-            case target of
+            changed <- Transaction.statement
+                (sessionKey, occurredAt)
+                deleteProjectionStatement
+            case changed of
                 Nothing -> pure False
-                Just _ -> do
-                    emptyId <- insertNormalizedValue (Object KeyMap.empty)
-                    changed <- Transaction.statement
-                        (sessionKey, occurredAt)
-                        deleteProjectionStatement
-                    case changed of
-                        Nothing -> pure False
-                        Just (sessionId, sequence) -> do
-                            Transaction.statement
-                                ( sessionId
-                                , sequence
-                                , "session.deleted"
-                                , occurredAt
-                                , emptyId
-                                )
-                                insertEventStatement
-                            pure True
+                Just (sessionId, sequence) -> do
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = sequence
+                            , eventInsertKind = "session.deleted"
+                            , eventInsertOccurredAt = occurredAt
+                            }
+                        insertEventStatement
+                    pure True
 
 importLegacySession
     :: StorePool
@@ -387,51 +448,38 @@ importLegacySession
 importLegacySession pool legacy =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
-            _ <- Transaction.statement
-                legacy.legacySessionId
-                blockingAdvisoryLockStatement
-            exists <- Transaction.statement
-                legacy.legacySessionId
-                sessionExistsStatement
+            let metadata = legacy.legacyMetadata
+                sessionKey = metadata.sessionMetadataKey
+            _ <- Transaction.statement sessionKey blockingAdvisoryLockStatement
+            exists <- Transaction.statement sessionKey sessionExistsStatement
             if exists
                 then pure False
                 else do
-                    metadataId <- insertNormalizedValue legacy.legacyMetadata
-                    sessionId <- Transaction.statement
-                        ( legacy.legacySessionId
-                        , legacy.legacyCreatedAt
-                        , metadataId
-                        )
-                        insertSessionStatement
-                    Transaction.statement
-                        ( sessionId
-                        , 0
-                        , "session.created"
-                        , legacy.legacyCreatedAt
-                        , metadataId
-                        )
+                    sessionId <- Transaction.statement metadata insertSessionStatement
+                    _ <- Transaction.statement
+                        EventInsert
+                            { eventInsertSessionId = sessionId
+                            , eventInsertSequence = 0
+                            , eventInsertKind = "session.created"
+                            , eventInsertOccurredAt =
+                                metadata.sessionMetadataCreatedAt
+                            }
                         insertEventStatement
-                    forM_ legacy.legacyTurns \(at, turn) -> do
-                        appended <- appendTurnTransaction
-                            legacy.legacySessionId at turn legacy.legacyMetadata
+                    forM_ legacy.legacyTurns \turn -> do
+                        appended <- appendTurnTransaction turn metadata
                         unless appended Transaction.condemn
-                    finalMetadataId <- insertNormalizedValue legacy.legacyMetadata
-                    changed <- Transaction.statement
-                        ( legacy.legacySessionId
-                        , legacy.legacyUpdatedAt
-                        , finalMetadataId
-                        )
-                        replaceProjectionStatement
+                    changed <- Transaction.statement metadata replaceProjectionStatement
                     case changed of
                         Nothing -> Transaction.condemn
                         Just (internalId, sequence) -> do
                             _ <- Transaction.statement
-                                ( internalId
-                                , sequence
-                                , "legacy.import_completed"
-                                , legacy.legacyUpdatedAt
-                                , finalMetadataId
-                                )
+                                EventInsert
+                                    { eventInsertSessionId = internalId
+                                    , eventInsertSequence = sequence
+                                    , eventInsertKind = "legacy.import_completed"
+                                    , eventInsertOccurredAt =
+                                        metadata.sessionMetadataUpdatedAt
+                                    }
                                 insertEventStatement
                             pure ()
                     Transaction.statement
@@ -452,52 +500,110 @@ withSessionAdvisoryLock pool sessionId action =
             acquired <- Transaction.statement sessionId tryAdvisoryLockStatement
             if acquired then Just <$> action else pure Nothing
 
-appendTurnTransaction :: Text -> UTCTime -> Value -> Value -> Transaction.Transaction Bool
-appendTurnTransaction sessionKey occurredAt turn metadata = do
-    turnId <- insertNormalizedValue turn
-    metadataId <- insertNormalizedValue metadata
-    changed <- Transaction.statement
-        (sessionKey, occurredAt, metadataId)
-        appendProjectionStatement
+appendTurnTransaction
+    :: SessionTurn
+    -> SessionMetadata
+    -> Transaction.Transaction Bool
+appendTurnTransaction turn metadata = do
+    changed <- Transaction.statement metadata appendProjectionStatement
     case changed of
         Nothing -> pure False
         Just (sessionId, sequence, turnIndex) -> do
             eventId <- Transaction.statement
-                (sessionId, sequence, "turn.appended", occurredAt, turnId)
+                EventInsert
+                    { eventInsertSessionId = sessionId
+                    , eventInsertSequence = sequence
+                    , eventInsertKind = "turn.appended"
+                    , eventInsertOccurredAt = turn.sessionTurnOccurredAt
+                    }
                 insertEventStatement
-            let (userText, assistantText) = searchableTurnText turn
-            Transaction.statement
-                ( sessionId
-                , eventId
-                , turnIndex
-                , sequence
-                , occurredAt
-                , userText
-                , assistantText
-                , turnId
-                )
+            turnId <- Transaction.statement
+                TurnInsert
+                    { turnInsertSessionId = sessionId
+                    , turnInsertEventId = eventId
+                    , turnInsertIndex = turnIndex
+                    , turnInsertEventSequence = sequence
+                    , turnInsertTurn = turn
+                    }
                 insertTurnStatement
+            insertResponseItems turnId turn.sessionTurnItems
             pure True
 
-requireValue :: Text -> Text -> Transaction.Transaction Value
-requireValue _label = loadNormalizedValueRequired
+data EventInsert = EventInsert
+    { eventInsertSessionId :: !Text
+    , eventInsertSequence :: !Int64
+    , eventInsertKind :: !Text
+    , eventInsertOccurredAt :: !UTCTime
+    }
 
-searchableTurnText :: Value -> (Text, Maybe Text)
-searchableTurnText = \case
-    Object object ->
-        ( textField "userText" object
-        , optionalTextField "assistantText" object
-        )
-    _ -> ("", Nothing)
-  where
-    textField name object =
-        case KeyMap.lookup (Key.fromText name) object of
-            Just (String value) -> value
-            _ -> ""
-    optionalTextField name object =
-        case KeyMap.lookup (Key.fromText name) object of
-            Just (String value) -> Just value
-            _ -> Nothing
+data TurnInsert = TurnInsert
+    { turnInsertSessionId :: !Text
+    , turnInsertEventId :: !Text
+    , turnInsertIndex :: !Int64
+    , turnInsertEventSequence :: !Int64
+    , turnInsertTurn :: !SessionTurn
+    }
+
+data TurnRow = TurnRow
+    { turnRowId :: !Text
+    , turnRowIndex :: !Int64
+    , turnRowEventSequence :: !Int64
+    , turnRowOccurredAt :: !UTCTime
+    , turnRowUserText :: !Text
+    , turnRowAssistantText :: !(Maybe Text)
+    , turnRowError :: !(Maybe Text)
+    , turnRowResponseId :: !(Maybe Text)
+    , turnRowUsageInput :: !(Maybe Int64)
+    , turnRowUsageOutput :: !(Maybe Int64)
+    , turnRowUsageCached :: !(Maybe Int64)
+    }
+
+loadStoredTurn :: TurnRow -> Transaction.Transaction (Either Text StoredTurn)
+loadStoredTurn row = do
+    items <- loadResponseItems row.turnRowId
+    pure do
+        decodedItems <- items
+        usage <- decodeUsage
+            row.turnRowUsageInput
+            row.turnRowUsageOutput
+            row.turnRowUsageCached
+        pure StoredTurn
+            { storedTurnIndex = row.turnRowIndex
+            , storedEventSequence = row.turnRowEventSequence
+            , storedTurn = SessionTurn
+                { sessionTurnOccurredAt = row.turnRowOccurredAt
+                , sessionTurnUserText = row.turnRowUserText
+                , sessionTurnAssistantText = row.turnRowAssistantText
+                , sessionTurnError = row.turnRowError
+                , sessionTurnResponseId = row.turnRowResponseId
+                , sessionTurnItems = decodedItems
+                , sessionTurnUsage = usage
+                }
+            }
+
+decodeUsage
+    :: Maybe Int64
+    -> Maybe Int64
+    -> Maybe Int64
+    -> Either Text (Maybe SessionUsage)
+decodeUsage input output cached =
+    case (input, output, cached) of
+        (Nothing, Nothing, Nothing) -> Right Nothing
+        (Just input', Just output', Just cached') ->
+            Right $ Just SessionUsage
+                { sessionUsageInputTokens = input'
+                , sessionUsageOutputTokens = output'
+                , sessionUsageCachedTokens = cached'
+                }
+        _ -> Left "stored session turn has partial usage counters"
+
+flattenDataResult
+    :: Either StoreError (Either Text a)
+    -> IO (Either StoreError a)
+flattenDataResult = pure . \case
+    Left err -> Left err
+    Right (Left err) -> Left (StoreDataError err)
+    Right (Right value) -> Right value
 
 sessionExistsStatement :: Statement Text Bool
 sessionExistsStatement = mkStatement
@@ -506,152 +612,191 @@ sessionExistsStatement = mkStatement
     boolResult
     True
 
-activeSessionStatement :: Statement Text (Maybe Text)
-activeSessionStatement = mkStatement
-    "SELECT session_id::text FROM harness.sessions\
-    \ WHERE session_key = $1 AND deleted_at IS NULL"
-    textParam
-    (Decoders.rowMaybe textColumn)
-    True
-
-insertSessionStatement :: Statement (Text, UTCTime, Text) Text
+insertSessionStatement :: Statement SessionMetadata Text
 insertSessionStatement = mkStatement
-    "INSERT INTO harness.sessions\
-    \ (session_key, created_at, updated_at, metadata_value_id)\
-    \ VALUES ($1, $2, $2, $3::uuid)\
-    \ RETURNING session_id::text"
-    ( ((\(value, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _) -> value) >$< timeParam)
-        <> ((\(_, _, value) -> value) >$< textParam)
-    )
+    "INSERT INTO harness.sessions (\
+    \ session_key, session_schema_version, created_at, updated_at,\
+    \ provider, connection_id, model_id, transport_model_id, dialect,\
+    \ legacy_target_provider, legacy_target_connection,\
+    \ legacy_target_effective_model, legacy_target_dialect,\
+    \ cwd, effort, title, title_is_manual, title_refresh_index,\
+    \ title_user_turns, last_response_id, input_tokens, output_tokens,\
+    \ cached_tokens\
+    \ ) VALUES (\
+    \ $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,\
+    \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23\
+    \ ) RETURNING session_id::text"
+    metadataParams
     textSingleResult
     True
 
 replaceProjectionStatement
-    :: Statement (Text, UTCTime, Text) (Maybe (Text, Int64))
+    :: Statement SessionMetadata (Maybe (Text, Int64))
 replaceProjectionStatement = mkStatement
-    "UPDATE harness.sessions\
-    \ SET updated_at = $2, metadata_value_id = $3::uuid,\
-    \     next_event_sequence = next_event_sequence + 1\
-    \ WHERE session_key = $1 AND deleted_at IS NULL\
-    \ RETURNING session_id::text, next_event_sequence - 1"
-    ( ((\(value, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _) -> value) >$< timeParam)
-        <> ((\(_, _, value) -> value) >$< textParam)
-    )
+    (metadataUpdateSql
+        <> ", next_event_sequence = next_event_sequence + 1\
+           \ WHERE session_key = $1 AND deleted_at IS NULL\
+           \ RETURNING session_id::text, next_event_sequence - 1")
+    metadataParams
     (Decoders.rowMaybe $
         (,)
             <$> textColumn
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+            <*> int64Column)
     True
 
 appendProjectionStatement
-    :: Statement (Text, UTCTime, Text) (Maybe (Text, Int64, Int64))
+    :: Statement SessionMetadata (Maybe (Text, Int64, Int64))
 appendProjectionStatement = mkStatement
-    "UPDATE harness.sessions\
-    \ SET updated_at = $2, metadata_value_id = $3::uuid,\
-    \     next_event_sequence = next_event_sequence + 1,\
-    \     next_turn_index = next_turn_index + 1\
-    \ WHERE session_key = $1 AND deleted_at IS NULL\
-    \ RETURNING session_id::text, next_event_sequence - 1,\
-    \   next_turn_index - 1"
-    ( ((\(value, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _) -> value) >$< timeParam)
-        <> ((\(_, _, value) -> value) >$< textParam)
-    )
+    (metadataUpdateSql
+        <> ", next_event_sequence = next_event_sequence + 1\
+           \, next_turn_index = next_turn_index + 1\
+           \ WHERE session_key = $1 AND deleted_at IS NULL\
+           \ RETURNING session_id::text, next_event_sequence - 1,\
+           \ next_turn_index - 1")
+    metadataParams
     (Decoders.rowMaybe $
         (,,)
             <$> textColumn
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+            <*> int64Column
+            <*> int64Column)
     True
 
-insertEventStatement
-    :: Statement (Text, Int64, Text, UTCTime, Text) Text
+metadataUpdateSql :: Text
+metadataUpdateSql =
+    "UPDATE harness.sessions SET\
+    \ session_schema_version = $2, created_at = $3, updated_at = $4,\
+    \ provider = $5, connection_id = $6, model_id = $7,\
+    \ transport_model_id = $8, dialect = $9,\
+    \ legacy_target_provider = $10, legacy_target_connection = $11,\
+    \ legacy_target_effective_model = $12, legacy_target_dialect = $13,\
+    \ cwd = $14, effort = $15, title = $16, title_is_manual = $17,\
+    \ title_refresh_index = $18, title_user_turns = $19,\
+    \ last_response_id = $20, input_tokens = $21, output_tokens = $22,\
+    \ cached_tokens = $23"
+
+insertEventStatement :: Statement EventInsert Text
 insertEventStatement = mkStatement
     "INSERT INTO harness.session_events\
-    \ (session_id, sequence, event_kind, occurred_at, payload_value_id)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5::uuid)\
+    \ (session_id, sequence, event_kind, occurred_at)\
+    \ VALUES ($1::uuid, $2, $3, $4)\
     \ RETURNING event_id::text"
-    ( ((\(value, _, _, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _, _, _) -> value) >$< int64Param)
-        <> ((\(_, _, value, _, _) -> value) >$< textParam)
-        <> ((\(_, _, _, value, _) -> value) >$< timeParam)
-        <> ((\(_, _, _, _, value) -> value) >$< textParam)
+    ( ((.eventInsertSessionId) >$< textParam)
+        <> ((.eventInsertSequence) >$< int64Param)
+        <> ((.eventInsertKind) >$< textParam)
+        <> ((.eventInsertOccurredAt) >$< timeParam)
     )
     textSingleResult
     True
 
-insertTurnStatement
-    :: Statement
-        (Text, Text, Int64, Int64, UTCTime, Text, Maybe Text, Text)
-        ()
+insertTurnStatement :: Statement TurnInsert Text
 insertTurnStatement = mkStatement
-    "INSERT INTO harness.session_turns\
-    \ (session_id, event_id, turn_index, event_sequence, occurred_at,\
-    \  user_text, assistant_text, turn_value_id)\
-    \ VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::uuid)"
-    ( ((\(value, _, _, _, _, _, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _, _, _, _, _, _) -> value) >$< textParam)
-        <> ((\(_, _, value, _, _, _, _, _) -> value) >$< int64Param)
-        <> ((\(_, _, _, value, _, _, _, _) -> value) >$< int64Param)
-        <> ((\(_, _, _, _, value, _, _, _) -> value) >$< timeParam)
-        <> ((\(_, _, _, _, _, value, _, _) -> value) >$< textParam)
-        <> ((\(_, _, _, _, _, _, value, _) -> value) >$< nullableTextParam)
-        <> ((\(_, _, _, _, _, _, _, value) -> value) >$< textParam)
+    "INSERT INTO harness.session_turns (\
+    \ session_id, event_id, turn_index, event_sequence, occurred_at,\
+    \ user_text, assistant_text, error_text, response_id,\
+    \ usage_input_tokens, usage_output_tokens, usage_cached_tokens\
+    \ ) VALUES (\
+    \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12\
+    \ ) RETURNING turn_id::text"
+    ( ((.turnInsertSessionId) >$< textParam)
+        <> ((.turnInsertEventId) >$< textParam)
+        <> ((.turnInsertIndex) >$< int64Param)
+        <> ((.turnInsertEventSequence) >$< int64Param)
+        <> (turnOccurredAt >$< timeParam)
+        <> (turnUserText >$< textParam)
+        <> (turnAssistantText >$< nullableTextParam)
+        <> (turnError >$< nullableTextParam)
+        <> (turnResponseId >$< nullableTextParam)
+        <> ((usageField (.sessionUsageInputTokens) . (.turnInsertTurn))
+            >$< nullableInt64Param)
+        <> ((usageField (.sessionUsageOutputTokens) . (.turnInsertTurn))
+            >$< nullableInt64Param)
+        <> ((usageField (.sessionUsageCachedTokens) . (.turnInsertTurn))
+            >$< nullableInt64Param)
     )
-    Decoders.noResult
+    textSingleResult
     True
+  where
+    usageField
+        :: (SessionUsage -> Int64)
+        -> SessionTurn
+        -> Maybe Int64
+    usageField field turn = field <$> turn.sessionTurnUsage
+    turnOccurredAt :: TurnInsert -> UTCTime
+    turnOccurredAt value = value.turnInsertTurn.sessionTurnOccurredAt
+    turnUserText :: TurnInsert -> Text
+    turnUserText value = value.turnInsertTurn.sessionTurnUserText
+    turnAssistantText :: TurnInsert -> Maybe Text
+    turnAssistantText value = value.turnInsertTurn.sessionTurnAssistantText
+    turnError :: TurnInsert -> Maybe Text
+    turnError value = value.turnInsertTurn.sessionTurnError
+    turnResponseId :: TurnInsert -> Maybe Text
+    turnResponseId value = value.turnInsertTurn.sessionTurnResponseId
 
-loadMetadataRootStatement :: Statement Text (Maybe Text)
-loadMetadataRootStatement = mkStatement
-    "SELECT metadata_value_id::text FROM harness.sessions\
-    \ WHERE session_key = $1 AND deleted_at IS NULL"
+loadMetadataStatement :: Statement Text (Maybe SessionMetadata)
+loadMetadataStatement = mkStatement
+    (metadataSelectSql
+        <> " WHERE session_key = $1 AND deleted_at IS NULL")
     textParam
-    (Decoders.rowMaybe textColumn)
+    (Decoders.rowMaybe metadataRow)
     True
 
-loadTurnRootsStatement :: Statement Text [(Int64, Int64, UTCTime, Text)]
-loadTurnRootsStatement = mkStatement
-    "SELECT t.turn_index, t.event_sequence, t.occurred_at,\
-    \ t.turn_value_id::text\
+listMetadataStatement :: Statement () [SessionMetadata]
+listMetadataStatement = mkStatement
+    (metadataSelectSql
+        <> " WHERE deleted_at IS NULL\
+           \ ORDER BY updated_at DESC, session_key ASC")
+    Encoders.noParams
+    (Decoders.rowList metadataRow)
+    True
+
+metadataSelectSql :: Text
+metadataSelectSql =
+    "SELECT session_key, session_schema_version, created_at, updated_at,\
+    \ provider, connection_id, model_id, transport_model_id, dialect,\
+    \ legacy_target_provider, legacy_target_connection,\
+    \ legacy_target_effective_model, legacy_target_dialect,\
+    \ cwd, effort, title, title_is_manual, title_refresh_index,\
+    \ title_user_turns, last_response_id, input_tokens, output_tokens,\
+    \ cached_tokens FROM harness.sessions"
+
+loadTurnsStatement :: Statement Text [TurnRow]
+loadTurnsStatement = mkStatement
+    "SELECT t.turn_id::text, t.turn_index, t.event_sequence, t.occurred_at,\
+    \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
+    \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
     \ WHERE s.session_key = $1\
     \ ORDER BY t.turn_index ASC"
     textParam
     (Decoders.rowList $
-        (,,,)
-            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-            <*> textColumn)
+        TurnRow
+            <$> textColumn
+            <*> int64Column
+            <*> int64Column
+            <*> timeColumn
+            <*> textColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn
+            <*> nullableInt64Column
+            <*> nullableInt64Column
+            <*> nullableInt64Column)
     True
 
-loadEventRootsStatement :: Statement Text [(Int64, Text, UTCTime, Text)]
-loadEventRootsStatement = mkStatement
-    "SELECT e.sequence, e.event_kind, e.occurred_at,\
-    \ e.payload_value_id::text\
+loadEventsStatement :: Statement Text [StoredEvent]
+loadEventsStatement = mkStatement
+    "SELECT e.sequence, e.event_kind, e.occurred_at\
     \ FROM harness.session_events e\
     \ JOIN harness.sessions s ON s.session_id = e.session_id\
     \ WHERE s.session_key = $1\
     \ ORDER BY e.sequence ASC"
     textParam
     (Decoders.rowList $
-        (,,,)
-            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+        StoredEvent
+            <$> int64Column
             <*> textColumn
-            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-            <*> textColumn)
-    True
-
-listMetadataRootsStatement :: Statement () [Text]
-listMetadataRootsStatement = mkStatement
-    "SELECT metadata_value_id::text FROM harness.sessions\
-    \ WHERE deleted_at IS NULL\
-    \ ORDER BY updated_at DESC, session_key ASC"
-    Encoders.noParams
-    (Decoders.rowList textColumn)
+            <*> timeColumn)
     True
 
 deleteProjectionStatement
@@ -668,7 +813,7 @@ deleteProjectionStatement = mkStatement
     (Decoders.rowMaybe $
         (,)
             <$> textColumn
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+            <*> int64Column)
     True
 
 recordLegacyImportStatement :: Statement (Text, Text, Text) Bool
@@ -708,10 +853,10 @@ searchTurnsStatement = mkStatement
     (Decoders.rowList $
         ConversationSearchResult
             <$> textColumn
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> int64Column
+            <*> timeColumn
             <*> textColumn
-            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> nullableTextColumn
             <*> Decoders.column (Decoders.nonNullable Decoders.float8))
     True
 
@@ -731,25 +876,128 @@ tryAdvisoryLockStatement = mkStatement
     boolResult
     True
 
+metadataParams :: Encoders.Params SessionMetadata
+metadataParams =
+    ((.sessionMetadataKey) >$< textParam)
+    <> ((.sessionMetadataVersion) >$< int32Param)
+    <> ((.sessionMetadataCreatedAt) >$< timeParam)
+    <> ((.sessionMetadataUpdatedAt) >$< timeParam)
+    <> ((.sessionMetadataProvider) >$< textParam)
+    <> ((.sessionMetadataConnection) >$< textParam)
+    <> ((.sessionMetadataModel) >$< textParam)
+    <> ((.sessionMetadataTransportModel) >$< nullableTextParam)
+    <> ((.sessionMetadataDialect) >$< textParam)
+    <> ((legacyField (.sessionLegacyProvider)) >$< nullableTextParam)
+    <> ((legacyField (.sessionLegacyConnection)) >$< nullableTextParam)
+    <> ((legacyField (.sessionLegacyEffectiveModel)) >$< nullableTextParam)
+    <> ((legacyField (.sessionLegacyDialect)) >$< nullableTextParam)
+    <> ((.sessionMetadataCwd) >$< textParam)
+    <> ((.sessionMetadataEffort) >$< textParam)
+    <> ((.sessionMetadataTitle) >$< textParam)
+    <> ((.sessionMetadataTitleIsManual) >$< boolParam)
+    <> ((.sessionMetadataTitleRefreshIndex) >$< int64Param)
+    <> ((.sessionMetadataTitleUserTurns) >$< int64Param)
+    <> ((.sessionMetadataLastResponseId) >$< nullableTextParam)
+    <> ((.sessionMetadataInputTokens) >$< int64Param)
+    <> ((.sessionMetadataOutputTokens) >$< int64Param)
+    <> ((.sessionMetadataCachedTokens) >$< int64Param)
+  where
+    legacyField
+        :: (SessionLegacyTarget -> Text)
+        -> SessionMetadata
+        -> Maybe Text
+    legacyField field metadata =
+        field <$> metadata.sessionMetadataLegacyTarget
+
+metadataRow :: Decoders.Row SessionMetadata
+metadataRow =
+    SessionMetadata
+        <$> textColumn
+        <*> int32Column
+        <*> timeColumn
+        <*> timeColumn
+        <*> textColumn
+        <*> textColumn
+        <*> textColumn
+        <*> nullableTextColumn
+        <*> textColumn
+        <*> (decodeLegacyTarget
+            <$> nullableTextColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn
+            <*> nullableTextColumn)
+        <*> textColumn
+        <*> textColumn
+        <*> textColumn
+        <*> boolColumn
+        <*> int64Column
+        <*> int64Column
+        <*> nullableTextColumn
+        <*> int64Column
+        <*> int64Column
+        <*> int64Column
+
+decodeLegacyTarget
+    :: Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe SessionLegacyTarget
+decodeLegacyTarget provider connection model dialect =
+    case (provider, connection, model, dialect) of
+        (Just provider', Just connection', Just model', Just dialect') ->
+            Just SessionLegacyTarget
+                { sessionLegacyProvider = provider'
+                , sessionLegacyConnection = connection'
+                , sessionLegacyEffectiveModel = model'
+                , sessionLegacyDialect = dialect'
+                }
+        _ -> Nothing
+
 textParam :: Encoders.Params Text
 textParam = Encoders.param (Encoders.nonNullable Encoders.text)
 
 nullableTextParam :: Encoders.Params (Maybe Text)
 nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
 
-timeParam :: Encoders.Params UTCTime
-timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
+int32Param :: Encoders.Params Int32
+int32Param = Encoders.param (Encoders.nonNullable Encoders.int4)
 
 int64Param :: Encoders.Params Int64
 int64Param = Encoders.param (Encoders.nonNullable Encoders.int8)
 
+nullableInt64Param :: Encoders.Params (Maybe Int64)
+nullableInt64Param = Encoders.param (Encoders.nullable Encoders.int8)
+
+boolParam :: Encoders.Params Bool
+boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
+
+timeParam :: Encoders.Params UTCTime
+timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
+
 textColumn :: Decoders.Row Text
 textColumn = Decoders.column (Decoders.nonNullable Decoders.text)
+
+nullableTextColumn :: Decoders.Row (Maybe Text)
+nullableTextColumn = Decoders.column (Decoders.nullable Decoders.text)
+
+int32Column :: Decoders.Row Int32
+int32Column = Decoders.column (Decoders.nonNullable Decoders.int4)
+
+int64Column :: Decoders.Row Int64
+int64Column = Decoders.column (Decoders.nonNullable Decoders.int8)
+
+nullableInt64Column :: Decoders.Row (Maybe Int64)
+nullableInt64Column = Decoders.column (Decoders.nullable Decoders.int8)
+
+boolColumn :: Decoders.Row Bool
+boolColumn = Decoders.column (Decoders.nonNullable Decoders.bool)
+
+timeColumn :: Decoders.Row UTCTime
+timeColumn = Decoders.column (Decoders.nonNullable Decoders.timestamptz)
 
 textSingleResult :: Decoders.Result Text
 textSingleResult = Decoders.singleRow textColumn
 
 boolResult :: Decoders.Result Bool
-boolResult =
-    Decoders.singleRow
-        (Decoders.column (Decoders.nonNullable Decoders.bool))
+boolResult = Decoders.singleRow boolColumn

@@ -49,9 +49,6 @@ import Agent.Store.Postgres.Connection
     , openRoleStorePool
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
-import Agent.Store.Postgres.NormalizedValue
-    ( normalizedSupportSchemaStatements
-    )
 import Agent.Store.Types (StoreError)
 
 data ScopeKind
@@ -133,8 +130,7 @@ scopeDatabaseFor scope =
 -- custom roles receive no privileges on these objects.
 customSchemaStatements :: [ByteString.ByteString]
 customSchemaStatements =
-    normalizedSupportSchemaStatements
-    <> [ "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+    [ "CREATE EXTENSION IF NOT EXISTS pgcrypto"
     , "REVOKE ALL ON SCHEMA harness FROM PUBLIC"
     , "REVOKE CREATE ON SCHEMA public FROM PUBLIC"
     , "CREATE TABLE IF NOT EXISTS harness.custom_scopes (\
