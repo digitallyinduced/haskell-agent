@@ -2,10 +2,12 @@
 
 This behavioral eval compares three user-facing configurations:
 
-- **ghci-only**: the default, with `run_ghci` and no explicit shell tool.
-- **bash-only**: the provider shell tool with `run_ghci` disabled.
-- **ghci-plus-bash**: `--bash`, which adds the provider shell tool while
-  retaining `run_ghci`.
+- **ghci-only**: `--ghci --no-bash`, with `run_ghci` and no explicit shell
+  tool.
+- **bash-only**: the default, with the provider shell tool and `run_ghci`
+  disabled.
+- **ghci-plus-bash**: `--ghci`, which adds `run_ghci` while retaining the
+  provider shell tool.
 
 It uses the same user task prompt in all variants. The complete product
 configurations necessarily differ because their tool schemas and matching
