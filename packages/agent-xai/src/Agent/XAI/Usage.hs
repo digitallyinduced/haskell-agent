@@ -3,14 +3,16 @@ module Agent.XAI.Usage
     ( GrokUsageSnapshot(..)
     , decodeGrokUsage
     , fetchGrokUsage
+    , weeklyLimitLeft
     ) where
 
 import Control.Exception.Safe (tryAny)
 import Agent.Provider (Credential(..))
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:))
+import Data.Aeson ((.:), (.:?))
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
+import Data.Maybe (fromMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -21,6 +23,7 @@ import Network.HTTP.Simple
 
 data GrokUsageSnapshot = GrokUsageSnapshot
     { usedPercent :: !Int
+    , periodType :: !Text
     , windowSeconds :: !Int
     , resetsAt :: !UTCTime
     }
@@ -35,25 +38,37 @@ instance Aeson.FromJSON GrokUsageSnapshot where
             creditUsagePercent <-
                 config .: "creditUsagePercent" :: Parser Scientific
             currentPeriod <- config .: "currentPeriod"
-            (startsAt, resetsAt) <-
+            (periodType, startsAt, resetsAt) <-
                 Aeson.withObject "Grok billing period" parsePeriod currentPeriod
             let usedPercent = max 0 (min 100 (floor creditUsagePercent))
                 windowSeconds =
                     max 1 (round (diffUTCTime resetsAt startsAt))
             pure GrokUsageSnapshot
                 { usedPercent
+                , periodType
                 , windowSeconds
                 , resetsAt
                 }
 
         parsePeriod period =
-            (,) <$> period .: "start" <*> period .: "end"
+            (,,)
+                <$> (fromMaybe "" <$> period .:? "type")
+                <*> period .: "start"
+                <*> period .: "end"
 
 decodeGrokUsage :: LBS.ByteString -> Either Text GrokUsageSnapshot
 decodeGrokUsage body = case Aeson.eitherDecode body of
     Left _ ->
         Left "Grok returned an unreadable usage response."
     Right snapshot -> Right snapshot
+
+-- | The fullscreen composer mirrors Grok Build's weekly reserve label only
+-- when the billing service explicitly reports a weekly period.
+weeklyLimitLeft :: GrokUsageSnapshot -> Maybe Int
+weeklyLimitLeft snapshot
+    | snapshot.periodType == "USAGE_PERIOD_TYPE_WEEKLY" =
+        Just (max 0 (100 - snapshot.usedPercent))
+    | otherwise = Nothing
 
 fetchGrokUsage :: Credential -> IO (Either Text GrokUsageSnapshot)
 fetchGrokUsage credential =

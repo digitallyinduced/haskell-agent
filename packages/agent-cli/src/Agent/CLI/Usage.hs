@@ -3,6 +3,9 @@ module Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatAccountUsage
     , formatDuration
+    , formatGrokLimitStatus
+    , formatOpenAiLimitStatus
+    , formatOpenRouterLimitStatus
     , formatUsageReport
     , formatUsageSummary
     , formatUsageWindow
@@ -14,6 +17,10 @@ import Agent.CLI.Error (formatApiErrorInlineAt)
 import Agent.CLI.Style (roleMuted, roleSuccess, roleWarn)
 import Agent.Error (ApiError)
 import Agent.OpenAI.Usage (UsageLimit(..), UsageSnapshot(..), UsageWindow(..))
+import Agent.OpenRouter.Usage (OpenRouterUsage(..))
+import Agent.TUI.Model (PromptLimitStatus(..))
+import Agent.XAI.Usage (GrokUsageSnapshot, weeklyLimitLeft)
+import Control.Applicative ((<|>))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -26,6 +33,87 @@ data AccountUsageLine = AccountUsageLine
     , usageResult :: !(Either ApiError UsageSnapshot)
     }
     deriving (Show)
+
+formatGrokLimitStatus :: GrokUsageSnapshot -> Maybe PromptLimitStatus
+formatGrokLimitStatus snapshot =
+    percentLimitStatus "Weekly limit left" <$> weeklyLimitLeft snapshot
+
+formatOpenAiLimitStatus :: UsageSnapshot -> Maybe PromptLimitStatus
+formatOpenAiLimitStatus snapshot = do
+    limits <- snapshot.rateLimit
+    case limits.secondaryWindow of
+        Just window ->
+            pure $
+                percentLimitStatus
+                    "Weekly limit left"
+                    (remainingWindowPercent window)
+        Nothing ->
+            percentLimitStatus
+                "5h limit left"
+                . remainingWindowPercent
+                <$> limits.primaryWindow
+
+formatOpenRouterLimitStatus :: OpenRouterUsage -> Maybe PromptLimitStatus
+formatOpenRouterLimitStatus usage =
+    keyLimitStatus <|> creditStatus
+  where
+    keyRemaining =
+        usage.keyLimitRemaining
+            <|> ((-) <$> usage.keyLimit <*> usage.keyUsage)
+    keyLimitStatus = case (usage.keyLimit, keyRemaining) of
+        (Just limit, Just remaining)
+            | limit > 0 ->
+                Just $
+                    percentLimitStatus
+                        "Key limit left"
+                        (remainingPercent remaining limit)
+        (_, Just remaining) ->
+            Just (amountLimitStatus "Key limit left" remaining False)
+        _ -> Nothing
+    creditStatus = do
+        credits <- usage.totalCredits
+        spent <- usage.totalUsage
+        let remaining = max 0 (credits - spent)
+            warning
+                | credits <= 0 = remaining <= 0
+                | otherwise = remainingPercent remaining credits <= 10
+        pure (amountLimitStatus "Credits left" remaining warning)
+
+percentLimitStatus :: Text -> Int -> PromptLimitStatus
+percentLimitStatus label remaining =
+    let clamped = max 0 (min 100 remaining)
+    in PromptLimitStatus
+        { promptLimitText =
+            label <> ": " <> Text.pack (show clamped) <> "%"
+        , promptLimitWarning = clamped <= 10
+        }
+
+remainingWindowPercent :: UsageWindow -> Int
+remainingWindowPercent window =
+    max 0 (100 - window.usedPercent)
+
+remainingPercent :: Real a => a -> a -> Int
+remainingPercent remaining total =
+    max 0 $
+        min 100 $
+            round
+                (100 * toRational remaining / toRational total)
+
+amountLimitStatus :: Real a => Text -> a -> Bool -> PromptLimitStatus
+amountLimitStatus label remaining warning =
+    PromptLimitStatus
+        { promptLimitText = label <> ": $" <> formatMoney remaining
+        , promptLimitWarning = warning
+        }
+
+formatMoney :: Real a => a -> Text
+formatMoney amount =
+    let cents = max 0 (round (toRational amount * 100) :: Integer)
+        (dollars, remainder) = cents `divMod` 100
+        centsText
+            | remainder < 10 = "0" <> Text.pack (show remainder)
+            | otherwise = Text.pack (show remainder)
+    in Text.pack (show dollars) <> "." <> centsText
 
 formatUsageReport :: Bool -> UTCTime -> [AccountUsageLine] -> Text
 formatUsageReport color now lines_ =

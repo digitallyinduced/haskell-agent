@@ -7,6 +7,7 @@ module Agent.TUI.Model
     , NoticeKind(..)
     , RetryCountdown(..)
     , PermissionOverlay(..)
+    , PromptLimitStatus(..)
     , PromptState(..)
     , UiBlock(..)
     , UiEvent(..)
@@ -134,6 +135,12 @@ data PermissionOverlay = PermissionOverlay
     }
     deriving (Eq, Show)
 
+data PromptLimitStatus = PromptLimitStatus
+    { promptLimitText :: !Text
+    , promptLimitWarning :: !Bool
+    }
+    deriving (Eq, Show)
+
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
@@ -141,6 +148,7 @@ data PromptState = PromptState
     , promptAccount :: !Text
     , promptAccountSelectable :: !Bool
     , promptUsage :: !TokenUsage
+    , promptLimitStatus :: !(Maybe PromptLimitStatus)
     , promptAttachments :: !Int
     }
     deriving (Eq, Show)
@@ -184,6 +192,7 @@ data UiEvent
     | UiSetDraft !Text !Int
     | UiSetPrompt !PromptState
     | UiSetPromptEffort !Text
+    | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text
     | UiSetNotice !(Maybe UiNotice)
@@ -229,6 +238,7 @@ initialUiState = UiState
         , promptAccount = ""
         , promptAccountSelectable = False
         , promptUsage = emptyTokenUsage
+        , promptLimitStatus = Nothing
         , promptAttachments = 0
         }
     , uiBranch = ""
@@ -309,6 +319,11 @@ reduceUi event state = case event of
     UiSetPromptEffort effort ->
         state
             { uiPrompt = state.uiPrompt { promptEffort = effort }
+            }
+    UiSetPromptLimitStatus limitStatus ->
+        state
+            { uiPrompt =
+                state.uiPrompt { promptLimitStatus = limitStatus }
             }
     UiSetAwaitingInput awaiting ->
         (if awaiting then finalizeStreams state else state)
