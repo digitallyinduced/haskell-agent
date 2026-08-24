@@ -31,7 +31,7 @@ import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Responses.Types
 
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Char (isSpace)
+import Data.Char (isAlphaNum, isSpace)
 import Data.List (find, isPrefixOf, sortOn)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
@@ -559,13 +559,69 @@ slashMenuForWithSkillsAndModels
     -> Int
     -> Maybe SlashMenu
 slashMenuForWithSkillsAndModels skills modelIds text cursor
-    | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
-    | otherwise =
+    | cursor < 1 = Nothing
+    | Text.isPrefixOf "/" text =
         let commandToken = Text.takeWhile (not . isSpace) text
             commandEnd = Text.length commandToken
         in if cursor <= commandEnd
             then commandMenu skills (Text.take cursor text) commandEnd
             else argumentMenu modelIds commandToken commandEnd text cursor
+    | otherwise =
+        skillMentionMenu skills text cursor
+
+skillMentionMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
+skillMentionMenu skills text cursor = do
+    let before = Text.take cursor text
+        token = Text.takeWhileEnd (not . isSpace) before
+        replaceStart = cursor - Text.length token
+    queryToken <- Text.stripPrefix "$" token
+    if Text.any (not . mentionNameChar) queryToken
+        then Nothing
+        else do
+            let query = Text.toLower queryToken
+                scored =
+                    mapMaybe
+                        (\(order, skill) -> do
+                            (score, positions) <-
+                                fuzzyMatch query
+                                    (Text.toLower skill.skillCommandName)
+                            pure (score, order, skill, positions))
+                        (zip [0 :: Int ..] skills)
+                ordered
+                    | Text.null query = scored
+                    | otherwise =
+                        sortOn
+                            (\(score, order, _, _) -> (Down score, order))
+                            scored
+                rows =
+                    [ SlashSuggestion
+                        { slashSuggestionDisplay =
+                            "$" <> skill.skillCommandName
+                        , slashSuggestionReplacement =
+                            "$" <> skill.skillCommandName <> " "
+                        , slashSuggestionSummary =
+                            skill.skillCommandSummary
+                                <> " · skill · "
+                                <> skill.skillCommandSource
+                        , slashSuggestionTakesArguments = True
+                        , slashSuggestionMatchPositions = map (+ 1) positions
+                        }
+                    | (_, _, skill, positions) <- ordered
+                    ]
+                replaceEnd =
+                    cursor
+                        + Text.length
+                            (Text.takeWhile mentionNameChar (Text.drop cursor text))
+            if null rows
+                then Nothing
+                else Just SlashMenu
+                    { slashMenuReplaceStart = replaceStart
+                    , slashMenuReplaceEnd = replaceEnd
+                    , slashMenuSuggestions = rows
+                    }
+  where
+    mentionNameChar char =
+        not (isSpace char) && (char == '-' || char == ':' || isAlphaNum char)
 
 commandMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 commandMenu skills token replaceEnd =
