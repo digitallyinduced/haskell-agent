@@ -13,6 +13,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
@@ -225,6 +226,43 @@ spec = do
                     _ ->
                         expectationFailure
                             "multimodal user input was not persisted"
+
+        it "includes attached files in the Claude prompt fallback" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                result <- timeout 5_000_000 $ do
+                    let filePath = fake.workingDirectory <> "/attachment.txt"
+                    writeFile filePath "file-bytes"
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend ->
+                            submitBackend backend
+                                Nothing
+                                [ UserMultimodalFiles
+                                    { userText = "describe this file"
+                                    , userImages = []
+                                    , userFiles =
+                                        [ FileAttachment
+                                            { fileName = Just "attachment.txt"
+                                            , fileMime = "text/plain"
+                                            , fileBytes = "file-bytes"
+                                            }
+                                        ]
+                                    }
+                                ]
+                                (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "[Attached file]"
+                submitted `shouldContain` "attachment.txt"
+                submitted `shouldContain` "describe this file"
 
         it "converts cumulative modelUsage snapshots to per-turn deltas" $
             withFakeClaude \fake -> do
