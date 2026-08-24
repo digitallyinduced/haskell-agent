@@ -303,9 +303,14 @@ readInlineEditor
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt state
                 editorLoop history entries state
-            EditorPaste pasted ->
-                continue history entries
-                    (insertText pasted state) { editorPasted = True }
+            EditorPaste pasted -> do
+                finishEditorLine prompt state
+                let pastedState =
+                        (insertText pasted state) { editorPasted = True }
+                pure $ ReplClipboardPasteOrText
+                    state.editorText
+                    pasted
+                    pastedState.editorText
             EditorInputError message -> do
                 finishEditorLine prompt state
                 Text.putStrLn ("input ignored: " <> message)

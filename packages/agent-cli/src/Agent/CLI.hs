@@ -4213,9 +4213,14 @@ replWithDraft env@SessionEnv
                                         (roleMuted stdoutColor
                                             (glyphOk <> message))
             continueWith keptDraft
-        ReplClipboardPasteOrText keptDraft pastedDraft -> do
-            imagesResult <- readClipboardImagesImageFirst
-            case nonEmptyClipboardImages imagesResult of
+        ReplClipboardPasteOrText keptDraft pasted pastedDraft -> do
+            pastedImages <- loadImagesFromPastedText pasted
+            imagesResult <- case pastedImages of
+                Just images@(_:_) -> pure (Just images)
+                _ ->
+                    nonEmptyClipboardImages
+                        <$> readClipboardImagesImageFirst
+            case imagesResult of
                 Just images -> do
                     message <- queueAttachedImages
                         attachmentsRef
@@ -4230,7 +4235,7 @@ replWithDraft env@SessionEnv
                             (roleMuted stdoutColor
                                 (glyphOk <> message))
                     continueWith keptDraft
-                Nothing -> do
+                _ -> do
                     fullscreenEvent (UiSetNotice Nothing)
                     continueWith pastedDraft
         ReplChooseModel keptDraft -> do
