@@ -148,18 +148,32 @@ spec = do
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
 
     describe "fullscreenVtyConfig" do
-        it "maps enhanced-keyboard Shift+Enter sequences before Vty decodes them" do
-            V.configInputMap fullscreenVtyConfig
-                `shouldMatchList`
-                    [ ( Nothing
-                      , "\ESC[27;2;13~"
-                      , V.EvKey V.KEnter [V.MShift]
-                      )
-                    , ( Nothing
-                      , "\ESC[13;2u"
-                      , V.EvKey V.KEnter [V.MShift]
-                      )
-                    ]
+        it "maps enhanced-keyboard sequences before Vty decodes them" do
+            let mappings = V.configInputMap fullscreenVtyConfig
+            mappings `shouldContain`
+                [ ( Nothing
+                  , "\ESC[27;2;13~"
+                  , V.EvKey V.KEnter [V.MShift]
+                  )
+                , ( Nothing
+                  , "\ESC[13;2u"
+                  , V.EvKey V.KEnter [V.MShift]
+                  )
+                ]
+            mappings `shouldContain`
+                [ ( Nothing
+                  , "\ESC[118;5u"
+                  , V.EvKey (V.KChar 'v') [V.MCtrl]
+                  )
+                , ( Nothing
+                  , "\ESC[118;9u"
+                  , V.EvKey (V.KChar 'v') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[118:86:86;9:1u"
+                  , V.EvKey (V.KChar 'v') [V.MMeta]
+                  )
+                ]
 
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
