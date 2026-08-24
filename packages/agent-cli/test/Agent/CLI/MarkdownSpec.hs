@@ -204,10 +204,10 @@ spec = do
         it "preserves a trailing newline" do
             renderMarkdown True "hi\n" `shouldSatisfy` Text.isSuffixOf "\n"
 
-        it "restores the agent wash after inline spans" do
+        it "restores the terminal default background after inline spans" do
             let out = renderMarkdown True "see `file.txt` now"
-            -- Nested Reset must re-open Solarized base03 so line painting sticks.
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;0;43;54m"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[1;36m"
+            out `shouldSatisfy` (not . Text.isInfixOf "48;")
 
     describe "splitMarkdownFragment" do
         it "holds a bold span until its closing delimiter arrives" do

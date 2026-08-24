@@ -422,7 +422,7 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` Text.isInfixOf "hello"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
-                body `shouldSatisfy` Text.isInfixOf "\ESC[48;2;0;43;54m"
+                body `shouldSatisfy` (not . Text.isInfixOf "48;")
                 body `shouldSatisfy` (not . Text.isInfixOf "**")
                 readIORef config.renderLiveActive `shouldReturn` False
 
@@ -435,7 +435,6 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "first "
                 body `shouldSatisfy` Text.isInfixOf "second"
                 Text.count "first " body `shouldBe` 1
-                body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC7")
                 body `shouldSatisfy` (not . Text.isInfixOf "\ESC8")
 

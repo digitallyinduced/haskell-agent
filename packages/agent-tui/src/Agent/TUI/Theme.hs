@@ -45,7 +45,7 @@ module Agent.TUI.Theme
     , waitingMidAttr
     , completionFlashAttr
     , monochrome
-    , solarizedDark
+    , terminalDefault
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
@@ -124,132 +124,60 @@ waitingDimAttr = attrName "waiting-dim"
 waitingMidAttr = attrName "waiting-mid"
 completionFlashAttr = attrName "completion-flash"
 
-solarizedDark :: AttrMap
-solarizedDark =
-    attrMap
-        (V.defAttr
-            `V.withForeColor` rgb 131 148 150
-            `V.withBackColor` rgb 0 43 54)
-        [ (baseAttr, V.defAttr
-            `V.withForeColor` rgb 131 148 150
-            `V.withBackColor` rgb 0 43 54)
-        , (headerAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 0 43 54)
-        , (footerAttr, V.defAttr
-            `V.withForeColor` rgb 88 110 117
-            `V.withBackColor` rgb 0 43 54)
-        , (mutedAttr, V.defAttr
-            `V.withForeColor` rgb 88 110 117
-            `V.withBackColor` rgb 0 43 54)
-        , (userAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 7 54 66)
-        , (assistantAttr, V.defAttr
-            `V.withForeColor` rgb 131 148 150
-            `V.withBackColor` rgb 0 43 54)
-        , (thinkingAttr, V.defAttr
-            `V.withForeColor` rgb 181 137 0
-            `V.withBackColor` rgb 0 43 54)
-        , (waitingDimAttr, V.defAttr
-            `V.withForeColor` rgb 101 83 0
-            `V.withBackColor` rgb 0 43 54)
-        , (waitingMidAttr, V.defAttr
-            `V.withForeColor` rgb 150 112 0
-            `V.withBackColor` rgb 0 43 54)
-        , (toolAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
-            `V.withBackColor` rgb 0 43 54)
-        , (errorAttr, V.defAttr
-            `V.withForeColor` rgb 220 50 47
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (successAttr, V.defAttr
-            `V.withForeColor` rgb 133 153 0
-            `V.withBackColor` rgb 0 43 54)
-        , (completionFlashAttr, V.defAttr
-            `V.withForeColor` rgb 181 196 0
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (selectedAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 7 54 66)
-        -- Persistent UI chrome stays on Solarized's base ramp. Saturated
-        -- accents are reserved for semantic content and exceptional states.
-        , (borderAttr, V.defAttr
-            `V.withForeColor` rgb 88 110 117
-            `V.withBackColor` rgb 0 43 54)
-        , (borderActiveAttr, V.defAttr
-            `V.withForeColor` rgb 101 123 131
-            `V.withBackColor` rgb 0 43 54)
-        , (headingAttr, V.defAttr
-            `V.withForeColor` rgb 211 54 130
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (codeAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
-            -- Keep fenced code distinct from the terminal's Solarized
-            -- selection background so native drag selections stay visible.
-            `V.withBackColor` codeBlockBackground)
-        , (dimAttr, V.defAttr
-            `V.withForeColor` rgb 88 110 117
-            `V.withBackColor` rgb 0 43 54)
-        , (emphasisAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.italic)
-        , (inlineCodeAttr, V.defAttr
-            `V.withForeColor` rgb 42 161 152
-            `V.withBackColor` rgb 7 54 66)
-        , (lambdaDimAttr, V.defAttr
-            `V.withForeColor` rgb 69 94 100
-            `V.withBackColor` rgb 0 43 54)
-        , (lambdaTrailAttr, V.defAttr
-            `V.withForeColor` rgb 88 110 117
-            `V.withBackColor` rgb 0 43 54)
-        , (lambdaGlowAttr, V.defAttr
-            `V.withForeColor` rgb 101 123 131
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (lambdaSparkAttr, V.defAttr
-            `V.withForeColor` rgb 131 148 150
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (linkAttr, V.defAttr
-            `V.withForeColor` rgb 38 139 210
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.underline)
-        , (strongAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.bold)
-        , (controlLinkAttr, V.defAttr
-            `V.withForeColor` rgb 101 123 131
-            `V.withBackColor` rgb 0 43 54)
-        , (controlLinkHoverAttr, V.defAttr
-            `V.withForeColor` rgb 131 148 150
-            `V.withBackColor` rgb 0 43 54
-            `V.withStyle` V.underline)
-        , (controlLinkActiveAttr, V.defAttr
-            `V.withForeColor` rgb 147 161 161
-            `V.withBackColor` rgb 7 54 66
-            `V.withStyle` V.bold)
-        , (syntaxNormalAttr, codeColor 42 161 152)
-        , (syntaxKeywordAttr, codeColor 211 54 130)
-        , (syntaxTypeAttr, codeColor 181 137 0)
-        , (syntaxFunctionAttr, codeColor 38 139 210)
-        , (syntaxVariableAttr, codeColor 42 161 152)
-        , (syntaxStringAttr, codeColor 42 161 152)
-        , (syntaxNumberAttr, codeColor 108 113 196)
+-- | Theme using only the terminal's default foreground/background and its
+-- configurable ANSI palette. Ghostty themes therefore apply directly,
+-- including automatic light/dark theme switching.
+terminalDefault :: AttrMap
+terminalDefault =
+    attrMap V.defAttr
+        [ (baseAttr, V.defAttr)
+        , (headerAttr, V.defAttr `V.withStyle` V.bold)
+        , (footerAttr, palette V.brightBlack)
+        , (mutedAttr, palette V.brightBlack)
+        , (userAttr, V.defAttr `V.withStyle` V.bold)
+        , (assistantAttr, V.defAttr)
+        , (thinkingAttr, palette V.yellow)
+        , (waitingDimAttr, palette V.brightBlack)
+        , (waitingMidAttr, palette V.yellow)
+        , (toolAttr, palette V.cyan)
+        , (errorAttr, palette V.red `V.withStyle` V.bold)
+        , (successAttr, palette V.green)
+        , (completionFlashAttr,
+            palette V.brightGreen `V.withStyle` V.bold)
+        , (selectedAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (borderAttr, palette V.brightBlack)
+        , (borderActiveAttr, V.defAttr)
+        , (headingAttr, palette V.magenta `V.withStyle` V.bold)
+        , (codeAttr, palette V.cyan)
+        , (dimAttr, palette V.brightBlack)
+        , (emphasisAttr, V.defAttr `V.withStyle` V.italic)
+        , (inlineCodeAttr, palette V.cyan `V.withStyle` V.reverseVideo)
+        , (lambdaDimAttr, palette V.brightBlack)
+        , (lambdaTrailAttr, palette V.brightBlack)
+        , (lambdaGlowAttr, V.defAttr `V.withStyle` V.bold)
+        , (lambdaSparkAttr,
+            palette V.brightWhite `V.withStyle` V.bold)
+        , (linkAttr, palette V.blue `V.withStyle` V.underline)
+        , (strongAttr, V.defAttr `V.withStyle` V.bold)
+        , (controlLinkAttr, palette V.brightBlack)
+        , (controlLinkHoverAttr, V.defAttr `V.withStyle` V.underline)
+        , (controlLinkActiveAttr, V.defAttr `V.withStyle` V.reverseVideo)
+        , (syntaxNormalAttr, palette V.cyan)
+        , (syntaxKeywordAttr, palette V.magenta)
+        , (syntaxTypeAttr, palette V.yellow)
+        , (syntaxFunctionAttr, palette V.blue)
+        , (syntaxVariableAttr, palette V.cyan)
+        , (syntaxStringAttr, palette V.green)
+        , (syntaxNumberAttr, palette V.brightMagenta)
         , (syntaxCommentAttr,
-            codeColor 88 110 117 `V.withStyle` V.italic)
-        , (syntaxOperatorAttr, codeColor 203 75 22)
-        , (syntaxAnnotationAttr, codeColor 133 153 0)
-        , (syntaxPreprocessorAttr, codeColor 203 75 22)
+            palette V.brightBlack `V.withStyle` V.italic)
+        , (syntaxOperatorAttr, palette V.brightYellow)
+        , (syntaxAnnotationAttr, palette V.green)
+        , (syntaxPreprocessorAttr, palette V.brightYellow)
         , (syntaxWarningAttr,
-            codeColor 181 137 0 `V.withStyle` V.bold)
+            palette V.yellow `V.withStyle` V.bold)
         , (syntaxErrorAttr,
-            codeColor 220 50 47 `V.withStyle` V.bold)
+            palette V.red `V.withStyle` V.bold)
         ]
 
 monochrome :: AttrMap
@@ -303,18 +231,5 @@ monochrome =
             `V.withStyle` (V.bold .|. V.reverseVideo))
         ]
 
-codeColor :: Int -> Int -> Int -> V.Attr
-codeColor r g b =
-    V.defAttr
-        `V.withForeColor` rgb r g b
-        `V.withBackColor` codeBlockBackground
-
-codeBlockBackground :: V.Color
-codeBlockBackground = rgb 0 43 54
-
-rgb :: Int -> Int -> Int -> V.Color
-rgb r g b =
-    V.RGBColor
-        (fromIntegral r)
-        (fromIntegral g)
-        (fromIntegral b)
+palette :: V.Color -> V.Attr
+palette = V.withForeColor V.defAttr

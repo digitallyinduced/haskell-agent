@@ -6,6 +6,10 @@ wrapped for tmux passthrough when `TMUX` is set.
 
 ## Integrated features
 
+- Native theme inheritance: the CLI uses Ghostty's configured foreground,
+  background, and ANSI palette instead of forcing a built-in dark palette.
+  This supports light themes such as `Modus Operandi Tinted` and follows
+  Ghostty's automatic light/dark theme switching.
 - Kitty graphics previews for pasted images.
 - OSC 7 working-directory reporting, including agent worktrees.
 - OSC 8 links for Markdown URLs and absolute tool file paths.

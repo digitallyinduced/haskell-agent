@@ -39,7 +39,7 @@ import Agent.CLI.Style
     , rolePrompt
     , roleSuccess
     , roleWarn
-    , solarizedCyan
+    , terminalCyan
     , style
     )
 import Agent.Tools.PlanMode
@@ -57,7 +57,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Console.ANSI
     ( ConsoleIntensity(..)
-    , ConsoleLayer(..)
     , SGR(..)
     )
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
@@ -289,7 +288,7 @@ formatChoiceLine color selected label
     | selected =
         style color
             [ SetConsoleIntensity BoldIntensity
-            , SetRGBColor Foreground solarizedCyan
+            , terminalCyan
             ]
             label
     | otherwise = roleMuted color label

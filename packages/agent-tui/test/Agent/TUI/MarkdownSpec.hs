@@ -117,7 +117,7 @@ spec = describe "fullscreen Markdown rendering" do
                     toList $
                         displayOpsForPic
                             (renderWidget
-                                (Just Theme.solarizedDark)
+                                (Just Theme.terminalDefault)
                                 [widget]
                                 region)
                             region
@@ -127,7 +127,7 @@ spec = describe "fullscreen Markdown rendering" do
                 Just
                     (attrMapLookup
                         Theme.inlineCodeAttr
-                        Theme.solarizedDark
+                        Theme.terminalDefault
                         `V.withStyle` V.bold)
 
     it "leaves unmatched delimiters visible" do
@@ -141,7 +141,7 @@ spec = describe "fullscreen Markdown rendering" do
                     toList $
                         displayOpsForPic
                             (renderWidget
-                                (Just Theme.solarizedDark)
+                                (Just Theme.terminalDefault)
                                 [markdownWidget input :: Widget ()]
                                 region)
                             region
@@ -150,11 +150,11 @@ spec = describe "fullscreen Markdown rendering" do
         fmap spanAttr headingSpan
             `shouldBe`
                 Just
-                    (attrMapLookup Theme.headingAttr Theme.solarizedDark)
+                    (attrMapLookup Theme.headingAttr Theme.terminalDefault)
         fmap spanAttr quoteSpan
             `shouldBe`
                 Just
-                    (attrMapLookup Theme.mutedAttr Theme.solarizedDark)
+                    (attrMapLookup Theme.mutedAttr Theme.terminalDefault)
 
     it "preserves nested list indentation and compact blockquotes" do
         renderRows 40 "- parent\n  - child\n    1. grandchild\n>quote"
@@ -273,15 +273,15 @@ spec = describe "fullscreen Markdown rendering" do
                                     input
                         in show $
                             renderWidget
-                                (Just Theme.solarizedDark)
+                                (Just Theme.terminalDefault)
                                 [widget]
                                 (80, 8)
                     closed =
                         render "```haskell\nmain = putStrLn \"hello\"\n```"
                     open =
                         render "```haskell\nmain = putStrLn \"hello\""
-                closed `shouldSatisfy` isInfixOf "RGBColor 38 139 210"
-                open `shouldSatisfy` (not . isInfixOf "RGBColor 38 139 210")
+                closed `shouldSatisfy` isInfixOf "ISOColor 4"
+                open `shouldSatisfy` (not . isInfixOf "ISOColor 4")
 
     it "renders thematic breaks inside a vertical viewport" do
         let widget :: Widget ()
@@ -612,12 +612,12 @@ renderedCodePayloadRows width widget =
             toList $
                 displayOpsForPic
                     (renderWidget
-                        (Just Theme.solarizedDark)
+                        (Just Theme.terminalDefault)
                         [widget]
                         region)
                     region
     codeAttr =
-        attrMapLookup Theme.codeAttr Theme.solarizedDark
+        attrMapLookup Theme.codeAttr Theme.terminalDefault
     payloadText row =
         Text.dropEnd 1 $
             Text.drop 1 $
