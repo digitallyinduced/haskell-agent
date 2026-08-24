@@ -55,6 +55,7 @@ data TelegramConfig = TelegramConfig
     , telegramEffort :: !(Maybe Text)
     , telegramYolo :: !Bool
     , telegramAllowedUsers :: !(Set Integer)
+    , telegramRespondToAllGroupMessages :: !Bool
     } deriving (Eq, Show)
 
 instance ToJSON TelegramConfig where
@@ -65,6 +66,8 @@ instance ToJSON TelegramConfig where
         , "effort" .= config.telegramEffort
         , "yolo" .= config.telegramYolo
         , "allowedUsers" .= Set.toList config.telegramAllowedUsers
+        , "respondToAllGroupMessages"
+            .= config.telegramRespondToAllGroupMessages
         ]
 
 instance FromJSON TelegramConfig where
@@ -81,6 +84,7 @@ instance FromJSON TelegramConfig where
             <*> o .:? "effort"
             <*> (o .:? "yolo" .!= False)
             <*> (Set.fromList <$> o .: "allowedUsers")
+            <*> (o .:? "respondToAllGroupMessages" .!= False)
 
 data TelegramSetupOptions = TelegramSetupOptions
     { setupProvider :: !(Maybe Provider)
@@ -89,6 +93,7 @@ data TelegramSetupOptions = TelegramSetupOptions
     , setupEffort :: !(Maybe Text)
     , setupYolo :: !Bool
     , setupAllowedUser :: !(Maybe Integer)
+    , setupRespondToAllGroupMessages :: !Bool
     , setupStart :: !Bool
     } deriving (Eq, Show)
 
@@ -100,6 +105,7 @@ defaultTelegramSetupOptions = TelegramSetupOptions
     , setupEffort = Nothing
     , setupYolo = False
     , setupAllowedUser = Nothing
+    , setupRespondToAllGroupMessages = False
     , setupStart = False
     }
 

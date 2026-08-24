@@ -22,6 +22,7 @@ module Agent.Telegram
     , PendingChatAction(..)
     , emptyTelegramState
     , classifyTelegramUpdate
+    , classifyTelegramUpdateWithMode
     , storeUpdateAction
     , nextPendingAction
     , checkpointPendingVoiceTranscript
@@ -222,6 +223,8 @@ parseSetupOptions = go defaultTelegramSetupOptions
                     go options { setupAllowedUser = Just userId } rest
                 _ -> Left ("invalid Telegram user ID: " <> value)
         "--yolo" : rest -> go options { setupYolo = True } rest
+        "--all-group-messages" : rest ->
+            go options { setupRespondToAllGroupMessages = True } rest
         "--start" : rest -> go options { setupStart = True } rest
         flag : _ -> Left ("unknown setup option: " <> flag <> "\n\n" <> telegramUsage)
 
@@ -251,6 +254,7 @@ telegramUsage = unlines
     , "  --cwd PATH            agent working directory"
     , "  --effort LEVEL        optional reasoning effort"
     , "  --allowed-user ID     numeric Telegram user ID"
+    , "  --all-group-messages  respond to every allowed-user group message"
     , "  --yolo                allow mutating agent tools"
     , "  --start               start the gateway after setup"
     ]
@@ -296,6 +300,8 @@ setupTelegram options = do
             , telegramEffort = options.setupEffort
             , telegramYolo = options.setupYolo
             , telegramAllowedUsers = Set.singleton allowedUser
+            , telegramRespondToAllGroupMessages =
+                options.setupRespondToAllGroupMessages
             }
     createDirectoryIfMissing True directory
     setFileMode (unsafeToFilePath directory) 0o700
@@ -426,6 +432,8 @@ runTelegramWithStore store home config token = do
             { runtimeClient = client
             , runtimeBot = bot
             , runtimeAllowedUsers = config.telegramAllowedUsers
+            , runtimeRespondToAllGroupMessages =
+                config.telegramRespondToAllGroupMessages
             , runtimeGatewayDirectory = gatewayDir
             , runtimePool = trustedPool store
             , runtimeSessionsRoot = root
@@ -523,6 +531,7 @@ data TelegramRuntime = TelegramRuntime
     { runtimeClient :: !TelegramClient
     , runtimeBot :: !TelegramUser
     , runtimeAllowedUsers :: !(Set Integer)
+    , runtimeRespondToAllGroupMessages :: !Bool
     , runtimeGatewayDirectory :: !OsPath
     , runtimePool :: !StorePool
     , runtimeSessionsRoot :: !OsPath
@@ -595,9 +604,10 @@ classifyUpdate
     -> TelegramUpdate
     -> IO TelegramUpdateAction
 classifyUpdate runtime update =
-    pure (classifyTelegramUpdate
+    pure (classifyTelegramUpdateWithMode
         runtime.runtimeBot
         runtime.runtimeAllowedUsers
+        runtime.runtimeRespondToAllGroupMessages
         update)
 
 classifyTelegramUpdate
@@ -605,12 +615,25 @@ classifyTelegramUpdate
     -> Set Integer
     -> TelegramUpdate
     -> TelegramUpdateAction
-classifyTelegramUpdate bot allowedUsers update =
+classifyTelegramUpdate bot allowedUsers =
+    classifyTelegramUpdateWithMode bot allowedUsers False
+
+classifyTelegramUpdateWithMode
+    :: TelegramUser
+    -> Set Integer
+    -> Bool
+    -> TelegramUpdate
+    -> TelegramUpdateAction
+classifyTelegramUpdateWithMode bot allowedUsers respondToAllGroupMessages update =
     case update.updateMessage of
         Just message
             | Just sender <- message.messageFrom
             , sender.userId `Set.member` allowedUsers ->
-                classifyMessage bot sender message
+                classifyMessage
+                    bot
+                    sender
+                    respondToAllGroupMessages
+                    message
         _ -> case update.updateMessageReaction of
             Just reaction
                 | reaction.messageReactionChat.telegramChatType == "private"
@@ -630,9 +653,10 @@ classifyTelegramUpdate bot allowedUsers update =
 classifyMessage
     :: TelegramUser
     -> TelegramUser
+    -> Bool
     -> TelegramMessage
     -> TelegramUpdateAction
-classifyMessage bot sender message =
+classifyMessage bot sender respondToAllGroupMessages message =
     case message.messageChat.telegramChatType of
         "private" -> queueMessage id
         "group" -> classifyGroupMessage
@@ -654,6 +678,8 @@ classifyMessage bot sender message =
         | Just rawText <- message.messageText
         , Just targetedText <- groupTextForBot bot rawText =
             queueText (attributeGroupText sender targetedText)
+        | respondToAllGroupMessages =
+            queueGroupReply
         | otherwise = IgnoreUpdate
 
     queueGroupReply =
