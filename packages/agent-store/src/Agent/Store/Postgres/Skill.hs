@@ -804,20 +804,20 @@ insertSkillStatement = mkStatement
     \ VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $11)\
     \ ON CONFLICT (scope_kind, scope_id, slug) DO NOTHING\
     \ RETURNING skill_id::text"
-    ( (scopeKindText . (.scopeKind) . (.learnedSkillCreateScope) >$< textParam)
-        <> (scopeIdText . (.scopeId) . (.learnedSkillCreateScope) >$< textParam)
-        <> ((.learnedSkillCreateSlug) >$< textParam)
-        <> ((.learnedSkillCreateTitle) >$< textParam)
-        <> ((.learnedSkillCreateDescription) >$< textParam)
-        <> ((.learnedSkillCreateAppliesWhen) >$< textParam)
-        <> ((.learnedSkillCreateInstructions) >$< textParam)
+    ( (scopeKindText . (.scopeKind) . (.learnedSkillCreateScope) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (scopeIdText . (.scopeId) . (.learnedSkillCreateScope) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateSlug) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateTitle) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateDescription) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateAppliesWhen) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateInstructions) >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> (learnedSkillActivationText . (.learnedSkillCreateActivation)
-            >$< textParam)
-        <> ((.learnedSkillCreatePriority) >$< int32Param)
-        <> (learnedSkillStatusText . (.learnedSkillCreateStatus) >$< textParam)
-        <> ((.learnedSkillCreateAt) >$< timeParam)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreatePriority) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> (learnedSkillStatusText . (.learnedSkillCreateStatus) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillCreateAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
-    (Decoders.rowMaybe textColumn)
+    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 updateSkillStatement :: Statement LearnedSkill ()
@@ -827,16 +827,16 @@ updateSkillStatement = mkStatement
     \ instructions_text = $5, activation_mode = $6, priority = $7,\
     \ status = $8, current_revision = $9, updated_at = $10\
     \ WHERE skill_id = $1::uuid"
-    ( ((.learnedSkillId) >$< textParam)
-        <> ((.learnedSkillTitle) >$< textParam)
-        <> ((.learnedSkillDescription) >$< textParam)
-        <> ((.learnedSkillAppliesWhen) >$< textParam)
-        <> ((.learnedSkillInstructions) >$< textParam)
-        <> (learnedSkillActivationText . (.learnedSkillActivation) >$< textParam)
-        <> ((.learnedSkillPriority) >$< int32Param)
-        <> (learnedSkillStatusText . (.learnedSkillStatus) >$< textParam)
-        <> ((.learnedSkillRevision) >$< int64Param)
-        <> ((.learnedSkillUpdatedAt) >$< timeParam)
+    ( ((.learnedSkillId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillTitle) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillDescription) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillAppliesWhen) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillInstructions) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (learnedSkillActivationText . (.learnedSkillActivation) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillPriority) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> (learnedSkillStatusText . (.learnedSkillStatus) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillRevision) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((.learnedSkillUpdatedAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
     Decoders.noResult
     True
@@ -849,20 +849,20 @@ insertRevisionStatement = mkStatement
     \ created_at)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\
     \ RETURNING skill_revision_id::text"
-    ( ((.learnedSkillId) . fst >$< textParam)
-        <> ((.learnedSkillRevision) . fst >$< int64Param)
-        <> ((.learnedSkillTitle) . fst >$< textParam)
-        <> ((.learnedSkillDescription) . fst >$< textParam)
-        <> ((.learnedSkillAppliesWhen) . fst >$< textParam)
-        <> ((.learnedSkillInstructions) . fst >$< textParam)
+    ( ((.learnedSkillId) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillRevision) . fst >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((.learnedSkillTitle) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillDescription) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillAppliesWhen) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillInstructions) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> (learnedSkillActivationText . (.learnedSkillActivation) . fst
-            >$< textParam)
-        <> ((.learnedSkillPriority) . fst >$< int32Param)
-        <> (learnedSkillStatusText . (.learnedSkillStatus) . fst >$< textParam)
-        <> (snd >$< textParam)
-        <> ((.learnedSkillUpdatedAt) . fst >$< timeParam)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillPriority) . fst >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> (learnedSkillStatusText . (.learnedSkillStatus) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.learnedSkillUpdatedAt) . fst >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
-    textSingleResult
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 insertSourceStatement
@@ -872,15 +872,15 @@ insertSourceStatement = mkStatement
     \ (skill_revision_id, source_session_key, source_turn_index,\
     \ source_response_item_id, evidence_text, created_at)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
-    ( (first4 >$< textParam)
+    ( (first4 >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> (sourceField (.learnedSkillSourceInputSessionKey)
-            >$< nullableTextParam)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
         <> (sourceField (.learnedSkillSourceInputTurnIndex)
-            >$< nullableInt64Param)
+            >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> (sourceField (.learnedSkillSourceInputResponseItemId)
-            >$< nullableTextParam)
-        <> (sourceField (.learnedSkillSourceInputEvidence) >$< textParam)
-        <> (fourth4 >$< timeParam)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> (sourceField (.learnedSkillSourceInputEvidence) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (fourth4 >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
     Decoders.noResult
     True
@@ -940,11 +940,11 @@ searchSkillsStatement = mkStatement
            \ ORDER BY ts_rank_cd(s.search_vector, query.value) DESC,\
            \ s.priority DESC, s.updated_at DESC\
            \ LIMIT $5")
-    ( ((.applicableUserScopeId) . (.skillSearchScopes) >$< textParam)
-        <> ((.applicableRepositoryScopeId) . (.skillSearchScopes) >$< textParam)
-        <> ((.applicableCheckoutScopeId) . (.skillSearchScopes) >$< textParam)
-        <> ((.skillSearchQuery) >$< textParam)
-        <> ((.skillSearchLimit) >$< int64Param)
+    ( ((.applicableUserScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableRepositoryScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableCheckoutScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.skillSearchQuery) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.skillSearchLimit) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList ((,) <$> skillRowDecoder <*> doubleColumn))
     True
@@ -953,8 +953,8 @@ loadRevisionStatement :: Statement (Text, Int64) (Maybe RevisionRow)
 loadRevisionStatement = mkStatement
     (revisionSelectSql
         <> " WHERE skill_id = $1::uuid AND revision_number = $2")
-    ( (fst >$< textParam)
-        <> (snd >$< int64Param)
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowMaybe revisionRowDecoder)
     True
@@ -985,10 +985,10 @@ listSourcesStatement = mkStatement
     \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
     \   AND r.revision_number = $4\
     \ ORDER BY src.created_at, src.skill_source_id"
-    ( (scopeKindText . (.scopeKind) . first3 >$< textParam)
-        <> (scopeIdText . (.scopeId) . first3 >$< textParam)
-        <> (second3 >$< textParam)
-        <> (third3 >$< int64Param)
+    ( (scopeKindText . (.scopeKind) . first3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (scopeIdText . (.scopeId) . first3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (second3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (third3 >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList sourceRowDecoder)
     True
@@ -999,15 +999,15 @@ listSourcesStatement = mkStatement
 
 scopeSlugEncoder :: Encoders.Params (Scope, Text)
 scopeSlugEncoder =
-    (scopeKindText . (.scopeKind) . fst >$< textParam)
-        <> (scopeIdText . (.scopeId) . fst >$< textParam)
-        <> (snd >$< textParam)
+    (scopeKindText . (.scopeKind) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (scopeIdText . (.scopeId) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.text))
 
 applicableScopesEncoder :: Encoders.Params ApplicableScopes
 applicableScopesEncoder =
-    ((.applicableUserScopeId) >$< textParam)
-        <> ((.applicableRepositoryScopeId) >$< textParam)
-        <> ((.applicableCheckoutScopeId) >$< textParam)
+    ((.applicableUserScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableRepositoryScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.applicableCheckoutScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
 
 skillSelectSql :: Text
 skillSelectSql =
@@ -1047,85 +1047,46 @@ applicableWhereSqlWithPrefix =
 skillRowDecoder :: Decoders.Row SkillRow
 skillRowDecoder =
     SkillRow
-        <$> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> int32Column
-        <*> textColumn
-        <*> int64Column
-        <*> timeColumn
-        <*> timeColumn
+        <$> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
 
 revisionRowDecoder :: Decoders.Row RevisionRow
 revisionRowDecoder =
     RevisionRow
-        <$> textColumn
-        <*> int64Column
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> int32Column
-        <*> textColumn
-        <*> textColumn
-        <*> timeColumn
+        <$> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
 
 sourceRowDecoder :: Decoders.Row LearnedSkillSource
 sourceRowDecoder =
     LearnedSkillSource
-        <$> textColumn
-        <*> int64Column
-        <*> nullableTextColumn
-        <*> nullableInt64Column
-        <*> nullableTextColumn
-        <*> textColumn
-        <*> timeColumn
-
-textParam :: Encoders.Params Text
-textParam = Encoders.param (Encoders.nonNullable Encoders.text)
-
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
-int32Param :: Encoders.Params Int32
-int32Param = Encoders.param (Encoders.nonNullable Encoders.int4)
-
-int64Param :: Encoders.Params Int64
-int64Param = Encoders.param (Encoders.nonNullable Encoders.int8)
-
-nullableInt64Param :: Encoders.Params (Maybe Int64)
-nullableInt64Param = Encoders.param (Encoders.nullable Encoders.int8)
-
-timeParam :: Encoders.Params UTCTime
-timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
-
-textColumn :: Decoders.Row Text
-textColumn = Decoders.column (Decoders.nonNullable Decoders.text)
-
-nullableTextColumn :: Decoders.Row (Maybe Text)
-nullableTextColumn = Decoders.column (Decoders.nullable Decoders.text)
-
-int32Column :: Decoders.Row Int32
-int32Column = Decoders.column (Decoders.nonNullable Decoders.int4)
-
-int64Column :: Decoders.Row Int64
-int64Column = Decoders.column (Decoders.nonNullable Decoders.int8)
-
-nullableInt64Column :: Decoders.Row (Maybe Int64)
-nullableInt64Column = Decoders.column (Decoders.nullable Decoders.int8)
-
-timeColumn :: Decoders.Row UTCTime
-timeColumn = Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+        <$> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
 
 doubleColumn :: Decoders.Row Double
 doubleColumn = Decoders.column (Decoders.nonNullable Decoders.float8)
-
-textSingleResult :: Decoders.Result Text
-textSingleResult = Decoders.singleRow textColumn

@@ -607,8 +607,8 @@ flattenDataResult = pure . \case
 sessionExistsStatement :: Statement Text Bool
 sessionExistsStatement = mkStatement
     "SELECT EXISTS (SELECT 1 FROM harness.sessions WHERE session_key = $1)"
-    textParam
-    boolResult
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
     True
 
 insertSessionStatement :: Statement SessionMetadata Text
@@ -626,7 +626,7 @@ insertSessionStatement = mkStatement
     \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23\
     \ ) RETURNING session_id::text"
     metadataParams
-    textSingleResult
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 replaceProjectionStatement
@@ -639,8 +639,8 @@ replaceProjectionStatement = mkStatement
     metadataParams
     (Decoders.rowMaybe $
         (,)
-            <$> textColumn
-            <*> int64Column)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
     True
 
 appendProjectionStatement
@@ -655,9 +655,9 @@ appendProjectionStatement = mkStatement
     metadataParams
     (Decoders.rowMaybe $
         (,,)
-            <$> textColumn
-            <*> int64Column
-            <*> int64Column)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
     True
 
 metadataUpdateSql :: Text
@@ -679,12 +679,12 @@ insertEventStatement = mkStatement
     \ (session_id, sequence, event_kind, occurred_at)\
     \ VALUES ($1::uuid, $2, $3, $4)\
     \ RETURNING event_id::text"
-    ( ((.eventInsertSessionId) >$< textParam)
-        <> ((.eventInsertSequence) >$< int64Param)
-        <> ((.eventInsertKind) >$< textParam)
-        <> ((.eventInsertOccurredAt) >$< timeParam)
+    ( ((.eventInsertSessionId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.eventInsertSequence) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((.eventInsertKind) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.eventInsertOccurredAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
-    textSingleResult
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 insertTurnStatement :: Statement TurnInsert Text
@@ -696,23 +696,23 @@ insertTurnStatement = mkStatement
     \ ) VALUES (\
     \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12\
     \ ) RETURNING turn_id::text"
-    ( ((.turnInsertSessionId) >$< textParam)
-        <> ((.turnInsertEventId) >$< textParam)
-        <> ((.turnInsertIndex) >$< int64Param)
-        <> ((.turnInsertEventSequence) >$< int64Param)
-        <> (turnOccurredAt >$< timeParam)
-        <> (turnUserText >$< textParam)
-        <> (turnAssistantText >$< nullableTextParam)
-        <> (turnError >$< nullableTextParam)
-        <> (turnResponseId >$< nullableTextParam)
+    ( ((.turnInsertSessionId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.turnInsertEventId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.turnInsertIndex) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((.turnInsertEventSequence) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> (turnOccurredAt >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+        <> (turnUserText >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (turnAssistantText >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> (turnError >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> (turnResponseId >$< Encoders.param (Encoders.nullable Encoders.text))
         <> ((usageField (.sessionUsageInputTokens) . (.turnInsertTurn))
-            >$< nullableInt64Param)
+            >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> ((usageField (.sessionUsageOutputTokens) . (.turnInsertTurn))
-            >$< nullableInt64Param)
+            >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> ((usageField (.sessionUsageCachedTokens) . (.turnInsertTurn))
-            >$< nullableInt64Param)
+            >$< Encoders.param (Encoders.nullable Encoders.int8))
     )
-    textSingleResult
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
   where
     usageField
@@ -735,7 +735,7 @@ loadMetadataStatement :: Statement Text (Maybe SessionMetadata)
 loadMetadataStatement = mkStatement
     (metadataSelectSql
         <> " WHERE session_key = $1 AND deleted_at IS NULL")
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe metadataRow)
     True
 
@@ -767,20 +767,20 @@ loadTurnsStatement = mkStatement
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
     \ WHERE s.session_key = $1\
     \ ORDER BY t.turn_index ASC"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         TurnRow
-            <$> textColumn
-            <*> int64Column
-            <*> int64Column
-            <*> timeColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableInt64Column
-            <*> nullableInt64Column
-            <*> nullableInt64Column)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.int8))
     True
 
 loadEventsStatement :: Statement Text [StoredEvent]
@@ -790,12 +790,12 @@ loadEventsStatement = mkStatement
     \ JOIN harness.sessions s ON s.session_id = e.session_id\
     \ WHERE s.session_key = $1\
     \ ORDER BY e.sequence ASC"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         StoredEvent
-            <$> int64Column
-            <*> textColumn
-            <*> timeColumn)
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz))
     True
 
 deleteProjectionStatement
@@ -806,13 +806,13 @@ deleteProjectionStatement = mkStatement
     \     next_event_sequence = next_event_sequence + 1\
     \ WHERE session_key = $1 AND deleted_at IS NULL\
     \ RETURNING session_id::text, next_event_sequence - 1"
-    ( (fst >$< textParam)
-        <> (snd >$< timeParam)
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
     (Decoders.rowMaybe $
         (,)
-            <$> textColumn
-            <*> int64Column)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
     True
 
 recordLegacyImportStatement :: Statement (Text, Text, Text) Bool
@@ -821,9 +821,9 @@ recordLegacyImportStatement = mkStatement
     \ (source_path, content_hash, session_id)\
     \ VALUES ($1, $2, $3::uuid)\
     \ ON CONFLICT DO NOTHING"
-    ( ((\(value, _, _) -> value) >$< textParam)
-        <> ((\(_, value, _) -> value) >$< textParam)
-        <> ((\(_, _, value) -> value) >$< textParam)
+    ( ((\(value, _, _) -> value) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, value) -> value) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (fmap (> 0) Decoders.rowsAffected)
     True
@@ -846,16 +846,16 @@ searchTurnsStatement = mkStatement
     \ ORDER BY ts_rank_cd(t.search_vector, query.value) DESC,\
     \   t.occurred_at DESC\
     \ LIMIT $2"
-    ( (fst >$< textParam)
-        <> (snd >$< int64Param)
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
     (Decoders.rowList $
         ConversationSearchResult
-            <$> textColumn
-            <*> int64Column
-            <*> timeColumn
-            <*> textColumn
-            <*> nullableTextColumn
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.float8))
     True
 
@@ -864,42 +864,42 @@ blockingAdvisoryLockStatement = mkStatement
     "SELECT true FROM (\
     \ SELECT pg_advisory_xact_lock(hashtextextended($1, 684022778))\
     \ ) AS acquired"
-    textParam
-    boolResult
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
     True
 
 tryAdvisoryLockStatement :: Statement Text Bool
 tryAdvisoryLockStatement = mkStatement
     "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 684022778))"
-    textParam
-    boolResult
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
     True
 
 metadataParams :: Encoders.Params SessionMetadata
 metadataParams =
-    ((.sessionMetadataKey) >$< textParam)
-    <> ((.sessionMetadataVersion) >$< int32Param)
-    <> ((.sessionMetadataCreatedAt) >$< timeParam)
-    <> ((.sessionMetadataUpdatedAt) >$< timeParam)
-    <> ((.sessionMetadataProvider) >$< textParam)
-    <> ((.sessionMetadataConnection) >$< textParam)
-    <> ((.sessionMetadataModel) >$< textParam)
-    <> ((.sessionMetadataTransportModel) >$< nullableTextParam)
-    <> ((.sessionMetadataDialect) >$< textParam)
-    <> ((legacyField (.sessionLegacyProvider)) >$< nullableTextParam)
-    <> ((legacyField (.sessionLegacyConnection)) >$< nullableTextParam)
-    <> ((legacyField (.sessionLegacyEffectiveModel)) >$< nullableTextParam)
-    <> ((legacyField (.sessionLegacyDialect)) >$< nullableTextParam)
-    <> ((.sessionMetadataCwd) >$< textParam)
-    <> ((.sessionMetadataEffort) >$< textParam)
-    <> ((.sessionMetadataTitle) >$< textParam)
-    <> ((.sessionMetadataTitleIsManual) >$< boolParam)
-    <> ((.sessionMetadataTitleRefreshIndex) >$< int64Param)
-    <> ((.sessionMetadataTitleUserTurns) >$< int64Param)
-    <> ((.sessionMetadataLastResponseId) >$< nullableTextParam)
-    <> ((.sessionMetadataInputTokens) >$< int64Param)
-    <> ((.sessionMetadataOutputTokens) >$< int64Param)
-    <> ((.sessionMetadataCachedTokens) >$< int64Param)
+    ((.sessionMetadataKey) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataVersion) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+    <> ((.sessionMetadataCreatedAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+    <> ((.sessionMetadataUpdatedAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+    <> ((.sessionMetadataProvider) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataConnection) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataModel) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataTransportModel) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((.sessionMetadataDialect) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((legacyField (.sessionLegacyProvider)) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((legacyField (.sessionLegacyConnection)) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((legacyField (.sessionLegacyEffectiveModel)) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((legacyField (.sessionLegacyDialect)) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((.sessionMetadataCwd) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataEffort) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataTitle) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    <> ((.sessionMetadataTitleIsManual) >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+    <> ((.sessionMetadataTitleRefreshIndex) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    <> ((.sessionMetadataTitleUserTurns) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    <> ((.sessionMetadataLastResponseId) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((.sessionMetadataInputTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    <> ((.sessionMetadataOutputTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    <> ((.sessionMetadataCachedTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
   where
     legacyField
         :: (SessionLegacyTarget -> Text)
@@ -911,30 +911,30 @@ metadataParams =
 metadataRow :: Decoders.Row SessionMetadata
 metadataRow =
     SessionMetadata
-        <$> textColumn
-        <*> int32Column
-        <*> timeColumn
-        <*> timeColumn
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> nullableTextColumn
-        <*> textColumn
+        <$> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
         <*> (decodeLegacyTarget
-            <$> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn)
-        <*> textColumn
-        <*> textColumn
-        <*> textColumn
-        <*> boolColumn
-        <*> int64Column
-        <*> int64Column
-        <*> nullableTextColumn
-        <*> int64Column
-        <*> int64Column
-        <*> int64Column
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text))
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
 
 decodeLegacyTarget
     :: Maybe Text
@@ -952,51 +952,3 @@ decodeLegacyTarget provider connection model dialect =
                 , sessionLegacyDialect = dialect'
                 }
         _ -> Nothing
-
-textParam :: Encoders.Params Text
-textParam = Encoders.param (Encoders.nonNullable Encoders.text)
-
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
-int32Param :: Encoders.Params Int32
-int32Param = Encoders.param (Encoders.nonNullable Encoders.int4)
-
-int64Param :: Encoders.Params Int64
-int64Param = Encoders.param (Encoders.nonNullable Encoders.int8)
-
-nullableInt64Param :: Encoders.Params (Maybe Int64)
-nullableInt64Param = Encoders.param (Encoders.nullable Encoders.int8)
-
-boolParam :: Encoders.Params Bool
-boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
-
-timeParam :: Encoders.Params UTCTime
-timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
-
-textColumn :: Decoders.Row Text
-textColumn = Decoders.column (Decoders.nonNullable Decoders.text)
-
-nullableTextColumn :: Decoders.Row (Maybe Text)
-nullableTextColumn = Decoders.column (Decoders.nullable Decoders.text)
-
-int32Column :: Decoders.Row Int32
-int32Column = Decoders.column (Decoders.nonNullable Decoders.int4)
-
-int64Column :: Decoders.Row Int64
-int64Column = Decoders.column (Decoders.nonNullable Decoders.int8)
-
-nullableInt64Column :: Decoders.Row (Maybe Int64)
-nullableInt64Column = Decoders.column (Decoders.nullable Decoders.int8)
-
-boolColumn :: Decoders.Row Bool
-boolColumn = Decoders.column (Decoders.nonNullable Decoders.bool)
-
-timeColumn :: Decoders.Row UTCTime
-timeColumn = Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-
-textSingleResult :: Decoders.Result Text
-textSingleResult = Decoders.singleRow textColumn
-
-boolResult :: Decoders.Result Bool
-boolResult = Decoders.singleRow boolColumn

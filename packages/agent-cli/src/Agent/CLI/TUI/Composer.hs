@@ -17,6 +17,7 @@ module Agent.CLI.TUI.Composer
     , handleControlMouseUp
     , handleEffortControlClick
     , handlePromptControlClick
+    , immediateBtwQuestion
     , newFullscreenInputBuffer
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
@@ -31,8 +32,10 @@ import Agent.CLI.Clipboard
     , readClipboardText
     )
 import Agent.CLI.Command
-    ( SlashMenu(..)
+    ( ReplAction(..)
+    , SlashMenu(..)
     , SlashSuggestion(..)
+    , parseReplLine
     , slashMenuForWithSkillsAndModels
     )
 import Agent.CLI.Input
@@ -635,11 +638,17 @@ handleComposerKey
 
     submitText state text pasted = do
         liftIO (appendReplHistory text)
-        enqueueInput
-            state
-            (if pasted then ReplPasted text else ReplText text)
-            (Just text)
-            True
+        let replLine = if pasted then ReplPasted text else ReplText text
+        case immediateBtwQuestion state.appUi replLine of
+            Just question -> do
+                applyUiEvent UiDraftSubmitted \current ->
+                    current
+                        { appSlashIndex = 0
+                        , appSlashDismissed = False
+                        }
+                liftIO (state.appRuntime.runtimeBtw question)
+            Nothing ->
+                enqueueInput state replLine (Just text) True
         modify' \current ->
             current
                 { appPasted = False
@@ -894,6 +903,22 @@ handleComposerKey
                 menu.slashMenuReplaceStart
                     + Text.length suggestion.slashSuggestionReplacement
         modifyUiResetSlash (UiSetDraft next cursor)
+
+-- | Side questions are independent requests and should not wait behind the
+-- active turn's ordinary follow-up queue.
+immediateBtwQuestion :: UiState -> ReplLine -> Maybe Text
+immediateBtwQuestion ui replLine
+    | not ui.uiRunning = Nothing
+    | otherwise =
+        case replLine of
+            ReplText text -> fromText text
+            ReplPasted text -> fromText text
+            _ -> Nothing
+  where
+    fromText text =
+        case parseReplLine text of
+            ReplBtw question -> Just question
+            _ -> Nothing
 
 applyComposerUiEvent :: UiEvent -> AppState -> AppState
 applyComposerUiEvent uiEvent state =

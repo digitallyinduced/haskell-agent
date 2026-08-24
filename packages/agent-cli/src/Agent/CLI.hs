@@ -1279,6 +1279,7 @@ prepareAgentIteration
                     setFullscreenSessionActions
                         runtime
                         (requestCancel toolEnv.toolCancel)
+                        (const (pure ()))
                         (\level ->
                             readIORef restartEffortActionRef >>= ($ level))
                         (noteFullscreenCtrlC interrupt)
@@ -1331,6 +1332,7 @@ resetFullscreenSessionActions runtime =
     setFullscreenSessionActions
         runtime
         (pure ())
+        (const (pure ()))
         (const (pure ()))
         -- No session-local interrupt state is alive between providers. A
         -- transition must remain escapable even if auth probing blocks.
@@ -2623,7 +2625,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2687,7 +2689,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2748,7 +2750,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2820,7 +2822,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -3089,6 +3091,7 @@ runSession
     -> Dialect
     -> ApprovalPolicy
     -> [AppTool]
+    -> IO ()
     -> [MCP.McpToolRegistration]
     -> [Text]
     -> IORef Bool
@@ -3134,7 +3137,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools suspendGhci mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3649,6 +3652,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled
             writeIORef bashEnabledRef bashEnabled
+            unless ghciEnabled suspendGhci
             refreshShellParams ghciEnabled bashEnabled
             pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
@@ -3720,6 +3724,18 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
+    btwRequests <- newChan
+    forM_ fullscreen \runtime ->
+        setFullscreenSessionActions
+            runtime
+            (requestCancel toolEnv.toolCancel)
+            (writeChan btwRequests)
+            (\level ->
+                readIORef startup.startupRestartEffort >>= ($ level))
+            (noteFullscreenCtrlC interrupt)
+            (readIORef startup.startupAgentSnapshot >>= id)
+            (\target ->
+                readIORef startup.startupAgentSelect >>= ($ target))
     let initializeSkills = do
             markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalogQuiet
@@ -3759,7 +3775,13 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                     Nothing ->
                         readIORef startup.startupSessionState.sessionDraft
                             >>= replWithDraft env
-    result <- sessionAction
+        btwWorker = do
+            question <- readChan btwRequests
+            runBtwQuestion False env question
+            btwWorker
+    result <- case fullscreen of
+        Just _ -> withAsync btwWorker (const sessionAction)
+        Nothing -> sessionAction
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
@@ -4183,13 +4205,55 @@ setSessionEffort env level = do
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
 
+runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
+runBtwQuestion registerCancel env question = do
+    let fullscreen = env.sessionFullscreen
+    color <- resolveColor stdout
+    forM_ fullscreen \runtime ->
+        emitUiEvent runtime
+            (UiSetNotice (Just (progressNotice "btw · asking…")))
+    result <-
+        runBtwWithCancel
+            (\cancel action ->
+                if registerCancel
+                    then
+                        withTurnCancel env.sessionInterrupt cancel $
+                            case fullscreen of
+                                Nothing ->
+                                    withEscCancel
+                                        cancel
+                                        env.sessionEscPaused
+                                        action
+                                Just _ -> action
+                    else action)
+            env.sessionBtwBackend
+            env.sessionParams
+            env.sessionTranscript
+            question
+    forM_ fullscreen \runtime ->
+        emitUiEvent runtime (UiSetNotice Nothing)
+    case result of
+        Left err -> do
+            errorColor <- resolveColor stderr
+            let message = formatBtwError err
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+                Nothing ->
+                    putTextLn stderr (roleError errorColor message)
+        Right answer ->
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiAssistantHistory answer)
+                Nothing ->
+                    putTextLn stdout (renderAssistantText color answer)
+
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
 
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
-    { sessionBtwBackend = btwBackend
-    , sessionCompact = compactRunner
+    { sessionCompact = compactRunner
     , sessionRender = render
     , sessionProvider = provider
     , sessionConnection = connectionId
@@ -4200,7 +4264,6 @@ replWithDraft env@SessionEnv
     , sessionPrinted = printed
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
-    , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionDatabasePool = databasePool
     , sessionPlanMode = planMode
@@ -4215,7 +4278,6 @@ replWithDraft env@SessionEnv
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
-    , sessionEscPaused = escPaused
     , sessionStoreRoot = storeRoot
     , sessionUsage = usageRef
     , sessionAccount = accountRef
@@ -4912,40 +4974,7 @@ replWithDraft env@SessionEnv
                                 pure (RunSwitchProvider providerSwitch)
                             Nothing -> continue
                     ReplBtw question -> do
-                        color <- resolveColor stdout
-                        fullscreenEvent
-                            (UiSetNotice
-                                (Just
-                                    (progressNotice
-                                        "btw · asking…")))
-                        result <-
-                            runBtwWithCancel
-                                (\cancel action ->
-                                    withTurnCancel interrupt cancel $
-                                        case fullscreen of
-                                            Nothing ->
-                                                withEscCancel
-                                                    cancel escPaused action
-                                            Just _ -> action)
-                                btwBackend
-                                paramsRef
-                                transcriptRef
-                                question
-                        case result of
-                            Left err -> do
-                                errorColor <- resolveColor stderr
-                                let message = formatBtwError err
-                                displayError message $
-                                    putTextLn stderr
-                                        (roleError errorColor message)
-                            Right answer ->
-                                case fullscreen of
-                                    Just runtime ->
-                                        emitUiEvent runtime
-                                            (UiAssistantHistory answer)
-                                    Nothing ->
-                                        putTextLn stdout
-                                            (renderAssistantText color answer)
+                        runBtwQuestion True env question
                         continue
                     ReplResume maybeId -> do
                         handleResume databasePool fullscreen maybeId persist >>= \case
