@@ -133,11 +133,16 @@ Setup reads the BotFather token without terminal echo, validates it against
 Telegram, and stores it separately from the non-secret gateway configuration.
 Never paste the bot token into an agent conversation.
 
-Only allowlisted private-chat text messages are handled. Each chat is mapped
-to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
-session and `/session` shows the current session ID. Mutating tools are denied
-unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
-background gateway.
+Only messages from allowlisted Telegram users are handled. Private chats work
+directly. In groups and supergroups, mention the bot, use a command addressed
+to its username (for example `/new@your_bot`), or reply to one of its messages.
+Ambient group traffic and messages from non-allowlisted members are ignored.
+Each private chat, group, and forum topic is mapped to its own persisted agent
+session under `~/.haskell-agent`; `/new` starts a fresh session and `/session`
+shows the current session ID. Group replies include the sender's identity in
+the agent prompt and are posted as replies to the triggering Telegram message.
+Mutating tools are denied unless setup is run with `--yolo`. Use
+`agent-telegram stop` to stop the background gateway.
 
 Incoming updates and pending replies are persisted before they are processed.
 Polling continues while agent turns run, conversations are processed in order,
