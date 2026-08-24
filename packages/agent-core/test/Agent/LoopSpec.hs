@@ -130,6 +130,74 @@ spec = describe "runLoop" do
             }
         readIORef maxInFlight `shouldReturn` 1
 
+    it "delivers events off the backend thread and flushes before returning" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendEntered <- newEmptyMVar
+        let backend = Backend \_state _prev _inputs _onEvent -> do
+                putMVar backendEntered ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            timeout 1000000 (takeMVar backendEntered)
+                `shouldReturn` Just ()
+            timeout 100000 (wait running)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+
+    it "bounds queued events when the sink falls behind" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendStarted <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                putMVar backendStarted ()
+                mapM_ (const (onEvent (TextDelta "x"))) [1 .. 300 :: Int]
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent = \case
+                TurnStarted -> do
+                    putMVar sinkStarted ()
+                    takeMVar releaseSink
+                _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            takeMVar backendStarted
+            timeout 100000 (takeMVar backendFinished)
+                `shouldReturn` Nothing
+            putMVar releaseSink ()
+            timeout 1000000 (takeMVar backendFinished)
+                `shouldReturn` Just ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar
         secondStarted <- newEmptyMVar
@@ -483,6 +551,20 @@ spec = describe "runLoop" do
             Exception.throwIO Exception.ThreadKilled
         runLoop config Nothing "hello"
             `shouldThrow` (== Exception.ThreadKilled)
+
+    it "does not detach asynchronous event-sink cancellation" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \_ ->
+                    Exception.throwIO Exception.ThreadKilled
+                }
+        timeout 1000000
+            (runLoop config Nothing "hello"
+                `shouldThrow` (== Exception.ThreadKilled))
+            `shouldReturn` Just ()
 
     it "emits TurnStarted and TurnFinished around each backend submit" do
         events <- newIORef []
