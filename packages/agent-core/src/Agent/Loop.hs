@@ -829,8 +829,17 @@ schedulingPlanForPrepared config (PreparedToolCall call approval) =
 -- is prepared serially even when the resulting handlers may run concurrently.
 prepareToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
 prepareToolCall config call = do
-    approval <- config.loopApprove call
-    pure (PreparedToolCall call (normalizeApproval approval))
+    approval <- tryAny (config.loopApprove call)
+    pure $
+        PreparedToolCall call $
+            case approval of
+                Left exception ->
+                    ToolApprovalDenied
+                        ("Tool " <> call.name
+                            <> " could not be prepared: "
+                            <> exceptionSummary exception)
+                Right decision ->
+                    normalizeApproval decision
   where
     normalizeApproval = \case
         Left denial -> ToolApprovalDenied denial
