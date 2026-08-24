@@ -23,6 +23,7 @@ import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
@@ -86,6 +87,7 @@ main = hspec do
     InterruptSpec.spec
     LoginSpec.spec
     MarkdownSpec.spec
+    McpManagerSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
