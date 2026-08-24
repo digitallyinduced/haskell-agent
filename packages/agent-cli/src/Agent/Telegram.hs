@@ -60,7 +60,10 @@ import Agent.CLI.Session
     , sessionsRoot
     )
 import Agent.Telegram.Types
-import Agent.Telegram.Markdown (markdownToTelegramHtml)
+import Agent.Telegram.Markdown
+    ( markdownToTelegramHtml
+    , telegramRenderedLength
+    )
 import Agent.Telegram.Voice (transcribeWithCodex)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
@@ -172,9 +175,22 @@ splitTelegramText :: Int -> Text -> [Text]
 splitTelegramText limit text
     | limit < 1 = []
     | Text.null text = []
+    | telegramRenderedLength text <= limit = [text]
     | otherwise =
-        let (chunk, rest) = Text.splitAt limit text
+        let (chunk, rest) = Text.splitAt (largestFittingPrefix text) text
         in chunk : splitTelegramText limit rest
+  where
+    largestFittingPrefix value = search 1 (Text.length value)
+      where
+        search low high
+            | low >= high = low
+            | renderedLength midpoint <= limit = search midpoint high
+            | otherwise = search low (midpoint - 1)
+          where
+            midpoint = low + (high - low + 1) `div` 2
+
+        renderedLength =
+            telegramRenderedLength . (`Text.take` value)
 
 telegramMain :: IO ()
 telegramMain =
@@ -1153,10 +1169,8 @@ reply runtime pending
         sendTextReply
   where
     sendTextReply = do
-        -- Rich HTML entities can expand one source character to six bytes.
-        -- Keep source chunks conservative so the rendered message stays below
-        -- Telegram's 4096-character limit without splitting generated tags.
-        let chunks = case splitTelegramText 600 pending.pendingText of
+        -- Telegram accepts messages up to 4096 rendered characters.
+        let chunks = case splitTelegramText 4096 pending.pendingText of
                 [] -> ["(empty response)"]
                 values -> values
         forM_ (zip [0 :: Int ..] chunks) \(index, chunk) ->
